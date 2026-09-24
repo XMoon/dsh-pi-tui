@@ -23,16 +23,19 @@ import { scheduler } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
+import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
-import { createForkedAgent } from './session-fork.ts'
+import type { DefaultIntentRecord } from './default-intent.ts'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
-import { mergeDraft } from './steer.ts'
+import { mergeDraft, sessionUnchanged } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from './display-preset.ts'
+import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
@@ -56,7 +59,7 @@ import { FooterConfiguratorModel, sameFooterCustomItem } from './footer/configur
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
-import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
+import { cancellationError, isCancellation, runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import {
   consumeDraftAttachments,
@@ -68,11 +71,14 @@ import { FileInputError, probeAttachment } from './attachment/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
-import { SubagentModelAllowlistSubmenu, allowlistSummary } from './subagent-model-menu.ts'
+import { SubagentModelAllowlistPicker, allowlistSummary } from './subagent-model-menu.ts'
 import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
 import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
-import { ModelSubmenu } from './model-menu.ts'
+import { ModelPicker, type ModelApplyOutcome } from './model-picker.ts'
+import type { OperationResult } from './runtime/write-outcome.ts'
+import { LifecycleError } from './runtime/session-lifecycle-port.ts'
+import { SupersededReadError } from './runtime/read-error.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { textOf } from './transcript.ts'
 import {
@@ -95,7 +101,7 @@ import {
 import type { SessionReader, SessionSummary } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
-import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
+import type { CreateSessionRequest, OpenSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
 import type { ConfigPort, CredentialProviderOption } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
@@ -128,26 +134,9 @@ import {
   type HumanSkillSummary,
 } from './skill-catalog.ts'
 
-/** A balanced completed-turn prefix for forking: the log up to (and including)
- * the last `turn/end`. Undefined when no turn has completed yet.
- * @param events - the session log.
- * @returns the fork seed events, or undefined.
- */
-export function forkSeed(events: readonly SessionEvent[]): readonly SessionEvent[] | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index]?.type === 'turn/end') return events.slice(0, index + 1)
-  }
-  return undefined
-}
-
 /** Shorten a session id for read-only display rows, capped at 28 characters. */
 function displaySessionId(id: string): string {
   return id.length > 28 ? `${id.slice(0, 28)}…` : id
-}
-
-/** Session meta for a fresh/forked session: the cwd plus the preset id when composed. */
-function metaOf(cwd: string, presetId: string | undefined): Record<string, unknown> {
-  return presetId === undefined ? { cwd } : { cwd, agentPreset: presetId }
 }
 
 /**
@@ -189,8 +178,8 @@ export function sessionPickerCategories(
       header: `${header} · Current directory`,
       // The same lineage tree as "All directories", built over the CURRENT
       // workspace's subset: a fork/rewind branch whose parent lives in
-      // another workspace (or outside the window) is an orphan at depth 1 —
-      // never lost, never mis-nested under an unrelated root.
+      // another workspace (or outside the window) degrades to a root at depth
+      // 0 — never lost, never mis-nested under an unrelated root.
       items: () => {
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
@@ -204,9 +193,9 @@ export function sessionPickerCategories(
       label: 'All directories',
       header: `${header} · All directories`,
       // The lineage tree (plan §20): fork/rewind children and subagents
-      // hang under their parentSession chain with a └─ prefix — never flat
-      // roots. Orphans sit at depth 1; the tree's `placed` guard keeps
-      // corrupt metadata from looping.
+      // hang under their parentSession chain with a └─ prefix. Missing-parent
+      // or cycle members degrade to flat roots; the tree's `placed` guard
+      // keeps corrupt metadata from looping.
       items: () => {
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
@@ -289,11 +278,12 @@ export function sessionSearchCategory(options: {
 
 /**
  * Display copy for the four shipped agent presets, fixed in English — the
- * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-client-ui-agent-preset`),
- * TUI-side. The effective roster root is the DSH agent-presets package's
- * official shipped root; its preset metadata language is not ours to control. Mapping the known ids keeps the picker English regardless of
- * what the files say; everything else renders file metadata. Names follow
- * the upstream English locale (`presetCodeName` is 'PTC mode').
+ * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-agent-preset-registry`
+ * display helpers), TUI-side. The shipped declarations publish no `name`
+ * (the official built-in classification), and their metadata language is
+ * not ours to control: mapping the known ids keeps the picker English
+ * regardless of what the declarations say; everything else renders the
+ * declaration's own metadata. Names follow the upstream English locale.
  */
 const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description: string }>> = {
   standard: {
@@ -314,15 +304,28 @@ const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description:
   },
 }
 
-/** Resolve one roster row's display copy: fixed English for a shipped
- * (system-trust) preset id, otherwise the preset's file metadata. */
+/** Whether one roster row is a SHIPPED preset under the official 0.1.7
+ * classification: a known shipped id that publishes no `name` of its own.
+ * A declaration that names itself — even with a shipped id — owns its
+ * copy (the same rule as `isBuiltInPreset` upstream; kept local so the
+ * display layer carries no runtime import). */
+export function isBuiltInPresetRow(preset: {
+  id: string
+  name?: string
+  description?: string
+}): boolean {
+  return preset.name === undefined && BUILT_IN_PRESET_COPY[preset.id] !== undefined
+}
+
+/** Resolve one roster row's display copy: the TUI's fixed English copy for
+ * a shipped preset (official classification above), otherwise the preset's
+ * own published metadata — a user-authored copy is never translated. */
 export function presetDisplayText(preset: {
   id: string
-  trust: string
   name?: string
   description?: string
 }): { name: string; description?: string } {
-  const builtIn = preset.trust === 'system' ? BUILT_IN_PRESET_COPY[preset.id] : undefined
+  const builtIn = isBuiltInPresetRow(preset) ? BUILT_IN_PRESET_COPY[preset.id] : undefined
   if (builtIn !== undefined) return { name: builtIn.name, description: builtIn.description }
   return {
     name: preset.name ?? preset.id,
@@ -331,7 +334,7 @@ export function presetDisplayText(preset: {
 }
 
 /** The TUI settings document surface (theme/footer/footerLayout/
- * fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode). The old
+ * fullscreen/busyEnter/localShellSandbox/homeEndKeys/displayPreset/focusMode). The old
  * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. The type now lives on
  * the config port (M1.9); the re-export keeps the public commands-surface
@@ -355,10 +358,7 @@ export interface CommandRegistryLike {
 /** One default-intent operation's ownership record: the id is the settle
  *  authority (an older operation settling must never clear or restore a
  *  newer operation's pending intent), the selection is the intent value. */
-export interface DefaultIntentRecord {
-  readonly id: number
-  readonly selection: ModelSelection
-}
+export type { DefaultIntentRecord } from './default-intent.ts'
 
 /**
  * The effective mode ONE submission resolved at the submit boundary: whether
@@ -375,8 +375,8 @@ export type SubmitDelivery = 'steer' | 'queue'
 
 /**
  * Resolve one submission's delivery mode — the DSH WEB
- * `ComposerSubmissionPolicy.resolve()` contract (baseline 0.1.5-rc.1,
- * shared by every UI client):
+ * `ComposerSubmissionPolicy.resolve()` contract (baseline established in DSH
+ * `0.1.6-alpha.1`, shared by every UI client):
  *
  * ```text
  * !running              -> queue
@@ -402,6 +402,23 @@ export function resolveComposerDelivery(
   return preferred === 'queue' ? 'steer' : 'queue'
 }
 
+/** A skill write reached the command boundary without a known settlement. */
+class IndeterminateSkillWriteError extends Error {
+  constructor() {
+    super('skill write result is indeterminate — do not retry automatically')
+    this.name = 'IndeterminateSkillWriteError'
+  }
+}
+
+/** Recognize the internal skill uncertainty marker after commands.execute(). */
+export function isIndeterminateSkillWrite(error: unknown): boolean {
+  return error instanceof IndeterminateSkillWriteError
+}
+
+/** TUI-local disposition for a command submission's cleared draft. This is
+ * correlated by the DSH command execution id outside the normalized result. */
+type CommandDraftDisposition = 'restored' | 'suppressed'
+
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
   ctx: Context
@@ -421,14 +438,16 @@ export interface TuiCommandRunner {
    * optimistic choice and never gets installed into an Agent context.
    */
   readonly selected: ModelSelectionRef
-  /** The default selection a NEW Session should observe: the latest explicit
-   * default intent (a /model commit this run), falling back to the persisted
-   * global default. Distinct from {@link selected}: a fresh Session observes
-   * the default, never the current Session's local choice. */
+  /** Legacy/display facade: the newest SESSIONLESS `/model` intent (pending or
+   * unresolved) falling back to the persisted global default. A fresh create
+   * NEVER seeds from it — the Direct adapter captures the persisted Host default
+   * at admission, and a failed/ambiguous intent is never seeded (v2 §0.8.4).
+   * Distinct from {@link selected}: it never exposes a live Session's local
+   * choice. Retained for the footer/legacy facade and tests. */
   defaultSelection(): ModelSelection | undefined
-  /** The latest explicit default intent, or undefined when no /model commit
-   * happened this run (a fresh Session then observes the persisted default
-   * dynamically instead of being seeded). */
+  /** The newest SESSIONLESS `/model` intent (pending or unresolved), or
+   * undefined when no sessionless commit happened this run. A fresh create
+   * never seeds from it (it reads the persisted Host default). */
   readonly defaultIntent: ModelSelection | undefined
   /** The current default-intent OWNERSHIP record (id + selection), or
    * undefined when no intent is active. The id is the operation's settle
@@ -442,18 +461,48 @@ export interface TuiCommandRunner {
   setDefaultIntent(selection: ModelSelection | undefined): void
   /** Report one operation's save outcome to the intent state machine. The
    * machine decides whether the intent clears (committed), walks the
-   * ancestry back to the nearest still-pending operation (failed), or stays
-   * with a newer operation — the caller never restores or settles the
-   * intent itself. */
-  settleIntent(id: number, outcome: 'committed' | 'failed'): void
+   * ancestry back to the nearest still-PENDING ancestor, retains the nearest
+   * UNRESOLVED ancestor (an ambiguous write still needs a Host read), or
+   * clears on committed — the caller never restores or settles the intent
+   * itself. */
+  settleIntent(id: number, outcome: 'committed' | 'failed' | 'unresolved'): void
+  /** Reconcile an UNRESOLVED sessionless default intent against an
+   *  authoritative Host read (v2 §0.3.2): the persisted default either carries
+   *  the choice (committed) or proves it did not land (clear). Never guesses. */
+  reconcileDefaultIntent(persisted: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined): void
+  /** Await EVERY in-flight sessionless `/model` global-default write (each
+   * includes its own fenced correction) so a fresh create observes the settled
+   * newest Host default instead of racing it. Aborts as soon as the lifetime
+   * signal aborts, so a hung Host save can never block first creation past
+   * shutdown. */
+  awaitPendingDefaultWrite(signal?: AbortSignal): Promise<void>
+  /** Register one sessionless `/model` global-default write. The barrier
+   * tracks ALL of them: an older write can still be settling (and re-asserting
+   * the newest committed value) after a newer one resolved. */
+  trackDefaultWrite(write: Promise<unknown>): void
+  /** The newest default-write settle: 'committed' (the persisted default
+   * carries the choice), 'failed' (the UI walks back; a failed choice is NEVER
+   * seeded into a create, v2 §0.8.4), 'unresolved' (dispatched but unprovable —
+   * keep the explicit unresolved state until a Host read, v2 §0.3.2), or
+   * undefined while pending. */
+  readonly defaultIntentOutcome: 'committed' | 'failed' | 'unresolved' | undefined
+  /** Record (or clear) the in-flight Session model selection the footer
+   *  reports as `selecting` while the semantic write settles. A newer
+   *  surface generation makes a stale record invisible; the display always
+   *  follows the authoritative Session selection, never this request. */
+  /** Set (or clear) the footer's in-flight model marker. `token` is the
+   *  owning `/model` operation: a clear from an older operation is ignored so
+   *  it can never wipe a newer operation's marker (v2 §0.2.5). `status`
+   *  distinguishes `selecting…` from an explicit `unresolved` state. */
+  setModelSelectionPending(selection: ModelSelection | undefined, token?: number, status?: 'pending' | 'unresolved'): void
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
-  /** The session lifecycle port (migration M1.5): /new and /fork create
-   * sessions through semantic requests (the Direct adapter resolves the
-   * preset composition internally). */
+  /** The session lifecycle port (D2.1): /new and /fork create/open sessions
+   * through semantic requests (the Direct adapter resolves the preset
+   * composition internally). */
   readonly agents: {
     create(options: CreateSessionRequest): Promise<SessionHandle>
-    resume(options: ResumeSessionRequest): Promise<SessionHandle>
+    open(options: OpenSessionRequest): Promise<SessionHandle>
   }
   /** M2/PR C: apply the persisted footer mode and layout to the app (shared
    * by /settings, /reload and startup; fail-soft on invalid configs). The
@@ -468,8 +517,9 @@ export interface TuiCommandRunner {
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
   readonly sessionReader: SessionReader
-  /** The session WRITE port (migration M1.4): follow-up delivery, steer,
-   * queue pull-back, cancel and title ops go through the port. */
+  /** The session WRITE port (D2.1): ordinary prompts, occurrence-level queue
+   * steering/removal, cancel and title ops go through the port. Multi-message
+   * gestures use runner-level FIFO orchestration; no batch verb crosses it. */
   readonly sessionWriter: SessionWriter
   /** The interaction port (migration M1.6): approval/question authority. */
   readonly interaction: InteractionPort
@@ -503,9 +553,9 @@ export interface TuiCommandRunner {
   imageStore: import('./image/draft-store.ts').DraftImageStore
   /** The per-TUI metadata-only generic file draft registry. */
   readonly fileStore?: import('./attachment/file-draft.ts').DraftFileStore
-  /** The shared clipboard WRITE policy (issue #7): tmux → platform helper
-   * → OSC 52 best-effort. Used by /copy; the fullscreen drag selection
-   * routes through the same policy via the app's copySelection option. */
+  /** The shared user-clipboard WRITE policy (issue #7). Delivers through
+   * two independent legs — terminal-client OSC 52 and native/platform
+   * helpers — and is the SAME policy the fullscreen drag selection uses. */
   copyToClipboard(text: string): Promise<boolean>
   /** The deployment image policy (`ctx.attachments.imageLimits`), re-read
    * dynamically; undefined when the attachment service is unavailable. */
@@ -542,6 +592,11 @@ export interface TuiCommandRunner {
    * swap. Late async work must re-check it before committing state. */
   readonly sessionGeneration: number
   switchSession(sessionId: string): Promise<string | undefined>
+  /** Host-owned /fork navigation. The runner dispatches the semantic fork
+   * outside the destructive transition FIFO and only commits the visible child
+   * while the captured navigation intent is still current. Optional keeps
+   * command-only test runners focused on unrelated commands. */
+  forkSession?: (sourceSessionId: string) => Promise<CommandResult>
   /**
    * The unified session-transition transaction: the old session is flushed
    * BEFORE the child is created, the commit is a synchronous critical
@@ -552,17 +607,17 @@ export interface TuiCommandRunner {
    * this transaction and must run it inside {@link withSessionTransition}.
    */
   transitionTo<T>(steps: {
-    /** The child's PRE-GENERATED session identity (MANDATORY). */
+    /** The child's pre-generated session identity (mandatory). */
     target: { id: string; header?: { cwd?: string } }
-    /** An explicit model selection the target must observe after creation.
-     * For /new this seeds an explicit default intent; for /fork and /rewind
-     * it preserves the source selection after the inherited historical prefix. */
-    inheritSelection?: ModelSelection
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
-  }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
+  /** The Host turn-boundary authority's blank state for the live Session
+   *  (`undefined` when the projection is unavailable — the Host then remains
+   *  the final authority). Never derived from the TUI transcript. */
+  sessionBlank(): boolean | undefined
   /** The preset chosen with /preset while no session exists yet; the next
    * session composes on it (run-local, ahead of launchPreset/default). */
   pendingPreset: string | undefined
@@ -577,8 +632,6 @@ export interface TuiCommandRunner {
    * see docs/surface-catalog.md). Never rejects: outcomes are `applied`,
    * `failed` or `superseded`. */
   refreshCatalog(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
-  /** Re-compose a still-blank session onto another preset (see recomposeBlank). */
-  recomposeBlank(presetId: string): Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
   refreshStatus(): void
   /** PR D2: the /status explicit context force — measures NOW through the
    * runner's context coordinator (mark dirty + semantic SessionReader),
@@ -589,11 +642,17 @@ export interface TuiCommandRunner {
    * Optional: stubs without the coordinator fall back to a direct
    * sessionReader read. */
   forceContextMeasurement?(): number | undefined
-  /** Whether Focus Mode is currently on (the authoritative runtime state). */
+  /** Shared with prompt assembly; settings changes take effect on the next step. */
+  readonly progressUpdatesState: ProgressUpdatesState
+  /** Shared with prompt assembly; settings changes take effect on the next step. */
+  readonly responseStyleState: ResponseStyleState
+  /** The canonical display preset (the authoritative runtime state). */
+  displayPreset?(): DisplayPreset
+  /** Apply a canonical display preset through the shared setter. */
+  setDisplayPreset?(preset: DisplayPreset): DisplayPresetApplyResult
+  /** @deprecated Compatibility facade for existing command-only callers. */
   focusEnabled(): boolean
-  /** The UNIFIED Focus setter: mutates the runtime state and the TUI
-   * surface immediately, persists best-effort (plan §7 — /settings and
-   * /focus both route through this, never a direct settings write). */
+  /** @deprecated Compatibility facade; production commands use setDisplayPreset. */
   setFocusMode(enabled: boolean): void
   /** Apply the completion-notification MODE ('unfocused' | 'always' |
    * 'off') to the runtime controller (the /settings panel write; the
@@ -637,13 +696,11 @@ export interface TuiCommandRunner {
    */
   sessionTransitionPending(): boolean
   /**
-   * Run one session-transition workflow exclusively through the
-   * process-local single-writer gate: /new, /fork and /rewind must create
-   * their child AND swap inside ONE exclusive section, so a transition can
-   * never interleave with another — no mixed-parent child (cwd captured
-   * across a concurrent switch), no stale commit after a switch, no ghost
-   * child published to persistence once the surface moved. Re-entering the
-   * gate from inside a task is refused loudly (it would deadlock).
+   * Run one destructive session-transition workflow exclusively through the
+   * process-local single-writer gate. Host-owned fork dispatch is intentionally
+   * outside this FIFO; only its current visible adoption and Direct retirement
+   * handoff use the gate. Re-entering the gate from inside a task is refused
+   * loudly (it would deadlock).
    */
   withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
   /**
@@ -1222,6 +1279,24 @@ export type HostCommandClaim =
   // command plane, and it is an ordinary submission.
   | { readonly claimed: false }
 
+/** Read the canonical preset, with a narrow adapter for old command-only fakes. */
+function displayPresetOf(runner: TuiCommandRunner): DisplayPreset {
+  return runner.displayPreset?.() ?? (runner.focusEnabled() ? 'focus' : 'full')
+}
+
+/** Apply through the canonical setter, retaining only the old test/extension seam. */
+function applyDisplayPreset(runner: TuiCommandRunner, preset: DisplayPreset): DisplayPresetApplyResult {
+  if (!isDisplayPresetAvailable(preset)) return { kind: 'unsupported', preset }
+  const setter = runner.setDisplayPreset
+  if (setter !== undefined) return setter(preset)
+  // The legacy seam can only express Focus vs non-Focus. Compact has no
+  // representation there, so it must FAIL rather than silently activate Full
+  // (Compact must never be a Full alias).
+  if (preset !== 'focus' && preset !== 'full') return { kind: 'unsupported', preset }
+  runner.setFocusMode(preset === 'focus')
+  return { kind: 'applied', preset }
+}
+
 /**
  * Register the TUI-owned slash commands on the commands service. The
  * completion list is refreshed after every registration so TUI-owned
@@ -1253,6 +1328,10 @@ export function registerTuiCommands(
   isSkillWrapper(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
+  /** Consume a TUI-local draft disposition correlated by DSH command id.
+   * When the command handler throws, no execution result returns the id; in
+   * that serialized path the oldest pending disposition is consumed instead. */
+  takeCommandDraftDisposition(commandId?: string): CommandDraftDisposition | undefined
   /** Re-synthesize the slash completions from the CURRENT host catalog plus
    * the live client contributions (the extension-invalidate hook: a late
    * contribution joins the menu without waiting for a session refresh). */
@@ -1273,6 +1352,15 @@ export function registerTuiCommands(
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
+
+  // `commands.execute()` normalizes handler results to the official
+  // CommandResult shape. Draft restoration therefore travels through this
+  // TUI-local side channel, correlated by the execution's command id, rather
+  // than through private fields that the Host normalizer discards.
+  const commandDraftDispositions = new Map<string, CommandDraftDisposition>()
+  const recordCommandDraftDisposition = (commandId: string | undefined, disposition: CommandDraftDisposition): void => {
+    if (commandId !== undefined) commandDraftDispositions.set(commandId, disposition)
+  }
 
   // ── submit-resolved delivery binding ────────────────────────────────────
   /**
@@ -1533,6 +1621,56 @@ export function registerTuiCommands(
     return [...byName.values()]
   }
   /**
+   * Client-local preset-selection visibility: the official `agentPresets.list`
+   * roster's `modeSelectionEnabled` deployment policy. PRESENTATION ONLY — the
+   * `/preset` handler stays registered and still fails closed, so a hidden
+   * `/preset` refuses exactly like a visible one (UI visibility is not an
+   * authorization boundary).
+   *
+   * The observed value is OWNER-scoped (Session generation + identity): a
+   * value read for another owner is stale and ignored (unknown => visible), so
+   * a disabled deployment's Session can never hide the affordance for a later
+   * Session, and an unavailable/unknown roster keeps the current presentation.
+   * Reads are request-ordered so a late same-owner read cannot overwrite a
+   * newer authoritative one.
+   */
+  type PresetSelectionOwner = { readonly generation: number; readonly sessionId: string | undefined }
+  let presetSelectionEnabled: boolean | undefined
+  let presetSelectionOwner: PresetSelectionOwner | undefined
+  let presetSelectionRequest = 0
+  /** Register a roster read that feeds the PRESENTATION cache. The token is
+   * taken at START, so a read that merely SETTLES later can never overwrite a
+   * newer one — every reader (probe, typed `/preset`, picker) participates.
+   * Mutation ownership is SEPARATE: an operation that already passed its own
+   * subject/token fences still dispatches even when this cache commit loses. */
+  const beginPresetSelectionRead = (): number => ++presetSelectionRequest
+  const currentPresetOwner = (): PresetSelectionOwner => ({
+    generation: runner.sessionGeneration,
+    sessionId: runner.liveAgent?.session.id,
+  })
+  const samePresetOwner = (left: PresetSelectionOwner, right: PresetSelectionOwner): boolean =>
+    left.generation === right.generation && left.sessionId === right.sessionId
+  /**
+   * The TUI-owned `/preset` command IDENTITY — the official
+   * discovery/presentation identity (0.1.6 `definitionId`), never an
+   * authorization fact. Visibility is keyed on it so a scoped same-name
+   * `/preset` contributed by a preset/plugin (which selects its own full
+   * descriptor and does not inherit this identity) keeps its own presentation.
+   */
+  const TUI_PRESET_COMMAND_DEFINITION_ID = CommandDefinitionId('@xmoon76/dsh-pi-tui/preset')
+  /**
+   * Whether one effective command is visible in the preset-selection surface.
+   * Only the TUI's OWN `/preset` identity honors the Host mode-selection
+   * policy; a same-name command with a DIFFERENT definitionId is semantically
+   * unrelated and stays visible. A value belonging to another owner is
+   * unknown: keep the affordance rather than inherit a stale `false`.
+   */
+  const presetCommandVisible = (command: { readonly definitionId?: string }): boolean => {
+    if (command.definitionId !== TUI_PRESET_COMMAND_DEFINITION_ID) return true
+    if (presetSelectionOwner === undefined || !samePresetOwner(presetSelectionOwner, currentPresetOwner())) return true
+    return presetSelectionEnabled !== false
+  }
+  /**
    * One collision notice per contribution IDENTITY and failure GENERATION
    * (the key is dropped when the collision recovers): a new owner reusing a
    * released name, or the same contribution colliding again after the host
@@ -1574,7 +1712,9 @@ export function registerTuiCommands(
     // stay live.
     const display = options.display === 'none'
       ? []
-      : [...mergeContributions(sorted)].sort((left, right) => left.name < right.name ? -1 : 1)
+      : [...mergeContributions(sorted)]
+          .filter(presetCommandVisible)
+          .sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
@@ -1698,6 +1838,48 @@ export function registerTuiCommands(
     installCompletionsContained(liveAgent === undefined
       ? mergeGlobalAndSavedScoped()
       : commands.list(liveAgent).map(commandSummaryOf))
+  }
+  /**
+   * Commit one roster read to the PRESENTATION cache while `request` is still
+   * the newest registered read, returning whether it committed. This owns ONLY
+   * the display cache: a `false` return means a later-started presentation read
+   * already owns the cache and the value must not repaint it — it must NEVER
+   * cancel the caller's own user operation. A user mutation decides from the
+   * roster IT read: the official Web keeps `loadGeneration` (presentation) and
+   * `select()` (mutation ownership) separate, and the Host
+   * `agentPresets.select` owns the blank-session/mount/commit authority.
+   */
+  const commitPresetVisibility = (enabled: boolean, owner: PresetSelectionOwner, request: number): boolean => {
+    if (request !== presetSelectionRequest) return false
+    if (presetSelectionOwner !== undefined && samePresetOwner(presetSelectionOwner, owner) && presetSelectionEnabled === enabled) return true
+    presetSelectionEnabled = enabled
+    presetSelectionOwner = owner
+    refreshCompletions()
+    return true
+  }
+  /**
+   * Seed/refresh the presentation capability from the CURRENT owner. The read
+   * is fenced by request order AND owner identity: a roster that settles after
+   * a newer read or a switch must never rewrite the new Session's command
+   * surface. A superseded or aborted read is a cancellation (debug diagnostics
+   * only); any other failure keeps the current presentation and is recorded by
+   * runOwned. A rosterless deployment (`available() === false`) is unknown and
+   * keeps `/preset` visible (its handler still refuses execution).
+   */
+  const refreshPresetSelectionVisibility = (): void => {
+    const presets = runner.catalog.presets
+    if (!presets.available()) return
+    const owner = currentPresetOwner()
+    const request = beginPresetSelectionRead()
+    runOwned('preset selection visibility', async () => {
+      const roster = await presets.roster(runner.signal)
+      if (!samePresetOwner(owner, currentPresetOwner())) return
+      commitPresetVisibility(roster.modeSelectionEnabled, owner, request)
+    }, {
+      diag: runner.diag,
+      sessionId: () => runner.liveAgent?.session.id,
+      isCancellation: (error) => error instanceof SupersededReadError || runner.signal.aborted,
+    })
   }
   // ── registry-change coalescing ─────────────────────────────────────────
   // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
@@ -1855,7 +2037,12 @@ export function registerTuiCommands(
       // opens): the panel teardown disposes it so a write pending when the
       // whole /settings overlay closes can never repaint or toast after
       // the panel is gone (review round 6).
-      let allowlistMenu: SubagentModelAllowlistSubmenu | undefined
+      let allowlistMenu: SubagentModelAllowlistPicker | undefined
+      // Whether the /settings overlay is still mounted: a late allowlist
+      // settle after the WHOLE panel closed must still update the (detached)
+      // row for bookkeeping, but must not schedule a repaint of a surface
+      // that no longer exists.
+      let settingsOpen = true
       const closeSettings = app.openSettings(
         [
           ...liveAgent === undefined ? [] : [{
@@ -1881,18 +2068,29 @@ export function registerTuiCommands(
           // dependency (configure allowed routes, then enable selection).
           ...(runner.config.subagentModelSelection.available() && runner.catalog.models.available()) ? (() => {
             const subagentSelection = runner.config.subagentModelSelection.get()
-            return [{
+            // The allowlist row's value is owned by the SUBMENU: a write
+            // settling after the submenu closed must converge the displayed
+            // summary through `summarize` (the fork rejects a `done` callback
+            // once the submenu generation advanced), without re-opening it.
+            const allowlistRow = {
               id: 'subagent-model-allowlist',
               label: 'Subagent allowed models',
               description: 'The child LLM routes the official subagent tool may pick from',
               currentValue: allowlistSummary(subagentSelection.allowedModels),
               submenu: (_currentValue: string, done: (selected?: string) => void) => {
-                const menu = new SubagentModelAllowlistSubmenu({
+                const menu = new SubagentModelAllowlistPicker({
                   selection: runner.config.subagentModelSelection,
                   catalog: runner.catalog.models,
                   notify: (message, kind) => app.notify(message, kind),
                   requestRender: () => app.requestRender(),
                   done,
+                  summarize: (value) => {
+                    allowlistRow.currentValue = value
+                    // Suppress the repaint once the WHOLE panel closed: the
+                    // row update above is inert bookkeeping, but a scheduled
+                    // render would repaint a surface the user already left.
+                    if (settingsOpen) app.requestRender()
+                  },
                   runOwned: (label, task, options) => {
                     runOwned(label, task, {
                       diag: runner.diag,
@@ -1904,7 +2102,8 @@ export function registerTuiCommands(
                 allowlistMenu = menu
                 return menu
               },
-            }, {
+            }
+            return [allowlistRow, {
               id: 'subagent-model-selection',
               label: 'Subagent model selection',
               description: 'Let new sessions pick a child provider/model in the subagent tool (official DSH setting; needs at least one allowed route)',
@@ -1951,9 +2150,9 @@ export function registerTuiCommands(
           },
           {
             id: 'expand',
-            label: 'Tool output',
-            description: 'Whether recent tool/system entries start expanded',
-            currentValue: app.isToolOutputExpanded() ? 'expanded' : 'collapsed',
+            label: 'Transcript detail',
+            description: 'Bulk expansion for recent collapsible transcript content',
+            currentValue: app.isTranscriptDetailExpanded() ? 'expanded' : 'collapsed',
             values: ['collapsed', 'expanded'],
           },
           {
@@ -1995,11 +2194,25 @@ export function registerTuiCommands(
             values: ['input', 'viewport'],
           },
           {
-            id: 'focus-mode',
-            label: 'Focus mode',
-            description: 'Collapse intermediate activity into a live Thought block; click to reveal the full turn',
-            currentValue: runner.focusEnabled() ? 'on' : 'off',
-            values: ['off', 'on'],
+            id: 'display-preset',
+            label: 'Display',
+            description: 'Transcript disclosure preset; Focus collapses intermediate activity into a live Thought block, Compact folds contiguous process into Activity spans',
+            currentValue: displayPresetOf(runner),
+            values: ['full', 'compact', 'focus'],
+          },
+          {
+            id: 'progress-updates',
+            label: 'Progress updates',
+            description: 'Off: no progress narration; Milestones: update only at substantial phase boundaries (default); Frequent: keep me informed during longer work. Focus suppresses progress-only intermediate messages without changing this saved preference.',
+            currentValue: runner.progressUpdatesState.mode,
+            values: ['off', 'milestones', 'frequent'],
+          },
+          {
+            id: 'response-style',
+            label: 'Response style',
+            description: 'Default: no extra answer-style guidance; Concise: compact and result-first; Explanatory: more rationale, architecture, and tradeoffs',
+            currentValue: runner.responseStyleState.style,
+            values: ['default', 'concise', 'explanatory'],
           },
           {
             id: 'notification-mode',
@@ -2283,7 +2496,7 @@ export function registerTuiCommands(
               }))
             }
           } else if (id === 'expand') {
-            app.setToolOutputExpanded(value === 'expanded')
+            app.setTranscriptDetailExpanded(value === 'expanded')
           } else if (id === 'thinking') {
             // The declarative surface sets the SHARED bulk preference —
             // `/settings` and Alt+T are the same state (plan §10.4).
@@ -2378,11 +2591,29 @@ export function registerTuiCommands(
                  ), { notify: true })
               }
             }
-          } else if (id === 'focus-mode') {
-            if (value === 'off' || value === 'on') {
-              // The UNIFIED setter: runtime mutation first, persistence
-              // best-effort (plan §7 — never a direct settings write).
-              runner.setFocusMode(value === 'on')
+          } else if (id === 'display-preset') {
+            if (value === 'full' || value === 'compact' || value === 'focus') {
+              applyDisplayPreset(runner, value)
+            }
+          } else if (id === 'progress-updates') {
+            const mode = parseProgressUpdates(value)
+            runner.progressUpdatesState.mode = mode
+            const settings = tuiSettings
+            if (settings !== undefined) {
+              detach('settings progress updates write', () => serializeTuiSettingsMutation(
+                settings,
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), progressUpdates: mode }, runner.config)),
+              ), { notify: true })
+            }
+          } else if (id === 'response-style') {
+            const style = parseResponseStyle(value)
+            runner.responseStyleState.style = style
+            const settings = tuiSettings
+            if (settings !== undefined) {
+              detach('settings response style write', () => serializeTuiSettingsMutation(
+                settings,
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), responseStyle: style }, runner.config)),
+              ), { notify: true })
             }
           } else if (id === 'notification-mode') {
             if (value === 'unfocused' || value === 'always' || value === 'off') {
@@ -2437,9 +2668,15 @@ export function registerTuiCommands(
           // Esc: close without writing. The allowlist submenu is disposed
           // with the panel — a write pending when the whole /settings
           // overlay closes must not repaint or toast after teardown
-          // (review round 6).
+          // (review round 6). `settingsOpen` gates the summarize repaint.
+          settingsOpen = false
           allowlistMenu?.dispose()
         },
+        // Teardown-aware: a fullscreen screen swap (or any other hide path)
+        // removes the panel WITHOUT the Esc cancel, so the mounted state must
+        // also flip there — otherwise a late allowlist settle would schedule
+        // a repaint of a surface that no longer exists.
+        () => { settingsOpen = false },
       )
       return { kind: 'success' }
     },
@@ -2580,19 +2817,37 @@ export function registerTuiCommands(
     },
   })
 
-  // `/focus` — the Focus Mode control (plan §8): LOCAL + SESSIONLESS (the
-  // runner's ownership sets), so it always executes directly — never
-  // queued/steered while busy, never sent to the model, and usable before
-  // the first session exists (the first real prompt then composes with the
-  // Focus section already installed). Every mutation goes through the
-  // runner's ONE setter.
+  // `/display` is the canonical LOCAL + SESSIONLESS display control. It is
+  // usable before the first session and every mutation goes through the
+  // runner's canonical setter.
+  commands.register({
+    name: 'display',
+    description: 'Set the transcript display preset',
+    input: { hint: '[full|focus|compact|status]' },
+    handler: (invocation) => {
+      const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+      const report = (text: string): { kind: 'success'; text: string } => {
+        app.notify(text, 'info')
+        return { kind: 'success', text }
+      }
+      if (verb === '' || verb === 'status') return report(`Display: ${displayPresetOf(runner)}.`)
+      if (verb === 'full' || verb === 'focus' || verb === 'compact') {
+        const result = applyDisplayPreset(runner, verb)
+        if (result.kind === 'unsupported') return { kind: 'error', text: `Display preset "${verb}" is not available in this build.` }
+        return report(`Display: ${verb}.`)
+      }
+      return { kind: 'error', text: `unknown /display verb "${verb}" (full|focus|compact|status)` }
+    },
+  })
+
+  // `/focus` is the compatibility adapter over the canonical display state.
   commands.register({
     name: 'focus',
-    description: 'Toggle Focus Mode (intermediate activity folds into a live Thought block)',
+    description: 'Toggle Focus display (intermediate activity folds into a live Thought block)',
     input: { hint: '[on|off|toggle|status]' },
     handler: (invocation) => {
       const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
-      const enabled = runner.focusEnabled()
+      const enabled = displayPresetOf(runner) === 'focus'
       // The command feedback is a transient notify (the same pattern as
       // /reload): a sessionless local command writes no command/done card,
       // so the success text must be surfaced HERE or the toggle would be
@@ -2602,17 +2857,17 @@ export function registerTuiCommands(
         return { kind: 'success', text }
       }
       if (verb === '' || verb === 'toggle') {
-        runner.setFocusMode(!enabled)
+        applyDisplayPreset(runner, enabled ? 'full' : 'focus')
         return report(`Focus mode ${enabled ? 'off' : 'on'}.`)
       }
       if (verb === 'on') {
         if (enabled) return report('Focus mode is on.')
-        runner.setFocusMode(true)
+        applyDisplayPreset(runner, 'focus')
         return report('Focus mode on.')
       }
       if (verb === 'off') {
-        if (!enabled) return report('Focus mode is off.')
-        runner.setFocusMode(false)
+        if (displayPresetOf(runner) === 'full') return report('Focus mode is off.')
+        applyDisplayPreset(runner, 'full')
         return report('Focus mode off.')
       }
       if (verb === 'status') {
@@ -3150,14 +3405,19 @@ export function registerTuiCommands(
     args = '',
     signal: AbortSignal = runner.signal,
     delivery: SubmitDelivery | undefined,
+    commandId?: string,
   ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
     const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
+    const generation = runner.sessionGeneration
     skillSignal.throwIfAborted()
     // The skill read goes through the catalog port (migration M1.8): the
     // Direct adapter resolves the session's live skill target internally —
     // the loaded definition is a detached DTO, never the registry object.
     const resolved = await runner.catalog.skills.resolveSkill(agent.session.id, name)
     skillSignal.throwIfAborted()
+    if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) {
+      return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+    }
     if (resolved.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
     if (resolved.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
     if (resolved.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
@@ -3179,17 +3439,39 @@ export function registerTuiCommands(
     // pinned across the WHOLE invocation — the async prepare, the steer
     // and the draft consumption — so a concurrent /image prune can never
     // delete images this invocation is still admitting (review finding 1).
-    const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
-    // body only when ITS tool registration is visible to this agent — the
-    // same visibility test the listener itself uses. Probed BEFORE the
-    // delivery: the queue path below depends on it, and the fallback body
-    // injection after the write needs it too.
+    // body only when its tool registration is visible to this agent. Probe
+    // that semantic catalog fact before choosing the delivery path.
     const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
+    // When the Host skill pre-step is absent, deliver the original invocation
+    // and its rendered body as two ordered single prompts. This preserves the
+    // original-line-before-body ordering without bypassing the semantic writer.
+    const fallbackBody = !hostLoadsSkillBody
+      ? (() => {
+        const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
+        const resourceBase = readResourceBase(skill.resourceBase)
+        return createUserMessage({
+          content: [{ type: 'text', text: renderSkillContent({
+            name: skill.name,
+            provider: typeof skill.provider === 'string' && skill.provider !== '' ? skill.provider : 'tui',
+            ...resourceBase === undefined ? {} : { resourceBase },
+            content: body,
+          }) }],
+          source: { kind: 'skill-invocation', name: skill.name, form: 'instructions' },
+        })
+      })()
+      : undefined
+    // Acquire the pin HERE, immediately before the `try` that owns its release:
+    // every earlier step is synchronous, so a throw above can no longer strand
+    // the pin and permanently block pruning of the referenced drafts.
+    const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
       skillSignal.throwIfAborted()
+      if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) {
+        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+      }
       // The session-transition write fence (review round 5): while a
       // transition is in flight the old agent may be woken again — a steer
       // in that window would target a session whose lock is about to be
@@ -3199,18 +3481,17 @@ export function registerTuiCommands(
       if (runner.sessionTransitionPending()) {
         const merged = mergeDraft(app.getDraft(), line)
         app.setEditorText(merged)
+        recordCommandDraftDisposition(commandId, 'restored')
         return { kind: 'error', text: merged === line
           ? 'a session transition is in progress — try again in a moment'
           : 'the draft changed while transitioning — review it before submitting again' }
       }
-      // The invocation's own write runs inside the operation barrier
-      // (convergence plan phase 3): a transition started while the draft
-      // prepared drains it first; a transition already running refuses the
-      // write with the standard fence UX (the check above is the quick
-      // path, this is the authoritative one).
+      // The invocation's complete write runs inside the operation barrier;
+      // the fallback body is a second ordered prompt, not an atomic batch.
       try {
-        await runner.withSessionWriter(agent.session.id, async () => {
+        const outcome = await runner.withSessionWriter(agent.session.id, async () => {
           skillSignal.throwIfAborted()
+          if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) return undefined
           // Web parity (busyEnter): a skill invocation is an agent-facing
           // prompt — under the queue mode it QUEUES like a plain prompt
           // (web: session.prompt with the policy-resolved mode). The mode
@@ -3218,22 +3499,46 @@ export function registerTuiCommands(
           // re-deriving it here from the persisted preference would lose the
           // accelerated chord's opposite mode, which exists only in the
           // dispatch that resolved it.
-          // The queue delivery is only safe when the HOST injects the skill
-          // body: the fallback body injection below rides next-step, so a
-          // followup would let the body arrive before the user's words (the
-          // driver claims next-step FIRST). Without the host loader the
-          // invocation keeps the steer path to preserve the
-          // original-line-before-body order — the documented exception.
+          // The no-loader fallback follows the dsh-web style: the original line
+          // and the rendered body are two ordered steer prompts. This is
+          // intentionally best-effort rather than a same-step batch; if the
+          // first prompt does not commit, the body is never sent.
           if (delivery !== 'steer' && hostLoadsSkillBody) {
-            agent.followup(userMessage)
-          } else {
-            agent.steer(userMessage)
+            return runner.sessionWriter.prompt(agent.session.id, userMessage, 'queue')
           }
+          if (fallbackBody !== undefined) {
+            const first = await runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer')
+            if (first.kind !== 'committed') return first
+            // The original invocation is durable once the first prompt
+            // commits. Consume its attachments before the body prompt so a
+            // later body failure cannot make a retry duplicate the line or
+            // re-admit its images.
+            try {
+              consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
+              const body = await runner.sessionWriter.prompt(agent.session.id, fallbackBody, 'steer')
+              if (body.kind !== 'committed') recordCommandDraftDisposition(commandId, 'suppressed')
+              return body
+            } catch (error) {
+              // The first prompt already committed; the outer command sink
+              // must not restore/replay its invocation after a body failure.
+              recordCommandDraftDisposition(commandId, 'suppressed')
+              throw error
+            }
+          }
+          return runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer')
         })
+        if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+        if (outcome.kind !== 'committed') {
+          if (outcome.kind === 'indeterminate') { throw new IndeterminateSkillWriteError() }
+          if (outcome.kind === 'cancelled') throw cancellationError('skill write cancelled')
+          const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+          return { kind: 'error', text: message }
+        }
       } catch (error) {
         if (error instanceof TransitionInProgressError) {
           const merged = mergeDraft(app.getDraft(), line)
           app.setEditorText(merged)
+          recordCommandDraftDisposition(commandId, 'restored')
           return { kind: 'error', text: merged === line
             ? 'a session transition is in progress — try again in a moment'
             : 'the draft changed while transitioning — review it before submitting again' }
@@ -3249,62 +3554,6 @@ export function registerTuiCommands(
       // throw (review finding: a leaked pin would block pruning and eat
       // draft capacity forever).
       releasePin()
-    }
-    // The host's pre-step listener (dsh-tool-skill) injects the rendered
-    // body only when ITS tool registration is visible to this agent — the
-    // same visibility test the listener itself uses. A composition without
-    // the loader (e.g. a stripped-down custom preset) never recognizes the
-    // gesture, so the TUI falls back to injecting the body itself with the
-    // OFFICIAL rendering and the OFFICIAL durable source, so transcript
-    // consumers present it exactly like a host injection (context.ts already
-    // projects skill-invocation rows). With the host present, the body is
-    // left to it: double injection would duplicate the skill body.
-    // The check is an existence probe shaped like the loader: the tool must
-    // be named `skill` and carry an execute function (the dsh-tool-skill
-    // definition always does). A scoped shadow merely named `skill` without
-    // a loader shape is treated as absent — the host's gesture listener
-    // would not inject for it either, so the TUI's fallback must cover it.
-    // The probe is a SEMANTIC catalog operation now (migration M1.8) — the
-    // raw tools service never crosses into the command surface.
-    // Deliver the batch through the steer path (and unlike
-    // agent.inject alone, which queues for the next pre-step WITHOUT waking
-    // the driver): the ORIGINAL line is steered — a running turn takes it
-    // at the next step boundary, an idle agent's steer wakes the driver and
-    // opens the next turn with it (web parity, where the `/name` prompt is
-    // a plain session.prompt). The fallback body injection rides the SAME
-    // next-step batch via inject (no wake): a RUNNING agent's next step
-    // claim takes all next-step messages at once in insertion order, so the
-    // original line precedes the body in one step; an IDLE agent's steer
-    // wake claims the original line synchronously inside steer(), so the
-    // body lands as step 2 of the same turn (the loop only ends when
-    // next-step drains). Either way the original line reaches the model
-    // before the body, exactly like the web's message order.
-    // The queue delivery (chosen above when the HOST injects the body) is
-    // the web-parity busyEnter path: followup parks the line in next-turn
-    // and the host's pre-step listener injects the body at the next model
-    // request — the same order the web's queued session.prompt produces.
-    // The fallback body injection below is INCOMPATIBLE with followup:
-    // the body would sit in next-step while the line waits in next-turn,
-    // and the driver's first step boundary claims next-step FIRST — the
-    // body would arrive BEFORE the user's words, inverting the web's
-    // message order. (A second follow-up would not help either: a turn
-    // boundary claims ONE next-turn message, so the pair would split
-    // across two turns.) That is why the queue path requires
-    // hostLoadsSkillBody.
-    if (!hostLoadsSkillBody) {
-      const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
-      // Forward the resource base too, so the fallback rendering matches
-      // what the host would render (directory/url/opaque hints).
-      const resourceBase = readResourceBase(skill.resourceBase)
-      agent.inject(createUserMessage({
-        content: [{ type: 'text', text: renderSkillContent({
-          name: skill.name,
-          provider: typeof skill.provider === 'string' && skill.provider !== '' ? skill.provider : 'tui',
-          ...resourceBase === undefined ? {} : { resourceBase },
-          content: body,
-        }) }],
-        source: { kind: 'skill-invocation', name: skill.name, form: 'instructions' },
-      }))
     }
     return { kind: 'success', text: 'skill ' + name + ' loaded' }
   }
@@ -3361,7 +3610,7 @@ export function registerTuiCommands(
             // withDelivery). Everything below may await.
             const delivery = takeDelivery()
             const agent = await requireAgent()
-            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
+            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
           },
         })
         skillDisposers.set(skill.name, dispose)
@@ -3396,6 +3645,9 @@ export function registerTuiCommands(
       savedScopedCommands = snapshot.scopedCommands
       installCompletionsContained(mergeGlobalAndSavedScoped())
     })
+    // The command surface follows the CURRENT owner's roster policy; the read
+    // is generation-fenced so a late result cannot rewrite a newer Session.
+    refreshPresetSelectionVisibility()
   }
   /**
    * The revalidating transition (target/owner change): scoped previews clear
@@ -3423,7 +3675,7 @@ export function registerTuiCommands(
               // Captured before any await, exactly like the direct wrapper.
               const delivery = takeDelivery()
               const agent = await requireAgent()
-              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
+              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
             },
           })
           skillDisposers.set(name, dispose)
@@ -3472,7 +3724,7 @@ export function registerTuiCommands(
       // invocation line is normalized to `/name args` so the host's pre-step
       // gesture (dsh-tool-skill) also recognizes it when visible.
       const [name, ...args] = splitSkillLine(invocation.rawInput)
-      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal, delivery)
+      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal, delivery, invocation.commandId)
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (the catalog port's
       // live read), so hostile or model-only entries never reach the
@@ -3626,6 +3878,15 @@ export function registerTuiCommands(
     },
   })
 
+  // Operation ownership for `/model` (shared across handler invocations): a
+  // newer selection supersedes an older one's pending-marker clear and error
+  // notice even on the SAME Session generation (v2 §0.2.5).
+  let modelOperationToken = 0
+  // PRESENTATION ownership for `/model`: a newer invocation supersedes the
+  // previous (loading or loaded) panel. It is DISTINCT from
+  // modelOperationToken (which owns the WRITE): the surface token decides
+  // which picker is allowed to hydrate/repaint/close.
+  let modelSurfaceToken = 0
   commands.register({
     name: 'model',
     description: 'Switch the model (and reasoning effort) for this session',
@@ -3633,116 +3894,217 @@ export function registerTuiCommands(
       const selected = runner.selected
       const models = runner.catalog.models
       if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
-      const providers = models.listProviders()
-      const current = selected.current ?? models.defaultSelection() ?? { provider: '', model: '' }
-      /** Commit a selection (model, optional effort) and refresh the footer. */
-      const apply = (next: ModelSelection): void => {
+      // The picker belongs to the Session that opened it: capture BOTH the
+      // generation and the identity before the catalog read, then bail
+      // silently if either moved (v2 §0.2.5/§0.3.1) — never hydrate a picker
+      // with another Session's catalog.
+      const readGeneration = runner.sessionGeneration
+      const pickerSessionId = runner.liveAgent?.session.id
+      const ownerCurrent = (): boolean =>
+        runner.sessionGeneration === readGeneration && runner.liveAgent?.session.id === pickerSessionId
+      /** Commit a selection (model, optional effort) and resolve with its
+       *  semantic settlement so the picker stays truthful: a rejected write
+       *  keeps the picker usable, a committed/indeterminate one dismisses. */
+      const apply = async (next: ModelSelection): Promise<ModelApplyOutcome> => {
+        // This operation owns its footer pending marker and notices; a newer
+        // selection invalidates that ownership even on the same generation.
+        const token = ++modelOperationToken
+        // The submitted value must belong to the Session (generation + identity)
+        // that OPENED the picker: a switch after the overlay opened must never
+        // apply the old operation to the new Session (v2 §0.2.5/§0.3.1).
+        if (runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId) {
+          return 'superseded'
+        }
         const liveSessionId = runner.liveAgent?.session.id
         if (liveSessionId === undefined) {
-          // Before a Session exists, `/model` is an optimistic sessionless
-          // choice. It must not create a Session, but it becomes the dynamic
-          // creation fallback and is persisted as the global default. The
-          // intent is TRANSIENT: a settled save clears it (the next /new
-          // reads the persisted default dynamically), a failed save walks
-          // the operation ancestry back to the nearest still-pending
-          // operation.
+          // Before a Session exists, `/model` is a global-default intent. It
+          // must not create a Session, but it becomes the dynamic creation
+          // fallback and is persisted as the global default. The intent is
+          // TRANSIENT: a committed save clears it (the next /new reads the
+          // persisted default dynamically), a failed save walks the operation
+          // ancestry back to the nearest still-pending operation. The save is
+          // AWAITED so the picker reports a truthful settlement (a failed or
+          // unsupported default write keeps the picker usable).
           runner.setDefaultIntent(next)
           const intentId = runner.defaultIntentRecord?.id
-          runOwned('model default save', () => models.saveDefaultSelection(next), {
-            diag: runner.diag,
-            onResult: () => {
-              // The global default committed: report the settle to the
-              // intent state machine (it clears the intent only when THIS
-              // operation still owns it; a newer operation is never cleared
-              // by an older completion).
-              if (intentId !== undefined) runner.settleIntent(intentId, 'committed')
-            },
-            onError: (error) => {
-              // The default save failed: report the settle to the intent
-              // state machine (it walks the ancestry back to the nearest
-              // still-pending operation, or clears). The footer must
-              // re-project the resulting intent — the optimistic choice was
-              // already painted.
-              if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
-              runner.refreshStatus()
-              runner.updateWelcomeCard()
-              app.notify(`model default save: ${safeErrorMessage(error)}`, 'error')
-            },
-          })
-        } else {
-          // A live Session owns the durable intent. The port appends
-          // model/selection FIRST and only then makes the choice
-          // authoritative, so a failed append can never be observed by a
-          // request. The Session commit and the global-default commit are
-          // settled SEPARATELY: a durable Session choice stands even when
-          // the default write fails, while the transient default intent is
-          // settled by the state machine.
-          runner.setDefaultIntent(next)
-          const intentId = runner.defaultIntentRecord?.id
-          runOwned('model selection save', () => models.selectSessionModel(liveSessionId, next), {
-            diag: runner.diag,
-            onResult: () => {
-              // Both commits succeeded: report the settle to the intent
-              // state machine (it clears the intent only when THIS operation
-              // still owns it).
-              if (intentId !== undefined) runner.settleIntent(intentId, 'committed')
-            },
-            onError: (error) => {
-              // The Session side needs no restore: the port commits the
-              // Agent-local selection only after the durable append, so a
-              // failed append leaves it untouched and a successful append
-              // keeps the choice. Only the transient default intent is
-              // settled by the state machine.
-              if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
-              app.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
-            },
-          })
+          // The sessionless footer marker is DERIVED from the tracker (see the
+          // runner), so recording the intent is enough to show `(selecting…)`.
+          runner.refreshStatus()
+          runner.updateWelcomeCard()
+          // Track the raw write so a fresh create can await its settle before
+          // dispatching (the Direct adapter reads the persisted Host default).
+          const write = models.saveDefaultSelection(next)
+          runner.trackDefaultWrite(write)
+          const outcome = await write
+          // Settle the transient intent BEFORE the ownership check: a stale
+          // operation must never leak a pending tracker entry (which a later
+          // failure of the newer op would resurrect as an active ancestor).
+          if (intentId !== undefined) {
+            runner.settleIntent(intentId, outcome.kind === 'committed'
+              ? 'committed'
+              : outcome.kind === 'indeterminate' ? 'unresolved' : 'failed')
+          }
+          // A newer `/model` — or a Session that appeared while the write was in
+          // flight — owns the surface: no repaint/notice for a stale operation.
+          if (token !== modelOperationToken) return 'superseded'
+          if (runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId) {
+            return 'superseded'
+          }
+          if (outcome.kind !== 'committed') {
+            runner.refreshStatus()
+            runner.updateWelcomeCard()
+            const detail = outcome.kind === 'rejected'
+              ? outcome.error.message
+              : outcome.kind === 'indeterminate'
+                ? `${outcome.error.message} — the default may still land; reopen /model to reconcile`
+                : outcome.kind === 'unsupported'
+                  ? outcome.reason
+                  : 'the default model save was cancelled'
+            app.notify(`model default save: ${detail}`, 'error')
+            // An unsupported backend and a proven refusal keep the picker
+            // usable; an indeterminate settle dismisses with the notice.
+            return outcome.kind
+          }
+          runner.refreshStatus()
+          runner.updateWelcomeCard()
+          return 'committed'
         }
-        // The Session commit (durable append + Agent-local selection) is
-        // synchronous inside the owned task factory, so the surface can
-        // project the new authoritative selection immediately; the owned
-        // task's onResult/onError settle the transient default intent and
-        // notify. The Welcome card is refreshed from the SAME authoritative
-        // selection — a global-default persistence failure never reverts or
-        // stales it.
+        // A live Session model write is NOT a sessionless global-default intent:
+        // the official `session.selectModel` best-effort default save is a Host
+        // side effect, so the runner's DefaultIntentTracker is reserved for the
+        // sessionless path only. Here the Session write settlement plus the
+        // pending marker are the whole owned state.
+        // The picker-open subject; re-fenced after EVERY await.
+        const ownerLost = (): boolean =>
+          runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId
+        runner.setModelSelectionPending(next, token)
+        let result: Awaited<ReturnType<typeof models.selectSessionModel>>
+        try {
+          // The whole semantic write runs inside the writer barrier: a
+          // transition that started first refuses it before dispatch, and a
+          // transition that starts after must wait for it (plan §11.1).
+          result = await runner.withSessionWriter(
+            liveSessionId,
+            () => models.selectSessionModel(liveSessionId, next, runner.signal),
+          )
+        } catch (error) {
+          // A refused/aborted writer never crossed admission.
+          // A newer `/model` owns the marker and the notices.
+          if (token !== modelOperationToken) return 'superseded'
+          // The subject moved while the write was in flight (writer release vs
+          // transition commit): this operation no longer owns the surface, so it
+          // makes NO close/open decision and emits no notice (v2 §0.3.1).
+          if (ownerLost()) return 'superseded'
+          runner.setModelSelectionPending(undefined, token)
+          // A transition fence is a proven pre-dispatch refusal; the write
+          // may still be retried, so it must not surface as a failure.
+          if (!(error instanceof TransitionInProgressError)) {
+            app.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
+          }
+          runner.refreshStatus()
+          runner.updateWelcomeCard()
+          return error instanceof TransitionInProgressError ? 'cancelled' : 'indeterminate'
+        }
+        const outcome = result.outcome
+        // A newer `/model` owns the footer marker and the notices (v2 §0.2.5).
+        if (token !== modelOperationToken) return 'superseded'
+        // Ownership is superseded either by the port's own fence OR by the
+        // subject moving while the write was in flight. Both mean this result no
+        // longer owns the overlay or the footer marker: v2 §0.3.1 requires NO
+        // close/open decision, NO repaint (even clearing the in-flight marker
+        // repaints a surface this operation no longer owns), and NO stale notice.
+        if (ownerLost() || result.ownership === 'superseded') return 'superseded'
+        runner.setModelSelectionPending(undefined, token)
+        if (outcome.kind === 'rejected') app.notify(`model selection: ${outcome.error.message}`, 'error')
+        else if (outcome.kind === 'indeterminate') app.notify('model selection is indeterminate — the display reconciles from the Session; do not retry', 'error')
+        else if (outcome.kind === 'unsupported') app.notify(`model selection unsupported: ${outcome.reason}`, 'error')
+        // The authoritative Session projection decides the display in
+        // every case: a rejected/indeterminate outcome never paints the
+        // requested choice as committed.
         runner.refreshStatus()
         runner.updateWelcomeCard()
+        return outcome.kind
       }
-      // The model and effort levels render INSIDE the provider list's
-      // submenu slot (ModelSubmenu/EffortSubmenu): selecting applies
-      // immediately and Esc walks back one level. A nested openSettings
-      // would mount a second overlay and leave the first one hanging
-      // (the ghost-overlay trap the /subagents flow documents).
-      const closer = app.openSettings(
-        providers.map(provider => ({
-          id: provider.id,
-          label: provider.name,
-          currentValue: current.provider === provider.id ? current.model : '',
-          submenu: (value, done) => new ModelSubmenu(provider.id, current.model, selected.current?.reasoningEffort, {
-            listModels: (id) => models.listModels(id),
-            resolveModelInfo: (id, modelId) => models.resolveModelInfo(id, modelId),
-            apply,
-            requestRender: () => app.requestRender(),
-            // An APPLIED selection (non-undefined) closes the WHOLE overlay
-            // (web ModelSelect settleSelection parity): picking a model
-            // walks into the effort submenu, picking an effort (or Default)
-            // commits and dismisses the panel. Esc (undefined) keeps the
-            // step-by-step walk-back. closer() runs BEFORE done() — close
-            // the overlay first, then the submenu level (order-safe).
-            done: (picked) => {
-              if (picked !== undefined) closer()
-              done(picked)
-            },
-            // The owned-task entry for the menu loads: runOwned with the
-            // runner's diag pre-attached (AGENTS.md — never a bare void).
-            runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
-              runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.liveAgent?.session.id })
-            },
-          }),
-        })),
-        () => {},
-        () => {},
-      )
+      // A newer `/model` owns the SURFACE: bump the presentation token and
+      // mount the loading panel IMMEDIATELY. The directory read runs as owned
+      // background work, so the user gets instant feedback and may type a
+      // query while it loads.
+      const surfaceToken = ++modelSurfaceToken
+      // The picker's `close` closure needs the mounted overlay's closer; it is
+      // assigned right after the picker is constructed and only ever invoked
+      // later (a user Esc/settlement), never during construction.
+      let closer: () => void = () => {}
+      const picker = new ModelPicker({
+        // The picker owns presentation only: brand the effort id here so the
+        // official session/global-default write semantics stay untouched.
+        apply: (next) => apply(next.reasoningEffort === undefined
+          ? { provider: next.provider, model: next.model }
+          : { provider: next.provider, model: next.model, reasoningEffort: ReasoningEffortId(next.reasoningEffort) }),
+        requestRender: () => app.requestRender(),
+        // Close only while this surface still owns the picker slot; a superseded
+        // panel must never tear down the newer one.
+        close: () => { if (surfaceToken === modelSurfaceToken) closer() },
+        // The owned-task entry for the semantic write: runOwned with the
+        // runner's diag pre-attached (AGENTS.md — never a bare void).
+        runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
+          runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.liveAgent?.session.id })
+        },
+      })
+      closer = app.openModelPicker(picker)
+      // ONE owned Host-generation directory read hydrates the SAME already
+      // mounted picker IN PLACE (never a second overlay). openModelPicker
+      // supersedes any previous /model picker surface.
+      runOwned('model directory', () => models.loadDirectory(runner.signal), {
+        diag: runner.diag,
+        sessionId: () => runner.liveAgent?.session.id,
+        // An abort or a typed read supersession is a cancellation, not a
+        // failure: the port honors the signal / connection generation, so a
+        // rejection that races either must land in the debug channel, never an
+        // ERROR diagnostic.
+        isCancellation: (error) => picker.isDisposed()
+          || surfaceToken !== modelSurfaceToken
+          || runner.signal.aborted
+          || error instanceof SupersededReadError,
+        // A cancelled read (abort / typed supersession) leaves NO trustworthy
+        // catalog: close THIS loading panel silently rather than leaving it
+        // stuck on Loading… forever. Never close a newer surface (the token
+        // guard) and never a panel the user already closed.
+        onCancel: () => {
+          if (surfaceToken === modelSurfaceToken && !picker.isDisposed()) closer()
+        },
+        onResult: (directory) => {
+          // A newer `/model` owns the surface now.
+          if (surfaceToken !== modelSurfaceToken) return
+          if (!ownerCurrent()) {
+            // The Session moved while loading: this panel belongs to the old
+            // subject — close it silently (no hydrate, no notice).
+            if (!picker.isDisposed()) closer()
+            return
+          }
+          if (picker.isDisposed()) return
+          // An authoritative Host read reconciles a lingering UNRESOLVED
+          // sessionless default intent (v2 §0.3.2) — the read is the truth.
+          runner.reconcileDefaultIntent(directory.default)
+          const sessionless = runner.liveAgent?.session.id === undefined
+          picker.setDirectory({
+            directory,
+            // A live Session highlights its effective selection; a sessionless
+            // surface highlights the directory default and never fabricates a
+            // `current` model.
+            current: sessionless ? directory.default : selected.current,
+            sessionless,
+          })
+        },
+        onError: (error) => {
+          if (surfaceToken !== modelSurfaceToken) return
+          if (!ownerCurrent()) {
+            if (!picker.isDisposed()) closer()
+            return
+          }
+          if (picker.isDisposed()) return
+          picker.setLoadError(safeErrorMessage(error))
+        },
+      })
       return { kind: 'success' }
     },
   })
@@ -3761,32 +4123,66 @@ export function registerTuiCommands(
       // The preset COMPOSITION (setup callback) is resolved inside the
       // Direct session lifecycle from this id — the command surface only
       // ever sees the identity (migration M1.11).
-      const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId)
-      // Read the DEFAULT selection intent at transition time: a fresh
-      // Session observes the global default (official blank-session
-      // semantics), never the old Session's local choice. After `/model`
-      // the intent carries the latest explicit choice.
-      const creationSelection = runner.defaultSelection()
-      const newOptions = {
-        provider: creationSelection?.provider,
-        model: creationSelection?.model,
+      let resolved
+      try {
+        resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
+      } catch (error) {
+        // A lifecycle cancellation (exit/HMR) during the read aborts it: no
+        // create is dispatched, and the abort must not surface as an unhandled
+        // rejection. Any OTHER failure keeps its real diagnostic — never
+        // mislabeled as a cancellation.
+        if (runner.signal.aborted) {
+          return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}` }
+        }
+        return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` }
+      }
+      // Coordinate with the newest sessionless `/model` global-default write
+      // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
+      // in-flight default write/correction so the Direct adapter captures the
+      // settled Host default. A failed latest intent is NOT seeded into the
+      // create — the fresh Session uses the actual Host default.
+      try {
+        await runner.awaitPendingDefaultWrite(signal)
+      } catch (error) {
+        // The lifetime signal aborted while waiting for the default write:
+        // no create is dispatched (the old session stays current).
+        return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}` }
       }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd } },
-        // Seed only an explicit default intent: without one the fresh
-        // Session observes the persisted default dynamically instead of
-        // freezing it into a durable choice.
-        ...(runner.defaultIntent === undefined ? {} : { inheritSelection: runner.defaultIntent }),
-        create: () => runner.agents.create({
-          sessionId: String(sessionId),
-          meta: metaOf(cwd, resolved.id),
-          // Before the first session the sessionless/default selection stands in.
-          provider: newOptions.provider,
-          model: newOptions.model,
-          agentPreset: resolved.id,
-        }),
+        create: async () => {
+          // Re-wait immediately before dispatch: a newer sessionless /model may
+          // have started between the first wait and here, and the Direct
+          // adapter activates the Agent from the persisted Host default.
+          await runner.awaitPendingDefaultWrite(signal)
+          return runner.agents.create({
+            sessionId: String(sessionId),
+            // The semantic `agentPreset` is the SINGLE preset authority; the
+            // Direct adapter persists the actually composed preset into the
+            // durable header. Never duplicate it into generic meta.
+            cwd,
+            agentPreset: resolved.id,
+          })
+        },
       })
-      if (!result.ok) return { kind: 'error', text: result.message }
+      if (!result.ok) {
+        if (result.error instanceof LifecycleError) {
+          // Preserve the machine-readable cause (incl. a published identity for
+          // D2.4 reconciliation) even on the UI-silent superseded path.
+          runner.diag.warn('fresh session create did not own the surface', {
+            settlement: result.error.settlement,
+            ownership: result.error.ownership,
+            publishedSessionId: result.error.publishedSessionId,
+            requestedSessionId: result.error.requestedSessionId,
+          })
+          // A locally SUPERSEDED create emits no error notice and NO
+          // user-visible success text (§0.2.1): the surface moved, so this
+          // result owns nothing. The machine-readable cause (incl. any
+          // published id) is already recorded in the diagnostic above.
+          if (result.error.ownership === 'superseded') return { kind: 'success' }
+        }
+        return { kind: 'error', text: result.message }
+      }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
       // drop the unpinned ones now, never before (a failed create keeps
       // the current session and its drafts intact; in-flight submissions
@@ -3849,8 +4245,13 @@ export function registerTuiCommands(
   // with values or a submenu, and /preset rows had neither, so the switch
   // the picker promised was impossible. The handler reads
   // runner.liveAgent optionally and never creates a session itself.
+  // Operation ownership for `/preset` is SHARED across handler invocations: a
+  // newer pick supersedes an older one's notification/repaint even on the SAME
+  // Session generation.
+  let presetOperationToken = 0
   commands.register({
     name: 'preset',
+    definitionId: TUI_PRESET_COMMAND_DEFINITION_ID,
     description: 'Show or switch the session agent preset',
     input: { hint: '[status|<id>|default [<id>]]' },
     handler: async (invocation) => {
@@ -3858,37 +4259,51 @@ export function registerTuiCommands(
       if (!presets.available()) {
         return { kind: 'error', text: 'agent presets unavailable in this deployment' }
       }
-      const liveAgent = runner.liveAgent
       // The live composition is the runner's own read (Direct ownership);
-      // the roster catalog the command surface needs is the port's.
-      const current = runner.currentPreset()
-      const displayedDefault = async (): Promise<string | undefined> => {
-        const configured = runner.config.presetDefault.get()
-        if (configured !== 'code') return configured ?? presets.defaultId()
-        // The omitted settings default is resolved through the roster. This
-        // keeps status/default display consistent with composition: a real
-        // custom code remains code, while old settings without code display ptc.
-        try {
-          return (await presets.resolve()).id ?? configured
-        } catch {
-          return configured
-        }
-      }
-      const presetErrorText = (error: unknown, id: string): string => {
-        const message = safeErrorMessage(error)
-        if (id !== 'code' || !/\b(?:not found|unknown|unavailable)\b/iu.test(message)) return message
-        return `${message}; if you meant the legacy PTC session identity, use preset "ptc"`
-      }
+      // the roster catalog the command surface needs is the port's. Every
+      // session-dependent decision RE-READS `runner.liveAgent` at its own
+      // operation boundary so an await cannot apply a stale Session.
+      const displayedDefault = async (): Promise<string | undefined> =>
+        runner.config.presetDefault.get() ?? presets.defaultId()
+      const presetErrorText = (error: unknown): string => safeErrorMessage(error)
       const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
       const verb = matched?.[1] ?? ''
       const rest = matched?.[2]?.trim() ?? ''
       if (verb === 'status') {
-        return { kind: 'success', text: `preset: ${current ?? 'none'} · default: ${await displayedDefault()}` }
+        // Re-read the live preset at use time: the roster await above must not
+        // let a stale capture describe the current Session.
+        return { kind: 'success', text: `preset: ${runner.currentPreset() ?? 'none'} · default: ${await displayedDefault()}` }
       }
       if (verb === 'default') {
         if (!runner.config.presetDefault.available()) return { kind: 'error', text: 'settings service unavailable' }
         if (rest === '') {
           return { kind: 'success', text: `default preset: ${await displayedDefault()}` }
+        }
+        // A saved default is a preset-SELECTION mutation, so the deployment
+        // policy gates it exactly like a selection (dsh-web writes `default`
+        // only while the picker is shown); the read-only `/preset default`
+        // query and `/preset status` stay available. Fenced by the CURRENT
+        // subject + request order like every other roster read.
+        const defaultOwner = { generation: runner.sessionGeneration, sessionId: runner.liveAgent?.session.id }
+        const defaultVisibilityRequest = beginPresetSelectionRead()
+        let defaultRoster
+        try {
+          defaultRoster = await presets.roster(runner.signal)
+        } catch (error) {
+          if (error instanceof SupersededReadError || runner.signal.aborted) return { kind: 'success' }
+          throw error
+        }
+        if (runner.sessionGeneration !== defaultOwner.generation || runner.liveAgent?.session.id !== defaultOwner.sessionId) {
+          // The subject moved during the read: no stale policy notice on the
+          // new surface (v2 §0.2.1).
+          return { kind: 'success' }
+        }
+        // Presentation freshness only: a newer background read may own the
+        // visibility cache, but it must NOT cancel this user mutation — the
+        // policy THIS operation read decides, fail-closed.
+        commitPresetVisibility(defaultRoster.modeSelectionEnabled, defaultOwner, defaultVisibilityRequest)
+        if (!defaultRoster.modeSelectionEnabled) {
+          return { kind: 'error', text: 'preset selection is disabled in this deployment' }
         }
         // The saved default only affects sessions created from now on. A
         // standing catalog refresh follows ONLY when no higher-precedence
@@ -3899,10 +4314,10 @@ export function registerTuiCommands(
           // Validate before writing settings. `code` is legal when the current
           // DSH roster contains a custom preset with that id; an unknown code
           // remains an ordinary unknown-preset failure and is never aliased.
-          await presets.resolve(rest)
+          await presets.resolve(rest, runner.signal)
           await runner.config.presetDefault.set(rest)
         } catch (error) {
-          return { kind: 'error', text: presetErrorText(error, rest) }
+          return { kind: 'error', text: presetErrorText(error) }
         }
         if (runner.effectivePresetId === undefined) {
           const outcome = await runner.refreshCatalog({
@@ -3913,20 +4328,62 @@ export function registerTuiCommands(
         }
         return { kind: 'success', text: `default preset set: ${rest}` }
       }
-      // Selecting swaps the composition; only a blank session (no turn
-      // has run yet) may do so — a started conversation's history was
-      // produced under its preset's tools. Same rule as the official
-      // `agentPreset.select` RPC and the launch-time --preset path. With
-      // no session at all the choice lands on the run-local pending
-      // preset the next session composes on (nothing is created here).
-      const applyPresetSelection = async (id: string):
-        Promise<{ kind: 'pending'; preset: string } | { kind: 'switched'; preset: string } | { kind: 'locked'; sessionId: string }> => {
-        if (liveAgent === undefined) {
-          const resolved = await presets.resolve(id)
+      // Selecting swaps the composition; only a blank session may do so — a
+      // started conversation's history was produced under its preset's tools.
+      // The Host owns the blank check, the recompose transaction and the
+      // durable `agent-preset/selected` commit (official `agentPresets.select`);
+      // the TUI transition gate only prevents local interleaving with /new,
+      // /fork, rewind or a Session switch. With no session at all the choice
+      // lands on the run-local pending preset the next session composes on
+      // (nothing is created here).
+      // Operation ownership for `/preset` (shared across invocations, declared
+      // beside the registration): a newer pick supersedes an older one's
+      // notification/repaint even on the SAME Session generation.
+      const applyPresetSelection = async (id: string, pickerOwner?: { readonly generation: number; readonly sessionId: string | undefined }):
+        Promise<
+          | { kind: 'pending'; preset: string }
+          | { kind: 'switched'; preset: string }
+          | { kind: 'superseded' }
+          | { kind: 'locked'; sessionId: string }
+          | { kind: 'rejected'; message: string }
+          | { kind: 'indeterminate'; message: string }
+        > => {
+        const token = ++presetOperationToken
+        // The semantic subject is captured ONCE, when the operation starts: a
+        // picker passes the subject it was opened on; the typed verb path
+        // captures the CURRENT subject here. Every await below re-fences it, so
+        // the subject can never drift onto a Session that appeared later.
+        const owner = pickerOwner ?? { generation: runner.sessionGeneration, sessionId: runner.liveAgent?.session.id }
+        const ownerCurrent = (): boolean =>
+          runner.sessionGeneration === owner.generation && runner.liveAgent?.session.id === owner.sessionId
+        try {
+        const visibilityRequest = beginPresetSelectionRead()
+        const roster = await presets.roster(runner.signal)
+        // Fence after EVERY await: a newer `/preset` operation OR a moved
+        // subject means this one no longer owns the surface — no
+        // policy/rejection notice, no repaint (§0.2.5/§0.3.1/§0.3.3). A Direct
+        // roster can resolve across a `/new`/switch (no Remote generation fence).
+        if (token !== presetOperationToken) return { kind: 'superseded' }
+        if (!ownerCurrent()) return { kind: 'superseded' }
+        // Presentation freshness only: losing the visibility-cache commit to a
+        // newer background read must not cancel this still-current user
+        // operation. The policy THIS operation read decides, fail-closed.
+        commitPresetVisibility(roster.modeSelectionEnabled, owner, visibilityRequest)
+        if (!roster.modeSelectionEnabled) {
+          return { kind: 'rejected', message: 'preset selection is disabled in this deployment' }
+        }
+        const agent = runner.liveAgent
+        if (agent === undefined) {
+          const resolved = await presets.resolve(id, runner.signal)
           // A roster that vanished between the availability check and the
           // resolve is a hard failure (the old compose path threw too) —
           // never a "preset undefined" success.
           if (resolved.id === undefined) throw new Error('agent presets unavailable in this deployment')
+          // A Session (or a newer pick) appeared while the resolve awaited: the
+          // sessionless subject is gone — superseded, never staged onto the
+          // now-live surface (v2 §0.2.5).
+          if (token !== presetOperationToken) return { kind: 'superseded' }
+          if (!ownerCurrent()) return { kind: 'superseded' }
           runner.pendingPreset = resolved.id
           // The sessionless catalog follows the choice through the STANDING
           // scope of the new preset (no Agent, no session — composition
@@ -3937,46 +4394,98 @@ export function registerTuiCommands(
             source: 'preset',
             target: { kind: 'preset', presetId: resolved.id },
           })
+          if (token !== presetOperationToken) return { kind: 'superseded' }
+          if (!ownerCurrent()) return { kind: 'superseded' }
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
           return { kind: 'pending', preset: resolved.id }
         }
+        const sessionId = agent.session.id
         // The live-session preset swap runs INSIDE the session-transition
-        // gate (review round 27): recompose + the agent-preset/selected
-        // append must never interleave with a concurrent /new, /fork,
-        // rewind or switch — inside the gate the captured agent cannot be
-        // quiesced or have its lock released mid-append.
-        const outcome = await runner.withSessionTransition(() => runner.recomposeBlank(id))
-        if (outcome.kind === 'locked') return { kind: 'locked', sessionId: runner.liveAgent!.session.id }
+        // gate: the official recompose + `agent-preset/selected` append must
+        // never interleave with a concurrent /new, /fork, rewind or switch.
+        // The subject is revalidated INSIDE the gate, so a transition during
+        // the roster read can never switch the OLD Session (Direct) or dispatch
+        // a stale id (Remote).
+        const result = await runner.withSessionTransition(() => {
+          if (!ownerCurrent()) {
+            // The subject changed before dispatch: nothing was sent, and this
+            // operation no longer owns the surface — superseded, never a
+            // user-visible rejection (§0.2.1).
+            return Promise.resolve<OperationResult<{ readonly preset: string }>>({
+              ownership: 'superseded',
+              outcome: { kind: 'cancelled' },
+            })
+          }
+          return presets.selectSessionPreset(sessionId, id, runner.signal)
+        })
+        // Fence BEFORE classification: if the subject or operation ownership
+        // moved while the Host transition was in flight, this operation no
+        // longer owns the surface — it must not surface a stale rejection or
+        // notice (v2 §0.2.5/§0.3.1).
+        if (token !== presetOperationToken) return { kind: 'superseded' }
+        if (!ownerCurrent()) return { kind: 'superseded' }
+        // A superseded operation owns nothing: no notice, no repaint.
+        if (result.ownership === 'superseded') return { kind: 'superseded' }
+        const outcome = result.outcome
+        if (outcome.kind === 'rejected') {
+          if (outcome.error.code === 'agent-preset/locked') return { kind: 'locked', sessionId }
+          return { kind: 'rejected', message: outcome.error.message }
+        }
+        if (outcome.kind === 'indeterminate') {
+          return { kind: 'indeterminate', message: outcome.error.message }
+        }
+        if (outcome.kind !== 'committed') {
+          return { kind: 'rejected', message: 'preset switch was cancelled' }
+        }
         // The still-blank session's agent layer changed: refresh the live
         // catalog for the SAME owner (no transition — the old scoped
-        // previews are being replaced by the new composition's).
-        await runner.refreshCatalog({
+        // previews are being replaced by the new composition's). A late
+        // commit from a replaced surface must not repaint it.
+        const refreshed = await runner.refreshCatalog({
           source: 'preset',
-          target: { kind: 'agent', key: runner.sessionGeneration },
+          target: { kind: 'agent', key: owner.generation },
           agent: runner.liveAgent,
         })
-        // A still-blank session's welcome card shows the preset: repaint it
-        // so the switch is visible before any conversation starts.
-        runner.updateWelcomeCard()
-        return { kind: 'switched', preset: outcome.preset }
+        // Fence after the refresh await: a newer operation or a moved subject
+        // owns the surface, and a superseded refresh must not repaint.
+        if (token !== presetOperationToken) return { kind: 'superseded' }
+        if (!ownerCurrent()) return { kind: 'superseded' }
+        if (refreshed.kind !== 'superseded') runner.updateWelcomeCard()
+        return { kind: 'switched', preset: outcome.value.preset }
+        } catch (error) {
+          // A newer `/preset` operation — or a superseded/aborted read — owns
+          // the surface: an error from this stale operation must not surface a
+          // stale notice (v2 §0.2.1/§0.2.3).
+          if (token !== presetOperationToken) return { kind: 'superseded' }
+          if (error instanceof SupersededReadError || !ownerCurrent() || runner.signal.aborted) {
+            return { kind: 'superseded' }
+          }
+          throw error
+        }
       }
-      const pickPreset = async (id: string): Promise<void> => {
+      const lockedPresetMessage = (sessionId: string): string =>
+        `session "${sessionId}" has already started; its agent preset is fixed — preset switching is only available in a new session`
+      const pickPreset = async (id: string, owner?: { readonly generation: number; readonly sessionId: string | undefined }): Promise<void> => {
         let outcome: Awaited<ReturnType<typeof applyPresetSelection>>
         try {
-          outcome = await applyPresetSelection(id)
+          outcome = await applyPresetSelection(id, owner)
         } catch (error) {
-          app.notify(presetErrorText(error, id), 'error')
+          app.notify(presetErrorText(error), 'error')
           return
         }
         if (outcome.kind === 'pending') {
           app.notify(`new sessions will start on preset ${outcome.preset}`, 'info')
         } else if (outcome.kind === 'switched') {
           app.notify(`session preset switched to ${outcome.preset}`, 'info')
+        } else if (outcome.kind === 'superseded') {
+          // A newer pick owns the surface: the notice would only describe an
+          // already-superseded switch.
+        } else if (outcome.kind === 'locked') {
+          app.notify(lockedPresetMessage(outcome.sessionId), 'error')
+        } else if (outcome.kind === 'indeterminate') {
+          app.notify(`${outcome.message} — the displayed preset reconciles from the Session; do not retry`, 'error')
         } else {
-          app.notify(
-            `session "${outcome.sessionId}" has already started; its agent preset is fixed — preset switching is only available in a new session`,
-            'error',
-          )
+          app.notify(outcome.message, 'error')
         }
       }
       if (verb !== '') {
@@ -3985,36 +4494,87 @@ export function registerTuiCommands(
           if (outcome.kind === 'pending') {
             return { kind: 'success', text: `new sessions will start on preset ${outcome.preset}` }
           }
+          if (outcome.kind === 'switched') {
+            return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
+          }
+          if (outcome.kind === 'superseded') {
+            // v2 §0.2.1: a superseded operation owns nothing — no notice, no
+            // repaint, no close decision, and no success text.
+            return { kind: 'success' }
+          }
           if (outcome.kind === 'locked') {
-            const message = `session "${outcome.sessionId}" has already started; its agent preset is fixed — preset switching is only available in a new session`
+            const message = lockedPresetMessage(outcome.sessionId)
             app.notify(message, 'error')
             return { kind: 'error', text: message }
           }
-          return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
+          if (outcome.kind === 'indeterminate') {
+            const message = `${outcome.message} — the displayed preset reconciles from the Session; do not retry`
+            app.notify(message, 'error')
+            return { kind: 'error', text: message }
+          }
+          app.notify(outcome.message, 'error')
+          return { kind: 'error', text: outcome.message }
         } catch (error) {
-          return { kind: 'error', text: presetErrorText(error, verb) }
+          return { kind: 'error', text: presetErrorText(error) }
         }
       }
-      const roster = await presets.list()
-      if (roster.length === 0) return { kind: 'success', text: 'no agent presets configured' }
-      const defaultId = await displayedDefault()
+      // The picker belongs to the EXACT Session that opened it (generation +
+      // identity, `undefined` included): a switch during the roster read must
+      // not paint the old current preset (or the old blankness) onto the new
+      // Session's picker.
+      const pickerGeneration = runner.sessionGeneration
+      const pickerSessionId = runner.liveAgent?.session.id
+      const pickerOwnerCurrent = (): boolean =>
+        runner.sessionGeneration === pickerGeneration && runner.liveAgent?.session.id === pickerSessionId
+      let roster
+      const visibilityRequest = beginPresetSelectionRead()
+      try {
+        roster = await presets.roster(runner.signal)
+      } catch (error) {
+        // A superseded/aborted read no longer owns the surface: stay silent
+        // instead of surfacing a stale roster failure (v2 §0.2.3/§0.3.1).
+        if (error instanceof SupersededReadError || !pickerOwnerCurrent() || runner.signal.aborted) {
+          return { kind: 'success' }
+        }
+        throw error
+      }
+      if (!pickerOwnerCurrent()) return { kind: 'success' }
+      // The picker IS presentation: it may lose to a newer presentation read
+      // (no stale overlay), unlike a user mutation below.
+      if (!commitPresetVisibility(roster.modeSelectionEnabled, { generation: pickerGeneration, sessionId: pickerSessionId }, visibilityRequest)) {
+        return { kind: 'success' }
+      }
+      if (!roster.modeSelectionEnabled) {
+        return { kind: 'error', text: 'preset selection is disabled in this deployment' }
+      }
+      if (roster.presets.length === 0) return { kind: 'success', text: 'no agent presets configured' }
+      const defaultId = roster.defaultId ?? await displayedDefault()
+      // Re-check AFTER the displayedDefault await too: a Session switch during
+      // it must not mix the old roster/default with the new Session's state.
+      if (!pickerOwnerCurrent()) return { kind: 'success' }
+      // Re-read the live preset AFTER the awaits: never mark a stale `current`.
+      const current = runner.currentPreset()
       // A started conversation's history was produced under its preset's
       // tools: offer no selectable roster — say why instead (the typed
-      // /preset <id> path above refuses the same way).
-      if (liveAgent !== undefined && liveAgent.session.snapshotEvents().some(event => event.type === 'turn/start')) {
-        const message = `preset switching is only available in a new session — session "${liveAgent.session.id}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
+      // /preset <id> path above refuses the same way). Blankness comes from
+      // the Host turn-boundary authority, never from the TUI transcript; an
+      // unknown blank state opens the picker and lets the Host be the final
+      // authority. Fence BEFORE the notify/openSettings UI mutation.
+      if (!pickerOwnerCurrent()) return { kind: 'success' }
+      if (runner.sessionBlank() === false) {
+        const message = `preset switching is only available in a new session — session "${runner.liveAgent?.session.id}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
         app.notify(message, 'error')
         return { kind: 'error', text: message }
       }
       const close = app.openSettings(
-        roster.map(preset => {
+        roster.presets.map(preset => {
           const display = presetDisplayText(preset)
           return {
             id: preset.id,
             label: `${display.name} (${preset.id})`,
             description: [
               display.description,
-              preset.trust === 'system' ? 'system' : 'user',
+              isBuiltInPresetRow(preset) ? 'system' : 'user',
               preset.id === defaultId ? 'default' : undefined,
               preset.id === current ? '← current' : undefined,
               preset.broken,
@@ -4032,7 +4592,7 @@ export function registerTuiCommands(
           // The picker's selection is an async result-consuming flow: the
           // outcome drives the notices — runOwned (AGENTS.md), never a bare
           // void; cancellation (a torn-down TUI) is debug-only.
-          runOwned('preset pick', () => pickPreset(id), {
+          runOwned('preset pick', () => pickPreset(id, { generation: pickerGeneration, sessionId: pickerSessionId }), {
             diag: runner.diag,
             sessionId: () => runner.liveAgent?.session.id,
             onError: (error) => app.notify(`preset selection failed: ${safeErrorMessage(error)}`, 'error'),
@@ -4063,23 +4623,53 @@ export function registerTuiCommands(
   // message yet) leaves the title untouched and informs the user.
   const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const liveAgent = await requireAgent()
+    const generation = runner.sessionGeneration
+    const current = (): boolean => !runner.signal.aborted && sessionUnchanged(
+      { agent: liveAgent, generation },
+      runner.liveAgent,
+      runner.sessionGeneration,
+    )
+    const stale = (): CommandResult => ({ kind: 'error', text: 'the session changed while updating the title — try again' })
     const name = invocation.rawInput.trim()
+    let acceptedTitle = name
     if (name !== '') {
-      // The session WRITE port (migration M1.4): the title service access
-      // lives in the Direct adapter, never here.
+      // The complete title write runs through the session barrier and the
+      // semantic writer. Both checks fence a delayed command result from a
+      // session that has already been replaced.
       try {
-        if (!runner.sessionWriter.rename(liveAgent.session.id, name)) {
-          return { kind: 'error', text: 'session title service unavailable' }
+        const outcome = await runner.withSessionWriter(liveAgent.session.id, async () => {
+          if (!current()) return undefined
+          return runner.sessionWriter.rename(liveAgent.session.id, name)
+        })
+        if (!current() || outcome === undefined) return stale()
+        if (outcome.kind === 'committed') acceptedTitle = outcome.value.title
+        if (outcome.kind !== 'committed') {
+          if (outcome.kind === 'cancelled') throw cancellationError('session title write cancelled')
+          if (outcome.kind === 'indeterminate') {
+            recordCommandDraftDisposition(invocation.commandId, 'suppressed')
+            return {
+              kind: 'error',
+              text: 'session title result is indeterminate — do not retry automatically',
+            }
+          }
+          const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+          return { kind: 'error', text: message }
         }
       } catch (error) {
+        if (error instanceof TransitionInProgressError) return stale()
+        if (isCancellation(error)) throw error
         return { kind: 'error', text: safeErrorMessage(error) }
       }
-      return { kind: 'success', text: `title set: ${name}` }
+      return { kind: 'success', text: `title set: ${acceptedTitle}` }
     }
     try {
-      const outcome = await runner.sessionWriter.refreshTitle(liveAgent.session.id, invocation.signal)
-      if (outcome.kind === 'unavailable') {
-        return { kind: 'error', text: 'session title service unavailable' }
+      const outcome = await runner.withSessionWriter(liveAgent.session.id, async () => {
+        if (!current()) return undefined
+        return runner.sessionWriter.refreshTitle(liveAgent.session.id, invocation.signal)
+      })
+      if (!current() || outcome === undefined) return stale()
+      if (outcome.kind === 'unsupported') {
+        return { kind: 'error', text: outcome.reason }
       }
       if (outcome.title === undefined) {
         app.notify('no conversation yet — title left as-is', 'info')
@@ -4088,6 +4678,8 @@ export function registerTuiCommands(
       app.notify(`title regenerated: ${outcome.title}`, 'info')
       return { kind: 'success' }
     } catch (error) {
+      if (error instanceof TransitionInProgressError) return stale()
+      if (isCancellation(error)) throw error
       return { kind: 'error', text: safeErrorMessage(error) }
     }
   }
@@ -4122,10 +4714,10 @@ export function registerTuiCommands(
         .map(block => block.text)
         .join('')
       if (text === '') return { kind: 'error', text: 'last assistant message has no text' }
-      // Issue #7: the SAME policy as the fullscreen drag selection (tmux →
-      // platform helper → OSC 52 best-effort) — a bare OSC 52 write is a
-      // silent lie under tmux `set-clipboard external` / restricted
-      // terminals.
+      // Issue #7: the SAME client-local shared user-clipboard policy as the
+      // fullscreen drag selection (src/clipboard.ts): an independent
+      // terminal-client OSC 52 leg plus an independent native/platform
+      // compatibility leg. A helper success never suppresses the OSC 52 leg.
       const ok = await runner.copyToClipboard(text)
       return ok
         ? { kind: 'success', text: 'copied last assistant message' }
@@ -4275,44 +4867,18 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'fork',
-    description: 'Fork this session at the last completed turn',
-    handler: () => runner.withSessionTransition(async () => {
+    description: 'Fork this session at the Host-selected latest completed prefix',
+    handler: async () => {
       const source = runner.liveAgent
-      const seed = source === undefined ? undefined : forkSeed(source.session.snapshotEvents())
-      if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
-      const sourceSelection = runner.selected.current
-      // Shared child creation with rewind (plan §6.2): preset inheritance,
-      // live session cwd, base provider/model options plus effective selection,
-      // parentSession +
-      // isSeeded/inheritedEventCount metadata — one chain, no drift between the two surfaces.
-      // The child's id is PRE-GENERATED so the create publishes it under a
-      // known identity (review round 6); the create runs inside the unified
-      // transaction, and a failure before the create leaves nothing behind
-      // (no published child, no ghost, no rollback attempt).
-      const sessionId = SessionId(`session-${randomUUID()}`)
-      const childCwd = source.session.header.cwd || runner.sessionCwd()
-      // The current preset is read once from the DSH projection and rides the
-      // create (a rejected create is NEVER retried — the old session stays
-      // current). The composition setup stays inside the Direct session
-      // lifecycle — the command surface only ever sees the identity
-      // (migration M1.11).
-      const sourcePreset = runner.currentPreset()
-      const result = await runner.transitionTo({
-        target: { id: String(sessionId), header: { cwd: childCwd } },
-        ...(sourceSelection === undefined ? {} : { inheritSelection: sourceSelection }),
-        create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
-      })
-      if (!result.ok) return { kind: 'error', text: result.message }
-      // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-      // drop the unpinned ones now (durable attachments are untouched, plan
-      // §14; in-flight submissions keep their pinned drafts — review
-      // finding 2).
-      runner.imageStore.clearUnpinned()
-      runner.fileStore?.clearUnpinned()
-      // A Direct create always yields the live agent (port contract);
-      // Remote handles surface the session identity only.
-      return { kind: 'success', text: `forked as ${result.next.session.id}` }
-    }),
+      if (source === undefined) return { kind: 'error', text: 'no conversation to fork from' }
+      if (runner.forkSession === undefined) {
+        return { kind: 'error', text: 'session fork is unavailable in this backend' }
+      }
+      // The command captures only the source identity. Host fork owns the
+      // boundary, child identity, lineage, workspace and model/preset policy;
+      // runner.forkSession owns the independently supersedable navigation.
+      return runner.forkSession(source.session.id)
+    },
   })
 
   commands.register({
@@ -4573,9 +5139,9 @@ export function registerTuiCommands(
         { id: 'k-queue', label: keysLabel('app.input.submitAccelerated'), description: 'Submit with the OPPOSITE of the "Submit while busy" behavior (the web accelerated-submit chord)', currentValue: '' },
         { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one interrupt while the agent is busy; press the interrupt action twice while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
-        { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
+        { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent transcript detail; in regular Focus it reveals the recent Thought detail; in fullscreen Focus it controls the Thought-root bulk (per-card detail stays mouse-owned). Thinking detail is separate: ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
         { id: 'k-todo', label: keysLabel('app.todo.toggle'), description: 'Toggle the todo panel', currentValue: '' },
-        { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Collapse/expand thinking blocks (detail level — blocks stay visible)', currentValue: '' },
+        { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Expand/collapse thinking detail (detail level — blocks stay visible)', currentValue: '' },
         { id: 'k-steer', label: keysLabel('app.input.steer'), description: 'Steer the running turn with the draft', currentValue: '' },
         { id: 'k-editor', label: keysLabel('app.editor.external'), description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
 
@@ -4585,12 +5151,14 @@ export function registerTuiCommands(
         { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
         { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs locally without recording', currentValue: '' },
         { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
-        ...commands.list(runner.liveAgent as unknown as Agent).map(command => ({
-          id: `cmd-${command.name}`,
-          label: `/${command.name}`,
-          description: command.description,
-          currentValue: '',
-        })),
+        ...commands.list(runner.liveAgent as unknown as Agent)
+          .filter(presetCommandVisible)
+          .map(command => ({
+            id: `cmd-${command.name}`,
+            label: `/${command.name}`,
+            description: command.description,
+            currentValue: '',
+          })),
       ]
       app.openSettings(rows, () => {}, () => {})
       return { kind: 'success' }
@@ -4768,5 +5336,16 @@ export function registerTuiCommands(
     /** The revalidating transition (the coordinator's target-change hook). */
     enterTransition: (): void => enterCatalogTransition(),
     withDelivery,
+    takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
+      if (commandId !== undefined) {
+        const disposition = commandDraftDispositions.get(commandId)
+        commandDraftDispositions.delete(commandId)
+        return disposition
+      }
+      const pending = commandDraftDispositions.entries().next()
+      if (pending.done) return undefined
+      commandDraftDispositions.delete(pending.value[0])
+      return pending.value[1]
+    },
   }
 }

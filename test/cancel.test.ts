@@ -39,13 +39,13 @@ afterEach(() => {
  * wires the Direct adapter the same way). */
 function writerStub(): SessionWriter {
   return {
-    followup: () => {},
-    steer: () => {},
-    dequeue: () => {},
-    cancel: (sessionId, cause, options) => {
-      ;(stubAgents.get(sessionId) as { cancel(c: unknown, o: unknown): void }).cancel(cause, options)
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    cancel: async (sessionId) => {
+      ;(stubAgents.get(sessionId) as { cancel(c: unknown, o: unknown): void }).cancel({ kind: 'user' }, { keepInbox: true })
+      return { kind: 'committed' as const, value: undefined }
     },
-    rename: () => true,
+    rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
     refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
   }
 }
@@ -682,9 +682,9 @@ test('Esc Esc opens the rewind picker and Enter selects the turn (headless E2E)'
     onRewind: () => {
       app.openPicker(
         [
-          rewindPickerItem({ turnStartSeq: 8, turn: 3, messageSeq: 9, editorText: 'C', preview: 'C', hasNonTextContent: false }),
-          rewindPickerItem({ turnStartSeq: 4, turn: 2, messageSeq: 5, editorText: 'B', preview: 'B', hasNonTextContent: false }),
-          rewindPickerItem({ turnStartSeq: 0, turn: 1, messageSeq: 1, editorText: 'A', preview: 'A', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 8, forkAtSeq: 7, turn: 3, messageSeq: 9, editorText: 'C', preview: 'C', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 4, forkAtSeq: 3, turn: 2, messageSeq: 5, editorText: 'B', preview: 'B', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 0, forkAtSeq: 0, turn: 1, messageSeq: 1, editorText: 'A', preview: 'A', hasNonTextContent: false }),
         ],
         (value) => picked.push(value),
         () => {},
@@ -732,7 +732,7 @@ test('Esc Esc while busy never opens the rewind picker (plan §28 second half)',
 
 // ── interruptAgent: the runner-side cancel preserves the queue ────────────
 
-test('interruptAgent cancels with keepInbox: true (web Stop parity)', () => {
+test('interruptAgent cancels with keepInbox: true (web Stop parity)', async () => {
   const calls: Array<{ cause: unknown; options: unknown }> = []
   const agent = {
     session: { id: 'session-a' },
@@ -740,7 +740,7 @@ test('interruptAgent cancels with keepInbox: true (web Stop parity)', () => {
     cancel: (cause: unknown, options: unknown) => { calls.push({ cause, options }) },
   }
   stubAgents.set('session-a', agent)
-  interruptAgent(agent as never, writerStub())
+  await interruptAgent(agent as never, writerStub())
   assert.equal(calls.length, 1, 'a running agent is interrupted exactly once')
   assert.deepEqual(calls[0]!.cause, { kind: 'user' })
   // THE regression: the default dsh cancel clears queued + steering
@@ -749,7 +749,7 @@ test('interruptAgent cancels with keepInbox: true (web Stop parity)', () => {
   assert.deepEqual(calls[0]!.options, { keepInbox: true })
 })
 
-test('interruptAgent tolerates an idle agent (no status gate, no throw)', () => {
+test('interruptAgent tolerates an idle agent (no status gate, no throw)', async () => {
   const calls: Array<{ cause: unknown; options: unknown }> = []
   const agent = {
     session: { id: 'session-b' },
@@ -759,11 +759,11 @@ test('interruptAgent tolerates an idle agent (no status gate, no throw)', () => 
     cancel: (cause: unknown, options: unknown) => { calls.push({ cause, options }) },
   }
   stubAgents.set('session-b', agent)
-  interruptAgent(agent as never, writerStub())
+  await interruptAgent(agent as never, writerStub())
   assert.equal(calls.length, 1, 'the cancel call itself is still made (dsh no-ops when idle)')
   assert.deepEqual(calls[0]!.options, { keepInbox: true })
 })
 
-test('interruptAgent with no live agent is a silent no-op', () => {
-  interruptAgent(undefined, writerStub())
+test('interruptAgent with no live agent is a silent no-op', async () => {
+  await interruptAgent(undefined, writerStub())
 })

@@ -30,7 +30,7 @@ function compactStatusRowPlacements(): FooterItemRef[] {
 
 /** The default layout's status-row LEFT placements, in order: the
  * main-subject identity facts (permission, model, tasks, cwd, branch)
- * and the extension bridge; plan state and focus mode ride the RIGHT
+ * and the extension bridge; plan state and display preset ride the RIGHT
  * zone. The view-scope item leads: it renders nothing on the main
  * subject and the viewer identity block while viewing (the legacy
  * viewer footer). A FACTORY (never a shared object graph): each preset
@@ -49,7 +49,7 @@ function defaultStatusRowLeftPlacements(): FooterItemRef[] {
 }
 
 /** The default layout: the status row (left = the identity facts and the
- * extension bridge, right = plan state and focus mode) plus a stats row
+ * extension bridge, right = plan state and display preset) plus a stats row
  * (left = the stats-line facts as REAL semantic placements — session
  * cumulative usage, cache hit, and the recent model performance as two
  * `performance` placements — plus the turn/step counters; right = the
@@ -67,7 +67,7 @@ export const DEFAULT_FOOTER_LAYOUT: FooterLayoutV1 = {
       left: defaultStatusRowLeftPlacements(),
       right: [
         { id: 'plan-state' },
-        { id: 'focus-mode' },
+        { id: 'display-preset' },
       ],
     },
     {

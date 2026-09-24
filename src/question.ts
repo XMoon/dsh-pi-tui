@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/question
  */
 
-import { Input, matchesKey, type KeyId } from '@xmoon76/pi-tui'
+import { decodeKittyPrintable, getKeybindings, Input, matchesKey, type KeyId, type Keybinding } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { componentKeymap } from './keybindings/component-keymap.ts'
@@ -66,6 +66,42 @@ const OTHER_ROW = '\u0000other'
  * that repaints into the marker row must not toggle the expanded panel
  * (and vice versa). */
 const MARKER_ROW = '\u0000marker'
+
+/** The semantic keybindings consumed by pi-tui Input before it inserts text.
+ * Keeping this ownership predicate beside QuestionFlow prevents an app-level
+ * inspection remap from stealing cursor/edit controls while a free-text answer
+ * is active. */
+const INPUT_OWNED_KEYBINDINGS: readonly Keybinding[] = [
+  'tui.select.cancel',
+  'tui.editor.undo',
+  'tui.input.submit',
+  'tui.editor.deleteCharBackward',
+  'tui.editor.deleteCharForward',
+  'tui.editor.deleteWordBackward',
+  'tui.editor.deleteWordForward',
+  'tui.editor.deleteToLineStart',
+  'tui.editor.deleteToLineEnd',
+  'tui.editor.yank',
+  'tui.editor.yankPop',
+  'tui.editor.cursorLeft',
+  'tui.editor.cursorRight',
+  'tui.editor.cursorLineStart',
+  'tui.editor.cursorLineEnd',
+  'tui.editor.cursorWordLeft',
+  'tui.editor.cursorWordRight',
+]
+
+function inputOwnsKey(data: string): boolean {
+  if (data.includes('\x1b[200~') || data.includes('\x1b[201~')) return true
+  if (data === '\n' || decodeKittyPrintable(data) !== undefined) return true
+  if ([...data].some((character) => {
+    const code = character.charCodeAt(0)
+    return code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f)
+  })) {
+    return INPUT_OWNED_KEYBINDINGS.some(keybinding => getKeybindings().matches(data, keybinding))
+  }
+  return data.length > 0
+}
 
 /**
  * Default total physical-row budget of the question flow itself. The
@@ -374,6 +410,43 @@ export class QuestionFlow implements Component, Focusable {
    * terminal — QuestionFrame reads this every render). */
   isBodyExpanded(): boolean {
     return this.bodyExpanded
+  }
+
+  /**
+   * Whether this flow owns a fixed response key for the current mode. TuiApp
+   * asks the component before routing a configurable inspection action so a
+   * remap cannot steal Question verbs or any semantic key consumed by the
+   * shared free-text Input. Printable input in the optionless navigation state
+   * is also local: it re-enters the text editor instead of becoming a
+   * transcript action.
+   */
+  ownsFixedKey(data: string): boolean {
+    if (this.editingOther) {
+      return inputOwnsKey(data)
+        || componentKeymap.matches(data, 'question.confirm')
+        || componentKeymap.matches(data, 'question.cancel')
+        || componentKeymap.matches(data, 'question.pageUp')
+        || componentKeymap.matches(data, 'question.pageDown')
+    }
+    if (this.tab >= this.questions.length) {
+      return componentKeymap.matches(data, 'question.confirm')
+        || componentKeymap.matches(data, 'question.cancel')
+        || componentKeymap.matches(data, 'question.previous')
+        || data === 'h'
+    }
+    const optionless = this.isOptionless()
+    if (optionless && inputOwnsKey(data)) return true
+    if (!optionless && /^[1-9]$/.test(data)) return true
+    if (componentKeymap.matches(data, 'question.confirm')
+      || componentKeymap.matches(data, 'question.cancel')
+      || componentKeymap.matches(data, 'question.previous')
+      || componentKeymap.matches(data, 'question.next')
+      || componentKeymap.matches(data, 'question.cursorUp')
+      || componentKeymap.matches(data, 'question.cursorDown')
+      || componentKeymap.matches(data, 'question.pageUp')
+      || componentKeymap.matches(data, 'question.pageDown')
+      || componentKeymap.matches(data, 'question.toggleExpand')) return true
+    return !optionless && (data === 'h' || data === 'j' || data === 'k' || data === 'l')
   }
 
   /**

@@ -1,12 +1,29 @@
 import assert from 'node:assert/strict'
-import { cpSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { requiredGuidance } from '../scripts/lib/dsh-compat.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+/** The version this checkout ships. The gate only ever validates the current
+ * line, so the expectations below are generated from the shared matrix
+ * instead of being re-written by hand for every release. */
+const CURRENT_VERSION = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')).version
+const CURRENT_CHANNEL = CURRENT_VERSION.includes('-') ? 'next' : 'stable'
+const CURRENT_TAG = `${CURRENT_CHANNEL === 'next' ? 'next-' : ''}v${CURRENT_VERSION}`
+
+function currentGuidance(omit) {
+  const entries = requiredGuidance(CURRENT_VERSION).filter(command => command !== omit)
+  return `\n${entries.map(command => `- ${command}`).join('\n')}`
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
 
 function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = '', channel = 'stable' }) {
   const root = life.tempDir('dsh-pi-tui-release-notes-')
@@ -16,18 +33,22 @@ function createFixture(life, { version, englishDate = '2026-08-28', chineseDate 
   const chinese = join(root, 'CHANGELOG.md')
   const english = join(root, 'CHANGELOG.en.md')
 
-  cpSync(join(repo, 'scripts/release-context.mjs'), join(root, 'release-context.mjs'))
-  cpSync(join(repo, 'scripts/release-notes.mjs'), join(root, 'release-notes.mjs'))
+  mkdirSync(join(root, 'scripts', 'lib'), { recursive: true })
+  mkdirSync(join(root, 'src'), { recursive: true })
+  cpSync(join(repo, 'scripts/release-context.mjs'), join(root, 'scripts', 'release-context.mjs'))
+  cpSync(join(repo, 'scripts/release-notes.mjs'), join(root, 'scripts', 'release-notes.mjs'))
+  cpSync(join(repo, 'scripts/lib/dsh-compat.mjs'), join(root, 'scripts', 'lib', 'dsh-compat.mjs'))
+  cpSync(join(repo, 'src', 'dsh-compat-matrix.json'), join(root, 'src', 'dsh-compat-matrix.json'))
   writeFileSync(packageJson, `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version }, null, 2)}\n`)
-  writeFileSync(chinese, `# 更新日志\n\n## [Unreleased]\n\n## [${version}] - ${chineseDate}\n\n### 变更\n\n- 中文迁移说明。\n\n> 已知限制：当前生产默认后端仍为 Direct；remote attach 暂不支持。${guidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
-  writeFileSync(english, `# Changelog\n\n## [Unreleased]\n\n## [${version}] - ${englishDate}\n\n### Changes\n\n- English migration note.\n\n> **Known limitation:** The production default backend remains Direct; remote attach is not supported.${guidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
+  writeFileSync(chinese, `# 更新日志\n\n## [Unreleased]\n\n## [${version}] - ${chineseDate}\n\n### 变更\n\n- 中文迁移说明。${guidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
+  writeFileSync(english, `# Changelog\n\n## [Unreleased]\n\n## [${version}] - ${englishDate}\n\n### Changes\n\n- English migration note.${guidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
   return { root, output, packageJson, chinese, english }
 }
 
 function run(fixture, input) {
   return spawnSync(
     process.execPath,
-    [join(fixture.root, 'release-notes.mjs'), input, fixture.output],
+    [join(fixture.root, 'scripts', 'release-notes.mjs'), input, fixture.output],
     { cwd: fixture.root, encoding: 'utf8' },
   )
 }
@@ -109,94 +130,26 @@ test('release-notes requires a dated current section directly after Unreleased a
   assert.match(lookalikeRepositoryResult.stderr, /matching stable release reference links/u)
 })
 
-test('0.4.5 release guidance pins the recommended rc.2 DSH/TUI pairing', (t) => {
+test('the current release body documents every matrix install pairing', (t) => {
   const life = testLifecycle(t)
-  const guidance = '\n```sh\nnpm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2\n```\n- @xmoon76/dsh-pi-tui@0.4.5\n- @xmoon76/dsh-pi-tui@0.3'
-  const fixture = createFixture(life, { version: '0.4.5', guidance })
-  const result = run(fixture, 'v0.4.5')
+  const fixture = createFixture(life, { version: CURRENT_VERSION, guidance: currentGuidance(), channel: CURRENT_CHANNEL })
+  const result = run(fixture, CURRENT_TAG)
   assert.equal(result.status, 0, result.stderr)
   const body = readFileSync(fixture.output, 'utf8')
-  for (const command of [
-    '@deepseek-ai/dsh@0.1.5-rc.2',
-    '@xmoon76/dsh-pi-tui@0.4.5',
-    '@xmoon76/dsh-pi-tui@0.3',
-  ]) {
+  for (const command of requiredGuidance(CURRENT_VERSION)) {
     assert.ok(body.includes(command), `release body is missing ${command}`)
   }
   assert.doesNotMatch(body, /@xmoon76\/dsh-pi-tui@(latest|next)/u)
 })
 
-test('0.4.6 release guidance keeps the 0.4.5 rc.2 DSH pairing', (t) => {
+test('the release-notes gate rejects a body missing any matrix pairing', (t) => {
   const life = testLifecycle(t)
-  const guidance = '\n```sh\nnpm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2\n```\n- @xmoon76/dsh-pi-tui@0.4.6\n- @xmoon76/dsh-pi-tui@0.3'
-  const fixture = createFixture(life, { version: '0.4.6', guidance })
-  const result = run(fixture, 'v0.4.6')
-  assert.equal(result.status, 0, result.stderr)
-  const body = readFileSync(fixture.output, 'utf8')
-  for (const command of [
-    '@deepseek-ai/dsh@0.1.5-rc.2',
-    '@xmoon76/dsh-pi-tui@0.4.6',
-    '@xmoon76/dsh-pi-tui@0.3',
-  ]) {
-    assert.ok(body.includes(command), `release body is missing ${command}`)
+  for (const omitted of requiredGuidance(CURRENT_VERSION)) {
+    const fixture = createFixture(life, { version: CURRENT_VERSION, guidance: currentGuidance(omitted), channel: CURRENT_CHANNEL })
+    const result = run(fixture, CURRENT_TAG)
+    assert.notEqual(result.status, 0, `omitting ${omitted} unexpectedly passed`)
+    assert.match(result.stderr, new RegExp(`must document ${escapeRegExp(omitted)}`, 'u'))
   }
-})
-
-test('0.4 release guidance pins the exact release TUI version', (t) => {
-  const life = testLifecycle(t)
-  // A fixture on the alpha.4 floor (any 0.4 prerelease after 0.4.0-alpha.1)
-  // must document the latest validated alpha.5 pin and the exact prerelease
-  // package version. The stable 0.4.0 cutover must pin its own package version
-  // and must not retain prerelease-only guidance.
-  const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.5\n- @xmoon76/dsh-pi-tui@0.4.0-alpha.2\n- @xmoon76/dsh-pi-tui@0.3'
-  const futurePrerelease = createFixture(life, { version: '0.4.0-alpha.2', guidance: prereleaseGuidance, channel: 'next' })
-  try {
-    const accepted = run(futurePrerelease, 'next-v0.4.0-alpha.2')
-    assert.equal(accepted.status, 0, accepted.stderr)
-    const stableWithPrereleaseGuidance = createFixture(life, { version: '0.4.0', guidance: prereleaseGuidance })
-    try {
-      const result = run(stableWithPrereleaseGuidance, 'v0.4.0')
-      assert.notEqual(result.status, 0)
-      assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2-rc\.1/u)
-    } finally {
-      // testLifecycle cleans the fixture roots.
-    }
-  } finally {
-    // testLifecycle cleans the fixture roots.
-  }
-
-  const stableGuidance = '\n- @deepseek-ai/dsh@0.1.2-rc.1\n- @xmoon76/dsh-pi-tui@0.4.0\n- @xmoon76/dsh-pi-tui@0.3'
-  const stable = createFixture(life, { version: '0.4.0', guidance: stableGuidance })
-  const stableResult = run(stable, 'v0.4.0')
-  assert.equal(stableResult.status, 0, stableResult.stderr)
-})
-
-test('0.4.1 stable guidance pins the published rc.1 DSH family', (t) => {
-  const life = testLifecycle(t)
-  const guidance = '\n- @deepseek-ai/dsh@0.1.2-rc.1\n- @xmoon76/dsh-pi-tui@0.4.1\n- @xmoon76/dsh-pi-tui@0.3'
-  const stable = createFixture(life, { version: '0.4.1', guidance })
-  const result = run(stable, 'v0.4.1')
-  assert.equal(result.status, 0, result.stderr)
-})
-
-test('0.4.3-alpha.2 prerelease guidance pins the published 0.1.3-alpha.2 family', (t) => {
-  const life = testLifecycle(t)
-  const guidance = '\n- @deepseek-ai/dsh@0.1.3-alpha.2\n- @xmoon76/dsh-pi-tui@0.4.3-alpha.2\n- @xmoon76/dsh-pi-tui@0.3'
-  const next = createFixture(life, { version: '0.4.3-alpha.2', guidance, channel: 'next' })
-  const result = run(next, 'next-v0.4.3-alpha.2')
-  assert.equal(result.status, 0, result.stderr)
-})
-
-test('release-notes guidance matching rejects near-miss package versions', (t) => {
-  const life = testLifecycle(t)
-  const fixture = createFixture(life, {
-    version: '0.4.0-alpha.1',
-    guidance: '\n- @deepseek-ai/dsh@0.1.2-alpha.3\n- @xmoon76/dsh-pi-tui@next\n- @xmoon76/dsh-pi-tui@0.3',
-    channel: 'next',
-  })
-  const result = run(fixture, 'next-v0.4.0-alpha.1')
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /must document @xmoon76\/dsh-pi-tui@0\.4\.0-alpha\.1/u)
 })
 
 test('release-notes rejects bilingual heading/date mismatch', (t) => {

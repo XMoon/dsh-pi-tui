@@ -100,7 +100,7 @@ export function buildContentBlocks(
  * RECALLED images (pulled back from the queue) are ALREADY durable: their
  * ref is reused as-is and they are excluded from the save batch — the
  * harness object is content-addressed, so re-submitting the same ref never
- * duplicates storage (dequeue recall, review finding 3).
+ * duplicates storage (recall-all, review finding 3).
  * @param segments - the expanded draft segments.
  * @param attachments - the live `ctx.attachments` service.
  * @returns the admitted blocks and refs.

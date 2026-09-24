@@ -173,20 +173,20 @@ configurable action first (plan §3.3).
 
 ## User configuration
 
-Settings namespace `dsh-pi-tui` (the TUI's own settings section — NOT the `pi-tui` profile name), field `keybindings` (the schema deliberately
-does NOT declare the field — schemastery's `z.object` keeps unknown keys,
-and the parser owns the validation):
+The `tui-app` plugin's profile-owned Config, field `keybindings` — a
+whole-value volatile raw field since DSH 0.1.7 (the retired `dsh-pi-tui`
+settings namespace is only a legacy-migration input). The parser in
+`src/keybindings/config.ts` remains the only validation authority:
 
 ```yaml
-dsh-pi-tui:
-  keybindings:
-    app.input.steer: ctrl+s
-    app.permission.cycle: [shift+tab, ctrl+shift+p]
-    app.history.search: ctrl+r
-    app.transcript.toggleThinking: false
-    leader: ctrl+x
-    bindings:
-      app.tasks.open: <leader>t
+keybindings:
+  app.input.steer: ctrl+s
+  app.permission.cycle: [shift+tab, ctrl+shift+p]
+  app.history.search: ctrl+r
+  app.transcript.toggleThinking: false
+  leader: ctrl+x
+  bindings:
+    app.tasks.open: <leader>t
 ```
 
 Semantics: string = one key; array = several; `false` = disable the
@@ -280,7 +280,7 @@ remap updates every hint automatically.
   key-level reservation AND the runtime ACTION whitelist — a Stable
   plugin registers only the public `TuiAction` set; the Host-private
   `app.*` actions are never plugin-bindable, round-12 finding).
-- The model-menu / history-panel / output-viewer focused components keep
+- The model-picker / history-panel / output-viewer focused components keep
   their component-local keys (the plan's M5 covers QuestionFlow and
   TaskBrowserPanel; the others follow the same pattern later).
 
@@ -318,7 +318,8 @@ The branch went through an extended external review chain
 (openai-codex / gpt-5.6-luna) on the PR #34 diff: review rounds fixed
 per-key rule ids, printable/space leader rejection, the monotonic keymap
 revision, leader fall-through, search-toggle effective keys, the
-`dsh-pi-tui` settings namespace, `app.input.submit` real remapping
+then-`dsh-pi-tui` settings namespace (now the `tui-app` profile Config
+`keybindings` field), `app.input.submit` real remapping
 (editor sync + cross-instance isolation + safe mode + leader-only/
 conflict fail-soft), action-driven host reservation, leader-prefix
 collision, host/plugin rule layering, the fixed viewer Esc close, the

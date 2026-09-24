@@ -83,6 +83,17 @@ follow-up read always observes the current ownership.
 | `src/mentions.ts` | `MentionProvider` inline skill source: prompt-mode routing, fuzzy candidates from the detached `HumanSkillSummary[]`, query-part prefix (never `/`-prefixed), strict snapshot fence, catalog-guarded apply |
 | `src/tui-editor.ts` | The consumer-side natural trigger: the vendored editor rejects `/` as a trigger character, so the host editor re-triggers the provider on the pure classifier (same pattern as the `@`-mention trigger) |
 
+## D1.2 authority shadow
+
+Production catalog behavior remains Direct. The live-Session-only D1.2 shadow
+reads the official `commands/list(sessionId)` and
+`skills/list({ sessionId }, signal)` Remote faces for diagnostics only. It
+preserves command `definitionId`, input hint/presence, and attachment
+declarations, preserves skill `modelInvocable`, and deliberately drops the
+Host-local skill `path`. The comparator derives bare/argument claim metadata
+from command input presence without executing commands or installing Remote
+state. Sessionless standing/global discovery remains Direct.
+
 ## Skill catalog consumers
 
 The human skill catalog feeds TWO independent consumers with different

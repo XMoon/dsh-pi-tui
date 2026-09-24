@@ -9,6 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel, formatElapsed, type TaskPanelItem } from '../src/task-panel.ts'
 import { MARQUEE_STEP_MS } from '../src/marquee.ts'
 
@@ -38,7 +39,7 @@ const subagent = (overrides: Partial<TaskPanelItem> = {}): TaskPanelItem => ({
   label: 'subagent · research',
   status: 'running',
   group: 'subagents',
-  interruptible: true,
+  canStop: true,
   ...overrides,
 })
 
@@ -49,7 +50,7 @@ function makePanel(
   const panel = new TaskBrowserPanel(
     items,
     options.maxVisible ?? 10,
-    { header: options.header ?? 'tasks · subagents', enableSearch: options.enableSearch, noMatchText: 'no active tasks' },
+    { mode: 'full', header: options.header ?? 'tasks · subagents', enableSearch: options.enableSearch, noMatchText: 'no active tasks' },
     () => {},
     () => {},
     () => {},
@@ -62,6 +63,7 @@ function makePanel(
 
 test('the extreme no-match grant keeps the message over the header', () => {
   const { panel, rendered } = makePanel([runningJob()], { enableSearch: true })
+  panel.handleInput('/') // explicit search mode
   // A 2-row panel grant: compact rows are header/search/message/hint; the
   // header must yield BEFORE the no-match message (declared priority:
   // search > message > hint > header).
@@ -81,8 +83,10 @@ test('a 1-row search-mode grant paints only the search input and acks nothing', 
     [runningJob({ attention: true })],
     10,
     {
+      mode: 'full',
       header: 'tasks · subagents',
       enableSearch: true,
+      initialSearchMode: true,
       onViewportExpose: (ids) => { exposed.push(...ids) },
     },
     () => {},
@@ -144,7 +148,7 @@ test('the header carries live running/done/failed counts', () => {
     { value: 'job:bash-3', label: 'bash · deploy', status: 'failed', startedAt: Date.now(), group: 'jobs' },
   ])
   const joined = rendered().map(strip).join('\n')
-  assert.ok(joined.includes('1 running'), `running count missing:\n${joined}`)
+  assert.ok(joined.includes('1 active'), `running count missing:\n${joined}`)
   assert.ok(joined.includes('1 done'), `done count missing:\n${joined}`)
   assert.ok(joined.includes('1 failed'), `failed count missing:\n${joined}`)
 })
@@ -155,7 +159,7 @@ test('selected row shows the pointer and bold label', () => {
   assert.ok(first.includes('→ ● bash · pnpm build'), `selected row must show the pointer:\n${first}`)
   panel.handleInput('\x1b[B')
   const second = rendered().map(strip).join('\n')
-  assert.ok(second.includes('→ ● bash · lint'), `selection must move down:\n${second}`)
+  assert.ok(second.includes('→ ○ bash · lint'), `selection must move down:\n${second}`)
   assert.ok(!second.includes('→ ● bash · pnpm build'), `old row must lose the pointer:\n${second}`)
 })
 
@@ -165,7 +169,7 @@ test('↑↓ clamp at the ends (no wrap-around)', () => {
   assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'), `↑ at top must not move:\n${rendered().map(strip).join('\n')}`)
   panel.handleInput('\x1b[B')
   panel.handleInput('\x1b[B') // at the bottom: stays
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `↓ at bottom must not wrap:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `↓ at bottom must not wrap:\n${rendered().map(strip).join('\n')}`)
 })
 
 test('Enter fires onSelect with the selected value; Esc fires onCancel', () => {
@@ -174,7 +178,7 @@ test('Enter fires onSelect with the selected value; Esc fires onCancel', () => {
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob()],
     10,
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
     (value) => { selected = value },
     () => { cancelled += 1 },
     () => {},
@@ -192,7 +196,8 @@ test('search filters by label/status and restores selection on setItems', () => 
     [runningJob(), doneJob(), subagent()],
     { enableSearch: true },
   )
-  // Typing a printable goes to the search input.
+  // Typing a printable goes to the search input once search mode owns it.
+  panel.handleInput('/')
   panel.handleInput('l')
   panel.handleInput('i')
   panel.handleInput('n')
@@ -211,6 +216,7 @@ test('search matches the GROUP name too (the merged /tasks surface)', () => {
     [runningJob(), doneJob(), subagent()],
     { enableSearch: true },
   )
+  panel.handleInput('/')
   panel.handleInput('s')
   panel.handleInput('u')
   panel.handleInput('b')
@@ -280,7 +286,7 @@ test('a USER-touched selection survives a later enrichment (no focus stealing)',
   )
   // The user moves down to the second row…
   panel.handleInput('\x1b[B')
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `precondition — user on the lint row:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `precondition — user on the lint row:\n${rendered().map(strip).join('\n')}`)
   // …then a refresh inserts a running subagent at the head.
   panel.setItems([
     typed(subagent(), 'subagent'),
@@ -288,7 +294,7 @@ test('a USER-touched selection survives a later enrichment (no focus stealing)',
     typed(doneJob(), 'bash'),
   ])
   const after = rendered().map(strip).join('\n')
-  assert.ok(after.includes('→ ● bash · lint'),
+  assert.ok(after.includes('→ ○ bash · lint'),
     `a touched selection must stay on the user's row, not jump to the new head:\n${after}`)
   assert.ok(!after.includes('→ ● subagent · research'), `the head must not steal the focus:\n${after}`)
 })
@@ -339,6 +345,7 @@ test('type filter composes with the search query', () => {
     { enableSearch: true },
   )
   panel.handleInput('\t') // subagent
+  panel.handleInput('/') // explicit search mode
   panel.handleInput('r') // query 'r'
   const both = rendered().map(strip).join('\n')
   assert.ok(both.includes('subagent · research'), `type+query keeps the matching agent row:\n${both}`)
@@ -356,12 +363,12 @@ test('rows without a type never match a type filter (they only appear under All)
   assert.ok(!filtered.includes('bash · pnpm build'), `typeless row hides under a type filter:\n${filtered}`)
 })
 
-test('the type hint advertises Tab only when the cycle has two or more entries', () => {
+test('the Full hint always advertises the Tab type cycle', () => {
   const single = makePanel([typed(runningJob(), 'bash')], { enableSearch: true })
-  assert.ok(!single.rendered().map(strip).join('\n').includes('tab type'),
-    `a single-kind list must not advertise the toggle:\n${single.rendered().map(strip).join('\n')}`)
+  assert.ok(single.rendered().map(strip).join('\n').includes('Tab type'),
+    `a single-kind list still toggles All↔type:\n${single.rendered().map(strip).join('\n')}`)
   const multi = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true })
-  assert.ok(multi.rendered().map(strip).join('\n').includes('tab type'),
+  assert.ok(multi.rendered().map(strip).join('\n').includes('Tab type'),
     `mixed list advertises the Tab cycle:\n${multi.rendered().map(strip).join('\n')}`)
 })
 
@@ -392,7 +399,7 @@ test('a Tab type filter counts as a user interaction (no head-stealing on refres
   panel.handleInput('\t') // bash (marks the selection touched)
   panel.handleInput('\x1b[B') // onto the lint row
   const before = rendered().map(strip).join('\n')
-  assert.ok(before.includes('→ ● bash · lint'), `precondition — a row selected within the type scope:\n${before}`)
+  assert.ok(before.includes('→ ○ bash · lint'), `precondition — a row selected within the type scope:\n${before}`)
   // An enrichment arrives with a NEW bash job at the head of the filtered
   // scope; the touched selection must not jump.
   panel.setItems([
@@ -402,112 +409,8 @@ test('a Tab type filter counts as a user interaction (no head-stealing on refres
     typed(subagent(), 'subagent'),
   ])
   const after = rendered().map(strip).join('\n')
-  assert.ok(after.includes('→ ● bash · lint'),
+  assert.ok(after.includes('→ ○ bash · lint'),
     `the touched selection must survive the refresh inside the typed scope:\n${after}`)
-})
-
-test('i on a selected subagent row fires the interrupt action while search is closed', () => {
-  let acted: { value: string; action: string } | undefined
-  const panel = new TaskBrowserPanel(
-    [runningJob(), subagent()],
-    10,
-    {
-      header: 'tasks · subagents',
-      onAction: (value, action) => { acted = { value, action } },
-    },
-    () => {},
-    () => {},
-    () => {},
-  )
-  panel.render(100)
-  // The subagent row is second; move the cursor onto it, then press i.
-  panel.handleInput('\x1b[B')
-  panel.handleInput('i')
-  assert.deepEqual(acted, { value: 'agent:child-1', action: 'interrupt' }, 'i must interrupt the selected subagent')
-  // A NON-interruptible row under the cursor (a job, or a one-shot
-  // subagent): i does NOT fire — the panel only reports rows the
-  // interrupt transport can actually stop.
-  acted = undefined
-  panel.handleInput('\x1b[A')
-  panel.handleInput('i')
-  assert.equal(acted, undefined, 'i on a non-interruptible row must not fire the interrupt action')
-})
-
-test('a one-shot subagent row never fires the interrupt action (accepted no-op would lie)', () => {
-  let acted = 0
-  const panel = new TaskBrowserPanel(
-    [subagent({ value: 'agent:one-shot-1', label: 'subagent · audit', interruptible: false })],
-    10,
-    {
-      header: 'tasks · subagents',
-      onAction: () => { acted += 1 },
-    },
-    () => {},
-    () => {},
-    () => {},
-  )
-  panel.render(100)
-  panel.handleInput('i')
-  assert.equal(acted, 0, 'one-shot rows are not interruptible')
-  // And the hint must not advertise it.
-  const joined = panel.render(100).map(strip).join('\n')
-  assert.ok(!joined.includes('i interrupt'), `one-shot-only list must not advertise i interrupt:\n${joined}`)
-})
-
-test('i is a query character once a search query is active, never an action', () => {
-  let acted = 0
-  const panel = new TaskBrowserPanel(
-    [subagent()],
-    10,
-    {
-      header: 'tasks · subagents',
-      enableSearch: true,
-      onAction: () => { acted += 1 },
-    },
-    () => {},
-    () => {},
-    () => {},
-  )
-  panel.render(100)
-  // With a query in flight, `i` is an ordinary query letter ("task",
-  // "git") even on a subagent row.
-  panel.handleInput('t')
-  panel.handleInput('i')
-  assert.equal(acted, 0, 'i must go to the search input while a query is active')
-})
-
-test('i interrupts a subagent row from the empty search state (the /tasks production path)', () => {
-  let acted: { value: string; action: string } | undefined
-  const panel = new TaskBrowserPanel(
-    [runningJob(), subagent()],
-    10,
-    {
-      header: 'tasks · subagents',
-      enableSearch: true,
-      onAction: (value, action) => { acted = { value, action } },
-    },
-    () => {},
-    () => {},
-    () => {},
-  )
-  panel.render(100)
-  // The browser opens with an EMPTY query: move onto the subagent row and
-  // press i — the interrupt must fire even though search is enabled (the
-  // real /tasks surface configures enableSearch: true).
-  panel.handleInput('\x1b[B')
-  panel.handleInput('i')
-  assert.deepEqual(acted, { value: 'agent:child-1', action: 'interrupt' }, 'empty-query i must interrupt the selected subagent')
-  // A job row under the cursor with an empty query: i starts a search
-  // instead of firing (no subagent selected — no interrupt intent).
-  acted = undefined
-  panel.handleInput('\x1b[A')
-  panel.handleInput('i')
-  assert.equal(acted, undefined, 'i on a job row with an empty query must go to the search input')
-  // Once the query is non-empty, i is a letter everywhere.
-  panel.handleInput('\x1b[B')
-  panel.handleInput('b') // query "ib"
-  panel.handleInput('i')
-  assert.equal(acted, undefined, 'i with a non-empty query must stay a query letter')
 })
 
 test('search input is editable: backspace removes characters and re-filters', () => {
@@ -515,6 +418,7 @@ test('search input is editable: backspace removes characters and re-filters', ()
     [runningJob(), doneJob(), subagent()],
     { enableSearch: true },
   )
+  panel.handleInput('/')
   panel.handleInput('l')
   panel.handleInput('i')
   panel.handleInput('n')
@@ -553,39 +457,7 @@ test('empty state renders the no-match text and hint', () => {
   const { rendered } = makePanel([], { enableSearch: true })
   const joined = rendered().map(strip).join('\n')
   assert.ok(joined.includes('no active tasks'), `empty text missing:\n${joined}`)
-  assert.ok(joined.includes('↑↓ navigate'), `hint missing:\n${joined}`)
-})
-
-test('the type chip narrows the header counts to the visible scope', () => {
-  // Round-1 review finding: with a type filter active, the counts must
-  // describe the visible rows only — a running row outside the scope must
-  // not inflate the numbers.
-  const { panel, rendered } = makePanel(
-    [typed(subagent(), 'subagent'), typed(runningJob(), 'bash')],
-    { enableSearch: true, header: 'tasks · subagents' },
-  )
-  const all = rendered().map(strip).join('\n')
-  assert.ok(all.includes('2 running'), `precondition — full surface counts both rows:\n${all}`)
-  panel.handleInput('\t') // subagent
-  const agents = rendered().map(strip).join('\n')
-  assert.ok(agents.includes('[subagent]'), `precondition — type chip:\n${agents}`)
-  assert.ok(agents.includes('1 running'), `the subagent scope counts its own row only:\n${agents}`)
-  assert.ok(!agents.includes('2 running'), `the hidden bash row must not inflate the count:\n${agents}`)
-})
-
-test('the hint advertises i interrupt only while a subagent row is selectable', () => {
-  // A subagent row in the list: the interrupt verb shows (the merged /tasks
-  // surface's only terminate entry — the old /subagents submenu is gone).
-  const withAgent = makePanel([runningJob(), subagent()])
-  assert.ok(withAgent.rendered().map(strip).join('\n').includes('i interrupt · ↑↓ navigate'),
-    `interrupt hint missing with a subagent row:\n${withAgent.rendered().map(strip).join('\n')}`)
-  // Jobs only: `i` would be a search letter, so the verb must stay hidden.
-  const jobsOnly = makePanel([runningJob()])
-  assert.ok(!jobsOnly.rendered().map(strip).join('\n').includes('i interrupt'),
-    `interrupt hint must not advertise on job rows:\n${jobsOnly.rendered().map(strip).join('\n')}`)
-  // Empty list: no interrupt either.
-  const empty = makePanel([])
-  assert.ok(!empty.rendered().map(strip).join('\n').includes('i interrupt'))
+  assert.ok(joined.includes('↑↓ select'), `hint missing:\n${joined}`)
 })
 
 test('dispose stops the elapsed tick (no render callbacks after close)', async (t) => {
@@ -595,7 +467,7 @@ test('dispose stops the elapsed tick (no render callbacks after close)', async (
   const panel = new TaskBrowserPanel(
     [runningJob({ startedAt: Date.now() - 1_000 })],
     10,
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
     () => {},
     () => {},
     () => { renders += 1 },
@@ -619,6 +491,7 @@ test('search-enabled: k and j are query characters, not list navigation', () => 
     { enableSearch: true },
   )
   // 'j' and 'k' must land in the search input (queries like "task" or "jq").
+  panel.handleInput('/')
   panel.handleInput('j')
   panel.handleInput('o')
   assert.equal(panel.getFilter(), 'jo', `k/j must be query characters when search is on`)
@@ -631,23 +504,14 @@ test('search-enabled: k and j are query characters, not list navigation', () => 
   void rendered
 })
 
-test('search-disabled: k/j keep their vim navigation aliases', () => {
-  const { panel, rendered } = makePanel([runningJob(), doneJob()], { enableSearch: false })
-  // Without search, 'j' moves down and 'k' moves up.
-  panel.handleInput('j')
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `j must move the selection down:\n${rendered().map(strip).join('\n')}`)
-  panel.handleInput('k')
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'), `k must move the selection up:\n${rendered().map(strip).join('\n')}`)
-})
-
 test('Kitty CSI-u arrow keys navigate the panel (zellij/WezTerm/Windows Terminal)', () => {
   const { panel, rendered } = makePanel([runningJob(), doneJob()])
   // CSI-u ↓ (`\x1b[1;1B`) and the zellij repro's super-mod form (`\x1b[1;129B`)
   // must both move the selection down; legacy `\x1b[B` still works.
   panel.handleInput('\x1b[1;1B')
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `CSI-u down must move the selection:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `CSI-u down must move the selection:\n${rendered().map(strip).join('\n')}`)
   panel.handleInput('\x1b[1;129B') // at the bottom (2 rows): stays
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · lint'), `CSI-u down (super mod) must keep the selection at the bottom:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `CSI-u down (super mod) must keep the selection at the bottom:\n${rendered().map(strip).join('\n')}`)
   panel.handleInput('\x1b[1;1A')
   assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'), `CSI-u up must move the selection back:\n${rendered().map(strip).join('\n')}`)
   // CSI-u pageUp/pageDown (`\x1b[5;1~` / `\x1b[6;1~`) page the list.
@@ -664,7 +528,7 @@ test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     (value) => { selected = value },
     () => { cancelled += 1 },
     () => {},
@@ -675,7 +539,7 @@ test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
   const panel2 = new TaskBrowserPanel(
     [runningJob(), doneJob()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     (value) => { selected = value },
     () => { cancelled += 1 },
     () => {},
@@ -686,7 +550,7 @@ test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
   const panel3 = new TaskBrowserPanel(
     [runningJob(), doneJob()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     (value) => { selected = value },
     () => { cancelled += 1 },
     () => {},
@@ -698,7 +562,7 @@ test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
   const panel4 = new TaskBrowserPanel(
     [runningJob()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     () => {},
     () => { cancelled += 1 },
     () => {},
@@ -724,7 +588,7 @@ test('the subagent mode suffix renders after the label and survives truncation',
   const narrowPanel = new TaskBrowserPanel(
     [subagent({ label: 'subagent · a-very-long-reviewer-label-that-keeps-growing', suffix: 'one-shot' })],
     10,
-    { header: 'tasks', enableSearch: false, noMatchText: 'no active tasks' },
+    { mode: 'full', header: 'tasks', enableSearch: false, noMatchText: 'no active tasks' },
     () => {},
     () => {},
     () => {},
@@ -746,7 +610,7 @@ test('the mode suffix is a HARD layout right: extreme widths compress label and 
     group: 'subagents',
   }
   const render = (width: number): string =>
-    new TaskBrowserPanel([item], 10, { header: 'tasks', enableSearch: false, noMatchText: '' }, () => {}, () => {}, () => {})
+    new TaskBrowserPanel([item], 10, { mode: 'full', header: 'tasks', enableSearch: false, noMatchText: '' }, () => {}, () => {}, () => {})
       .render(width).map(strip).join('\n')
   // 60 cols: the mode and the tail survive with the label nearly complete
   // (one cell yields to the pad between the mode and the status).
@@ -760,9 +624,10 @@ test('the mode suffix is a HARD layout right: extreme widths compress label and 
   // The selected row marquees: no static ellipsis (the label window shows
   // the label start during the initial pause), and the mode suffix + the
   // status tail stay fixed (plan §7.5).
-  assert.ok(!medium.includes('…'), `a selected overflow row must marquee, not ellipsis:\n${medium}`)
+  assert.ok(!medium.split('\n').find(line => line.includes('one-shot'))!.includes('…'),
+    `a selected overflow row must marquee, not ellipsis:\n${medium}`)
   assert.ok(medium.includes('inactive'), `tail must survive 30 cols:\n${medium}`)
-  // 16 cols (physically fits `→ ● one-shot`): the label and tail yield
+  // 16 cols (physically fits `→ ○ one-shot`): the label and tail yield
   // entirely, the MODE stays — the viewer's interactivity is a pre-Enter
   // fact and the final whole-line truncation may never cut it.
   const narrow = render(16)
@@ -777,6 +642,7 @@ test('search matches the mode suffix too', () => {
   ], { enableSearch: true })
   // Type "one-shot" — only the audit row matches (the suffix is part of
   // the searchable text, so the mode is reachable by filter).
+  panel.handleInput('/')
   panel.handleInput('o')
   panel.handleInput('n')
   panel.handleInput('e')
@@ -803,7 +669,7 @@ test('the selected row marquees under a fake clock while unselected rows stay fi
   ]
   const panel = new TaskBrowserPanel(
     items, 10,
-    { header: 'tasks', enableSearch: false, noMatchText: '', marqueeNow: () => now.value },
+    { mode: 'full', header: 'tasks', enableSearch: false, noMatchText: '', marqueeNow: () => now.value },
     () => {}, () => {}, () => {},
   )
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -844,7 +710,7 @@ test('a search/type filter restarts the selected row marquee even when the SAME 
   }
   const panel = new TaskBrowserPanel(
     [item], 10,
-    { header: 'tasks', enableSearch: true, noMatchText: '', marqueeNow: () => now.value },
+    { mode: 'full', header: 'tasks', enableSearch: true, noMatchText: '', marqueeNow: () => now.value },
     () => {}, () => {}, () => {},
   )
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -854,6 +720,7 @@ test('a search/type filter restarts the selected row marquee even when the SAME 
   assert.ok(!mid.includes('a-very-long-selected-label-that'),
     `precondition — the label must have scrolled past its start:\n${mid}`)
   // Type a query that MATCHES the same row (identity unchanged).
+  panel.handleInput('/')
   panel.handleInput('s')
   now.value = 800 + 8 * MARQUEE_STEP_MS
   const after = panel.render(60).map(strip).join('\n')
@@ -893,7 +760,7 @@ test('task panel: mouse click activates the exact task (mouse parity)', () => {
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob(), subagent()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     (value) => { selected.push(value) },
     () => {},
     () => {},
@@ -912,7 +779,7 @@ test('task panel: group headers and hint are inert (mouse parity)', () => {
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob(), subagent()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     () => {},
     () => {},
     () => {},
@@ -929,12 +796,13 @@ test('task panel: search Input click repositions the query cursor (mouse parity)
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob()],
     10,
-    { header: 'tasks', enableSearch: true },
+    { mode: 'full', header: 'tasks', enableSearch: true },
     () => {},
     () => {},
     () => {},
   )
   panel.render(100)
+  panel.handleInput('/') // explicit search mode paints the search row
   panel.handleInput('ab')
   panel.render(100)
   // The search row is ' ' + the Input render (prompt stripped): the value
@@ -950,7 +818,7 @@ test('task panel: wheel moves the selection (mouse parity)', () => {
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob(), subagent()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     () => {},
     () => {},
     () => {},
@@ -970,7 +838,7 @@ test('task panel: async enrichment between press and click cannot transfer activ
   const panel = new TaskBrowserPanel(
     [runningJob()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     (value) => { selected.push(value) },
     () => {},
     () => {},
@@ -992,7 +860,7 @@ test('task panel: tiny-budget hit map never references omitted rows (mouse parit
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob(), subagent()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     (value) => { selected.push(value) },
     () => {},
     () => {},
@@ -1014,12 +882,13 @@ test('task panel: delegated search press replaces the stale pressed value (mouse
   const panel = new TaskBrowserPanel(
     [runningJob(), doneJob(), subagent()],
     10,
-    { header: 'tasks', enableSearch: true },
+    { mode: 'full', header: 'tasks', enableSearch: true },
     (value) => { selected.push(value) },
     () => {},
     () => {},
   )
   panel.render(100)
+  panel.handleInput('/') // explicit search mode paints the search row
   // Normal layout: search at row 2, item A (bash · lint) at row 7.
   const rowA = panel.render(100).findIndex(line => line.includes('bash · lint'))
   assert.ok(rowA >= 0, `item A row missing:\n${panel.render(100).join('\n')}`)
@@ -1046,7 +915,7 @@ test('task panel: async enrichment WITHOUT a repaint between press and click can
   const panel = new TaskBrowserPanel(
     [runningJob()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     (value) => { selected.push(value) },
     () => {},
     () => {},
@@ -1068,7 +937,7 @@ test('task panel: async enrichment WITHOUT a repaint between paint and press can
   const panel = new TaskBrowserPanel(
     [runningJob()],
     10,
-    { header: 'tasks', enableSearch: false },
+    { mode: 'full', header: 'tasks', enableSearch: false },
     () => {},
     () => {},
     () => {},
@@ -1090,7 +959,7 @@ test('task panel: a mouse press that changes selection cancels a pending stop co
   const panel = new TaskBrowserPanel(
     [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
     24,
-    { header: 'tasks', enableSearch: false, mode: 'quick', onStop: value => stopped.push(value) },
+    { header: 'tasks', enableSearch: false, mode: 'full', onStop: value => stopped.push(value) },
     () => {},
     () => {},
     () => {},
@@ -1114,7 +983,7 @@ test('task panel: a click cannot bypass a pending stop confirmation (mouse parit
   const panel = new TaskBrowserPanel(
     [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
     24,
-    { header: 'tasks', enableSearch: false, mode: 'quick' },
+    { header: 'tasks', enableSearch: false, mode: 'full' },
     value => selected.push(value),
     () => {},
     () => {},
@@ -1130,4 +999,177 @@ test('task panel: a click cannot bypass a pending stop confirmation (mouse parit
   panel.handleMouse(mouse('press', 10, row, 100, 24))
   panel.handleMouse(mouse('click', 10, row, 100, 24))
   assert.deepEqual(selected, [], 'the click must not bypass the pending confirmation')
+})
+
+// --- single-physical-row containment (presentation boundary) ---
+
+/** Every returned element is ONE physical terminal row: no embedded CR/LF
+ * can escape the row budget, and nothing paints wider than the grant. */
+function assertPhysicalRows(lines: readonly string[], width: number): void {
+  for (const line of lines) {
+    assert.equal(/[\r\n]/.test(line), false, `an embedded row break leaked into a row: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= width, `a row exceeds the grant (${visibleWidth(line)} > ${width}): ${JSON.stringify(line)}`)
+  }
+}
+
+const multilineJob = (): TaskPanelItem => runningJob({
+  label: "bash · set -e\necho 'build'\r\npnpm test",
+})
+
+test('Quick Tasks: a multiline job label stays ONE physical row and the raw item is untouched', () => {
+  const item = multilineJob()
+  const panel = new TaskBrowserPanel(
+    [item],
+    10,
+    { mode: 'quick' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  // The three command lines did not leak as extra terminal rows: the
+  // collapsed projection carries them on the ONE main row instead.
+  const joined = lines.join('\n')
+  assert.ok(joined.includes("set -e echo 'build' pnpm test"), `the collapsed projection must stay visible:\n${joined}`)
+  assert.ok(item.label.includes('\n'), 'the raw runtime label must keep its newlines (no data rewrite)')
+  panel.dispose()
+})
+
+test('Full Task Center: a multiline job main row stays ONE physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [multilineJob(), doneJob()],
+    10,
+    { mode: 'full', header: 'tasks · subagents' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.join('\n').includes("set -e echo 'build' pnpm test"), 'the collapsed label must stay visible')
+  panel.dispose()
+})
+
+test('Full Task Center detail: multiline label/detail project to single rows in BOTH layouts', () => {
+  const item: TaskPanelItem = runningJob({
+    label: 'job first\njob second',
+    detail: 'detail first\r\ndetail second',
+  })
+  const panel = new TaskBrowserPanel(
+    [item],
+    10,
+    { mode: 'full', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  // Wide width: the side detail pane renders detailLines rows.
+  const wide = panel.render(120).map(strip)
+  assertPhysicalRows(wide, 120)
+  const wideJoined = wide.join('\n')
+  assert.ok(wideJoined.includes('job first job second'), `wide pane must show the collapsed label:\n${wideJoined}`)
+  assert.ok(wideJoined.includes('detail first detail second'), `wide pane must show the collapsed detail:\n${wideJoined}`)
+  // Medium width: the compact inline detail under the selected row (it
+  // carries label/status/elapsed — the full detail rows live in the wide
+  // side pane above).
+  const medium = panel.render(100).map(strip)
+  assertPhysicalRows(medium, 100)
+  const mediumJoined = medium.join('\n')
+  assert.ok(mediumJoined.includes('job first job second'), `inline detail must show the collapsed label:\n${mediumJoined}`)
+  assert.ok(mediumJoined.includes('job first job second · status'), `inline detail stays one collapsed row:\n${mediumJoined}`)
+  // The raw domain text is never rewritten.
+  assert.equal(item.label, 'job first\njob second')
+  assert.equal(item.detail, 'detail first\r\ndetail second')
+  panel.dispose()
+})
+
+test('multiline input respects the row budget: every painted row is one physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [multilineJob(), doneJob(), runningJob({ value: 'job:c', label: 'bash · test' })],
+    10,
+    { mode: 'full', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.setMaxRows(6)
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.length <= 6, `the multiline input must not break the row budget (${lines.length} > 6)`)
+  panel.dispose()
+})
+
+test('caller-provided header and no-match text project to ONE physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob()],
+    10,
+    { mode: 'full', header: 'Workflow · foo\nbar', enableSearch: true, noMatchText: 'nothing\nhere' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  // The header embeds caller/durable text (the Workflow scoped Task
+  // Center passes run name + phase label) — it must not carry CR/LF past
+  // the row budget.
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.some(line => line.includes('Workflow · foo bar')), `the collapsed header must render:\n${lines.join('\n')}`)
+  // The no-match message is caller text on one row.
+  panel.handleInput('/')
+  for (const key of 'zz') panel.handleInput(key)
+  const noMatch = panel.render(100).map(strip)
+  assertPhysicalRows(noMatch, 100)
+  assert.ok(noMatch.some(line => line.includes('nothing here')), `the collapsed no-match text must render:\n${noMatch.join('\n')}`)
+  // Narrow grants: a LONG no-match message is also width-truncated (the
+  // same one-row contract as the refresh-error banner). Only the
+  // no-match rows are asserted — the static hint text's pre-existing
+  // overflow is separate behavior, unchanged by this containment.
+  const longPanel = new TaskBrowserPanel(
+    [],
+    10,
+    { mode: 'full', enableSearch: true, noMatchText: `nothing here${' padding'.repeat(6)}\nend` },
+    () => {},
+    () => {},
+    () => {},
+  )
+  for (const narrowWidth of [20, 30]) {
+    const narrow = longPanel.render(narrowWidth).map(strip)
+    const noMatchRows = narrow.filter(line => line.includes('nothing'))
+    assert.ok(noMatchRows.length >= 1, `width ${narrowWidth}: the truncated no-match row must stay visible:\n${narrow.join('\n')}`)
+    for (const line of noMatchRows) {
+      assert.equal(/[\r\n]/.test(line), false, `width ${narrowWidth}: the no-match row must be one physical row: ${JSON.stringify(line)}`)
+      assert.ok(visibleWidth(line) <= narrowWidth, `width ${narrowWidth}: the no-match row must fit the grant (${visibleWidth(line)} > ${narrowWidth}): ${JSON.stringify(line)}`)
+    }
+  }
+  longPanel.dispose()
+  panel.dispose()
+})
+
+test('a multiline refresh error stays ONE physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [multilineJob()],
+    10,
+    { mode: 'full', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.setRefreshState('stale', 'fetch failed\nretry later\nEOF')
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.join('\n').includes('fetch failed retry later EOF'), 'the collapsed error must stay visible')
+  assert.ok(lines.length <= 12, 'the banner must stay a single row')
+  // Narrow grant: the banner is also WIDTH-truncated — a long dynamic
+  // error must not wrap into extra terminal rows in a direct embedding
+  // (only the banner rows are asserted; the static hint text is a
+  // separate pre-existing behavior, unchanged by this containment).
+  const narrow = panel.render(20).map(strip)
+  const banner = narrow.filter(line => line.includes('fetch failed'))
+  assert.ok(banner.length >= 1, `the truncated banner must stay visible:\n${narrow.join('\n')}`)
+  for (const line of banner) {
+    assert.equal(/[\r\n]/.test(line), false, `the banner must be one physical row: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= 20, `the banner must fit the narrow grant (${visibleWidth(line)} > 20): ${JSON.stringify(line)}`)
+  }
+  panel.dispose()
 })

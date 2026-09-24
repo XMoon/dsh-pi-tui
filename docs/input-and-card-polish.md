@@ -631,7 +631,7 @@ rounds (codex / gpt-5.6-luna):
   declined `!` in the plugin document.
 - **Round 15**: P1 — `getDraft()` returned the bare body while
   `setDraft()` decoded the wire form, so read-merge-restore callers (the
-  runner's restore paths, the dequeue merge, the steer action) silently
+  runner's restore paths, the recall-all merge, the steer action) silently
   lost the shell mode (FIXED: `getDraft()` now returns the WIRE form —
   the symmetric counterpart of `setDraft()` — and `submitDraft` consumes
   it directly without re-serializing); P1 — a Stable extension may return

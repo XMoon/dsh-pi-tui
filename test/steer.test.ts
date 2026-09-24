@@ -1,21 +1,26 @@
 /**
  * Headless tests for the steer-all orchestration (Ctrl+S). The send core
- * is SYNCHRONOUS one-pass (snapshot → re-validate → deliver, no await in
- * between) since the divergence-guard removal, so the only reachable
- * stale triggers are the identity re-validation (modeled here with
- * deps whose second read returns a switched surface) and the transition
- * fence. The delivery gates (empty payload, onlyDraft, writer seam) and
- * the draft-restore merge semantics are pinned here too.
+ * snapshots and re-validates before entering its async writer window. The
+ * delivery gates (empty payload, onlyDraft, writer seam), barrier coverage
+ * and draft-restore merge semantics are pinned here too.
  * @module @xmoon76/dsh-pi-tui/steer.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mergeDraft, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
-import { TransitionInProgressError, type SessionOperationBarrier } from '../src/session-operation-barrier.ts'
+import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
 interface FakeAgent extends SteerAgentLike {
   status: 'idle' | 'running'
+  steer(message: unknown): void
+  followup(message: unknown): void
+  inbox: {
+    readonly nextTurn: readonly { id: string }[]
+    readonly nextStep: readonly { id: string }[]
+    remove(id: string): void
+  }
   /** The live queue state (splices mutate this). */
   state: { nextTurn: { id: string }[]; nextStep: { id: string }[] }
   steered: { id: string; text: string }[]
@@ -37,13 +42,67 @@ function fakeAgent(ids: string[], sessionId = 'session-steer'): FakeAgent {
         state.nextStep = state.nextStep.filter(m => m.id !== id)
       },
     },
-    status: 'idle',
+    status: 'running',
     steer: (message) => { steered.push(message as { id: string; text: string }) },
     followup: (message) => { followed.push(message as { id: string; text: string }) },
     state,
     steered,
     followed,
   } as FakeAgent
+}
+
+/** Test-only semantic reader: production code never receives the fake Agent's
+ * inbox; the reader exposes the same placement projection as the Direct
+ * adapter. */
+function pendingReaderFor(getAgent: () => SteerAgentLike | undefined): PendingInputReader {
+  return {
+    snapshot: (sessionId) => {
+      const agent = getAgent() as FakeAgent | undefined
+      if (agent === undefined || agent.session.id !== sessionId) return undefined
+      return {
+        running: agent.status === 'running',
+        items: [
+          ...agent.state.nextTurn.map(message => ({ id: message.id, placement: 'queued' as const, content: [] })),
+          ...agent.state.nextStep.map(message => ({ id: message.id, placement: 'steering' as const, content: [] })),
+        ],
+      }
+    },
+  }
+}
+
+/** Test-only semantic writer used by the default dependency fixture. */
+function writerFor(getAgent: () => SteerAgentLike | undefined): SteerDeps['writer'] {
+  return {
+    prompt: async (sessionId, message, mode) => {
+      const agent = getAgent() as FakeAgent | undefined
+      if (agent === undefined || agent.session.id !== sessionId) {
+        return { kind: 'rejected' as const, error: { code: 'session/not-found', message: 'session is gone' } }
+      }
+      const recorded = message as { id: string; text: string }
+      if (mode === 'steer') agent.steered.push(recorded)
+      else agent.followed.push(recorded)
+      return { kind: 'committed' as const, value: undefined }
+    },
+    updateQueue: async (sessionId, messageId, action) => {
+      if (action.kind !== 'steer') {
+        return { kind: 'rejected' as const, error: { code: 'test/unexpected-queue-action', message: 'steerAll must use the steer action' } }
+      }
+      const agent = getAgent() as FakeAgent | undefined
+      if (agent === undefined || agent.session.id !== sessionId) {
+        return { kind: 'rejected' as const, error: { code: 'session/not-found', message: 'session is gone' } }
+      }
+      const message = agent.state.nextTurn.find(item => item.id === messageId)
+      if (message === undefined) {
+        return { kind: 'rejected' as const, error: { code: 'session/queue-item-not-found', message: 'queued item is gone' } }
+      }
+      if (agent.status !== 'running') {
+        return { kind: 'rejected' as const, error: { code: 'session/steer-unavailable', message: 'steering is unavailable' } }
+      }
+      agent.state.nextTurn = agent.state.nextTurn.filter(item => item.id !== messageId)
+      agent.steered.push(message as { id: string; text: string })
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
 }
 
 /**
@@ -71,7 +130,9 @@ function switchingIdentities(options: {
       generation = options.secondGeneration ?? generation
       return result
     },
-    notify: (message, kind) => { void message; void kind },
+    pendingInputReader: pendingReaderFor(() => options.first),
+    writer: writerFor(() => options.first),
+     notify: (message, kind) => { void message; void kind },
     restoreDraft: () => true,
     createDraft: (text) => ({ id: `draft:${text}`, text }),
     staleNotice: () => 'changed while sending',
@@ -84,10 +145,14 @@ function makeDeps(options: {
   generation?: () => number
   notices?: string[]
   restored?: string[]
+  barrier?: SessionOperationBarrier
 }): SteerDeps {
   return {
     currentAgent: options.agent,
     currentGeneration: options.generation ?? (() => 1),
+    pendingInputReader: pendingReaderFor(options.agent),
+    writer: writerFor(options.agent),
+     barrier: options.barrier,
     notify: (message, kind) => options.notices?.push(`${kind}: ${message}`),
     restoreDraft: (text) => { options.restored?.push(text); return true },
     createDraft: (text) => ({ id: `draft:${text}`, text }),
@@ -145,15 +210,43 @@ test('a generation bump between the snapshot and the delivery aborts stale and r
 
 // ── delivery semantics ──────────────────────────────────────────────────────
 
-test('an unchanged state steers exactly the confirmed messages and removes only them', async () => {
+test('a non-empty draft takes priority over queued occurrences', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const outcome = await steerAll(makeDeps({ agent: () => agent }), 'draft', { draftHasPayload: true })
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(agent.state.nextTurn.map(message => message.id), ['a', 'b'], 'the queue remains untouched')
+  assert.deepEqual(agent.steered.map(m => m.id), ['draft:draft'], 'only the draft is steered')
+  assert.deepEqual(agent.followed, [], 'the running draft does not queue')
+})
+
+test('an empty draft steers exactly the confirmed queue occurrences and removes only them', async () => {
   const agent = fakeAgent(['a', 'b'])
   const notices: string[] = []
-  const outcome = await steerAll(makeDeps({ agent: () => agent, notices }), 'draft')
+  const outcome = await steerAll(makeDeps({ agent: () => agent, notices }), '', { draftHasPayload: false })
   assert.equal(outcome, 'ok')
   assert.deepEqual(agent.state.nextTurn, [], 'confirmed messages are removed')
-  assert.equal(agent.steered.length, 3, 'two queued messages + the draft')
-  assert.deepEqual(agent.steered.map(m => m.id), ['a', 'b', 'draft:draft'])
-  assert.ok(notices.some(note => note.includes('steering 3 messages')), notices.join(' | '))
+  assert.equal(agent.steered.length, 2, 'both queued messages are steered')
+  assert.deepEqual(agent.steered.map(m => m.id), ['a', 'b'])
+  assert.ok(notices.some(note => note.includes('steering 2 messages')), notices.join(' | '))
+})
+
+test('empty-draft queue sweep ignores steering and context placements', async () => {
+  const agent = fakeAgent(['queued'])
+  agent.state.nextStep.push({ id: 'already-steering' })
+  const deps = makeDeps({ agent: () => agent })
+  deps.pendingInputReader = {
+    snapshot: () => ({
+      running: true,
+      items: [
+        { id: 'queued', placement: 'queued', content: [] },
+        { id: 'already-steering', placement: 'steering', content: [] },
+        { id: 'context', placement: 'context', content: [] },
+      ],
+    }),
+  }
+  const outcome = await steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(agent.steered.map(message => message.id), ['queued'])
 })
 
 test('an empty queue falls back to the classic single-draft steer', async () => {
@@ -224,24 +317,231 @@ test('P0: empty QUEUE + non-empty draft still steers (the classic single-draft p
   assert.deepEqual(agent.steered.map(m => m.text), ['hello'])
 })
 
-test('P0: empty draft + NON-empty queue steers the queue exactly as before (queue-only Ctrl+S)', async () => {
+test('P0: empty draft + NON-empty queue steers only while the turn accepts steering', async () => {
   for (const status of ['idle', 'running'] as const) {
     const agent = fakeAgent(['A', 'B'])
     agent.status = status
     const outcome = await steerAll(makeDeps({ agent: () => agent }), '', { draftHasPayload: false })
     assert.equal(outcome, 'ok')
-    assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B'], `${status}: both queued messages steered in order`)
+    assert.deepEqual(agent.steered.map(m => m.id), status === 'running' ? ['A', 'B'] : [], `${status}: dsh-web convergence never replays unavailable queue items`)
     assert.deepEqual(agent.followed, [], `${status}: a queue batch never follows up`)
-    assert.deepEqual(agent.state.nextTurn, [], `${status}: confirmed entries removed`)
+    assert.deepEqual(agent.state.nextTurn, status === 'running' ? [] : [{ id: 'A' }, { id: 'B' }], `${status}: unavailable queue items remain pending`)
   }
 })
 
-test('P0: empty draft + queue [A,B] + draft C keeps A,B,C order (queue + draft)', async () => {
+test('idle empty-draft queue steering does not call the occurrence writer', async () => {
+  const agent = fakeAgent(['A'])
+  agent.status = 'idle'
+  let writes = 0
+  const deps = makeDeps({ agent: () => agent })
+  deps.writer = {
+    ...deps.writer,
+    updateQueue: async () => {
+      writes += 1
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.equal(writes, 0, 'an idle empty-draft gesture stops before occurrence writes')
+  assert.deepEqual(agent.state.nextTurn, [{ id: 'A' }])
+})
+
+// ── parked next-step steering: the empty-Ctrl+S recovery notice ──────────────
+
+test('hasParkedSteering requires idle AND a steering occurrence (context/queued never count)', () => {
+  const item = (placement: 'queued' | 'steering' | 'context'): { id: string; placement: 'queued' | 'steering' | 'context'; content: [] } =>
+    ({ id: placement, placement, content: [] })
+  assert.equal(hasParkedSteering({ running: false, items: [item('steering')] }), true)
+  assert.equal(hasParkedSteering({ running: true, items: [item('steering')] }), false, 'a running steer is active, not parked')
+  assert.equal(hasParkedSteering({ running: false, items: [item('context')] }), false, 'context never enters the pending USER surface')
+  assert.equal(hasParkedSteering({ running: false, items: [item('queued')] }), false, 'a queued occurrence is not parked steering')
+  assert.equal(hasParkedSteering({ running: false, items: [] }), false)
+})
+
+test('parked steering: an empty Ctrl+S explains the recovery and writes NOTHING', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  agent.state.nextStep.push({ id: 'parked-a' })
+  const notices: string[] = []
+  const writes: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices })
+  deps.writer = {
+    prompt: async () => { writes.push('prompt'); return { kind: 'committed' as const, value: undefined } },
+    updateQueue: async () => { writes.push('updateQueue'); return { kind: 'committed' as const, value: undefined } },
+  }
+  const outcome = await steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(writes, [], 'the recovery notice must never reach the writer')
+  assert.deepEqual(agent.steered, [], 'the parked occurrence is never re-steered')
+  assert.deepEqual(agent.followed, [], 'the parked occurrence is never replayed as a followup')
+  assert.deepEqual(agent.state.nextStep, [{ id: 'parked-a' }], 'the parked occurrence stays in the inbox, identity unchanged')
+  assert.deepEqual(notices, [`info: ${PARKED_STEERING_NOTICE}`], 'exactly one info recovery notice')
+})
+
+test('parked steering + empty Ctrl+S is a CONTRACT: explain the recovery, never replay or fake-resume', async () => {
+  // A future maintainer reads THIS test as the rule: the empty Ctrl+S
+  // recovery is an explanation, not a remove/resend. Assert every write seam
+  // and the inbox removal count are untouched.
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  agent.state.nextStep.push({ id: 'parked-contract' })
+  let removals = 0
+  const originalRemove = agent.inbox.remove.bind(agent.inbox)
+  ;(agent.inbox as { remove: (id: string) => void }).remove = (id: string) => { removals += 1; originalRemove(id) }
+  let prompts = 0
+  let queueWrites = 0
+  const deps = makeDeps({ agent: () => agent })
+  deps.writer = {
+    prompt: async () => { prompts += 1; return { kind: 'committed' as const, value: undefined } },
+    updateQueue: async () => { queueWrites += 1; return { kind: 'committed' as const, value: undefined } },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.equal(prompts, 0, 'no prompt')
+  assert.equal(queueWrites, 0, 'no updateQueue')
+  assert.equal(removals, 0, 'no inbox remove')
+  assert.deepEqual(agent.steered, [], 'no re-steer')
+  assert.deepEqual(agent.followed, [], 'no followup')
+  assert.deepEqual(agent.state.nextStep, [{ id: 'parked-contract' }])
+})
+
+test('plain idle empty Ctrl+S stays silent: no notice without a parked steering occurrence', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  const notices: string[] = []
+  const outcome = await steerAll(makeDeps({ agent: () => agent, notices }), '', { draftHasPayload: false })
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(notices, [], 'an ordinary idle no-op must not add notice noise')
+})
+
+test('a context occurrence must not enter the parked-steering recovery surface', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices })
+  deps.pendingInputReader = {
+    snapshot: () => ({ running: false, items: [{ id: 'ctx', placement: 'context' as const, content: [] }] }),
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.deepEqual(notices, [])
+})
+
+test('whitespace-only no-payload queue steering restores on a non-commit', async () => {
+  const agent = fakeAgent(['A'])
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    ...deps.writer,
+    updateQueue: async () => ({
+      kind: 'rejected' as const,
+      error: { code: 'session/write-failed', message: 'write failed' },
+    }),
+  }
+
+  const outcome = await steerAll(deps, '   ', { draftHasPayload: false })
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(restored, ['   '], 'a non-payload whitespace draft is still restored after a failed queue write')
+  assert.deepEqual(agent.steered, [], 'a rejected queue write never claims delivery')
+  assert.deepEqual(agent.followed, [], 'the whitespace gesture never falls through to a child prompt')
+})
+
+test('whitespace-only no-payload steering restores when the child authority is unavailable', async () => {
+  const restored: string[] = []
+  const outcome = await steerAll(
+    makeDeps({ agent: () => undefined, restored }),
+    '   ',
+    { draftHasPayload: false },
+  )
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(restored, ['   '], 'a missing child cannot swallow the cleared whitespace draft')
+})
+
+test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier turn', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const barrier = new SessionOperationBarrier()
+  const events: string[] = []
+  let releaseFirst!: () => void
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+  const deps = makeDeps({ agent: () => agent, barrier })
+  deps.writer = {
+    prompt: async () => {
+      events.push('draft')
+      return { kind: 'committed' as const, value: undefined }
+    },
+    updateQueue: async (_sessionId, messageId) => {
+      events.push(`queued:${messageId}:start`)
+
+      await firstGate
+      agent.inbox.remove(messageId)
+      events.push(`queued:${messageId}:end`)
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
+
+  const steering = steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(barrier.activeWriters, 1, 'the whole FIFO sweep enters the barrier before it settles')
+  let transitionRan = false
+  const transition = barrier.runTransition(async () => { transitionRan = true; events.push('transition') })
+  await Promise.resolve()
+  assert.equal(transitionRan, false, 'a transition waits for the complete FIFO sweep')
+  releaseFirst()
+  assert.equal(await steering, 'ok')
+  await transition
+  assert.deepEqual(events, [
+    'queued:a:start',
+    'queued:a:end',
+    'queued:b:start',
+    'queued:b:end',
+    'transition',
+  ])
+})
+
+test('a child queue sweep stops before the next occurrence after a same-id Agent rollover', async () => {
+  const oldAgent = fakeAgent(['a', 'b'])
+  const replacement = fakeAgent(['b'], oldAgent.session.id)
+  let current: FakeAgent = oldAgent
+  const deps = makeDeps({ agent: () => current })
+  const baseWriter = writerFor(() => current)
+  deps.writer = {
+    ...baseWriter,
+    updateQueue: async (sessionId, messageId) => {
+      const outcome = await baseWriter.updateQueue(sessionId, messageId, { kind: 'steer' })
+      current = replacement
+      return outcome
+    },
+  }
+
+  const outcome = await steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(oldAgent.steered.map(message => message.id), ['a'], 'the old child receives only the first occurrence')
+  assert.deepEqual(replacement.steered, [], 'the replacement child is never written by the old sweep')
+})
+
+test('a child queue sweep stops before the next occurrence after viewer exit', async () => {
+  const child = fakeAgent(['a', 'b'])
+  let current: FakeAgent | undefined = child
+  const deps = makeDeps({ agent: () => current })
+  const fixedWriter = writerFor(() => child)
+  deps.writer = {
+    ...fixedWriter,
+    updateQueue: async (sessionId, messageId) => {
+      const outcome = await fixedWriter.updateQueue(sessionId, messageId, { kind: 'steer' })
+      current = undefined
+      return outcome
+    },
+  }
+
+  const outcome = await steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(child.steered.map(message => message.id), ['a'], 'closing the viewer fences the next child write')
+})
+
+test('P0: non-empty draft takes priority over queue [A,B] and steers only draft C', async () => {
   const agent = fakeAgent(['A', 'B'])
   agent.status = 'running'
   const outcome = await steerAll(makeDeps({ agent: () => agent }), 'C', { draftHasPayload: true })
   assert.equal(outcome, 'ok')
-  assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B', 'draft:C'])
+  assert.deepEqual(agent.steered.map(m => m.id), ['draft:C'])
+  assert.deepEqual(agent.state.nextTurn.map(message => message.id), ['A', 'B'])
 })
 
 // ── runner Gate A (steerHasPayload): the empty-Ctrl+S gate, headless-pinned ───────────────
@@ -275,19 +575,18 @@ test('Gate A: an undefined verdict is a VERBATIM pass-through (legacy callers ke
   assert.equal(steerHasPayload(undefined, { onlyDraft: true, queuedCount: 0, liveAgent: true }), true)
 })
 
-test('P0: the includeDraft verdict honors an EXPLICIT payload claim over text.trim()', async () => {
-  // The new contract: draftHasPayload is the runner's authoritative verdict
-  // (it owns shell/image semantics — a future out-of-band non-text payload
-  // with text='' can claim payload=TRUE). The queue-non-empty branch must
-  // include the draft when the verdict says so, NEVER fall back to
-  // text.trim() — otherwise payload=true + text='' + queue=[A,B] would drop
-  // the draft (inconsistent with queue=[] which creates it).
+test('P0: an EXPLICIT payload claim takes priority over the queue even with empty text', async () => {
+  // The runner owns shell/image semantics: an attachment-only draft can have
+  // text='' and still claim payload=TRUE. That payload-bearing draft is the
+  // whole gesture; the queued occurrences remain untouched.
   const agent = fakeAgent(['A', 'B'])
   agent.status = 'running'
   const outcome = await steerAll(makeDeps({ agent: () => agent }), '', { draftHasPayload: true })
   assert.equal(outcome, 'ok')
-  assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B', 'draft:'],
-    'payload=true + text="" must include the empty-text draft as a payload message')
+  assert.deepEqual(agent.steered.map(m => m.id), ['draft:'],
+    'payload=true + text="" steers the empty-text draft alone')
+  assert.deepEqual(agent.state.nextTurn.map(message => message.id), ['A', 'B'],
+    'payload=true leaves the queue untouched')
 })
 
 test('P0: draftHasPayload=false + text non-empty + queue non-empty drops the draft (verdict wins)', async () => {
@@ -302,13 +601,14 @@ test('P0: draftHasPayload=false + text non-empty + queue non-empty drops the dra
     'verdict=false never rides the draft even when text is non-empty')
 })
 
-test('P0: draftHasPayload undefined keeps the historical semantics (the text IS a payload)', async () => {
+test('P0: draftHasPayload undefined derives an empty draft and sweeps the queue', async () => {
   const agent = fakeAgent(['a'])
   agent.status = 'running'
-  // No explicit payload verdict: the empty text used to steer the queue.
+  // Direct callers without the runner verdict still derive an empty draft,
+  // which selects the queue-only gesture.
   const outcome = await steerAll(makeDeps({ agent: () => agent }), '')
   assert.equal(outcome, 'ok')
-  assert.deepEqual(agent.steered.map(m => m.id), ['a'], 'historical behavior preserved when the verdict is absent')
+  assert.deepEqual(agent.steered.map(m => m.id), ['a'], 'an absent verdict derives queue-only semantics for empty text')
 })
 
 test('sessionUnchanged requires the same agent object and generation', () => {
@@ -537,10 +837,18 @@ test('the fence is a no-op when no transition is in flight', async () => {
     },
   })
   const deps = makeDeps({ agent: () => spied as never })
+  deps.writer = {
+    ...deps.writer,
+    prompt: async (_sessionId, message, mode) => {
+      if (mode === 'steer') spied.steer(message)
+      else spied.followup(message)
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
   deps.fence = () => false
   const outcome = await steerAll(deps, 'draft')
   assert.equal(outcome, 'ok')
-  assert.deepEqual(writes, ['followup'], 'an idle agent takes the draft as a followup')
+  assert.deepEqual(writes, ['steer'], 'a running agent takes the draft as a steer')
 })
 
 test('refuseByTransitionFence restores the draft verbatim and notifies the retry hint', () => {
@@ -559,10 +867,86 @@ test('refuseByTransitionFence MERGES newer input below the unsent submission', (
   assert.deepEqual(notices, ['info: the draft changed while transitioning — review it before submitting again'])
 })
 
+test('dsh-web steer stops at a convergent missing occurrence without a draft prompt', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const calls: string[] = []
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    prompt: async (_sessionId, message, mode) => {
+      calls.push(`prompt:${mode}:${(message as { id: string }).id}`)
+      return { kind: 'committed' as const, value: undefined }
+    },
+    updateQueue: async (_sessionId, messageId) => {
+      calls.push(`queue:${messageId}`)
+      if (messageId === 'a') agent.inbox.remove(messageId)
+      return messageId === 'a'
+        ? { kind: 'committed' as const, value: undefined }
+        : { kind: 'rejected' as const, error: { code: 'session/steer-unavailable', message: 'steering closed' } }
+    },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.deepEqual(calls, ['queue:a', 'queue:b'], 'a queue-only gesture stops without an extra prompt')
+  assert.deepEqual(agent.state.nextTurn.map(message => message.id), ['b'], 'the unavailable occurrence remains queued')
+  assert.deepEqual(restored, [], 'a convergent queue miss does not restore or replay an old occurrence')
+})
+
+test('steer does not include queue occurrences added after its initial snapshot', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const calls: string[] = []
+  const deps = makeDeps({ agent: () => agent })
+  deps.writer = {
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async (_sessionId, messageId) => {
+      calls.push(messageId)
+      agent.inbox.remove(messageId)
+      if (messageId === 'a') agent.state.nextTurn.push({ id: 'c' })
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.deepEqual(calls, ['a', 'b'])
+  assert.deepEqual(agent.state.nextTurn.map(message => message.id), ['c'])
+})
+
+test('a genuine per-occurrence steer refusal stops the empty-draft queue sweep', async () => {
+  const agent = fakeAgent(['a'])
+  const restored: string[] = []
+  const calls: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    prompt: async () => {
+      calls.push('prompt')
+      return { kind: 'committed' as const, value: undefined }
+    },
+    updateQueue: async () => ({ kind: 'rejected' as const, error: { code: 'transport/failure', message: 'write failed' } }),
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'stale')
+  assert.deepEqual(calls, [], 'a queue-only gesture has no separate draft prompt')
+  assert.deepEqual(restored, [], 'there is no draft payload to restore')
+})
+
+test('an indeterminate per-occurrence steer stops without retrying or prompting', async () => {
+  const agent = fakeAgent(['a'])
+  const restored: string[] = []
+  const calls: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    prompt: async () => {
+      calls.push('prompt')
+      return { kind: 'committed' as const, value: undefined }
+    },
+    updateQueue: async () => ({ kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }),
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'indeterminate')
+  assert.deepEqual(calls, [], 'an indeterminate queue-only gesture has no draft prompt')
+  assert.deepEqual(restored, [], 'there is no draft payload to restore')
+})
+
 test('P1: the empty-queue classic steer delivers through the SessionWriter, never a direct agent call', async () => {
   // The empty-queue path (queue == 0 + Ctrl+S + draft) previously called
   // now.steer/now.followup DIRECTLY, bypassing the semantic port. It must
-  // go through the writer seam: writer.steer/writer.followup exactly once,
+  // go through the writer seam: writer.prompt with an explicit mode exactly once,
   // and the agent's own steer/followup NEVER called.
   for (const status of ['running', 'idle'] as const) {
     const agent = fakeAgent([])
@@ -570,18 +954,58 @@ test('P1: the empty-queue classic steer delivers through the SessionWriter, neve
     const writerCalls: string[] = []
     const deps = makeDeps({ agent: () => agent })
     deps.writer = {
-      steer: (sessionId, messages) => { writerCalls.push(`steer:${sessionId}:${(messages[0] as { id: string }).id}`) },
-      followup: (sessionId, message) => { writerCalls.push(`followup:${sessionId}:${(message as { id: string }).id}`) },
-      dequeue: () => { writerCalls.push('dequeue') },
+      prompt: async (sessionId, message, mode) => {
+        writerCalls.push(`${mode}:${sessionId}:${(message as { id: string }).id}`)
+        return { kind: 'committed' as const, value: undefined }
+      },
+      updateQueue: async () => {
+        writerCalls.push('updateQueue')
+        return { kind: 'committed' as const, value: undefined }
+      },
     }
     const outcome = await steerAll(deps, 'hello')
     assert.equal(outcome, 'ok')
     assert.equal(agent.steered.length, 0, `${status}: the agent's own steer is NEVER called directly`)
     assert.equal(agent.followed.length, 0, `${status}: the agent's own followup is NEVER called directly`)
     if (status === 'running') {
-      assert.deepEqual(writerCalls, ['steer:session-steer:draft:hello'], 'running → writer.steer exactly once')
+      assert.deepEqual(writerCalls, ['steer:session-steer:draft:hello'], 'running → writer.prompt(steer) exactly once')
     } else {
-      assert.deepEqual(writerCalls, ['followup:session-steer:draft:hello'], 'idle → writer.followup exactly once')
+      assert.deepEqual(writerCalls, ['queue:session-steer:draft:hello'], 'idle → writer.prompt(queue) exactly once')
     }
   }
+})
+
+test('semantic steer rejection restores the draft and does not claim delivery', async () => {
+  const agent = fakeAgent([])
+  const restored: string[] = []
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored, notices })
+  deps.writer = {
+    prompt: async () => ({ kind: 'rejected' as const, error: { code: 'session/not-found', message: 'session is gone' } }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'stale')
+  assert.deepEqual(restored, ['draft'])
+  assert.deepEqual(agent.steered, [])
+  assert.deepEqual(agent.followed, [])
+  assert.deepEqual(notices, ['error: changed while sending'])
+})
+
+test('semantic steer indeterminate outcome stays absent and never retries', async () => {
+  const agent = fakeAgent([])
+  const restored: string[] = []
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored, notices })
+  let calls = 0
+  deps.writer = {
+    prompt: async () => {
+      calls += 1
+      return { kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }
+    },
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'indeterminate')
+  assert.equal(calls, 1)
+  assert.deepEqual(restored, [])
+  assert.deepEqual(notices, ['error: the session write outcome is indeterminate — do not retry automatically'])
 })

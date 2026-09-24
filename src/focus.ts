@@ -3,9 +3,9 @@
  *
  * Focus Mode is a presentation + behavioral-policy feature: the session log
  * stays lossless and the TUI only PROJECTS turn-intermediate activity into a
- * live Thought block. This module owns the ONE authoritative runtime state
- * (`FocusState.enabled`) and the prompt section text; the projection itself
- * lives in focus-activity.ts and the TUI surface in tui-app.ts.
+ * live Thought block. This module reads the shared DisplayState for the
+ * Focus behavioral policy; the projection itself lives in focus-activity.ts
+ * and the TUI surface in tui-app.ts.
  *
  * The prompt section is installed once per composed agent through
  * {@link installFocusPrompt} and reads the shared state on every assembly,
@@ -16,11 +16,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Diag } from './diag.ts'
-
-/** The single authoritative Focus runtime state (plan §5). */
-export interface FocusState {
-  enabled: boolean
-}
+import { isFocusDisplayPreset, type DisplayState } from './display-preset.ts'
 
 /** The system-prompt section name: TUI-private, never a host/preset name. */
 export const FOCUS_SECTION_NAME = 'tui:focus-mode'
@@ -32,20 +28,16 @@ export const FOCUS_SECTION_ORDER = 90
 /**
  * The model-facing Focus instruction (plan §4): the user only sees the final
  * text message of each response, so mid-turn narration is wasted and
- * everything the user needs must land in the final message.
+ * everything the user needs must land in the final message. Questions and
+ * background work are explicit exceptions to the old hidden-context assumption:
+ * both need truthful, self-contained visible communication.
  */
 export const FOCUS_MODE_PROMPT = `# Focus mode
-The user has focus mode enabled. They only see your final text message in each response — not tool calls, tool results, or any text you write between tool calls. Anything you say mid-turn is not seen, so don't narrate progress between tool calls. Put everything the user needs into your final message: what you investigated, what you found, what you changed, decisions you made, and what's next. Do not assume they saw earlier output.`
+The user has focus mode enabled. They only see your final text message in each response — not tool calls, tool results, or any text you write between tool calls. Intermediate assistant text is not visible. Progress-only intermediate assistant messages cannot reach the user on this surface, so continue working instead of generating them. Put the information the user needs into the final visible message: the outcome, important findings, changes made, relevant decisions, and anything still pending. Summarize hidden work rather than replaying the full hidden process. Do not assume they saw earlier output.
 
-/**
- * Defensive normalization of the persisted `focusMode` value: anything that
- * is not exactly `'on'` restores to `'off'` (an invalid persisted value must
- * never crash the runner or flip Focus on).
- * @param value - the persisted settings value, undefined when absent.
- */
-export function focusModeOf(value: string | undefined): 'on' | 'off' {
-  return value === 'on' ? 'on' : 'off'
-}
+When you need user input, approval, or a decision, assume the user did not see hidden reasoning, tool calls, tool results, or mid-turn narration. Make the question self-contained: state what input or decision is needed and include the minimum context required to answer it. Do not refer to hidden context with phrases such as "as above", "the issue I mentioned", "that plan", or "the previous result", and do not dump the full hidden process merely to reconstruct context.
+
+Continue useful work while independent background work runs, and wait in the foreground only when the immediate next action depends on that result. Do not claim the user's requested work is fully complete while a required background result is unresolved. If the turn ends first, make the visible final text a checkpoint that states what remains pending and what has already been established; do not pretend the whole request is complete or promise that a later wake is guaranteed.`
 
 /** The dsh-system-prompt service surface the focus section needs (structural
  * — the bundle never imports dsh-system-prompt as a dependency). */
@@ -60,9 +52,9 @@ export interface SystemPromptLike {
 /**
  * Install the Focus prompt section on one agent scope, reading the shared
  * state at EVERY assembly (a provider, not a static snapshot). The section
- * is registered exactly once per composed agent; `/focus on|off` only flips
- * `focusState.enabled`, so the next model step's system-prompt assembly sees
- * the new value without recreating the agent or the session.
+ * is registered exactly once per composed agent; `/display` and `/focus`
+ * mutate the shared DisplayState, so the next model step's system-prompt
+ * assembly sees the new value without recreating the agent or the session.
  *
  * The section is deliberately NOT `complete` (it must never replace the
  * harness identity / persona / tool guidance) and is NOT dynamic context
@@ -72,13 +64,13 @@ export interface SystemPromptLike {
  * A missing systemPrompt service degrades gracefully: the agent still runs
  * and the TUI projection still works; the absence is recorded in diagnostics.
  * @param agentCtx - the composed agent's scoped context.
- * @param focusState - the shared runtime state (the single source of truth).
+ * @param displayState - the shared display state (the single source of truth).
  * @param diag - the diagnostics channel, when the caller has one.
  * @returns the exact Cordis effect disposer, when the service was available.
  */
 export function installFocusPrompt(
   agentCtx: Context,
-  focusState: FocusState,
+  displayState: DisplayState,
   diag?: Diag,
 ): (() => void) | undefined {
   const systemPrompt = agentCtx.get('systemPrompt') as SystemPromptLike | undefined
@@ -90,7 +82,7 @@ export function installFocusPrompt(
     return systemPrompt.section({
       name: FOCUS_SECTION_NAME,
       order: FOCUS_SECTION_ORDER,
-      text: () => (focusState.enabled ? FOCUS_MODE_PROMPT : ''),
+      text: () => (isFocusDisplayPreset(displayState.preset) ? FOCUS_MODE_PROMPT : ''),
     })
   } catch (error) {
     // A throwing registration must not kill the TUI (the section registry

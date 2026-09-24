@@ -141,6 +141,19 @@ function isDshFamilyPackage(name) {
   return name === DSH_CLI_PACKAGE || name.startsWith('@deepseek-ai/dsh-')
 }
 
+/**
+ * Normalize the TUI `packageJson` option into a manifest object: an explicit
+ * path, an explicit manifest, or this repository's own `package.json`. One
+ * helper so the npm default target and the source-distribution validation can
+ * never disagree about what "the caller's package.json" means.
+ */
+function tuiPackageManifest(value) {
+  if (value === undefined) return readJson(join(PACKAGE_ROOT, 'package.json'), 'package.json')
+  return typeof value === 'string'
+    ? readJson(resolve(value), 'package.json')
+    : objectValue(value, 'TUI package.json')
+}
+
 /** Return whether a dependency name belongs to the published DSH family. */
 export function isDshPackage(name) {
   return isDshFamilyPackage(name)
@@ -416,11 +429,7 @@ export function validateSourceDistribution(input, options = {}) {
   const listedPaths = new Set([...packages.values()].map(entry => resolve(entry.path)))
   const unlistedTarballs = tgzFiles(directory).filter(path => !listedPaths.has(resolve(path)))
   if (unlistedTarballs.length > 0) fail(`DSH distribution contains unlisted tarball(s): ${unlistedTarballs.join(', ')}`)
-  const packageJson = options.packageJson === undefined
-    ? readJson(join(PACKAGE_ROOT, 'package.json'), 'package.json')
-    : typeof options.packageJson === 'string'
-      ? readJson(resolve(options.packageJson), 'package.json')
-      : objectValue(options.packageJson, 'TUI package.json')
+  const packageJson = tuiPackageManifest(options.packageJson)
   const required = options.requiredPackages ?? requiredDshPackages(packageJson)
   const missing = required.filter(name => !packages.has(name))
   if (missing.length > 0) fail(`DSH distribution is missing TUI-required package(s): ${missing.join(', ')}`)
@@ -493,11 +502,64 @@ export function loadDshDistribution({
     return distribution
   }
   if (mode !== 'npm') fail(`unsupported DSH distribution mode ${mode}; expected source or npm`)
-  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? '0.1.2-alpha.2')
+  // The declared package.json devDependency is the authoritative npm target:
+  // a hard-coded historical default would silently verify/install an obsolete
+  // family for any caller that omits the version. The caller's own manifest (a
+  // path or an object) wins over this repository's, so a consumer workspace is
+  // never verified against the wrong declared DSH.
+  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? npmDshVersion(tuiPackageManifest(packageJson)))
 }
 
-/** Return temporary pnpm override values for every packed DSH package. */
-export function buildDshOverrides(distribution) {
+/**
+ * The two root overrides that pin the whole published DSH family to one exact
+ * version. DSH publishes `@deepseek-ai/dsh` and every `@deepseek-ai/dsh-*`
+ * sibling at one version per release, but the CLI's own dependency edges are
+ * caret ranges (`^0.1.6-alpha.2`), so a fresh isolated install can otherwise
+ * resolve a newer, ABI-incompatible sibling — the `0.1.6-alpha.2` app-boot that
+ * dropped `watchUserPatches`, for example. The two keys mirror
+ * {@link isDshPackage}'s family definition so `@deepseek-ai/dsh` itself stays
+ * inside the same pin instead of remaining one exception.
+ */
+export function npmDshFamilyOverrides(version) {
+  const exact = assertVersion(stringValue(version, 'npm DSH family version'), 'npm DSH family version')
+  return {
+    [DSH_CLI_PACKAGE]: exact,
+    '@deepseek-ai/dsh-*': exact,
+  }
+}
+
+/**
+ * Return a copy of an install environment with every minimum-release-age
+ * setting removed (case-insensitive; pnpm reads both the `npm_config_` and
+ * `pnpm_config_` spellings).
+ *
+ * The exact-family RESOLUTION step must run through this: with a
+ * minimum-release-age setting present, pnpm was observed to ignore the family
+ * `overrides` entirely, so the CLI's caret family edges re-opened to a newer
+ * sibling. Removing the settings is deliberate isolation of the resolve
+ * phase's configuration source, not a statement about pnpm internals. A frozen
+ * realization step needs no resolution, so it may keep the policy.
+ */
+export function withoutMinimumReleaseAge(env) {
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => !/^(?:npm|pnpm)_config_minimum_release_age$/iu.test(key)),
+  )
+}
+
+/**
+ * Return temporary pnpm override values for one DSH distribution.
+ *
+ * A source pack pins every packed package to its local tarball. An npm
+ * distribution pins the whole family to the exact version ONLY when the caller
+ * explicitly declared "verify this exact family" (`npmFamilyPin`): the ordinary
+ * frozen-lockfile lane owns its own resolution and must not be rewritten.
+ * @param distribution - normalized DSH distribution.
+ * @param options - `npmFamilyPin` opts an npm distribution into the exact pin.
+ */
+export function buildDshOverrides(distribution, options = {}) {
+  if (distribution?.kind === 'npm') {
+    return options.npmFamilyPin === true ? npmDshFamilyOverrides(distribution.version) : {}
+  }
   if (distribution?.kind !== 'source-pack') return {}
   const overrides = {}
   for (const [name, packageEntry] of distribution.packages) {
@@ -517,8 +579,15 @@ function overrideYaml(overrides) {
   return lines.join('\n')
 }
 
-/** Write source-only overrides into an ephemeral pnpm workspace file. */
-export function writeDshWorkspaceOverrides(workspaceDir, distribution, fileName = 'pnpm-workspace.yaml') {
+/**
+ * Write the managed DSH override block into an ephemeral pnpm workspace file.
+ * Source mode pins the packed family to local tarballs; an npm distribution
+ * writes the exact-family pin only when `options.npmFamilyPin` is set. The
+ * block is delimited by the managed markers, so a previous block is replaced
+ * instead of nested (pnpm reads root `overrides` from this file, not from
+ * package.json).
+ */
+export function writeDshWorkspaceOverrides(workspaceDir, distribution, fileName = 'pnpm-workspace.yaml', options = {}) {
   const path = join(resolve(workspaceDir), fileName)
   const existed = existsSync(path)
   const current = existed ? readFileSync(path, 'utf8') : 'packages:\n- packages/*\n'
@@ -531,14 +600,16 @@ export function writeDshWorkspaceOverrides(workspaceDir, distribution, fileName 
     const after = current.slice(end + SOURCE_OVERRIDE_END.length).replace(/^\s*\n/u, '')
     base += after
   }
-  const overrides = distribution?.kind === 'source-pack' ? buildDshOverrides(distribution) : {}
+  const overrides = buildDshOverrides(distribution, options)
   try {
-    if (distribution?.kind === 'source-pack') {
-      if (Object.keys(overrides).length === 0) fail('source DSH distribution produced no overrides')
+    if (distribution?.kind === 'source-pack' && Object.keys(overrides).length === 0) {
+      fail('source DSH distribution produced no overrides')
+    }
+    if (Object.keys(overrides).length === 0) {
+      writeFileSync(path, base, 'utf8')
+    } else {
       const next = `${base.trimEnd()}\n${overrideYaml(overrides)}\n`
       writeFileSync(path, next, 'utf8')
-    } else {
-      writeFileSync(path, base, 'utf8')
     }
   } catch (error) {
     try {
@@ -575,7 +646,7 @@ function packageSpec(distribution, name) {
 export function prepareDshInstall(distribution, targetDir, options = {}) {
   const directory = resolve(targetDir)
   if (!existsSync(directory)) fail(`DSH install target is missing: ${directory}`)
-  const overrides = buildDshOverrides(distribution)
+  const overrides = buildDshOverrides(distribution, options)
   const packagePath = options.packageJsonPath ?? join(directory, 'package.json')
   const materializeSourceDependencies = distribution?.kind === 'source-pack' && options.materializeSourceDependencies === true
   let workspaceFile
@@ -583,7 +654,7 @@ export function prepareDshInstall(distribution, targetDir, options = {}) {
   try {
     workspaceFile = options.workspaceFile === false
       ? undefined
-      : writeDshWorkspaceOverrides(directory, distribution, options.workspaceFile ?? 'pnpm-workspace.yaml')
+      : writeDshWorkspaceOverrides(directory, distribution, options.workspaceFile ?? 'pnpm-workspace.yaml', options)
     if (options.addCliDependency === true || materializeSourceDependencies || options.stripPackageManager === true) {
       packageJsonBackup = readFileSync(packagePath, 'utf8')
       const pkg = readJson(packagePath, 'temporary install package.json')
@@ -711,6 +782,76 @@ export function assertSourceResolution(targetDir, distribution, required = [...d
   if (distribution?.kind !== 'source-pack') return
   for (const name of required) assertSourcePackageResolution(targetDir, distribution, name)
   printDshProvenance(distribution)
+}
+
+/** The `major.minor.patch` core of one version, or `undefined` if unparseable. */
+function versionCore(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)/u.exec(version)
+  return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+/** Compare two `major.minor.patch` cores: -1 / 0 / 1. */
+function compareVersionCores(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1
+  }
+  return 0
+}
+
+/**
+ * Assert that an exact-family npm install RESOLVED only the requested version
+ * across the TARGET's release line. Scans pnpm's virtual store, so this proves
+ * the actual dependency resolution rather than the generated override file — a
+ * writer-only assertion keeps passing if pnpm ever changes how it reads
+ * `overrides`.
+ *
+ * The rule is deliberately NOT "every family package has one version": this
+ * repository legitimately carries OLDER DSH compatibility lines as transitive
+ * dependencies (`dsh-0.1.2-alpha.x`, `dsh-0.1.5-rc.x`). What is fenced is the
+ * TARGET CORE (`0.1.6`): on that core ONLY the exact target version may
+ * resolve — `0.1.6-alpha.2`, `0.1.6-rc.1` and a stable `0.1.6` are all drift —
+ * and a HIGHER core must not appear at all (the CLI's `^0.1.6-alpha.2`
+ * resolves a same-core variant such as `0.1.6` or a higher
+ * STABLE core such as `0.1.7`; the gate rejects every higher core, including a
+ * higher prerelease that default semver rules would not themselves select).
+ * Older cores are a separate
+ * upstream line and are ignored.
+ * @param targetDir - installed workspace/harness root.
+ * @param version - the one exact DSH version the target core must resolve to.
+ * @returns the installed target-core versions (exactly `[version]` on success).
+ */
+export function assertInstalledDshFamily(targetDir, version) {
+  const exact = assertVersion(stringValue(version, 'DSH npm family version'), 'DSH npm family version')
+  const modulesPath = join(resolve(targetDir), 'node_modules', '.pnpm')
+  if (!existsSync(modulesPath) || !statSync(modulesPath).isDirectory()) {
+    fail(`exact DSH family check has no pnpm virtual store: ${modulesPath}`)
+  }
+  const installed = new Set()
+  for (const entry of readdirSync(modulesPath)) {
+    // pnpm directory names are `@scope+name@version` plus a `_`-separated peer
+    // suffix; the version never contains `_`, so the capture stops correctly.
+    const match = /^@deepseek-ai\+dsh(?:-[^@]+)?@([^_]+)/iu.exec(entry)
+    if (match !== null) installed.add(match[1])
+  }
+  const targetCore = versionCore(exact)
+  const versions = [...installed]
+  const sameCore = versions.filter(installedVersion => {
+    const core = versionCore(installedVersion)
+    return core !== undefined && targetCore !== undefined && compareVersionCores(core, targetCore) === 0
+  })
+  if (!sameCore.includes(exact)) fail(`exact DSH family install contained no ${exact} package`)
+  const mismatches = sameCore.filter(installedVersion => installedVersion !== exact).sort()
+  if (mismatches.length > 0) {
+    fail(`exact DSH family install resolved ${mismatches.join(', ')} alongside ${exact}`)
+  }
+  const newer = versions.filter(installedVersion => {
+    const core = versionCore(installedVersion)
+    return core !== undefined && targetCore !== undefined && compareVersionCores(core, targetCore) > 0
+  }).sort()
+  if (newer.length > 0) {
+    fail(`exact DSH family install resolved a newer DSH line (${newer.join(', ')}) alongside ${exact}`)
+  }
+  return { versions: sameCore.sort() }
 }
 
 /** Print the provenance tuple that distinguishes source commits sharing a version. */

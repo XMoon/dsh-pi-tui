@@ -1199,5 +1199,225 @@ describe("TUI overlay non-capturing", () => {
 				tui.stop();
 			}
 		});
+
+		it("preserveOrder restores a suppressed pair without changing the visual order (X056)", async () => {
+			const terminal = new VirtualTerminal(20, 6);
+			const tui: TUI = new TuiMainScreen(terminal);
+			tui.addChild(new EmptyContent());
+			tui.start();
+			try {
+				const capturing = new FocusableOverlay(["A"]);
+				const hud = new FocusableOverlay(["H"]);
+				const capturingHandle = tui.showOverlay(capturing, { row: 0, col: 0, width: 1 });
+				const hudHandle = tui.showOverlay(hud, { row: 0, col: 0, width: 1, nonCapturing: true });
+				await renderAndFlush(tui, terminal);
+				// The capturing overlay owns the keyboard; the later nonCapturing
+				// HUD is the visual front.
+				assert.strictEqual(terminal.getViewport()[0]?.charAt(0), "H");
+				assert.strictEqual(capturingHandle.isFocused(), true);
+
+				capturingHandle.setHidden(true);
+				hudHandle.setHidden(true);
+				// INTERNAL restore (X056): visibility + keyboard WITHOUT promotion.
+				capturingHandle.setHidden(false, { preserveOrder: true });
+				hudHandle.setHidden(false, { preserveOrder: true });
+				capturingHandle.focus({ preserveOrder: true });
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(terminal.getViewport()[0]?.charAt(0), "H",
+					"the HUD must keep the visual front after the order-preserving restore");
+				assert.strictEqual(capturingHandle.isFocused(), true);
+
+				// The default (promoting) focus still brings the overlay forward.
+				capturingHandle.focus();
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(terminal.getViewport()[0]?.charAt(0), "A");
+			} finally {
+				tui.stop();
+			}
+		});
+
+		it("initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)", async () => {
+			const terminal = new VirtualTerminal(20, 6);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const editor = new FocusableOverlay(["EDITOR"]);
+			tui.addChild(new EmptyContent());
+			tui.setFocus(editor);
+			tui.start();
+			try {
+				const capturing = new FocusableOverlay(["A"]);
+				const handle = tui.showOverlay(capturing, { row: 0, col: 0, width: 1, initialFocus: false });
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(capturing.focused, false, "initialFocus:false must not focus the entry");
+				assert.strictEqual(editor.focused, true);
+
+				handle.focus();
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(handle.isFocused(), true);
+
+				handle.setHidden(true);
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(editor.focused, true);
+
+				handle.setHidden(false, { preserveOrder: true, preserveFocus: true });
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(capturing.focused, false, "preserveFocus must not take focus on show");
+				assert.strictEqual(editor.focused, true);
+
+				// The default show still focuses the capturing entry.
+				handle.setHidden(true);
+				handle.setHidden(false);
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(handle.isFocused(), true);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+});
+
+class ReentrantFocusOverlay implements Component, Focusable {
+	private lines: string[];
+	private focusedState = false;
+	/** Invoked (once) when this component loses focus. */
+	onBlurRefocus: (() => void) | undefined;
+	constructor(lines: string[]) {
+		this.lines = lines;
+	}
+	get focused(): boolean {
+		return this.focusedState;
+	}
+	set focused(value: boolean) {
+		const wasFocused = this.focusedState;
+		this.focusedState = value;
+		if (wasFocused && !value) this.onBlurRefocus?.();
+	}
+	handleInput(): void {}
+	render(): string[] {
+		return this.lines;
+	}
+	invalidate(): void {}
+}
+
+describe("TUI focus transition supersession (X056)", () => {
+	it("a focus() issued from onBlur is not overwritten by the outer transition", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const a = new ReentrantFocusOverlay(["A"]);
+			const b = new FocusableOverlay(["B"]);
+			tui.setFocus(a);
+			assert.strictEqual(a.focused, true);
+			a.onBlurRefocus = () => {
+				a.onBlurRefocus = undefined;
+				tui.setFocus(a);
+			};
+			tui.showOverlay(b, { row: 0, col: 0, width: 1 });
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(tui.getFocusedComponent(), a, "the nested focus transition wins");
+			assert.strictEqual(a.focused, true);
+			assert.strictEqual(b.focused, false);
+		} finally {
+			tui.stop();
+		}
+	});
+});
+
+describe("TUI focus transition pending-target mutation (X056)", () => {
+	it("a pending target hidden via hideOverlay from onBlur is not installed", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			tui.setFocus(editor);
+			tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				tui.hideOverlay();
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "a hideOverlay-removed target is not installed");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("an idempotently hidden pending target is not installed", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			tui.setFocus(editor);
+			const targetHandle = tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			targetHandle.setHidden(true);
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				targetHandle.setHidden(true); // idempotent: already hidden
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "a hidden pending target is not installed");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("a later release of another target does not lose an earlier pending-target release", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			const other = new FocusableOverlay(["O"]);
+			tui.setFocus(editor);
+			const targetHandle = tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			const otherHandle = tui.showOverlay(other, { row: 0, col: 0, width: 1, initialFocus: false });
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				targetHandle.unfocus();
+				otherHandle.unfocus(); // a later release must not mask the target's
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "the earlier released target stays invalidated");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("a transition to a target unfocused from onBlur is not installed", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			tui.setFocus(editor);
+			const targetHandle = tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				targetHandle.unfocus();
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "a released pending target is not installed");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
 	});
 });

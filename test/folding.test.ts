@@ -160,19 +160,19 @@ test('kitty-protocol Ctrl+O fires once per press (release/repeat do not toggle)'
     // Press: \x1b[<codepoint>;<mod>:<event>u — event 1 = press, 2 = repeat, 3 = release.
     vt.sendInput('\x1b[111;5:1u') // ctrl+o press
     await viewport(vt)
-    assert.ok(app.isToolOutputExpanded(), 'press should expand')
+    assert.ok(app.isTranscriptDetailExpanded(), 'press should expand')
     vt.sendInput('\x1b[111;5:3u') // ctrl+o release
     await viewport(vt)
-    assert.ok(app.isToolOutputExpanded(), 'release must not collapse the fold')
+    assert.ok(app.isTranscriptDetailExpanded(), 'release must not collapse the fold')
     vt.sendInput('\x1b[111;5:2u') // ctrl+o key repeat
     await viewport(vt)
-    assert.ok(app.isToolOutputExpanded(), 'key repeat must not toggle the fold')
+    assert.ok(app.isTranscriptDetailExpanded(), 'key repeat must not toggle the fold')
     vt.sendInput('\x1b[111;5:1u') // press again
     await viewport(vt)
-    assert.ok(!app.isToolOutputExpanded(), 'second press should collapse')
+    assert.ok(!app.isTranscriptDetailExpanded(), 'second press should collapse')
     vt.sendInput('\x1b[111;5:3u')
     await viewport(vt)
-    assert.ok(!app.isToolOutputExpanded(), 'release after the second press must not expand')
+    assert.ok(!app.isTranscriptDetailExpanded(), 'release after the second press must not expand')
   } finally {
     setKittyProtocolActive(false)
   }
@@ -294,8 +294,9 @@ test('renderTranscriptMarkdown never replays surface replacements', () => {
           step: 0,
           message: {
             id: 'msg-1' as never,
-            role: 'user',
-            content: [{ type: 'tool-result', toolCallId: 'call-1' as never, content: [{ type: 'text', text: 'ORIGINAL RESULT' }] }],
+            role: 'tool',
+            toolCallId: 'call-1' as never,
+            content: [{ type: 'text', text: 'ORIGINAL RESULT' }],
             source: { kind: 'tool', callId: 'call-1' as never },
           },
         },
@@ -310,8 +311,9 @@ test('renderTranscriptMarkdown never replays surface replacements', () => {
           step: 0,
           message: {
             id: 'msg-2' as never,
-            role: 'user',
-            content: [{ type: 'tool-result', toolCallId: 'call-1' as never, content: [{ type: 'text', text: 'PRUNED RESULT' }] }],
+            role: 'tool',
+            toolCallId: 'call-1' as never,
+            content: [{ type: 'text', text: 'PRUNED RESULT' }],
             source: { kind: 'tool', callId: 'call-1' as never },
           },
         },

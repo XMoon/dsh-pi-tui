@@ -159,13 +159,13 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const settings = fakeTuiSettings(options.busyEnter ?? 'queue', options.localShellSandbox ?? 'bypass')
   const runner: TuiCommandRunner = {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return undefined },
+        get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -179,8 +179,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -192,11 +191,10 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -218,8 +216,14 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

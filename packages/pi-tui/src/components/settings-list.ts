@@ -409,6 +409,15 @@ export class SettingsList implements Component, Focusable {
 			return result ? { ...result, focus: true } : undefined;
 		}
 
+		// The last PAINT was the submenu, but it has since closed (no repaint
+		// yet): `mouseRows` still describes the main list from BEFORE the
+		// submenu opened, so a pointer event on the still-painted submenu must
+		// be rejected rather than activate/alter a hidden main row. The next
+		// render clears `paintedSubmenuComponent` and the main map becomes
+		// authoritative again. (dsh-pi-tui divergence X042 mouse parity — the
+		// close-side counterpart of the live-but-unpainted OPEN fence above.)
+		if (this.paintedSubmenuComponent !== null) return undefined;
+
 		// The hit map is the FINAL painted geometry (after the description
 		// shrink AND the tail slice): a click must hit the row the user
 		// actually saw, never a re-derived range from maxVisible.
@@ -564,6 +573,12 @@ export class SettingsList implements Component, Focusable {
 		this.submenuGeneration++;
 		this.submenuComponent?.dispose?.();
 		this.submenuComponent = null;
+		// Consume any in-flight gesture: a press that began before the close
+		// (on the main list or the submenu) must not be completed by a later
+		// click against the main list's map — the painted-owner fence only
+		// covers FRESH events before the close repaint. (X042 mouse parity.)
+		this.mousePressedId = undefined;
+		this.mousePressedGeneration = undefined;
 		if (this.navigateAfterClose !== null) {
 			const id = this.navigateAfterClose;
 			this.navigateAfterClose = null;

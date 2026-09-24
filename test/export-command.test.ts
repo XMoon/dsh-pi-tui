@@ -19,7 +19,7 @@ import { ProcessTerminal } from '@xmoon76/pi-tui'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
-import { apply as applyRunner, type Config } from '../src/index.ts'
+import { apply as applyRunner, Config as TuiConfigSchema } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { sessionArtifactFilename, safeSessionIdSegment } from '../src/session-artifact-filename.ts'
 import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../src/client-artifact-save.ts'
@@ -54,7 +54,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return state.agent },
+        get liveAgent() { return state.agent },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -68,15 +68,13 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
@@ -87,23 +85,22 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     catalog: {
       models: {
         available: () => true,
+        loadDirectory: async () => ({ default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] }),
         listProviders: () => [],
         listModels: async () => [],
-        resolveModelInfo: async () => ({}),
         defaultSelection: () => undefined,
-        saveDefaultSelection: async () => {},
+        saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
         sessionSelection: () => undefined,
-        selectSessionModel: async (_sessionId: string, selection: { provider: string; model: string }) => selection,
-        currentSelection: () => undefined,
-        saveSelection: async () => {},
+        selectSessionModel: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { provider: '', model: '' } } }),
         discoverModels: async () => [],
         listConfigurableProviders: () => [],
       },
       presets: {
         available: () => false,
-        list: async () => [],
+        roster: async () => ({ presets: [], modeSelectionEnabled: false }),
         resolve: async () => ({}),
         defaultId: () => undefined,
+        selectSessionPreset: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { preset: '' } } }),
       },
       skills: {
         standing: async () => ({ catalog: { skills: [], complete: true } }),
@@ -187,8 +184,14 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     pendingPreset: undefined,
     effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'locked' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
@@ -806,7 +809,7 @@ async function mountRunner(
   home: string,
   harness: ReturnType<typeof makeHarness>,
   startup: { sessionId?: string; presetId?: string },
-  config: Config,
+  config: Record<string, unknown> = {},
 ) {
   ctx.provide('appExit', () => {})
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
@@ -818,7 +821,7 @@ async function mountRunner(
   ctx.provide('llm', harness.llm as never)
   ctx.provide('commands', harness.commands as never)
   ctx.provide('loader', { await: async () => {} } as never)
-  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, config))
+  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema(config as never)))
   await fiber
   await settle()
   return fiber
@@ -922,8 +925,9 @@ test('a second artifact save while one prompt is active is refused with a notice
   })
   const sessionA = { id: 'session-a', header: { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION } }
   const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
-  // Both commands stay in flight until released: two concurrent command
-  // successes can race the Save prompt (the dispatch is not serialized).
+  // Both command executions are gated so the shared submit FIFO can be
+  // observed: the second command must not enter the Host plane until the
+  // first command has settled.
   const executeGates: Array<() => void> = []
   const originalExecute = harness.commands.execute
   harness.commands.execute = async () => {
@@ -947,14 +951,24 @@ test('a second artifact save while one prompt is active is refused with a notice
   submitText(app, '/export')
   submitText(app, '/transcript')
   await settle()
-  // Release both commands: both settle successfully, then the save
-  // workflows race the prompt — the first opens the REAL prompt, the
-  // second is refused by the duplicate guard.
-  for (const release of executeGates) release()
+  // Release each command in turn. The first successful command opens the
+  // real Save Location prompt; after its submit turn is released, the second
+  // command runs and its save is refused by the duplicate guard.
+  for (let index = 0; index < 2; index += 1) {
+    for (let round = 0; round < 40 && executeGates.length <= index; round += 1) await settle()
+    assert.ok(executeGates[index], `command ${index + 1} must reach the gated Host plane`)
+    executeGates[index]!()
+    await settle()
+  }
   await settle()
-  await new Promise<void>(resolve => setTimeout(resolve, 50))
-  await settle()
-  const view = vt.getViewport().join('\n')
+  // Bounded poll for the refused-save notice: a fixed sleep raced the
+  // prompt/notice rendering under load (the flake this replaces).
+  let view = ''
+  for (let round = 0; round < 50 && !view.includes('already active'); round += 1) {
+    await new Promise<void>(resolve => setTimeout(resolve, 10))
+    await settle()
+    view = vt.getViewport().join('\n')
+  }
   assert.ok(view.includes('already active'),
     `the refused second save must notify, never silently drop:\n${view}`)
   // Cancel the first prompt (Esc) to clean up.

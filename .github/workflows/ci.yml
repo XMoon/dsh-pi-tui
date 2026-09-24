@@ -247,11 +247,45 @@ jobs:
              } >> "$GITHUB_ENV"
           fi
 
+      # The Remote parity smokes import root TypeScript projections, whose
+      # private pi-tui package export requires its local dist to exist.
+      - name: Build vendored pi-tui before Source Mode smokes
+        run: pnpm build:fork
+
       - name: Typecheck vendored pi-tui
         run: pnpm typecheck:fork
 
+      - name: Typecheck performance benchmark
+        run: pnpm typecheck:bench
+
       - name: Test vendored pi-tui
         run: pnpm test:fork
+
+      - name: Remote Session read fixture smoke
+        run: pnpm smoke:remote-session-read
+
+      - name: Remote Session same-Host parity smoke
+        run: pnpm smoke:remote-session-read-parity
+
+      - name: Remote command/skill authority parity smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-surface-authority-parity
+
+      - name: Remote task read parity smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-task-read-parity
+
+      - name: Remote presentation/history parity smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-presentation-parity
+
+      - name: D1 closure gate
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-d1-closure
+
+      - name: D2 closure smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-d2-closure
 
       # This was missing from the previous CI.
       - name: Test documentation
@@ -265,9 +299,6 @@ jobs:
       # never depends on the developer git/CI environment.
       - name: Test development tooling
         run: pnpm test:tooling
-
-      - name: Build vendored pi-tui for compatibility contract
-        run: pnpm build:fork
 
       - name: Pi component compatibility contract
         run: pnpm gate:pi-surface-compat
@@ -293,6 +324,33 @@ jobs:
         run: node scripts/naming-gate.mjs
 
   # ---------------------------------------------------------------------------
+  # Build and run the Remote Session read gates against the exact DSH version
+  # declared by package.json. The verifier creates a fresh npm workspace, so
+  # this never inherits the branch lockfile's mixed prerelease graph. A
+  # different release target is a local-only explicit compatibility probe.
+  client-family-compat:
+    name: DSH Client release-family compatibility
+    needs: dsh-context
+    if: ${{ needs.dsh-context.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Run exact current-family gates
+        run: pnpm compat:dsh:client-family
+
   # Build the ONE artifact that is tested and eventually published.
   #
   # pnpm pack invokes the package lifecycle:
@@ -322,7 +380,7 @@ jobs:
       - prepare-dsh-source
     if: ${{ always() && needs.dsh-context.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
@@ -429,6 +487,10 @@ jobs:
           else
             node scripts/dsh-source-leak-gate.mjs "$DSH_CANDIDATE"
           fi
+
+      - name: Verify the TUI startup strictness handshake
+        if: env.DSH_MODE == 'npm'
+        run: pnpm smoke:startup-strictness -- "${{ steps.package.outputs.tarball }}"
 
       - name: Upload release tarball
         uses: actions/upload-artifact@v7
@@ -918,10 +980,11 @@ jobs:
     # The pi2dsh ecosystem gate is DISABLED (see the ecosystem-compat job
     # comment) — restore `needs.ecosystem-compat.result == 'success'` and the
     # `- ecosystem-compat` need when a compatible pi2dsh release lands.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.build-and-pack.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.build-and-pack.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
+      - client-family-compat
       - release-context
       - source-checks
       - build-and-pack

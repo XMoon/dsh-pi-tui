@@ -140,6 +140,22 @@ export function findNewDebt(scanned, baseline) {
   return debt
 }
 
+/** Return baseline entries no longer present in the production scan. */
+export function findStaleBaseline(scanned, baseline) {
+  const stale = []
+  for (const [file, patterns] of Object.entries(baseline)) {
+    const current = new Set(scanned[file] ?? [])
+    if (scanned[file] === undefined) {
+      stale.push(`${file}: file`)
+      continue
+    }
+    for (const pattern of patterns) {
+      if (!current.has(pattern)) stale.push(`${file}: ${pattern}`)
+    }
+  }
+  return stale
+}
+
 function main() {
   const scanned = scanTree(join(ROOT, 'src'))
   if (process.argv.includes('--report')) {
@@ -151,13 +167,20 @@ function main() {
   }
   const baseline = loadBaseline()
   const debt = findNewDebt(scanned, baseline)
-  if (debt.length > 0) {
-    console.error('client-boundary-gate: NEW Host coupling outside the approved boundary:')
-    for (const d of debt) console.error(`  ${d}`)
+  const stale = findStaleBaseline(scanned, baseline)
+  if (debt.length > 0 || stale.length > 0) {
+    if (debt.length > 0) {
+      console.error('client-boundary-gate: NEW Host coupling outside the approved boundary:')
+      for (const d of debt) console.error(`  ${d}`)
+    }
+    if (stale.length > 0) {
+      console.error('client-boundary-gate: STALE baseline entries no longer present in src/:')
+      for (const entry of stale) console.error(`  ${entry}`)
+    }
     console.error('\nSee AGENTS.md "Server/client migration guardrails" and docs/client-server-coupling.md.')
     process.exit(1)
   }
-  console.log(`client-boundary-gate: ok (${Object.keys(scanned).length} file(s), no new Host coupling)`)
+  console.log(`client-boundary-gate: ok (${Object.keys(scanned).length} file(s), no new Host coupling or stale baseline)`)
 }
 
 if (process.argv[1] && relative(ROOT, process.argv[1]).replace(/\\/g, '/') === 'scripts/client-boundary-gate.mjs') {

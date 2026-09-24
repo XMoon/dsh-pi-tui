@@ -2,8 +2,9 @@
 /**
  * Verify the npm/DSH runtime boundary with a real candidate tarball and a
  * published below-floor runtime. The candidate must fail on the unsupported
- * runtime. The startup row names the rc.1 floor and suggests the recommended
- * published npm rc.2 upgrade target.
+ * runtime. The startup row names the current matrix floor and suggests the
+ * recommended published npm upgrade target (both derived from
+ * src/dsh-compat-matrix.json, currently the 0.1.7-rc.1 floor).
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -20,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import semver from 'semver'
 
 import { cleanupTimedOutProcessTree, pnpmExecutable } from './lib/process.mjs'
+import { COMPAT_MATRIX } from './lib/dsh-compat.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -30,9 +32,9 @@ const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 // rejection case is 0.1.1-rc.2; the exact prerelease floor is covered
 // by the startup-gate unit tests.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = '0.1.5-rc.1'
+const TARGET_DSH_VERSION = COMPAT_MATRIX.current.upgradeDsh
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
-const EXPECTED_BOUNDARY_IMPORT = /(?:@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|commands|credentials|goal|jobs|llm|llm-retry|permission-presets|plan-mode|sandbox-policy|session|session-log-export|session-persistence|session-title|settings|shell|skill|subagent|token-meter|tool-todo|tool-workflow|tools|user-approval|user-questions|tool-subagent|code-runtime-worker-thread|cordis-host-runner))(?=['"/]|$)/iu
+const EXPECTED_BOUNDARY_IMPORT = /(?:@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|commands|credentials|goal|jobs|llm|llm-retry|permission-presets|plan-mode|sandbox-policy|session|session-log-export|session-persistence|session-title|settings|shell|skill|subagent|token-meter|tool-todo|tool-workflow|tools|user-approval|user-questions|tool-subagent|cordis-host-runner))(?=['"/]|$)/iu
 
 function run(command, args, options = {}) {
   const detached = options.detached ?? process.platform !== 'win32'
@@ -125,16 +127,23 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 }
 
 // Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the published
-// npm rc.1 floor is rejected. The exact prerelease boundary is tested by
-// startup.test.ts because only the 0.1.1 line is installed by this smoke.
+// npm floor (currently 0.1.7-rc.1, derived from the compat matrix) is
+// rejected. The exact prerelease boundary is tested by startup.test.ts
+// because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {
   if (semver.lt(oldVersion, TARGET_DSH_VERSION)) {
-    return { requires: TARGET_DSH_VERSION }
+    return {
+      requires: TARGET_DSH_VERSION,
+      // Derived from the same floor the notice names, so a version-floor move
+      // cannot leave this smoke asserting a stale upgrade target.
+      upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@'
+        + TARGET_DSH_VERSION,
+    }
   }
   return undefined
 }
 
-function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
+function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION, expectedBundleVersion = undefined) {
   if (status === 0) throw new Error(`0.4 candidate unexpectedly started on DSH ${oldVersion}`)
   // Stale Source Mode wording is forbidden on EVERY outcome path — the
   // friendly advisory AND the concurrent-loader raw import fallback — so a
@@ -151,9 +160,13 @@ function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
       'dsh-pi-tui',
       `running dsh ${oldVersion}`,
       `DeepSeek Harness ${notice.requires} or later`,
-      'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2',
+      notice.upgradeCommand,
       'dsh --profile pi-tui',
     ]
+    // The candidate's OWN version label is part of the notice; when the real
+    // smoke supplies the candidate tarball's version, a stale packed bundle
+    // (built before a version bump) fails here instead of passing silently.
+    if (expectedBundleVersion !== undefined) required.push(`dsh-pi-tui v${expectedBundleVersion}`)
     for (const text of required) {
       if (!output.includes(text)) throw new Error(`boundary output is missing ${JSON.stringify(text)}:\n${output}`)
     }
@@ -163,6 +176,17 @@ function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
   // before the advisory startup notice gets to print. In that case the raw
   // import boundary is the expected evidence; do not make message ordering a
   // release requirement.
+  // A below-floor runtime that predates the declarative preset registry
+  // cannot even LOAD the profile: its own bundle loader reads
+  // `dsh.bundle.patch` as a single string and crashes on the array form the
+  // candidate ships. That crash IS the below-floor rejection for such
+  // runtimes — the candidate never starts on them, which is the contract —
+  // so it is accepted as a third recognized rejection mechanism.
+  const oldLoaderRejectedArrayPatch = output.includes('ERR_INVALID_ARG_TYPE')
+    && output.includes('dsh-app-boot')
+    && output.includes('loadProfile')
+    && /"path" argument must be of type string/u.test(output)
+  if (oldLoaderRejectedArrayPatch) return
   if (!RAW_BOUNDARY_ERROR.test(output) || !EXPECTED_BOUNDARY_IMPORT.test(output)) {
     throw new Error(`unsupported runtime failed without either advisory guidance or an expected TUI/DSH import boundary:\n${output}`)
   }
@@ -198,7 +222,7 @@ function main() {
     }
     installCandidate(dsh, tarball, harnessDir, env)
     const started = runDsh(dsh, ['--profile', 'pi-tui', '--session', 'boundary-check'], harnessDir, env)
-    assertBoundary(outputOf(started), started.status)
+    assertBoundary(outputOf(started), started.status, OLD_DSH_VERSION, pkg.version)
     console.log(`runtime boundary smoke passed — ${basename(tarball)} × DSH ${OLD_DSH_VERSION} (rejected)`)
   } finally {
     if (process.env.DSH_BOUNDARY_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })

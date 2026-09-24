@@ -174,6 +174,7 @@ sandbox-mode
 approval-policy
 plan-state
 focus-mode
+display-preset
 focused-seat
 view-scope
 cwd
@@ -194,6 +195,10 @@ version
 ext:*
 ```
 
+`display-preset` is the canonical display indicator for new layouts and shows
+`full`, `focus`, or a future available preset. `focus-mode` remains a legacy
+layout-compatibility item: it shows `focus` only when Focus is active.
+
 `ext:*` is the compatibility bridge for the legacy aggregate extension Footer
 segment. First-class extension items use their own `ext:<owner>/<id>` identity.
 
@@ -205,6 +210,7 @@ Common builtin Style sets include:
 | Model | `badge`, `plain`, `compact` |
 | Permission preset | `badge`, `plain`, `compact` |
 | Plan state | `badge`, `plain` |
+| Display preset | `plain` |
 | Working directory | `short`, `basename`, `full` |
 | Git branch | `plain`, `label` |
 | Context | `bar`, `percent`, `full` |
@@ -218,7 +224,7 @@ The `default` preset composes two rows with a left and a right zone each:
 
 ```text
 row 1 left   view-scope · permission-preset · model · tasks · cwd · git-branch · ext:*
-row 1 right  plan-state · focus-mode
+row 1 right  plan-state · display-preset
 row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed · turns-steps
 row 2 right  context:full
 ```
@@ -463,8 +469,9 @@ model=$(printf '%s' "$payload" | jq -r '.composition.model.id // "-"')
 printf '%s · %s\n' "$model" "$cwd"
 ```
 
-The protocol is versioned with `schemaVersion: 1`. Scripts should tolerate
-optional facts being absent.
+The protocol is versioned with `schemaVersion: 1`. The interaction projection
+uses the canonical `displayPreset` value; scripts should tolerate optional
+facts being absent.
 
 ## Extension-provided Footer items
 
@@ -552,7 +559,7 @@ footerLayout:
         - id: context
           format: full
       right:
-        - id: focus-mode
+        - id: display-preset
       separator:
         text: " │ "
         tone: textDim

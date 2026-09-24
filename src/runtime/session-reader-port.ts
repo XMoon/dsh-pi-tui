@@ -1,8 +1,7 @@
 /**
  * The session READ domain port (M1.3) — the semantic contract between the
  * TUI and persisted-session reads (list / projection / search), implemented
- * by `src/runtime/direct/` (Direct) today and by a Remote adapter in a later
- * milestone. The port owns the domain semantics (semantic lightweight listing,
+ * by `src/runtime/direct/` (Direct) and the experimental D1.1 Remote adapter. The port owns the domain semantics (semantic lightweight listing,
  * the combined `title`+`agentPreset` projection batch with zero-I/O cold cache
  * hints and unknown-on-miss semantics, bounded content search); the consumer
  * keeps the picker presentation.
@@ -16,8 +15,10 @@
 export interface SessionSummary {
   /** Full session id (the picker's value). */
   id: string
-  /** Creation epoch-ms, for the relative age. */
-  createdAt: number
+  /** Host-authoritative activity/order timestamp. */
+  updatedAt: number
+  /** Source-specific creation hint; Remote list rows may not provide it. */
+  createdAt?: number
   /** Absolute working directory, for the workspace group. */
   cwd?: string
   /** Effective agent preset id, when a caller has already enriched this row.
@@ -90,6 +91,11 @@ export interface SessionReader {
    * rejects with an abort-shaped error, never a normal empty result.
    */
   search(query: string, signal?: AbortSignal): Promise<SessionContentSearchPage | undefined>
+  /** Host-authoritative blankness for one Session (v2 §0.6): whether the
+   *  Session has no started turn — the /preset affordance authority. `undefined`
+   *  means the Host authority is unavailable; it is NEVER inferred from the
+   *  transcript, rendered rows, running state, or a live Agent object. */
+  blank(sessionId: string): boolean | undefined
   /** Best-effort context-pressure measurement for one session (the
    * /status context row). `undefined` = unmeasurable (service absent,
    * session unknown, or a measurement failure — never a crash). */

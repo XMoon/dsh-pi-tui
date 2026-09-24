@@ -64,12 +64,13 @@ export type IconSemantic =
   | 'context-generic'
   | 'disclosure-collapsed'
   | 'disclosure-expanded'
+  | 'section-collapsed'
+  | 'section-expanded'
   | 'working-a'
   | 'working-b'
   | 'assistant-bullet'
   | 'thinking'
   | 'compaction'
-  | 'queue-notice'
 
 /** Every semantic, for exhaustive palette/width sweeps. */
 export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
@@ -94,12 +95,13 @@ export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
   'context-generic',
   'disclosure-collapsed',
   'disclosure-expanded',
+  'section-collapsed',
+  'section-expanded',
   'working-a',
   'working-b',
   'assistant-bullet',
   'thinking',
   'compaction',
-  'queue-notice',
 ]
 
 /** The full palette: semantic × style. The emoji column is the historical
@@ -130,12 +132,13 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'context-generic': '📎',
     'disclosure-collapsed': '🐋',
     'disclosure-expanded': '🐳',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '🐋',
     'working-b': '🐳',
     'assistant-bullet': '🐋',
     thinking: '🌊',
     compaction: '🗜',
-    'queue-notice': '⏳',
   },
   symbols: {
     // EVERY glyph here is verified by the width gate to be BOTH 1 cell
@@ -163,15 +166,16 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'context-generic': '⋅',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '∙',
     'working-b': '◦',
     // The markdown bullet (the neutral bullet-operator U+2219), the
-    // thinking wave (U+223F echoes the 🌊 idea), the compaction squeeze
-    // (U+21A7) and the queued-notice hourglass (U+29D7).
+    // thinking wave (U+223F echoes the 🌊 idea), and the compaction squeeze
+    // (U+21A7).
     'assistant-bullet': '∙',
     thinking: '∿',
     compaction: '↧',
-    'queue-notice': '⧗',
   },
   minimal: {
     // Ordinary decorative icons are HIDDEN — the title + semantic color
@@ -197,17 +201,17 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     question: '?',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     // The working pair is UNIFIED with symbols — minimal removes static
     // icons, it does not change animation semantics.
     'working-a': '∙',
     'working-b': '◦',
     // Structure anchors survive minimal: the message bullet (the
-    // continuation indent depends on it) and the queued-notice hourglass
-    // (a real waiting state).
+    // continuation indent depends on it).
     'assistant-bullet': '∙',
     thinking: '',
     compaction: '',
-    'queue-notice': '⧗',
   },
 }
 
@@ -216,6 +220,13 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
  * semantic color context paints it. */
 export function iconFor(semantic: IconSemantic, style: IconStyle): string {
   return ICONS[style][semantic]
+}
+
+/** The plain section disclosure semantic used by Compact Work spans and
+ * Context clusters — deliberately distinct from the Focus root's whale
+ * identity. */
+export function sectionDisclosureSemantic(expanded: boolean): 'section-collapsed' | 'section-expanded' {
+  return expanded ? 'section-expanded' : 'section-collapsed'
 }
 
 /** The icon plus its TWO-space trailing separator when the style shows a
@@ -231,9 +242,8 @@ export function iconPrefix(semantic: IconSemantic, style: IconStyle): string {
 
 /** The icon plus its SINGLE-space trailing separator when the style shows
  * a glyph, '' when hidden — for titles whose historical layout uses one
- * space (`` `🌊 Thinking` ``, `` `🗜 Context compacted` ``, `` `⏳ notice` ``),
- * so the emoji default stays byte-identical and minimal never leaves a
- * dangling space. */
+ * space (`` `🌊 Thinking` ``, `` `🗜 Context compacted` ``), so the emoji
+ * default stays byte-identical and minimal never leaves a dangling space. */
 export function iconLead(semantic: IconSemantic, style: IconStyle): string {
   const icon = iconFor(semantic, style)
   return icon === '' ? '' : `${icon} `

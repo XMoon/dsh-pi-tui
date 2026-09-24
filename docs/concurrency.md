@@ -16,7 +16,7 @@ Session writer ownership has exactly two layers on the master baseline:
 dsh sessions cannot be shared across processes. Two dsh processes (TUI +
 web, or two TUIs) holding one session each number events from their own
 in-memory log length, so both can mint the same `seq` and corrupt the log
-at the `session/end-seed` resume marker. DSH closes the OPEN path itself:
+at the `session/end-seed` marker. DSH closes the OPEN path itself:
 `agents.create` / `agents.resume` return a `SessionHandle` whose
 `dispose()` is the structured teardown of the persistence writer, and the
 kernel-flock `SessionWriteLease` (on `session.lock`) is the cross-process
@@ -47,8 +47,9 @@ distinct:
   late subagent-viewer attach, clears it at end/restart/disposal, and never
   writes that transient baseline to the durable Session. A continuable child
   viewer follows the current registered Agent lifecycle, so a same-session
-  cold-resume after disposal rebinds to the new Agent while delayed frames from
-  the retired Agent remain fenced.
+  cold-resume after disposal rebinds to the new Agent at `turn/start` (before
+  the first assistant frame) while delayed frames from the retired Agent remain
+  fenced.
 
 The session picker consumes the semantic list and zero-I/O projection-cache
 seams only. It never observes a cold Session merely to fill a label and never
@@ -60,9 +61,9 @@ resume opens the Session.
 Without the open-time refusal, the worst corruption shape unfolds
 silently:
 
-1. Process A resumes session S and is mid-turn (an open `step/start` is the
+1. Process A opens session S and is mid-turn (an open `step/start` is the
    last event, A's in-memory seq is `n+1`).
-2. Process B resumes S. dsh's persistence `prepare` sees the open turn and
+2. Process B opens S. dsh's persistence `prepare` sees the open turn and
    **synthesizes interrupted-turn closers into the shared log** (`step/end`,
    `turn/end interrupted`, then the constructor's `session/end-seed`), all
    appended to the file at seqs `n+1…n+3`.
@@ -80,42 +81,42 @@ starts: the second opener's `resume` is refused with
 
 The DSH lease protects the session FILE from cross-process writers. A
 separate hazard is IN-PROCESS interleaving between the TUI's own
-transition paths — `/new`, `/fork`, `/rewind`, `/sessions` switch/resume
+transition paths — `/new`, `/fork`, `/rewind`, `/sessions` switch/open
 and the first-session creation. Before the gate, two such workflows could
 overlap across their awaits:
 
-- a fork child could be created — `session/created` published, persistence
-  already writing its seed — and THEN the stale check notice the surface
-  had moved; `AgentHandle.dispose()` stops the agent and removes it from
-  the live registry, but it does **not** delete the persisted session, so a
-  durable ghost branch would appear in `/sessions` that the user never
-  entered;
-- a rewind swap's identity check could pass, then yield across the
-  old-handle `dispose()` await, letting a concurrent switch land and later
-  be overwritten by the first continuation.
+- a fork child can be published while the visible surface moves; publication
+  is not rolled back because the persisted child is authoritative. The stale
+  child owner is parked in a Direct-only pool and a later `/sessions` open
+  claims it instead of starting a second writer;
+- a rewind adoption's identity check could pass, then yield across the
+  old-owner retirement await, letting a concurrent switch land and later be
+  overwritten by the first continuation. The adoption critical section now
+  rechecks the navigation identity under the gate.
 
 ### SessionTransitionGate — one transition at a time
 
-`src/transition-gate.ts` is a **process-local single-writer queue**: every
-transition path runs inside `SessionTransitionGate.run`, held from BEFORE
-the child create (for rewind) or the resume (for switches) until the
-transaction settles. Tasks are strictly FIFO; a rejected task fails its own
+`src/transition-gate.ts` is a **process-local single-writer queue**: ordinary
+session transitions run inside `SessionTransitionGate.run`, held from BEFORE
+the child create or Direct `resume` until the transaction settles. Host fork
+dispatch is intentionally outside this destructive transition queue; only a
+known-current fork adoption enters the gate for the visible handoff and
+old-owner retirement. Tasks are strictly FIFO; a rejected task fails its own
 caller and never blocks the queue; re-entering the gate from inside a task
 is refused loudly (AsyncLocalStorage detects it — re-entry would deadlock
 the queue). The runner exposes the gate as `runner.withSessionTransition(task)`.
 
-On top of the gate, all paths share ONE transaction shape
-(`runner.transitionTo` / `RewindCommitHost.transitionTo`), whose phase
-order — fixed in `src/transition.ts` (`runTransitionTo`, unit-tested) —
-is the whole point:
+On top of the gate, ordinary session transitions share ONE transaction shape
+(`runner.transitionTo`), whose phase order — fixed in `src/transition.ts`
+(`runTransitionTo`, unit-tested) — is the whole point:
 
-1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. (A `/new` or
-   `/fork` while the agent is busy WAITS for the current activity instead
-   of aborting it — the deliberate product semantics.) May fail → abort,
-   ZERO child side effects.
+1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. (A `/new`
+   while the agent is busy WAITS for the current activity instead of aborting
+   it — the deliberate product semantics.) May fail → abort, ZERO child
+   side effects.
 2. ALL TUI-owned preflight (preset/composition/stale checks — BEFORE the
    DSH boundary, so failures abort with ZERO side effects).
-3. create/resume the CHILD — may fail → abort; once it SUCCEEDS the child
+3. create/open the CHILD — may fail → abort; once it SUCCEEDS the child
    is published (`session/created` → persistence may already write its
    seed) and there is NO failure path after this point that may be
    interpreted as "the child never happened": `dispose()` stops an agent
@@ -129,24 +130,42 @@ is the whole point:
    top-level Agent retirement section); child surface/catalog work is
    best-effort and the committed child always stands.
 
-A rejected `create`/`resume` is handled WITHOUT any publication-phase
+### Fork dispatch and adoption
+
+`/fork` and `/rewind` are deliberately not ordinary transition transactions.
+They capture the source identity and navigation epoch, dispatch the semantic
+Host fork immediately without `whenIdle()` or the destructive transition gate,
+and keep the operation in the runner's pending-fork set through adoption or
+parking. The Host boundary fixes the completed-turn cut at admission, so a
+busy source is not waited to a later boundary.
+
+When a known child settles, the runner rechecks the captured identity. A newer
+navigation leaves the visible surface unchanged and parks the successful Direct
+owner; it does not roll back the published child. If the identity is current,
+a short gated handoff swaps the visible handle, bumps the generation, restores
+rewind draft state, and retires the old owner. Cleanup waits for pending forks
+before retiring current and parked Direct owners, including late published-
+with-error settlements.
+
+A rejected `create`/`open` is handled WITHOUT any publication-phase
 inference: the old session simply stays current and the user may retry.
 
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
-woken again by a followup/steer while the transition still awaits
+woken again by a prompt in `queue` or `steer` mode while the transition still awaits
 (flush, prepare, create). A write in that window would target a session
 the transition is about to retire. The transition gate therefore doubles
 as a WRITE FENCE: while a transition is in flight
 (`SessionTransitionGate.busy`), every agent-write entry point — plain
-submit, busy-Enter steer, Ctrl+S steer, the command fallback followup,
-DIRECT slash-command execution (a bare `commands.execute` that landed
-across a transition could write an agent a concurrent transition is
-about to retire — review round 27), the `!` shell submit, and the
+submit, busy-Enter prompt, Ctrl+S per-occurrence queue steering, the command fallback prompt,
+Host command execution through `HostCommandPort` (a command that landed
+across a transition could write an Agent a concurrent transition is
+about to retire), the `!` shell submit, and the
 per-skill slash invocations — refuses the write, restores/keeps the draft
 or the invocation line (or keeps the shell card) and notifies "a session
-transition is in progress". The live `/preset` swap (recompose +
-`agent-preset/selected` append) likewise runs INSIDE the transition gate,
-so the captured agent can never be quiesced mid-append (review round 27).
+transition is in progress". The live `/preset` swap (the official
+`agentPresets.select` blank check + recompose transaction + durable
+`agent-preset/selected` commit) likewise runs INSIDE the transition gate,
+so the captured Session can never be quiesced mid-swap (review round 27).
 The submission re-validation (agent object + session generation) covers
 the window AFTER the transition commits; the fence covers the window
 DURING it.
@@ -161,18 +180,151 @@ transition waits for in-flight writers to drain before it quiesces the old
 agent, and writers that start while a transition holds the barrier are
 refused (`TransitionInProgressError`).
 
+### D2.1 write settlement
+
+D2.1 makes the current Direct writes asynchronous at the semantic boundary
+without changing the ownership or ordering rules:
+
+- Ordinary input uses `SessionWriter.prompt(sessionId, message, mode)`;
+  `queue` and `steer` are explicit. Direct Agent admission exceptions settle as
+  the official `session/agent-busy` rejection (`prompt rejected` plus the
+  exception reason); only a successful Direct call settles as `committed`.
+- Ctrl+S remains one operation-barrier turn. A payload-bearing draft takes
+  priority and is sent alone through `prompt(..., 'steer')`; it never sweeps
+  the queue. With an empty draft, it reads the `PendingInputReader` snapshot,
+  selects only `placement: 'queued'`, revalidates the agent identity and
+  generation, then calls `updateQueue({ kind: 'steer' })` once per occurrence in
+  FIFO order. An empty-draft gesture is gated on `PendingInputSnapshot.running`;
+  an idle subject is left untouched. Queue races settle per occurrence rather
+  than aborting the whole sweep; missing/unavailable occurrences stop it quietly
+  without replay, and a genuine or indeterminate failure never claims
+  atomicity or retries. Direct validates edit content before Agent lookup;
+  successful removals retire user `rpcId` upload bindings. A failure after
+  removal, including retirement failure, is `indeterminate`; cancellation
+  before confirmed removal remains `cancelled`.
+- Alt+Up is a TUI-only recall-all extension: it calls
+  `updateQueue({ kind: 'remove' })` one occurrence at a time in FIFO order,
+  then stages the removed content in the editor. It is not the official in-place
+  `updateQueue({ kind: 'edit' })` operation, so the recalled draft is a new
+  human submission if the user sends it. Already-`steering` and `context`
+  placements are not recall targets. A known partial refusal restores only
+  confirmed removals; an indeterminate removal keeps every recalled
+  representation for manual review and is never retried.
+  If a session transition queues while the writer is in flight, visible
+  reconciliation waits for its outcome: a committed transition discards the
+  staged references without injecting old content, while a failed transition
+  restores the appropriate confirmed or indeterminate representation in the
+  original editor.
+- Host command execution uses `HostCommandPort` after the runner has already
+  decided that the line belongs to the Host. Cancellation-shaped adapter throws
+  settle `cancelled`; other execution throws settle `indeterminate`, so the
+  runner never restores or automatically retries a command whose side effect
+  status is unknown. A settled command result is committed separately from the
+  TUI's fallback prompt path.
+- Task Center child interruption uses `SubagentPort` with the durable direct
+  parent and child identities. The semantic writer hides Direct cancellation
+  knobs such as the user reason and inbox-preservation option.
+- Continuable viewer prompts carry the runner-resolved `queue` or `steer`
+  delivery from the child running state and `busyEnter` policy. The prompt
+  port forwards that delivery with human provenance; it does not force every
+  viewer prompt into a FIFO queue. An empty accelerated viewer submit is a
+  child-scoped queue steer-all: it snapshots only the live child’s `queued`
+  occurrences and never calls the child prompt API. If that no-payload sweep
+  cannot settle, the original child draft (including whitespace-only input) is
+  restored to the current editor or the stale child slot. Child queue occurrence
+  reads and mutations require the exact interactive continuable viewer Agent,
+  its live registry identity, and its pinned direct parent; ordinary child
+  prompts retain `SubagentPort` parent authority. The queue pane reads that
+  same active child subject while the viewer is mounted; an unavailable child
+  clears the pane rather than falling back to the parent's queue.
+
+Known-unwritten outcomes are never reported as committed. An indeterminate
+future wire result is not retried automatically or restored as if the queued
+occurrence were known-unwritten. A no-payload whitespace draft may still be
+restored as editor input; that does not restore or replay the occurrence. Direct
+normally returns confirmed `committed` or explicit
+refusal outcomes; its exceptional non-occurrence failures continue through the
+owned rejection path, while occurrence-level exceptions remain indeterminate
+because removal may already have happened.
+
+A single process-local submit FIFO covers ordinary prompts, explicit queue
+prompts, Ctrl+S per-occurrence steer sweeps, and command execution including its fallback
+prompt. Each gesture takes its turn before async preparation and releases it
+only after the semantic command/write path settles, so delayed mention or
+attachment preparation cannot let a later gesture overtake an earlier one.
+
+### D2.3 model / preset / create-open ordering
+
+- A live Session model selection is a Session WRITE: `/model` dispatches
+  `ModelCatalog.selectSessionModel` INSIDE the writer barrier
+  (`withSessionWriter`), so a transition that started first refuses the write
+  before dispatch and a transition that starts after waits for it. The picker
+  itself enters an in-place `Selecting…` state (a duplicate apply is never a
+  second commit) and the footer shows the in-flight choice as `(selecting…)`
+  while keeping the authoritative current value. The
+  outcome drives presentation: `committed` follows the authoritative Session
+  projection, `rejected`/`cancelled` returns to the model list with the Host
+  refusal, and `indeterminate` dismisses without retry and never claims the
+  requested model. `/model` and `/preset` capture their semantic SUBJECT once —
+  the Session generation PLUS the exact session identity (including `undefined`
+  for a sessionless surface) — and re-fence it after EVERY await and before any
+  UI mutation; a same-generation Session-identity drift is `superseded` exactly
+  like a generation bump, so it is dropped (no repaint, no close/open decision,
+  no notice). A dropped live Session write also makes no default-intent claim:
+  the sessionless global-default tracker is never entered by a live Session
+  write, so nothing leaks into a later fresh create.
+- Preset selection stays inside the local transition gate as coordination
+  only: the Host owns the serialized switch, the blank re-check, the recompose
+  transaction and the durable commit. The command captures the subject once
+  (the typed `/preset <id>` path binds the subject it started with, never
+  whatever Session exists when an await returns) and revalidates it after every
+  await — roster, resolve, the Host transition (before classifying the result)
+  and the follow-up catalog refresh (a superseded refresh never repaints).
+  Blankness for the picker comes from the official turn-boundary projection,
+  never the TUI transcript. `agent-preset/locked` is the
+  race-proof final authority and maps to the started-session wording; the TUI
+  never mutates its display to a rejected choice.
+- A sessionless `/model` choice is a global-default intent. The footer derives
+  its sessionless marker from that single tracker: `(selecting…)` while the
+  default write is in flight, an explicit `(unconfirmed)` once it settles
+  `indeterminate`, and NOTHING once an authoritative Host read reconciles it
+  (the persisted default either carries the choice — committed — or proves it
+  did not land); a reconciliation that restores an older still-pending intent
+  shows `(selecting…)` again. EVERY in-flight
+  write (and its fenced correction) is tracked and a fresh create AWAITS their
+  settle before dispatching, so the Direct adapter's Host-default activation
+  cannot race an older value; the wait is abort-aware, so a hung Host save can
+  never block first creation past shutdown. The fresh create consumes the
+  SETTLED persisted Host default and
+  never durable-seeds a Session choice: a committed save is observed
+  dynamically, and a FAILED latest intent is walked back in the UI (v2 §0.8.4)
+  — the create uses the actual Host default, it does NOT seed the failed
+  selection (a fabricated choice would freeze a default the user never
+  durably set, and the sticky failure would leak into later creates). The
+  global default is BEST-EFFORT Host state (plan §6.1): a fencing correction
+  that itself fails is warned and leaves the persisted default stale until the
+  next save — it never becomes durable Session authority.
+- Fresh create has NO blind retry: one Host dispatch, and a post-publication
+  create error is never reported as "the Session was never created" — the
+  requested/published identity is preserved for later reconciliation (D2.4
+  closes the full reconnect-settlement matrix). `/new` keeps the old surface
+  until the create commits.
+- Remote open is a Client selection, not Host activation:
+  `ClientSessions.open()/binding()`. It fails closed for an unaddressable
+  Session and never invents a Host resume RPC.
+
 ### Generation/stale fences
 
 - The runner keeps a **monotonic session generation**, bumped on EVERY
-  session swap (switch, `/new`, `/fork`, rewind, resume). Late async work
+  session swap (switch, `/new`, `/fork`, rewind, open). Late async work
   from the old session captures the generation it started under and
   refuses to commit state once a newer generation owns the surface.
 - The submission re-validation checks the live agent object AND the session
   generation before mutating visible state.
-- Rewind commits run a **stale gate** before anything is created: the
-  source identity captured when the picker opened must still own the
-  surface, or the selection is rejected as `stale` (a stale selection
-  never creates a child).
+- Rewind captures the source identity, generation and navigation epoch when the
+  picker opens. Selection revalidates that full identity before dispatching the
+  Host fork, so returning to the same Session id after newer navigation still
+  rejects the stale picker row without creating a child.
 
 ## Direct top-level Agent retirement
 
@@ -219,19 +371,22 @@ Where it runs:
 - **HMR / runner fiber unload**: the fiber disposer is async (Cordis
   unloads await it) and runs the SAME memoized retirement — one teardown
   promise shared by every teardown path, never four copies.
-- **Successful session transition** (`/new`, `/fork`, rewind, `/sessions`
-  switch): the pre-commit quiesce (whenIdle + flush) is preserved; AFTER
-  the commit the old owner is retired with the same fixed order, so the old
-  Agent's continuable descendants are drained and its final flush lands
-  after the drain. A failed child create never drains or disposes the old
-  owner — the old session stays current (the transaction semantics are
-  unchanged).
+- **Successful ordinary session transition** (`/new`, `/sessions` switch,
+  or open): the pre-commit quiesce (whenIdle + flush) is preserved; AFTER the
+  commit the old owner is retired with the same fixed order, so the old
+  Agent's continuable descendants are drained and its final flush lands after
+  the drain. A failed child create never drains or disposes the old owner —
+  the old session stays current (the transaction semantics are unchanged).
+- **Fork/rewind adoption:** Host publication is not rolled back on navigation
+  supersession. Current Direct adoption retires the old owner after the gated
+  visible handoff; a successful unselected child remains parked for a later
+  owner claim, and runner teardown retires all remaining parked owners.
 
 The process-local transition gate / operation barrier coordinate only the
 TUI's Client writers; they do not take over Host ownership. The retirement
 serializes against an in-flight transition through the same gate + barrier
 (a FIFO no-op task waits for a running transition to settle — the lifecycle
-abort already cancelled its create/resume), then retires the CURRENT owner.
+abort already cancelled its create/open), then retires the CURRENT owner.
 
 ## The submit path is guard-free (the decision)
 

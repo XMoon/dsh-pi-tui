@@ -45,6 +45,7 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import semver from 'semver'
 import {
+  assertInstalledDshFamily,
   assertSourceResolution,
   DEFAULT_SOURCE_CONFIG,
   DSH_CLI_PACKAGE,
@@ -53,6 +54,7 @@ import {
   prepareDshInstall,
   restoreDshInstall,
   sourceInstallPackages,
+  withoutMinimumReleaseAge,
 } from './lib/dsh-distribution.mjs'
 import { cleanupTimedOutProcessTree, pnpmBundledNodeGyp, pnpmExecutable } from './lib/process.mjs'
 
@@ -784,17 +786,48 @@ function runPnpmInstall(harnessDir, env, distribution) {
       addCliDependency: true,
       materializeSourceDependencies: distribution.kind === 'source-pack',
        stripPackageManager: true,
+      // The isolated harness has no lockfile, so an npm install would otherwise
+      // re-resolve the CLI's caret family edges to a newer, incompatible
+      // sibling. `npmFamilyPin` makes THIS one install entry point pin the
+      // whole `@deepseek-ai/dsh` family to the exact target version; every
+      // isolated npm harness uses this function, so the pin lives in exactly
+      // one place. A source pack already pins its packed closure.
+      npmFamilyPin: distribution.kind === 'npm',
     })
-  const installArgs = distribution?.kind === 'source-pack'
-    ? [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only']
-    : ['install', '--ignore-scripts', '--no-frozen-lockfile', '--config.minimum-release-age=0', '--reporter=append-only']
   let result
   try {
-    result = run(PNPM_COMMAND, installArgs, {
-      cwd: harnessDir,
-      env,
-      timeout: distribution?.kind === 'source-pack' ? 20 * 60_000 : SUBPROCESS_TIMEOUTS.install,
-    })
+    if (distribution?.kind === 'npm') {
+      // An exact-family npm install is TWO steps. pnpm applies the family
+      // `overrides` only while no minimum-release-age setting is present; with
+      // one set, the CLI's caret family edges re-opened to a newer sibling in
+      // an isolated harness. The resolution step therefore runs without the age
+      // setting (the harness env is otherwise fully isolated), and the frozen
+      // step realizes that exact lockfile — it resolves nothing, so it may keep
+      // the policy. A one-step `--no-frozen-lockfile` install cannot express
+      // this.
+      const resolve = run(PNPM_COMMAND, ['install', '--lockfile-only', '--no-frozen-lockfile', '--ignore-scripts', '--reporter=append-only'], {
+        cwd: harnessDir,
+        env: withoutMinimumReleaseAge(env),
+        timeout: SUBPROCESS_TIMEOUTS.install,
+      })
+      if (resolve.status !== 0) {
+        fail('INFRA_INSTALL_FAILURE', `isolated DSH family resolution failed:\n${resultText(resolve)}`)
+      }
+      result = run(PNPM_COMMAND, ['install', '--ignore-scripts', '--frozen-lockfile', '--config.minimum-release-age=0', '--reporter=append-only'], {
+        cwd: harnessDir,
+        env,
+        timeout: SUBPROCESS_TIMEOUTS.install,
+      })
+    } else {
+      const installArgs = distribution?.kind === 'source-pack'
+        ? [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only']
+        : ['install', '--ignore-scripts', '--no-frozen-lockfile', '--config.minimum-release-age=0', '--reporter=append-only']
+      result = run(PNPM_COMMAND, installArgs, {
+        cwd: harnessDir,
+        env,
+        timeout: distribution?.kind === 'source-pack' ? 20 * 60_000 : SUBPROCESS_TIMEOUTS.install,
+      })
+    }
   } finally {
     restoreDshInstall(prepared)
   }
@@ -805,6 +838,15 @@ function runPnpmInstall(harnessDir, env, distribution) {
     try {
       const packageJson = JSON.parse(readFileSync(join(harnessDir, 'package.json'), 'utf8'))
       assertSourceResolution(harnessDir, distribution, sourceInstallPackages(distribution, packageJson))
+    } catch (error) {
+      fail('INFRA_INSTALL_FAILURE', error instanceof Error ? error.message : String(error))
+    }
+  }
+  if (distribution?.kind === 'npm') {
+    // Prove the ACTUAL resolution, not merely the generated override file: a
+    // writer-only check keeps passing if pnpm changes how it reads overrides.
+    try {
+      assertInstalledDshFamily(harnessDir, distribution.version)
     } catch (error) {
       fail('INFRA_INSTALL_FAILURE', error instanceof Error ? error.message : String(error))
     }

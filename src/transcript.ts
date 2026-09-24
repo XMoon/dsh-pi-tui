@@ -20,7 +20,7 @@ import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
+import { contextIconSemantic, contextPresentation, contextProvenance, contextSummary, type TranscriptContextPresentation } from './context.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, textWithAttachmentMarkers, userBlocksVisibleNow } from './content-block-presentation.ts'
 import { displayFailure, displayFailureText } from './failure-presentation.ts'
 import type { IconSemantic } from './icons.ts'
@@ -28,9 +28,10 @@ import { firstLine, latestLine, type JsonValue } from './present.ts'
 import {
   StepUsageAccumulator,
   totalTokens,
-  usageFromAssistantSettlement,
   type TokenUsageTotals,
+  type UsageLike,
 } from './token-usage.ts'
+import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
 import type {
   AssistantLiveChunk,
   AssistantLiveContentBlock,
@@ -59,6 +60,161 @@ export type AssistantDisplayBlock =
 export interface PresentedFilePresentation {
   readonly path: string
   readonly description?: string
+}
+
+/** Source-derived origins for synthetic system presentation rows. */
+export type TranscriptSystemOrigin = 'llm-retry' | 'turn-max-tokens'
+
+/** Source-derived origins for synthetic tool presentation rows. */
+export type TranscriptToolOrigin = 'turn-error' | 'turn-interrupted'
+
+/** The official command pairing identity (`command/run`/`command/done`),
+ * derived from the official event payload — never a plain-string alias. */
+export type CommandId = Extract<SessionEvent, { type: 'command/run' }>['data']['commandId']
+
+/** The official durable event sequence identity (a branded integer). */
+export type SessionEventSeq = SessionEvent['seq']
+
+/** One settled command outcome: the handler's verbatim result plus, for a
+ * success, the optional earlier authoritative domain event that owns a
+ * richer presentation (the official `sourceEventSeq` relationship). */
+export interface TranscriptCommandOutcome {
+  readonly kind: 'success' | 'error'
+  readonly text?: string
+  readonly sourceEventSeq?: SessionEventSeq
+}
+
+/**
+ * A real session-level slash-command transcript node: `command/run` creates
+ * the running row, `command/done` settles the SAME row in place, paired by
+ * {@link CommandId}. It mirrors the official CommandNode semantics and
+ * deliberately carries NO semantic `turn` — DSH appends the command
+ * lifecycle as direct log-only events, so the row is standalone
+ * control-plane evidence, never model-turn Process/Action input. Window and
+ * search placement is a presentation concern resolved from the physical log
+ * position, never stored here as an owning turn.
+ */
+export interface TranscriptCommandMessage {
+  kind: 'command'
+  /** The `command/run` pairing identity. */
+  readonly commandId: CommandId
+  /** The run event's seq/time; the done event's for a fragment-only fallback. */
+  readonly seq: SessionEventSeq
+  readonly time: number
+  /** Null only for a `command/done` fragment whose run event is unavailable. */
+  readonly name: string | null
+  readonly args: string | null
+  /** Null between command/run and command/done. */
+  outcome: TranscriptCommandOutcome | null
+}
+
+/**
+ * The bounded reasoning tail cap: previews never buffer the full reasoning
+ * stream. Shared with the compact Think preview (post-F6 plan §8.3) so the
+ * preview bound comes from the ONE existing constant, never a duplicate
+ * magic number.
+ */
+export const THINKING_TAIL_CAP = 400
+
+/**
+ * Presentation-only timing sidecar for one transcript row (post-F6 plan
+ * §12.4): the wall-clock span its OWN durable Process evidence covers, from
+ * `SessionEvent.time` (never a second clock). `running` is true while the
+ * row's authoritative end has not landed; an `endedAt` may be missing even
+ * when settled (an abandoned attempt has no authoritative end) — consumers
+ * treat unknown as UNKNOWN, never zero (plan §12.16).
+ */
+export interface TranscriptTiming {
+  readonly startedAt: number
+  readonly endedAt?: number
+  readonly running: boolean
+}
+
+/** The presentation-only sidecar store: keyed by row object identity, so a
+ * merged read group's fresh card object simply gets its own entry. */
+const transcriptTimings = new WeakMap<TranscriptMessage, TranscriptTiming>()
+
+/**
+ * The timing sidecar of one transcript row, if the fold recorded any
+ * (post-F6 plan §12.4). Absent means NO reliable timing evidence —
+ * consumers omit the duration (never fabricate `0s`).
+ */
+export function transcriptTimingOf(message: TranscriptMessage): TranscriptTiming | undefined {
+  return transcriptTimings.get(message)
+}
+
+/** Record/replace one row's timing sidecar (fold-internal authority). */
+function setTranscriptTiming(message: TranscriptMessage, timing: TranscriptTiming): void {
+  transcriptTimings.set(message, timing)
+}
+
+/**
+ * Post-turn replay evidence: the rows that MATERIALIZED after their owning
+ * turn's authoritative `turn/end` (weakly held sidecar — the fact dies with
+ * its row). The fold is the ONLY authority that can know this: a row's
+ * `turn`/`kind` alone cannot distinguish a durable row of a settled turn from
+ * a replay artifact that arrived afterwards.
+ *
+ * The provenance is exactly "this row was NEWLY created after the turn
+ * completed" — NEVER "this row was touched by a post-`turn/end` event". A
+ * `tool/result` that finds its own pending/running card still settles that
+ * card normally and leaves it fully legal Action evidence; only a newly
+ * created row (an orphan result or a fresh synthetic call card) earns the
+ * mark.
+ *
+ * Consumers share this ONE predicate so no surface invents its own fence:
+ * - the transcript keeps the row (search / Full / expanded Focus);
+ * - it is never Process aggregation evidence: it is excluded from the Action
+ *   classifier, from Work-span membership, and from consecutive-read
+ *   grouping (a group card is a synthesized object that could otherwise
+ *   launder the provenance back into an aggregate).
+ */
+const postTurnReplayEvidence = new WeakSet<TranscriptMessage>()
+
+/** Whether one row materialized after its owning turn's `turn/end` (see
+ * {@link postTurnReplayEvidence}). Presentation/persistence consumers use
+ * this to keep the row as transcript evidence while excluding it from the
+ * settled turn's Process/Action aggregates. */
+export function isPostTurnReplayEvidence(message: TranscriptMessage): boolean {
+  return postTurnReplayEvidence.has(message)
+}
+
+/** Mark one newly materialized row as post-turn replay evidence
+ * (fold-internal authority — called ONLY where a row is created while its
+ * owning turn is already `completed`). */
+function markPostTurnReplayEvidence(message: TranscriptMessage): void {
+  postTurnReplayEvidence.add(message)
+}
+
+/** The last ACCEPTED reasoning-evidence time per thinking row (live fold):
+ * the fallback end when a settlement carries no authoritative lane end (a
+ * legacy `assistant/message` without the embedded stream). Without it the
+ * known reasoning end would be lost and the row would settle end-less.
+ * Weakly held — the fallback dies with its row. */
+const thinkingLastEvidence = new WeakMap<TranscriptMessage, number>()
+
+/** A point-evidence timing: the row proves presence at one instant only
+ * (post-F6 plan §12.9) — never an invented duration. */
+function pointTiming(at: number): TranscriptTiming {
+  return { startedAt: at, endedAt: at, running: false }
+}
+
+/** The fold-internal fallback identity of a streamed tool-call delta whose
+ * formal call id has not arrived yet: the SAME (turn, step, block index)
+ * identity the live preview projection uses, so Preparing timing survives
+ * the delayed-id handoff (post-F6 plan §12.14). */
+function preparingFallbackKey(turn: number, step: number, index: number): string {
+  return `\u0000tool-call-preparing:${turn}:${step}:${index}`
+}
+
+/** Record a running row's authoritative end (post-F6 plan §12.7). A row the
+ * fold never started (a missing-call fragment) degrades to point evidence
+ * at the end time instead of inventing a start. */
+function settleToolTiming(message: TranscriptMessage, endedAt: number): void {
+  const previous = transcriptTimings.get(message)
+  transcriptTimings.set(message, previous === undefined
+    ? { startedAt: endedAt, endedAt, running: false }
+    : { startedAt: previous.startedAt, endedAt: Math.max(previous.startedAt, endedAt), running: false })
 }
 
 /** One renderable message in the TUI transcript. */
@@ -107,7 +263,23 @@ export type TranscriptMessage =
    * other `kind: 'system'` presentation rows (llm/retry, max-tokens), which
    * are orchestration and must never be treated as turn foundation.
    */
-  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic; context?: true }
+  | {
+    kind: 'system'
+    turn: number
+    text: string
+    label?: string
+    summary?: string
+    icon?: IconSemantic
+    context?: true
+    origin?: TranscriptSystemOrigin
+    /**
+     * Presentation-only provenance for an injected Context row: the
+     * producer-declared form, the raw source kind and a relay/notice
+     * sender. Never part of the semantic class — `context` stays the
+     * surfaced authority.
+     */
+    contextPresentation?: TranscriptContextPresentation
+  }
   | TranscriptToolMessage
   | TranscriptWorkflowMessage
   /** Older-than-window turns collapsed into one line (windowing). */
@@ -132,7 +304,19 @@ export type TranscriptMessage =
     running?: boolean
     /** Non-empty when compaction/end carried an error. */
     error?: string
+    /**
+     * Presentation-only manual-compaction correlation (post-PR166 plan §7.1):
+     * the initiating command identity when the official compaction lifecycle
+     * events carry `sourceCommandId`, the `compaction/summary` event seq, and
+     * the fused `kind: 'command'` row once an authoritative relationship is
+     * proven. Never new Session facts — the card is the sole visible owner of
+     * a correlated manual compaction.
+     */
+    sourceCommandId?: CommandId
+    summaryEventSeq?: SessionEventSeq
+    sourceCommand?: TranscriptCommandMessage
   }
+  | TranscriptCommandMessage
 
 const assistantPresentationRevisions = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
 const assistantStepIdentities = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
@@ -442,6 +626,16 @@ export interface TranscriptToolMessage {
   args: string
   result: string
   status: 'ok' | 'error' | 'running'
+  /** Source-derived provenance for synthetic non-model tool rows. */
+  origin?: TranscriptToolOrigin
+  /**
+   * Genuine model `tool/call` cardinality: HOW MANY real tool/call events
+   * this card carries. Only a MERGED read-group card sets it (the merged
+   * sum — two grouped reads are still TWO calls, never `"2 files" → 1`);
+   * a plain card is one call by definition, so absence means 1. Synthetic
+   * rows carry `origin` instead and never count toward `tools`.
+   */
+  callCount?: number
   /** The completed result's content blocks, for tool-owned presentation. */
   resultBlocks?: readonly ContentBlock[]
   /** The tool-private presentation payload from the tool/result event. */
@@ -495,54 +689,256 @@ export interface TranscriptWorkflowMessage {
  */
 export type TranscriptItemId = number
 
-/** One full-history search hit: the CURRENT visible representative of the
- * matched logical card plus its visible turn. Matches deliberately never
- * carry `TranscriptMessage` objects: live settlement replaces items and
- * grouping reflow replaces merged cards, so an object-based match would
- * pin stale state and break Next/Prev navigation. */
+/** The semantic origin of one searchable span inside a message's corpus.
+ * Reveal/selection needs the origin, not just a character offset: a PTC hit
+ * must know its ancestor `subCallIds` chain, a Workflow member hit its
+ * `phaseKey`/`seq`, an assistant deliverable hit its file index. */
+export type TranscriptSearchSource =
+  | { readonly kind: 'message' }
+  | { readonly kind: 'tool-field'; readonly field: 'name' | 'args' | 'result' }
+  | { readonly kind: 'command-field'; readonly field: 'name' | 'args' | 'outcome' }
+  | { readonly kind: 'subcall-field'; readonly subCallIds: readonly string[]; readonly field: 'name' | 'args' | 'result' }
+  | { readonly kind: 'workflow-run'; readonly field: 'kind' | 'name' | 'status' }
+  | { readonly kind: 'workflow-phase'; readonly phaseKey: string }
+  | { readonly kind: 'workflow-member'; readonly phaseKey: string; readonly seq: number; readonly field: 'label' | 'status' }
+  | { readonly kind: 'assistant-deliverable'; readonly index: number; readonly field: 'path' | 'description' }
+
+/** Stable string identity of one semantic source. This is the source half of
+ * {@link transcriptSearchMatchKey}; it must stay stable across re-normalization
+ * (live settlement / group reflow) so the overlay can recover the current hit. */
+export function transcriptSearchSourceKey(source: TranscriptSearchSource): string {
+  switch (source.kind) {
+    case 'message': return 'message'
+    case 'tool-field': return `tool.${source.field}`
+    case 'command-field': return `command.${source.field}`
+    case 'subcall-field': return `subcall.${source.subCallIds.join('>')}.${source.field}`
+    case 'workflow-run': return `workflow-run.${source.field}`
+    case 'workflow-phase': return `workflow-phase.${source.phaseKey}`
+    case 'workflow-member': return `workflow-member.${source.phaseKey}.${source.seq}.${source.field}`
+    case 'assistant-deliverable': return `assistant-deliverable.${source.index}.${source.field}`
+  }
+}
+
+/** One corpus chunk: the raw text plus its semantic origin. */
+interface TranscriptSearchChunk {
+  readonly text: string
+  readonly source: TranscriptSearchSource
+}
+
+/** One span of a message corpus: NORMALIZED-coordinate bounds plus its origin.
+ * `sourceKey` is the stable identity used by {@link transcriptSearchMatchKey}. */
+export interface TranscriptSearchCorpusSpan {
+  readonly start: number
+  readonly end: number
+  readonly source: TranscriptSearchSource
+  readonly sourceKey: string
+}
+
+/** The full searchable corpus of one message: the legacy raw text (the
+ * compatibility surface {@link transcriptSearchText} returns) plus the
+ * whole-string lowercase normalized text and its source spans. */
+export interface TranscriptSearchCorpus {
+  readonly text: string
+  readonly normalizedText: string
+  readonly spans: readonly TranscriptSearchCorpusSpan[]
+}
+
+/** One full-history search hit: the current visible representative of the
+ * matched logical card, its visible turn, and the OCCURRENCE identity inside
+ * that card. Matches deliberately never carry `TranscriptMessage` objects:
+ * live settlement replaces items and grouping reflow replaces merged cards,
+ * so an object-based match would pin stale state and break Next/Prev.
+ * `occurrence` counts non-overlapping hits in the representative corpus;
+ * `source`/`sourceOccurrence` locate the same hit inside its semantic source
+ * (PTC path, Workflow member, deliverable) for temporary reveal + highlight. */
 export interface TranscriptSearchMatch {
   readonly id: TranscriptItemId
   readonly turn: number
+  readonly occurrence: number
+  readonly source: TranscriptSearchSource
+  readonly sourceOccurrence: number
 }
 
-/** The searchable text of one message — the SINGLE source of truth for the
- * search corpus (the legacy full-history search semantics: tools search
- * `name args result`, every other kind searches `text`). `summary` rows
- * never reach `items`, so the projection never indexes them. A PTC root
- * card's corpus recursively includes its sub-call descendants (their
- * name/args/result), so nested output stays searchable and matches locate
- * the root Code card. */
+/** The stable occurrence identity used by the overlay's stale-refresh
+ * recovery: representative id + semantic source + source-local ordinal.
+ * Deliberately NOT the card id alone — one card holds many hits. */
+export function transcriptSearchMatchKey(match: TranscriptSearchMatch): string {
+  return `${match.id}:${transcriptSearchSourceKey(match.source)}:${match.sourceOccurrence}`
+}
+
+/** The searchable text of one message — the compatibility helper over the
+ * SINGLE corpus builder (tools search `name args result`, every other kind
+ * searches `text`). `summary` rows never reach `items`. A PTC root card's
+ * corpus recursively includes its sub-call descendants (name/args/result). */
 export function transcriptSearchText(message: TranscriptMessage, depth = 0): string {
+  return transcriptSearchCorpus(message, depth).text
+}
+
+/** The full source-aware corpus of one message: raw text for compatibility
+ * plus the normalized text/spans the indexed query path consumes. */
+export function transcriptSearchCorpus(message: TranscriptMessage, depth = 0): TranscriptSearchCorpus {
+  return buildSearchCorpus(searchChunksForMessage(message, depth))
+}
+
+function searchChunksForMessage(message: TranscriptMessage, depth: number): TranscriptSearchChunk[] {
   if (message.kind === 'tool') {
-    const own = `${message.name} ${message.args} ${message.result}`
-    if (message.subCalls === undefined || message.subCalls.length === 0 || depth >= PTC_MAX_DEPTH) return own
-    return `${own} ${message.subCalls.map(child => transcriptSearchText(child, depth + 1)).join(' ')}`
+    const chunks: TranscriptSearchChunk[] = [
+      { text: message.name, source: { kind: 'tool-field', field: 'name' } },
+      { text: message.args, source: { kind: 'tool-field', field: 'args' } },
+      { text: message.result, source: { kind: 'tool-field', field: 'result' } },
+    ]
+    if (message.subCalls !== undefined && message.subCalls.length > 0 && depth < PTC_MAX_DEPTH) {
+      for (const child of message.subCalls) chunks.push(...searchChunksForSubCall(child, depth + 1, [child.subCallId ?? '']))
+    }
+    return chunks
+  }
+  if (message.kind === 'command') {
+    return commandSearchChunks(message)
+  }
+  if (message.kind === 'compaction') {
+    // A correlated manual compaction owns its command's searchable fields
+    // (post-PR166 plan §7.4): the hidden raw command entry produces no hit
+    // of its own, so search keeps finding the command through the card that
+    // visibly owns it. Explicit `command-field` identity — never tool-field.
+    const chunks: TranscriptSearchChunk[] = [{ text: message.text ?? '', source: { kind: 'message' } }]
+    if (message.sourceCommand !== undefined) chunks.push(...commandSearchChunks(message.sourceCommand))
+    return chunks
   }
   if (message.kind === 'workflow') {
     // The run's search identity (PR2 plan §13): the kind, the run name, the
     // current status, every phase's readable label (Unassigned/Empty stay
     // distinct) and every member's label + status. Machine identities
-    // (childId/runId) are deliberately NOT indexed. A member hidden inside
-    // a large phase's summary still hits its Workflow card (plan §13.1).
+    // (childId/runId) are deliberately NOT indexed. A member hidden inside a
+    // large phase's summary still hits its Workflow card (plan §13.1), and
+    // the member's `phaseKey`/`seq` survive for the search-only context row.
+    const chunks: TranscriptSearchChunk[] = [
+      { text: 'workflow', source: { kind: 'workflow-run', field: 'kind' } },
+      { text: message.name, source: { kind: 'workflow-run', field: 'name' } },
+      { text: message.status, source: { kind: 'workflow-run', field: 'status' } },
+    ]
     const phases = new Set<string>()
-    const members: string[] = []
     for (const member of message.members) {
-      phases.add(workflowReadablePhase(member.phase))
-      members.push(`${member.label} ${member.status}`)
+      const phaseKey = workflowPhaseKey(member.phase)
+      if (phases.has(phaseKey)) continue
+      phases.add(phaseKey)
+      chunks.push({ text: workflowReadablePhase(member.phase), source: { kind: 'workflow-phase', phaseKey } })
     }
-    return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
+    if (message.members.length === 0) {
+      // The legacy template always emitted BOTH group separators, so an empty
+      // run's raw corpus keeps its two trailing spaces. The empty chunks carry
+      // no searchable text; they only preserve `transcriptSearchText`.
+      const empty = { text: '', source: { kind: 'workflow-run', field: 'kind' } } as const
+      chunks.push(empty, empty)
+      return chunks
+    }
+    for (const member of message.members) {
+      const phaseKey = workflowPhaseKey(member.phase)
+      chunks.push({ text: member.label, source: { kind: 'workflow-member', phaseKey, seq: member.seq, field: 'label' } })
+      chunks.push({ text: member.status, source: { kind: 'workflow-member', phaseKey, seq: member.seq, field: 'status' } })
+    }
+    return chunks
   }
   if (message.kind === 'assistant' && message.deliverables !== undefined && message.deliverables.length > 0) {
-    return `${message.text} ${message.deliverables.map(file => [file.path, file.description ?? ''].join(' ')).join(' ')}`
+    const chunks: TranscriptSearchChunk[] = [{ text: message.text, source: { kind: 'message' } }]
+    message.deliverables.forEach((file, index) => {
+      chunks.push({ text: file.path, source: { kind: 'assistant-deliverable', index, field: 'path' } })
+      chunks.push({ text: file.description ?? '', source: { kind: 'assistant-deliverable', index, field: 'description' } })
+    })
+    return chunks
   }
-  return message.text ?? ''
+  return [{ text: message.text ?? '', source: { kind: 'message' } }]
 }
 
-/** Normalize search text exactly like the legacy query path did (JS String
- * `toLowerCase`, no locale options). Applied ONCE per entry at build/refresh
- * time — never per query. */
-function normalizeSearchText(text: string): string {
-  return text.toLowerCase()
+/** The searchable fields of one command row (post-PR166 plan §16): the
+ * slash-prefixed name, the verbatim args, and the settled outcome text.
+ * A running command contributes an empty outcome chunk so the spans stay
+ * stable across settlement. */
+function commandSearchChunks(message: TranscriptCommandMessage): TranscriptSearchChunk[] {
+  return [
+    { text: message.name === null ? '' : `/${message.name}`, source: { kind: 'command-field', field: 'name' } },
+    { text: message.args ?? '', source: { kind: 'command-field', field: 'args' } },
+    { text: message.outcome?.text ?? '', source: { kind: 'command-field', field: 'outcome' } },
+  ]
+}
+
+function searchChunksForSubCall(message: TranscriptToolMessage, depth: number, path: readonly string[]): TranscriptSearchChunk[] {
+  const chunks: TranscriptSearchChunk[] = [
+    { text: message.name, source: { kind: 'subcall-field', subCallIds: path, field: 'name' } },
+    { text: message.args, source: { kind: 'subcall-field', subCallIds: path, field: 'args' } },
+    { text: message.result, source: { kind: 'subcall-field', subCallIds: path, field: 'result' } },
+  ]
+  if (message.subCalls !== undefined && message.subCalls.length > 0 && depth < PTC_MAX_DEPTH) {
+    for (const child of message.subCalls) {
+      chunks.push(...searchChunksForSubCall(child, depth + 1, [...path, child.subCallId ?? '']))
+    }
+  }
+  return chunks
+}
+
+function buildSearchCorpus(chunks: readonly TranscriptSearchChunk[]): TranscriptSearchCorpus {
+  const text = chunks.map(chunk => chunk.text).join(' ')
+  const rawSpans: TranscriptSearchCorpusSpan[] = []
+  let offset = 0
+  for (const chunk of chunks) {
+    const start = offset
+    offset += chunk.text.length
+    rawSpans.push({
+      start,
+      end: offset,
+      source: chunk.source,
+      sourceKey: transcriptSearchSourceKey(chunk.source),
+    })
+    offset += 1 // the single-space join separator
+  }
+  return { text, normalizedText: text.toLowerCase(), spans: normalizeSearchSpans(text, rawSpans) }
+}
+
+/** Map raw-coordinate span bounds into whole-string-lowercase coordinates.
+ * The normalizer is JS `toLowerCase` over the WHOLE corpus (Unicode needs the
+ * word context: a final sigma is `ς`, not `σ`), so the mapping is derived from
+ * per-code-point lowercase LENGTHS — chunk-by-chunk lowercasing would change
+ * the corpus (see the Greek-sigma regression test). */
+function normalizeSearchSpans(raw: string, spans: readonly TranscriptSearchCorpusSpan[]): TranscriptSearchCorpusSpan[] {
+  const map = rawToNormalizedIndex(raw)
+  return spans.map(span => ({
+    ...span,
+    start: map[span.start] ?? span.start,
+    end: map[span.end] ?? span.end,
+  }))
+}
+
+function rawToNormalizedIndex(raw: string): number[] {
+  const map = new Array<number>(raw.length + 1).fill(0)
+  let normalized = 0
+  let index = 0
+  while (index < raw.length) {
+    map[index] = normalized
+    const codePoint = raw.codePointAt(index) ?? 0
+    const size = codePoint > 0xffff ? 2 : 1
+    normalized += raw.slice(index, index + size).toLowerCase().length
+    if (size === 2) map[index + 1] = normalized
+    index += size
+  }
+  map[raw.length] = normalized
+  return map
+}
+
+/** Resolve the semantic source of one normalized-coordinate occurrence: the
+ * span that owns the occurrence's START. A query crossing a chunk boundary
+ * (`label` + `status`, tool name + args) keeps the FIRST chunk's owner, so a
+ * cross-span Workflow member hit still reaches its run/phase/member reveal and
+ * search-only context row. Only an occurrence starting INSIDE a join separator
+ * (no owning span) falls back to the whole-card `message` source. */
+function resolveSearchSource(
+  spans: readonly TranscriptSearchCorpusSpan[],
+  matchStart: number,
+): TranscriptSearchCorpusSpan | undefined {
+  for (const span of spans) {
+    if (span.start > matchStart) break
+    if (matchStart < span.start || matchStart >= span.end) continue
+    return span
+  }
+  return undefined
 }
 
 /** The turn-end reason surface Focus reads (structural — never a full
@@ -584,8 +980,12 @@ export interface TurnActivity {
    * max-tokens/interrupted) — never an invented name. */
   readonly reason?: TurnEndReason
   /** The Think slot: the latest meaningful line of the bounded reasoning
-   * tail (compact preview only — never the raw reasoning stream). */
-  readonly think?: { readonly text: string }
+   * tail (compact preview only — never the raw reasoning stream), plus the
+   * authoritative reasoning lifecycle fact: `running` is true only while
+   * that step's reasoning entry still streams. A turn can keep running
+   * (tool execution, further model output) after reasoning settled, so the
+   * Focus follow-end gate reads THIS, never `completed`. */
+  readonly think?: { readonly text: string; readonly running: boolean }
   /** The Message slot: the bounded LATEST TAIL of the current candidate /
    * confirmed intermediate assistant text, kept MULTILINE (the Focus
    * renderer wraps it to the current width and shows the last three
@@ -633,8 +1033,9 @@ interface MutableTurnActivity {
   reason?: TurnEndReason
   /** The rolling reasoning tail (preview only, bounded). */
   thinkingTail: string
-  /** The materialized Think slot (latest meaningful line). */
-  think?: { text: string }
+  /** The materialized Think slot (latest meaningful line) plus the live
+   * reasoning-running fact mirrored from its thinking entry. */
+  think?: { text: string; running: boolean }
   /** The step that currently owns the Focus reasoning preview. */
   thinkingStep?: number
   /** The streaming assistant text of the CURRENT step (bounded tail —
@@ -769,6 +1170,31 @@ export function subCallDisplayStatus(child: {
   return 'ok'
 }
 
+/**
+ * The RUNNING PTC descendants of one root card, aggregated by tool name in
+ * durable dispatch order — the SAME projection the Focus Tool slot consumes
+ * (post-F6 plan §9.1: an Activity member card must not drop what Focus
+ * shows). Presentation metadata ONLY: never part of the tool stats.
+ */
+export function activeSubCallsOf(
+  root: TranscriptToolMessage,
+): { readonly name: string; readonly count: number }[] {
+  const counts = new Map<string, number>()
+  const order: string[] = []
+  const visit = (card: TranscriptToolMessage, depth: number): void => {
+    if (depth >= PTC_MAX_DEPTH) return
+    for (const sub of card.subCalls ?? []) {
+      if (sub.status === 'running') {
+        if (!counts.has(sub.name)) order.push(sub.name)
+        counts.set(sub.name, (counts.get(sub.name) ?? 0) + 1)
+      }
+      visit(sub, depth + 1)
+    }
+  }
+  visit(root, 0)
+  return order.map(name => ({ name, count: counts.get(name)! }))
+}
+
 /** Reconstruct the logical blocks used by any Assistant entry. */
 function assistantEntryBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
   if (entry.content !== undefined) return entry.content
@@ -794,12 +1220,33 @@ function assistantChunkHasVisibleReply(chunk: AssistantVisibilityChunk): boolean
   return true
 }
 
-/** Rebuild the first Focus-visible Assistant timestamp from a durable compact
- * stream. Missing or empty streams deliberately provide no timing evidence. */
-function firstVisibleAssistantTimeFromStream(stream: readonly unknown[] | undefined): number | undefined {
-  if (stream === undefined) return undefined
-  for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
-    if (assistantChunkHasVisibleReply(member.chunk)) return member.time
+/** The concatenated reasoning text of an assembled content-block list
+ * (`undefined` input yields ''). Used for durable Thinking lane restore. */
+function reasoningBlockText(blocks: readonly ContentBlock[] | undefined): string {
+  if (blocks === undefined) return ''
+  let text = ''
+  for (const block of blocks) {
+    if (block.type === 'reasoning') text += block.text
+  }
+  return text
+}
+
+/** The lane order the durable `message.content` block order proves for one
+ * settled assistant step: the FIRST lane-visible block decides the result —
+ * a single-lane content still proves the order (the step's other lane row is
+ * hidden or absent, so no visible misorder is possible); `undefined` only
+ * when no block carries lane-visible evidence. Visibility matches the stream
+ * projection's rule (`assistantBlockProjection` — empty reasoning text is not
+ * Thinking evidence), so this stays ordered durable evidence, never a text
+ * heuristic. Used only when the step's embedded stream yields no lane
+ * evidence. */
+function contentLaneOrder(blocks: readonly ContentBlock[]): 'thinking' | 'assistant' | undefined {
+  for (const block of blocks) {
+    if (block.type === 'reasoning') {
+      if (block.text !== '') return 'thinking'
+      continue
+    }
+    if (assistantBlocksVisibleNow([block])) return 'assistant'
   }
   return undefined
 }
@@ -870,6 +1317,21 @@ interface AssistantStreamProjection {
   blocks: ContentBlock[]
   displayBlocks: AssistantDisplayBlock[]
   firstLane: 'thinking' | 'assistant' | undefined
+  /** First chunk time carrying Focus-visible reply content (the old
+   * single-purpose stream scan), `undefined` when none. */
+  firstVisibleAt: number | undefined
+  /** The last usage sample in the stream, `undefined` when none. */
+  usage: UsageLike | undefined
+  /** Lane timing from the SAME single decode (post-F6 plan §12.5): the
+   * first/last chunk time at which the Thinking lane was visible, so the
+   * durable Thinking row's sidecar timing costs no second pass. (The
+   * Assistant lane needs no sidecar: assistant rows are Conversation
+   * evidence and never Activity members.) */
+  thinkingStartedAt: number | undefined
+  thinkingEndedAt: number | undefined
+  /** First tool-call-delta time per call id, for the Preparing → durable
+   * elapsed continuity (post-F6 plan §12.14). */
+  toolCallStarts: Map<string, number>
 }
 
 /**
@@ -1139,7 +1601,7 @@ export function recentTurnThreshold(
   if (recentTurns <= 0) return Number.POSITIVE_INFINITY
   const turns = new Set<number>()
   for (const message of messages) {
-    if (message.kind === 'summary') continue
+    if (message.kind === 'summary' || !('turn' in message)) continue
     if (kinds === undefined || kinds.includes(message.kind)) turns.add(message.turn)
   }
   const sorted = [...turns].sort((a, b) => b - a)
@@ -1203,10 +1665,25 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
 }
 
 /**
+ * Whether one row may join a consecutive-read group: a settled-ok `read`
+ * card that is NOT post-turn replay evidence. This is the ONE grouping
+ * eligibility authority — the stateful folder (`TranscriptFolder.groupable`)
+ * and the exported mirror (`groupConsecutiveReads`) both delegate here, so a
+ * replay row can never be laundered into an aggregate through a synthesized
+ * group card (which is a fresh object the replay sidecar does not cover).
+ */
+export function isGroupableRead(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
+  return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+    && !isPostTurnReplayEvidence(message)
+}
+
+/**
  * Merge consecutive completed `read` tool cards into one card ("N files").
- * A single read stays untouched; groups break on any other kind or status.
- * Nested PTC sub-calls never reach this top-level projection (they live in
- * their parent card's `subCalls` tree).
+ * A single read stays untouched; groups break on any other kind or status,
+ * on post-turn replay evidence, AND on a turn boundary — a group never
+ * crosses turns, so every Activity span's own facts (count, timing) stay
+ * attributable to the turn that renders the card (post-F6 plan
+ * §10.2/§12.11).
  * @param messages - the folded transcript.
  * @returns a new list with grouped read cards (same object references).
  */
@@ -1215,12 +1692,17 @@ export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): T
   let group: Extract<TranscriptMessage, { kind: 'tool' }> | undefined
   let count = 0
   for (const message of messages) {
-    if (message.kind === 'tool' && message.name === 'read' && message.status === 'ok') {
+    const groupable = isGroupableRead(message)
+      && (group === undefined || group.turn === message.turn)
+    if (groupable) {
       if (group !== undefined) {
         count += 1
         group.args = `${count} files`
         group.result = group.result === '' ? message.result : `${group.result}\n\n${message.result}`
-        group.turn = Math.max(group.turn, message.turn)
+        // The mirror carries the same genuine-call cardinality as the
+        // folder's makeReadGroup card: a merged group is still that many
+        // model tool calls (a plain card is one by definition).
+        group.callCount = (group.callCount ?? 1) + (message.callCount ?? 1)
         continue
       }
       group = { ...message }
@@ -1264,6 +1746,8 @@ interface TranscriptSearchEntry {
    * only; non-representative members keep their own raw text and are
    * skipped at scan time. */
   normalizedText: string
+  /** The source spans of `normalizedText` (occurrence → semantic origin). */
+  spans: readonly TranscriptSearchCorpusSpan[]
 }
 
 interface NextStepInboxIdentity {
@@ -1290,6 +1774,28 @@ export class TranscriptFolder {
   private readonly deliverableDeclarationsByTurn = new Map<number, Array<PresentedFilePresentation & { readonly seq: number }>>()
   /** Durable assistant/message sequence per step, used as the closing boundary. */
   private readonly assistantSettlementSeqs = new Map<string, number>()
+  /** The durable lane chronology authority per assistant step (post-F6 plan
+   * §4.3): the first lane of the step's LATEST authoritative durable
+   * evidence — stored at every `assistant/message` / `assistant/attempt`
+   * settlement that carries lane evidence. Settlement materialization and
+   * late diagnostic reasoning place the Thinking/Assistant lanes by THIS
+   * stored authority, never by row existence (a row's presence proves
+   * nothing about the step's chronology). */
+  private readonly stepLaneOrders = new Map<string, 'thinking' | 'assistant'>()
+  /** Display-order displacements for lane rows whose physical append order
+   * contradicts the step's stored authority (`convergeStepLaneOrder`):
+   * displaced raw index → its anchor Assistant row. `items` itself stays
+   * strictly append-only (the `TranscriptItemId` contract), so these maps
+   * are pure presentation order — every raw-index-keyed structure (search
+   * ids, turn boundaries, read groups, compaction/workflow cards) keeps its
+   * physical meaning and needs no remap. Mutate ONLY through
+   * `setLaneDisplay`/`dropLaneDisplayFor` (they keep the two inverse maps
+   * in sync and bump the search revision). */
+  private readonly laneDisplayByDisplaced = new Map<number, { anchor: number; position: 'before' | 'after' }>()
+  /** Inverse of {@link laneDisplayByDisplaced}: anchor Assistant row → the
+   * displaced Thinking row emitted at the anchor during
+   * `displayOrderedRawIds`. */
+  private readonly laneDisplayByAnchor = new Map<number, number>()
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
    * completed block replaces the entire indexed state without duplication. */
@@ -1340,8 +1846,56 @@ export class TranscriptFolder {
   }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
-  /** Command names by commandId, from command/run events. */
-  private readonly commandNames = new Map<string, string>()
+  /** The real command lifecycle index (post-PR166 plan §5): commandId → the
+   * ONE `kind: 'command'` row plus its raw item index. Entries survive
+   * settlement — the bounded manual-compaction correlation resolves by
+   * commandId in O(1) even when the compaction evidence lands later. */
+  private readonly commands = new Map<CommandId, { index: number; message: TranscriptCommandMessage }>()
+  /** Search entries of turn-less rows appended before the first ACCEPTED
+   * turn/start: they re-anchor to that turn when it arrives. */
+  private readonly pendingAnchorEntries: number[] = []
+  /** Whether an ACCEPTED `turn/start` has been seen. The leading-prefix
+   * re-anchor decision is keyed on THIS — never on `anchor === 0`, because
+   * turn 0 itself is a perfectly legal first turn (an in-turn-0 command
+   * anchored to 0 must NOT be re-anchored away by turn 1). */
+  private seenAcceptedTurnStart = false
+  /** The placement-anchor AUTHORITY for turn-less standalone rows (plan
+   * §8.1/§9): one anchor per command object, written at append time and
+   * re-anchored with the leading prefix. Search navigation, the fast
+   * indexed window's physical ranges and the non-monotonic defensive window
+   * all derive placement from this ONE sidecar — never a semantic `turn` on
+   * the row. */
+  private readonly commandPlacementTurns = new WeakMap<TranscriptCommandMessage, number>()
+  /** The placement anchor a fused command HANDS OVER to its combined
+   * manual-compaction owner: the visible representative of a manual
+   * `/compact` is the compaction card, so its window/search placement must
+   * inherit the command's anchor (a pre-turn or replayed manual compaction
+   * would otherwise keep the legacy `currentTurn` and anchor the wrong
+   * bounded window). Written at fuse time; re-anchored with the leading
+   * prefix exactly like the command sidecar. */
+  private readonly manualCompactionPlacementTurns = new WeakMap<Extract<TranscriptMessage, { kind: 'compaction' }>, number>()
+  /** Manual-compaction correlation legs (post-PR166 plan §7): bounded direct
+   * lookups so `command/done.sourceEventSeq` and compaction
+   * `sourceCommandId` never scan history. */
+  private readonly compactionBySummarySeq = new Map<SessionEventSeq, number>()
+  private readonly compactionBySourceCommandId = new Map<CommandId, number>()
+  /** The ESTABLISHED combined owner per command (commandId → the owning
+   * compaction card's raw index): once leg 1 proves the relationship the
+   * ownership is fixed, and the command's settlement refreshes the owner's
+   * search corpus through this relation. */
+  private readonly compactionOwnerByCommandId = new Map<CommandId, number>()
+  /** Commands fused into their compaction card: hidden from every visible
+   * projection (the card is the one visible owner) while the row itself and
+   * its relationship stay inspectable. */
+  private readonly fusedCommands = new WeakSet<TranscriptCommandMessage>()
+  /** First streamed tool-call-delta time per call identity, from BOTH the
+   * live chunks and the durable embedded streams: the earliest authoritative
+   * start of a call, so a Preparing → durable handoff never resets its
+   * elapsed time (post-F6 plan §12.14). Keyed by the formal call id OR the
+   * (turn, step, index) fallback identity, and each entry carries its
+   * OWNING step so a retry/boundary clears BOTH key shapes — a reused call
+   * id in a later attempt must never inherit a dead attempt's timer. */
+  private readonly toolCallPreparingStarts = new Map<string, { at: number; owner: string }>()
   /** Active Workflow runs: the shared semantic projection (owner tracking,
    * interruption projection, member/run settlement) plus the raw item index
    * of each active run's card for search dirty marking. */
@@ -1383,8 +1937,11 @@ export class TranscriptFolder {
    * for query-time lazy normalization — a query normalizes exactly these,
    * never a full-history scan. */
   private readonly dirtySearchEntries = new Set<number>()
-  /** Bumped on EVERY entry mutation (append, settlement, group reflow):
-   * query refinement must not reuse previous candidates across a revision. */
+  /** Bumped on EVERY search-projection change — entry mutation (append,
+   * settlement, group reflow) AND display-order change (lane displacement
+   * via `setLaneDisplay`/`dropLaneDisplayFor`): the projection's content
+   * and its ORDER are both part of the revision, so query refinement must
+   * not reuse previous candidates across one. */
   private searchRevisionCounter = 0
   /** Step key → raw item index, for in-place streaming text updates.
    * Namespaced by entry kind (`assistant:` / `thinking:`): a step streams
@@ -1399,6 +1956,9 @@ export class TranscriptFolder {
   private searchDirtyScanCount = 0
   private searchFullScanCount = 0
   private searchRefineCount = 0
+  /** Test-only: the number of CANDIDATE CARDS re-scanned by refinement
+   * (proves refinement is O(candidate cards), never O(previous occurrences)). */
+  private searchRefineCandidates = 0
   private groupingRebuildCount = 0
 
   /**
@@ -1442,11 +2002,9 @@ export class TranscriptFolder {
    * drift). */
   private readonly usage = new StepUsageAccumulator()
   /** The bounded reasoning tail cap: previews never buffer the full stream. */
-  private static readonly THINKING_TAIL_CAP = 400
+  private static readonly THINKING_TAIL_CAP = THINKING_TAIL_CAP
   /** The bounded message candidate tail cap (streaming assistant text). */
   private static readonly MESSAGE_TAIL_CAP = 400
-  /** The bounded preview cap (the card truncates to width too). */
-  private static readonly NARRATIVE_PREVIEW_CAP = 200
 
   /** One turn's Focus activity, created on its first event (defensive:
    * a turn/start-less log fragment still aggregates). */
@@ -1647,23 +2205,11 @@ export class TranscriptFolder {
     if (rootEntry !== undefined) this.markSearchEntryDirty(rootEntry.index)
     const activity = this.activityFor(root.turn)
     if (activity.tool === undefined) return
-    const counts = new Map<string, number>()
-    const order: string[] = []
-    const visit = (card: TranscriptToolMessage, depth: number): void => {
-      if (depth >= PTC_MAX_DEPTH) return
-      for (const sub of card.subCalls ?? []) {
-        if (sub.status === 'running') {
-          if (!counts.has(sub.name)) order.push(sub.name)
-          counts.set(sub.name, (counts.get(sub.name) ?? 0) + 1)
-        }
-        visit(sub, depth + 1)
-      }
-    }
-    visit(root, 0)
-    if (order.length === 0) {
+    const active = activeSubCallsOf(root)
+    if (active.length === 0) {
       activity.tool.activeSubCalls = undefined
     } else {
-      activity.tool.activeSubCalls = order.map(name => ({ name, count: counts.get(name)! }))
+      activity.tool.activeSubCalls = active
     }
     activity.revision += 1
   }
@@ -1687,8 +2233,29 @@ export class TranscriptFolder {
     if (step < (activity.lastAssistantStep ?? step)) return
     activity.thinkingStep = step
     activity.thinkingTail = text.slice(-TranscriptFolder.THINKING_TAIL_CAP)
-    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
-    activity.think = line === '' ? undefined : { text: line }
+    // The preview keeps the tail's latest line in full: width clipping is
+    // the renderer's job (a head cap here would drop the true tail before
+    // the follow-end window ever sees it).
+    const line = latestLine(activity.thinkingTail)
+    activity.think = line === '' ? undefined : { text: line, running: this.thinkRunningFor(activity, step) }
+    activity.revision += 1
+  }
+
+  /** The authoritative reasoning-running fact for one activity's Think
+   * slot: true only while that step's reasoning entry still streams and the
+   * step has not settled. This is the follow-end gate — a turn can keep
+   * running after reasoning settled. */
+  private thinkRunningFor(activity: MutableTurnActivity, step: number): boolean {
+    if (activity.settledSteps.has(step)) return false
+    return this.thinkingEntries.get(stepKey(activity.turn, step))?.running === true
+  }
+
+  /** Mirror a reasoning entry's settlement onto an ALREADY materialized
+   * Think preview (the live attempt/turn ends without re-materializing the
+   * line). */
+  private markThinkSettled(activity: MutableTurnActivity, step: number): void {
+    if (activity.thinkingStep !== step || activity.think === undefined || activity.think.running === false) return
+    activity.think = { text: activity.think.text, running: false }
     activity.revision += 1
   }
 
@@ -1713,8 +2280,10 @@ export class TranscriptFolder {
     if (activity.completed || step < (activity.lastAssistantStep ?? step)) return
     activity.thinkingStep = step
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
-    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
-    activity.think = line === '' ? undefined : { text: line }
+    // Keep the latest line in full (see restoreThinkingPreview): the
+    // renderer's follow-end window owns width clipping.
+    const line = latestLine(activity.thinkingTail)
+    activity.think = line === '' ? undefined : { text: line, running: this.thinkRunningFor(activity, step) }
     activity.revision += 1
   }
 
@@ -1843,6 +2412,63 @@ export class TranscriptFolder {
     this.turnValueSet.add(turn)
   }
 
+  /** The FIRST REAL model turn (turn/start) adopts the leading standalone
+   * prefix (pre-turn commands): their anchors — 0 until now — re-anchor to
+   * the first turn value, so an anchored search window that contains the
+   * first turn reveals them (the raw prefix itself renders from index 0).
+   * Only turn/start adopts the prefix: a GHOST legacy turn (a pre-turn
+   * manual compaction registering the initial currentTurn) is not a real
+   * turn and must not consume it. */
+  private adoptLeadingAnchors(turn: number): void {
+    if (this.seenAcceptedTurnStart) return
+    this.seenAcceptedTurnStart = true
+    if (this.pendingAnchorEntries.length === 0) return
+    for (const index of this.pendingAnchorEntries) {
+      const item = this.items[index]
+      if (item !== undefined && item.kind === 'command') this.setPlacementAnchor(item, index, turn)
+    }
+    this.pendingAnchorEntries.length = 0
+  }
+
+  /** The PRESENTATION placement anchor of one turn-less standalone row: the
+   * turn currently open, else the latest known turn, else 0 while the log
+   * still has no turn (re-anchored by {@link appendTurnIndex}). This anchor
+   * drives window/search navigation ONLY — it is never stored on the row as
+   * a semantic `turn` (post-PR166 plan §8.1). */
+  private placementAnchorTurn(): number {
+    if (this.openTurn !== undefined) return this.openTurn
+    return this.turnValues.length > 0 ? this.turnValues[this.turnValues.length - 1]! : 0
+  }
+
+  /** Write one command's placement anchor and hand it over to an already
+   * fused manual-compaction owner: the owner is the VISIBLE representative,
+   * so its sidecar and search entry must follow the same anchor. */
+  private setPlacementAnchor(message: TranscriptCommandMessage, index: number, turn: number): void {
+    this.commandPlacementTurns.set(message, turn)
+    const entry = this.searchEntries[index]
+    if (entry !== undefined) entry.turn = turn
+    const owner = this.compactionOwnerByCommandId.get(message.commandId)
+    if (owner === undefined) return
+    const compaction = this.items[owner]
+    if (compaction !== undefined && compaction.kind === 'compaction') {
+      this.manualCompactionPlacementTurns.set(compaction, turn)
+      const ownerEntry = this.searchEntries[owner]
+      if (ownerEntry !== undefined) ownerEntry.turn = turn
+    }
+  }
+
+  /** The placement anchor of one turn-less standalone row from the shared
+   * authority sidecar (undefined for turn-owned rows): a plain command, or
+   * the COMBINED manual-compaction owner inheriting its fused command's
+   * anchor. */
+  private placementAnchorOf(message: TranscriptMessage): number | undefined {
+    if (message.kind === 'command') return this.commandPlacementTurns.get(message)
+    if (message.kind === 'compaction' && message.sourceCommand !== undefined) {
+      return this.manualCompactionPlacementTurns.get(message)
+    }
+    return undefined
+  }
+
   /** Append one folded message, maintaining the window projections. Returns
    * the raw item index (the stable search identity). */
   private appendItem(message: TranscriptMessage): number {
@@ -1851,12 +2477,18 @@ export class TranscriptFolder {
     // The searchable projection mirrors the item's own text (eager at
     // append — the cold path); later mutations mark the entry dirty and
     // re-normalize lazily at the next search.
+    const corpus = transcriptSearchCorpus(message)
+    const ownsTurn = 'turn' in message
+    const anchorTurn = ownsTurn ? message.turn : this.placementAnchorTurn()
+    if (!ownsTurn && message.kind === 'command') this.commandPlacementTurns.set(message, anchorTurn)
     this.searchEntries.push({
-      turn: 'turn' in message ? message.turn : 0,
-      normalizedText: normalizeSearchText(transcriptSearchText(message)),
+      turn: anchorTurn,
+      normalizedText: corpus.normalizedText,
+      spans: corpus.spans,
     })
+    if (!ownsTurn && !this.seenAcceptedTurnStart) this.pendingAnchorEntries.push(index)
     this.searchRevisionCounter += 1
-    const turn = 'turn' in message ? message.turn : undefined
+    const turn = ownsTurn ? message.turn : undefined
     if (turn !== undefined) {
       if (this.turnValues.length === 0) {
         this.appendTurnIndex(turn)
@@ -1918,8 +2550,19 @@ export class TranscriptFolder {
       if (group !== undefined && this.representativeOf(index) !== index) continue
       const card = group ?? this.items[index]
       if (card === undefined) continue
-      entry.turn = 'turn' in card ? card.turn : 0
-      entry.normalizedText = normalizeSearchText(transcriptSearchText(card))
+      // A TURN-OWNED card refreshes its navigation turn from the card (a
+      // merged read group may move it). A turn-less row (a real command)
+      // KEEPS its presentation anchor: the appendItem/appendTurnIndex sidecar
+      // is the authority (post-PR166 plan §8.1/§9), and resetting it to 0
+      // would point an inter-turn search match at the wrong bounded window.
+      // A fused manual compaction keeps its HANDED-OVER anchor for the same
+      // reason — its legacy `turn` is not the placement authority.
+      if ('turn' in card && !(card.kind === 'compaction' && card.sourceCommand !== undefined)) {
+        entry.turn = card.turn
+      }
+      const corpus = transcriptSearchCorpus(card)
+      entry.normalizedText = corpus.normalizedText
+      entry.spans = corpus.spans
       this.searchRefreshCount += 1
     }
     this.dirtySearchEntries.clear()
@@ -1927,8 +2570,9 @@ export class TranscriptFolder {
 
   /** The CURRENT output representative of one raw item id: the first member
    * of its merged read group when grouped, else the item itself. Search
-   * results are deduplicated by representative so a merged read card yields
-   * exactly ONE visible match no matter how many members hit. */
+   * deduplicates by representative: a merged read card emits ONE result per
+   * OCCURRENCE in the representative corpus, never a separate result per
+   * hidden member. */
   private representativeOf(id: number): number {
     const group = this.groupOf.get(id)
     if (group === undefined) return id
@@ -1937,14 +2581,28 @@ export class TranscriptFolder {
     return first === undefined ? id : first
   }
 
-  /** Whether an item is groupable as a consecutive read (settled ok).
-   * Nested PTC sub-calls never reach the top-level items (they live in
-   * their parent card's `subCalls` tree), so no exclusion is needed here. */
+  /** Whether an item is groupable as a consecutive read (settled ok, never
+   * post-turn replay evidence). Nested PTC sub-calls never reach the
+   * top-level items (they live in their parent card's `subCalls` tree), so no
+   * exclusion is needed here. Delegates to the module-level
+   * {@link isGroupableRead} so the folder and the exported mirror share ONE
+   * eligibility contract. */
   private static groupable(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
-    return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+    return isGroupableRead(message)
   }
 
-  /** Build one merged read card without repeatedly concatenating its result. */
+  /** Whether the item at this position CONTINUES a read-group run: groupable
+   * AND the same turn as the run's anchor (post-F6 plan §10.2/§12.11 — a
+   * group never crosses turns, so every Activity span's own facts — count,
+   * timing, slot — stay attributable to the turn that renders the card). */
+  private static continuesReadRun(message: TranscriptMessage, turn: number): message is Extract<TranscriptMessage, { kind: 'tool' }> {
+    return TranscriptFolder.groupable(message) && message.turn === turn
+  }
+
+  /** Build one merged read card without repeatedly concatenating its result.
+   * Runs are TURN-BOUND by the walks above (`continuesReadRun`), so all
+   * members share one turn; the cross-turn drop paths downstream stay as
+   * defensive guards for that invariant. */
   private makeReadGroup(start: number, end: number): {
     group: ReadGroupCard
     members: number[]
@@ -1958,12 +2616,14 @@ export class TranscriptFolder {
     const turns = new Set<number>()
     let firstResult: string | undefined
     let maxTurn = first.turn
+    let callCount = 0
     for (let index = start; index <= end; index += 1) {
       const member = this.items[index]
       if (member === undefined || !TranscriptFolder.groupable(member)) continue
       members.push(index)
       turns.add(member.turn)
       maxTurn = Math.max(maxTurn, member.turn)
+      if (member.kind === 'tool') callCount += member.callCount ?? 1
       // Match the existing projection's empty-result behavior: leading empty
       // results are omitted, but an empty result after the first non-empty one
       // remains a real (separator-delimited) member.
@@ -1978,8 +2638,53 @@ export class TranscriptFolder {
       args: `${members.length} files`,
       result: firstResult === undefined ? '' : [firstResult, ...results].join('\n\n'),
       turn: maxTurn,
+      // The group's genuine-call cardinality is the SUM of its members:
+      // two grouped reads are still two model tool calls, never
+      // `"2 files" → 1` (post-F6 plan §10.2).
+      ...(callCount > 0 ? { callCount } : {}),
     }
+    this.mergedReadGroupTiming(group, members, turns.size > 1)
     return { group, members, firstTurn: first.turn, spansTurns: turns.size > 1 }
+  }
+
+  /** Attach the merged read group's OWN timing, aggregated from its member
+   * cards WITH turn attribution (post-F6 plan §12.11). Runs are TURN-BOUND
+   * (`continuesReadRun`), so `spansTurns` is an invariant guard here — a
+   * defensive SET-OR-CLEAR: if a group ever carried members of more than
+   * one turn, its timing would be DROPPED (never a cross-turn leak), and a
+   * recomputation with no evidence clears a stale span too. A same-turn
+   * group aggregates its members' evidence (earliest start, latest end);
+   * members without sidecar evidence contribute nothing. */
+  private mergedReadGroupTiming(
+    group: Extract<TranscriptMessage, { kind: 'tool' }>,
+    memberIndexes: readonly number[],
+    spansTurns: boolean,
+  ): void {
+    if (spansTurns) {
+      transcriptTimings.delete(group)
+      return
+    }
+    let startedAt: number | undefined
+    let endedAt: number | undefined
+    let running = false
+    for (const index of memberIndexes) {
+      const member = this.items[index]
+      if (member === undefined) continue
+      const timing = transcriptTimingOf(member)
+      if (timing === undefined) continue
+      startedAt = startedAt === undefined ? timing.startedAt : Math.min(startedAt, timing.startedAt)
+      if (timing.endedAt !== undefined) endedAt = endedAt === undefined ? timing.endedAt : Math.max(endedAt, timing.endedAt)
+      running = running || timing.running
+    }
+    if (startedAt === undefined) {
+      transcriptTimings.delete(group)
+      return
+    }
+    setTranscriptTiming(group, {
+      startedAt,
+      ...(endedAt === undefined ? {} : { endedAt }),
+      running,
+    })
   }
 
   /** Add one grouped-output turn to the monotonic display index. */
@@ -2049,6 +2754,10 @@ export class TranscriptFolder {
       return assistantEntryVisibleNow(item)
     }
     if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
+    // A command fused into its compaction card is hidden: the card is the
+    // one visible owner of the correlated manual compaction (post-PR166
+    // plan §7.3) — the row itself stays in `items` for search identity.
+    if (item.kind === 'command' && this.fusedCommands.has(item)) return false
     return true
   }
 
@@ -2166,7 +2875,7 @@ export class TranscriptFolder {
         continue
       }
       let end = start + 1
-      while (end < this.items.length && TranscriptFolder.groupable(this.items[end]!)) end += 1
+      while (end < this.items.length && TranscriptFolder.continuesReadRun(this.items[end]!, item.turn)) end += 1
       if (end - start === 1) {
          this.addGroupedTurn(item.turn)
          // The single read has no merged card yet.
@@ -2206,7 +2915,9 @@ export class TranscriptFolder {
       const entry = this.searchEntries[first]
       if (entry === undefined) continue
       entry.turn = group.turn
-      entry.normalizedText = normalizeSearchText(transcriptSearchText(group))
+      const corpus = transcriptSearchCorpus(group)
+      entry.normalizedText = corpus.normalizedText
+      entry.spans = corpus.spans
       this.dirtySearchEntries.delete(first)
       this.searchRefreshCount += 1
     }
@@ -2227,6 +2938,10 @@ export class TranscriptFolder {
     const previousIndex = index - 1
     const previous = this.items[previousIndex]
     if (previous === undefined || !TranscriptFolder.groupable(previous)) return true
+    // A group never crosses turns (post-F6 plan §10.2/§12.11): a next-turn
+    // read starts its OWN run instead of extending the previous turn's
+    // group/singleton, so every span's count and timing stay attributable.
+    if (previous.turn !== item.turn) return true
 
     const previousGroup = this.groupOf.get(previousIndex)
     if (previousGroup !== undefined) {
@@ -2243,9 +2958,15 @@ export class TranscriptFolder {
       previousGroup.args = `${members.length} files`
       previousGroup.result = previousGroup.result === '' ? item.result : `${previousGroup.result}\n\n${item.result}`
       previousGroup.turn = Math.max(previousGroup.turn, item.turn)
+      // The extended group carries the merged genuine-call cardinality:
+      // the grouped members are still that many model tool calls.
+      const mergedCallCount = (previousGroup.callCount ?? 1) + (item.callCount ?? 1)
+      if (mergedCallCount > 0) previousGroup.callCount = mergedCallCount
+      else delete previousGroup.callCount
        this.addGroupedTurn(previousGroup.turn)
       const spansTurns = wasCross || item.turn !== firstTurn
       this.groupMeta.set(previousGroup, { firstTurn, spansTurns })
+      this.mergedReadGroupTiming(previousGroup, members, spansTurns)
       if (!wasCross && spansTurns) this.crossTurnGroups += 1
       this.groupedToolCount -= 1
       // The merged card's text changed (args count + result): mark the
@@ -2270,11 +2991,15 @@ export class TranscriptFolder {
       result: previous.result === '' ? item.result : `${previous.result}\n\n${item.result}`,
       turn: Math.max(previous.turn, item.turn),
     }
+    // The promoted group carries the merged genuine-call cardinality.
+    const promotedCallCount = (previous.callCount ?? 1) + (item.callCount ?? 1)
+    if (promotedCallCount > 0) group.callCount = promotedCallCount
     this.groupOf.set(previousIndex, group)
     this.groupOf.set(index, group)
     this.groupMembers.set(group, [previousIndex, index])
     this.groupMeta.set(group, { firstTurn: previous.turn, spansTurns: previous.turn !== item.turn })
-     this.addGroupedTurn(group.turn)
+    this.mergedReadGroupTiming(group, [previousIndex, index], previous.turn !== item.turn)
+      this.addGroupedTurn(group.turn)
     if (previous.turn !== item.turn) this.crossTurnGroups += 1
     this.groupedToolCount -= 1
     // The promoted singleton becomes the new group's representative: its
@@ -2305,10 +3030,13 @@ export class TranscriptFolder {
     const item = this.items[index]
     if (item === undefined || !TranscriptFolder.groupable(item)) return
     this.groupedTurnIndexDirty = true
+    // The re-flown run stays within the settled read's OWN turn: a group
+    // never crosses turns (post-F6 plan §10.2/§12.11).
+    const runTurn = item.turn
      let start = index
-    while (start > 0 && TranscriptFolder.groupable(this.items[start - 1]!)) start -= 1
+    while (start > 0 && TranscriptFolder.continuesReadRun(this.items[start - 1]!, runTurn)) start -= 1
     let end = index
-    while (end + 1 < this.items.length && TranscriptFolder.groupable(this.items[end + 1]!)) end += 1
+    while (end + 1 < this.items.length && TranscriptFolder.continuesReadRun(this.items[end + 1]!, runTurn)) end += 1
     // Detach the run's items from any existing groups (a settle can splice
     // a previously-running item into the middle of the run).
     for (let i = start; i <= end; i += 1) {
@@ -2330,7 +3058,12 @@ export class TranscriptFolder {
             this.groupMembers.set(group, remaining)
             const first = this.items[remaining[0]!]
             if (first !== undefined && TranscriptFolder.groupable(first)) {
-              this.groupMeta.set(group, { firstTurn: first.turn, spansTurns: this.crossTurn(remaining) })
+              // The surviving group keeps only ITS remaining members'
+              // evidence: recompute the timing from `remaining` (or drop
+              // it) — never keep a span aggregated over members that left.
+              const spansTurns = this.crossTurn(remaining)
+              this.groupMeta.set(group, { firstTurn: first.turn, spansTurns })
+              this.mergedReadGroupTiming(group, remaining, spansTurns)
             }
           }
         }
@@ -2428,6 +3161,12 @@ export class TranscriptFolder {
         if (thinking !== undefined && thinking.running === false) {
           thinking.text = ''
           thinking.running = true
+          // The reopen starts a NEW reasoning span: the previous attempt's
+          // sidecar timing AND its last-evidence fallback are stale
+          // evidence and must not straddle the retry (the first chunk of
+          // the new attempt re-records the start).
+          transcriptTimings.delete(thinking)
+          thinkingLastEvidence.delete(thinking)
           this.markStreamingEntryDirty(`thinking:${key}`)
           let open = this.openThinkingByTurn.get(input.turn)
           if (open === undefined) {
@@ -2451,14 +3190,24 @@ export class TranscriptFolder {
         this.liveAssistantBlocks.delete(stepKey(input.turn, input.step))
         if (input.status === 'abandoned') {
           this.settleFailedAttempt(input.turn, input.step, true, true)
+          // The abandoned attempt's preparing starts are dead evidence: a
+          // reused call id in a later attempt must not inherit its timer.
+          this.clearPreparingStartsForStep(input.turn, input.step)
         }
         // Any remaining open reasoning entries stop animating at settlement.
+        // The notification frame carries no time: there is no authoritative
+        // end, so the sidecar keeps `endedAt` undefined (plan §12.16).
         {
           const open = this.openThinkingByTurn.get(input.turn)
           if (open !== undefined) {
-            for (const entry of open) entry.running = false
+            for (const entry of open) this.closeThinking(entry)
             this.openThinkingByTurn.delete(input.turn)
           }
+          // The turn may continue (tool execution, later model output): the
+          // Focus Think slot must return to a settled (head) preview now,
+          // not at turn/end (review finding).
+          const activity = this.activityByTurn.get(input.turn)
+          if (activity !== undefined) this.markThinkSettled(activity, input.step)
         }
         break
     }
@@ -2471,6 +3220,10 @@ export class TranscriptFolder {
     const key = stepKey(turn, step)
     const entry = this.assistantEntries.get(key)
     if (entry === undefined || !this.transientAssistantEntries.has(entry)) return false
+    // A tombstoned anchor Assistant row can no longer honor a display
+    // displacement — drop the mapping so the Thinking lane falls back to
+    // its physical slot (the raw index stays the stable TranscriptItemId).
+    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`assistant:${key}`) ?? -1)
     const activity = this.activityByTurn.get(turn)
     const clearLatestVisibility = activity !== undefined
       && activity.lastAssistantStep === step
@@ -2531,20 +3284,49 @@ export class TranscriptFolder {
     // A late reasoning replay remains diagnostic transcript evidence, but a
     // late text/block surface frame must never overwrite the durable message.
     if (activity.settledSteps.has(step)) {
+      // Late reasoning is preserved as SETTLED diagnostic evidence (post-F6
+      // plan §4.6): an existing Thinking row refreshes in place, and a step
+      // without one keeps the row — created not-running and placed by the
+      // step's stored lane authority below. It is never dropped just to
+      // avoid a trailing row: for a thinking-first step the CREATED row
+      // relocates BEFORE the Assistant row (no invalid trailing Activity),
+      // while an assistant-first step keeps it after its Assistant row
+      // (valid topology for that step). An EXISTING row's position was
+      // already anchored (§4.5 live chronology or an earlier convergence) —
+      // an in-place refresh never re-judges it.
+      const existing = this.thinkingEntries.get(key)
       if (chunk.type === 'reasoning-delta') {
-        const thinking = this.thinkingEntry(turn, step)
+        // Empty reasoning is NOT Thinking lane evidence (the shared
+        // `assistantBlockProjection` contract: `reasoning.text !== ''`): an
+        // empty first delta must not CREATE a missing row — the visibility
+        // check never hides an empty Thinking row, so it would leak a blank
+        // process row into the Work span.
+        if (existing === undefined && chunk.text === '') return
+        const thinking = this.thinkingEntry(turn, step, time)
         thinking.text += chunk.text
         thinking.running = false
-        this.closeThinking(thinking)
+        this.closeThinking(thinking, time)
         this.markStreamingEntryDirty(`thinking:${key}`)
         this.foldThinking(activity, step, chunk.text)
+        if (existing === undefined) this.convergeStepLaneOrder(turn, step)
       } else if (chunk.type === 'block-end' && chunk.block.type === 'reasoning' && 'text' in chunk.block && typeof chunk.block.text === 'string') {
-        const thinking = this.thinkingEntry(turn, step)
-        thinking.text = chunk.block.text
-        thinking.running = false
-        this.closeThinking(thinking)
-        this.markStreamingEntryDirty(`thinking:${key}`)
-        this.restoreThinkingPreview(activity, step, chunk.block.text)
+        if (chunk.block.text === '') {
+          // An authoritative EMPTY finalized reasoning replaces any existing
+          // row — the same rule the non-settled restore path applies
+          // (reasoning === '' hides Thinking) — and never creates one.
+          if (existing !== undefined) {
+            this.hideThinkingEntry(turn, step)
+            this.clearThinkingPreview(activity, step)
+          }
+        } else {
+          const thinking = this.thinkingEntry(turn, step, time)
+          thinking.text = chunk.block.text
+          thinking.running = false
+          this.closeThinking(thinking, time)
+          this.markStreamingEntryDirty(`thinking:${key}`)
+          this.restoreThinkingPreview(activity, step, chunk.block.text)
+          if (existing === undefined) this.convergeStepLaneOrder(turn, step)
+        }
       } else if (chunk.type === 'usage') {
         this.usage.onUsageChunk(turn, step, chunk.usage)
         this.syncUsage(activity)
@@ -2571,6 +3353,14 @@ export class TranscriptFolder {
       case 'reasoning-delta':
       case 'tool-call-delta':
       case 'block-end': {
+        // Preparing continuity (post-F6 plan §12.14): the FIRST streamed
+        // delta of a tool call is the call's earliest authoritative start —
+        // keyed by the formal call id when it is known, else by the same
+        // (turn, step, index) fallback identity the preview projection
+        // uses, and migrated when the formal id arrives.
+        if (chunk.type === 'tool-call-delta') {
+          this.recordPreparingDelta(turn, step, chunk.id, chunk.index, time)
+        }
         const previous = projection.states.get(chunk.index)
         if (applyAssistantBlockChunk(projection.states, chunk)) {
           this.updateLiveAssistantProjection(projection, chunk.index, previous)
@@ -2580,7 +3370,16 @@ export class TranscriptFolder {
               activity.firstVisibleAssistantTimes.set(step, time)
             }
           }
-          this.syncLiveAssistantPresentation(turn, step)
+          this.syncLiveAssistantPresentation(turn, step, time)
+          // Accepted reasoning evidence is the Thinking row's honest end
+          // candidate: remember it so a streamless settlement can close the
+          // row at its real reasoning end instead of end-less (post-F6 plan
+          // §12.6).
+          if (chunk.type === 'reasoning-delta'
+            || (chunk.type === 'block-end' && chunk.block.type === 'reasoning')) {
+            const thinkingRow = this.thinkingEntries.get(key)
+            if (thinkingRow !== undefined) thinkingLastEvidence.set(thinkingRow, time)
+          }
         }
         break
       }
@@ -2651,7 +3450,7 @@ export class TranscriptFolder {
   }
 
   /** Project the current live block map without duplicating block-end text. */
-  private syncLiveAssistantPresentation(turn: number, step: number): void {
+  private syncLiveAssistantPresentation(turn: number, step: number, time?: number): void {
     const key = stepKey(turn, step)
     const projection = this.liveAssistantProjectionFor(turn, step)
     const { blocks, displayBlocks } = projection
@@ -2730,7 +3529,7 @@ export class TranscriptFolder {
       }
       return
     }
-    const thinking = this.thinkingEntry(turn, step)
+    const thinking = this.thinkingEntry(turn, step, time)
     this.hiddenThinkingEntries.delete(thinking)
     thinking.text = reasoning
     thinking.running = true
@@ -2741,13 +3540,18 @@ export class TranscriptFolder {
   /** Fold one durable assistant stream once for both presentation order and
    * restored content. The indexed state is updated in O(1) per accepted chunk;
    * only the final projections sort the retained indexes. */
-  private assistantStreamProjection(stream: readonly unknown[]): AssistantStreamProjection {
+  private assistantStreamProjection(stream: readonly unknown[], turn: number, step: number): AssistantStreamProjection {
     const states = new Map<number, AssistantBlockState>()
     const rowOrder: Array<'thinking' | 'assistant'> = []
     let assistantVisibleCount = 0
     let thinkingVisibleCount = 0
     let assistantPresent = false
     let thinkingPresent = false
+    let firstVisibleAt: number | undefined
+    let usage: UsageLike | undefined
+    let thinkingStartedAt: number | undefined
+    let thinkingEndedAt: number | undefined
+    const toolCallStarts = new Map<string, number>()
 
     const adjustVisibility = (state: AssistantBlockState, amount: number): void => {
       const projection = assistantBlockProjection(state)
@@ -2755,8 +3559,32 @@ export class TranscriptFolder {
       if (projection.thinkingVisible) thinkingVisibleCount += amount
     }
 
-    for (const { chunk } of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
-      if (chunk.type === 'usage' || chunk.type === 'finish') continue
+    for (const { time, chunk } of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+      if (chunk.type === 'usage') {
+        usage = chunk.usage
+        continue
+      }
+      if (chunk.type === 'finish') continue
+      if (firstVisibleAt === undefined && assistantChunkHasVisibleReply(chunk)) firstVisibleAt = time
+      // Preparing evidence for the Preparing → durable elapsed continuity
+      // (post-F6 plan §12.14): the FIRST streamed delta of a tool call is
+      // the call's earliest authoritative start — keyed by the formal call
+      // id when it is known (migrating the fallback identity's earlier
+      // start and dropping the stale fallback key), else by the (turn,
+      // step, index) fallback identity, exactly like the live fold.
+      if (chunk.type === 'tool-call-delta') {
+        if (chunk.id !== '') {
+          const fallbackKey = preparingFallbackKey(turn, step, chunk.index)
+          const fallback = toolCallStarts.get(fallbackKey)
+          if (!toolCallStarts.has(chunk.id)) {
+            toolCallStarts.set(chunk.id, fallback ?? time)
+          }
+          if (fallback !== undefined) toolCallStarts.delete(fallbackKey)
+        } else {
+          const fallbackKey = preparingFallbackKey(turn, step, chunk.index)
+          if (!toolCallStarts.has(fallbackKey)) toolCallStarts.set(fallbackKey, time)
+        }
+      }
       const previous = states.get(chunk.index)
       if (!applyAssistantBlockChunk(states, chunk)) continue
       if (previous !== undefined) adjustVisibility(previous, -1)
@@ -2765,6 +3593,18 @@ export class TranscriptFolder {
 
       const visibleNow = assistantVisibleCount > 0
       const nextThinking = thinkingVisibleCount > 0
+      // The Thinking lane's TIMING evidence ends with its OWN reasoning
+      // chunks: the reasoning block remains "visible" for the rest of the
+      // decode, so updating on every visible chunk would stretch the
+      // Thinking span to the end of the whole step stream (post-F6 plan
+      // §12.6 — the reasoning block-end is the authoritative end; assistant
+      // text is Conversation evidence, never Process).
+      const reasoningEvidence = chunk.type === 'reasoning-delta'
+        || (chunk.type === 'block-end' && chunk.block.type === 'reasoning')
+      if (nextThinking) {
+        thinkingStartedAt ??= time
+        if (reasoningEvidence) thinkingEndedAt = time
+      }
       // Match live step-level materialization: a hidden aggregate lane is
       // removed, and a later recreation is appended after surviving rows.
       if (visibleNow !== assistantPresent) {
@@ -2790,8 +3630,175 @@ export class TranscriptFolder {
       blocks: assistantContentFromBlocks(states),
       displayBlocks: assistantDisplayBlocksFromStates(states),
       firstLane: rowOrder[0],
+      firstVisibleAt,
+      usage,
+      thinkingStartedAt,
+      thinkingEndedAt,
+      toolCallStarts,
     }
   }
+
+  /** First-wins record of one streamed tool-call delta's time: keyed by the
+   * formal call id once it arrives (migrating the fallback identity's
+   * earlier start so the preparing seconds survive the delayed-id handoff),
+   * else by the (turn, step, index) fallback identity. Every entry is
+   * owned by its (turn, step) so lifecycle cleanup can clear BOTH key
+   * shapes. */
+  private recordPreparingDelta(turn: number, step: number, callId: string, index: number, time: number): void {
+    const owner = `${turn}:${step}`
+    if (callId !== '') {
+      const fallbackKey = preparingFallbackKey(turn, step, index)
+      const fallback = this.toolCallPreparingStarts.get(fallbackKey)
+      if (!this.toolCallPreparingStarts.has(callId)) {
+        this.toolCallPreparingStarts.set(callId, { at: fallback?.at ?? time, owner })
+      }
+      if (fallback !== undefined) this.toolCallPreparingStarts.delete(fallbackKey)
+      return
+    }
+    const fallbackKey = preparingFallbackKey(turn, step, index)
+    if (!this.toolCallPreparingStarts.has(fallbackKey)) {
+      this.toolCallPreparingStarts.set(fallbackKey, { at: time, owner })
+    }
+  }
+
+  /** Drop the preparing-start evidence of one step — BOTH the fallback
+   * identities and the formal call ids it owns: a retry/step boundary
+   * invalidates the dead attempt's starts, so a reused call id can never
+   * inherit another attempt's timer (post-F6 plan §12.14). */
+  private clearPreparingStartsForStep(turn: number, step: number): void {
+    const owner = `${turn}:${step}`
+    for (const [key, start] of this.toolCallPreparingStarts) {
+      if (start.owner === owner) this.toolCallPreparingStarts.delete(key)
+    }
+  }
+
+  /** Drop every preparing-start evidence of one turn (its `turn/end`). */
+  private clearPreparingStartsForTurn(turn: number): void {
+    const ownerPrefix = `${turn}:`
+    for (const [key, start] of this.toolCallPreparingStarts) {
+      if (start.owner.startsWith(ownerPrefix)) this.toolCallPreparingStarts.delete(key)
+    }
+  }
+
+  /** First-wins merge of one durable stream's tool-call preparing starts
+   * into the folder-wide map, owned by the stream's own (turn, step)
+   * (post-F6 plan §12.14). */
+  private absorbPreparingStarts(starts: ReadonlyMap<string, number>, turn: number, step: number): void {
+    const owner = `${turn}:${step}`
+    for (const [key, at] of starts) {
+      if (!this.toolCallPreparingStarts.has(key)) {
+        this.toolCallPreparingStarts.set(key, { at, owner })
+      }
+    }
+  }
+
+  /** The durable lane-order authority for one settled assistant step: the
+   * embedded stream's first visible lane — the same authority
+   * `assistant/attempt` already consumes (`assistantStreamProjection`) —
+   * and the durable `message.content` block order only when the stream
+   * yields NO lane evidence (missing, empty, or lane-evidence-free such as
+   * usage-only frames). Never a text heuristic; `undefined` means no order
+   * evidence. */
+  private durableLaneOrder(
+    projection: AssistantStreamProjection | undefined,
+    blocks: readonly ContentBlock[],
+  ): 'thinking' | 'assistant' | undefined {
+    return projection?.firstLane ?? contentLaneOrder(blocks)
+  }
+
+  /** Converge one step's Thinking/Assistant rows to its stored lane
+   * authority. When the physical append order contradicts the authority (a
+   * lane materialized after the step already owned the other row — same-step
+   * replacement or late diagnostic reasoning), the Thinking row is
+   * DISPLAY-DISPLACED around the Assistant row: `items` stays strictly
+   * append-only and the raw index keeps its `TranscriptItemId` stable-
+   * identity meaning (the search overlay recovers hits by it). Steps with
+   * fewer than two live lane rows, without stored authority, or already
+   * conformant drop any stale mapping instead. */
+  private convergeStepLaneOrder(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const authority = this.stepLaneOrders.get(key)
+    if (authority === undefined) return
+    const thinkingRow = this.thinkingEntries.get(key)
+    const assistantRow = this.assistantEntries.get(key)
+    if (thinkingRow === undefined || assistantRow === undefined) return
+    const thinkingIndex = this.searchIndexByStepKey.get(`thinking:${key}`)
+    const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
+    if (thinkingIndex === undefined || assistantIndex === undefined) return
+    if ((thinkingIndex < assistantIndex) === (authority === 'thinking')) {
+      // Conformant: drop stale mappings from an earlier flipped authority.
+      this.dropLaneDisplayFor(thinkingIndex)
+      this.dropLaneDisplayFor(assistantIndex)
+      return
+    }
+    // The Assistant row anchors the step; the Thinking row is displayed
+    // immediately before (thinking-first) or after (assistant-first) it.
+    this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after')
+  }
+
+  /** Drop any lane display mapping that references one raw item index (as
+   * displaced row or as anchor). Called when a lane row is tombstoned so a
+   * stale mapping can never strand the surviving row's display slot. Bumps
+   * the search revision only when a mapping was actually removed. */
+  private dropLaneDisplayFor(index: number): void {
+    const entry = this.laneDisplayByDisplaced.get(index)
+    if (entry !== undefined) {
+      this.laneDisplayByDisplaced.delete(index)
+      this.laneDisplayByAnchor.delete(entry.anchor)
+      this.searchRevisionCounter += 1
+      return
+    }
+    const displaced = this.laneDisplayByAnchor.get(index)
+    if (displaced !== undefined) {
+      this.laneDisplayByAnchor.delete(index)
+      this.laneDisplayByDisplaced.delete(displaced)
+      this.searchRevisionCounter += 1
+    }
+  }
+
+  /** THE single display-order traversal of the raw items: raw physical
+   * order, with lane rows displaced by `convergeStepLaneOrder` emitted at
+   * their anchor (before/after per the stored authority). Every display
+   * path — `groupedMessages()`, the window projection and `search()` —
+   * consumes THIS traversal so display chronology has exactly one owner;
+   * raw storage stays append-only and raw indexes stay stable
+   * (`TranscriptItemId`).
+   *
+   * Ranged callers (the window) must supply COMPLETE turn ranges — lane
+   * peers always share one turn, so a turn-bounded range always covers a
+   * pair together; an arbitrary raw slice could split one. */
+  private *displayOrderedRawIds(start = 0, end: number = this.items.length - 1): Iterable<number> {
+    for (let index = start; index <= end; index += 1) {
+      // A displaced lane row is emitted at its anchor below, never at its
+      // physical slot.
+      if (this.laneDisplayByDisplaced.has(index)) continue
+      const displaced = this.laneDisplayByAnchor.get(index)
+      if (displaced === undefined) {
+        yield index
+        continue
+      }
+      const placement = this.laneDisplayByDisplaced.get(displaced)
+      if (placement?.position === 'before') yield displaced
+      yield index
+      if (placement?.position === 'after') yield displaced
+    }
+  }
+
+  /** The only mutation entry for the lane display maps: records the pair
+   * and bumps the search revision when the recorded relation actually
+   * changes (an idempotent re-record of the same pair is revision-neutral).
+   * The revision guards the search projection's CONTENT **and ORDER** — a
+   * display-relation change alters the order matches are emitted in, so
+   * refinement against previous matches must be invalidated even when no
+   * searchable text changed. */
+  private setLaneDisplay(displaced: number, anchor: number, position: 'before' | 'after'): void {
+    const current = this.laneDisplayByDisplaced.get(displaced)
+    if (current?.anchor === anchor && current.position === position) return
+    this.laneDisplayByDisplaced.set(displaced, { anchor, position })
+    this.laneDisplayByAnchor.set(anchor, displaced)
+    this.searchRevisionCounter += 1
+  }
+
 
   private restoreThinkingFromProjection(turn: number, step: number, projection: AssistantStreamProjection): void {
     const activity = this.activityByTurn.get(turn)
@@ -2813,11 +3820,16 @@ export class TranscriptFolder {
       }
       return
     }
-    const entry = this.thinkingEntry(turn, step)
+    const entry = this.thinkingEntry(turn, step, projection.thinkingStartedAt)
     this.hiddenThinkingEntries.delete(entry)
     entry.text = text
     this.markStreamingEntryDirty(`thinking:${key}`)
-    this.closeThinking(entry)
+    // The durable lane timing is AUTHORITY at settlement: a same-step
+    // replacement re-anchors BOTH bounds (§12.6), never only the end.
+    if (projection.thinkingStartedAt !== undefined) {
+      setTranscriptTiming(entry, { startedAt: projection.thinkingStartedAt, running: true })
+    }
+    this.closeThinking(entry, projection.thinkingEndedAt)
     this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
 
@@ -2900,17 +3912,22 @@ export class TranscriptFolder {
     }
   }
 
-  /** Restore a SETTLED thinking entry from the reasoning blocks of a
-   * durable assistant message (Session v2 cold replay — the assembled
-   * `message.content` carries `reasoning` blocks the live plane streamed
-   * as deltas). The durable message is authoritative: it replaces any
-   * earlier same-step reasoning, including replacing it with no entry. */
-  private restoreThinkingFromMessage(turn: number, step: number, blocks: readonly ContentBlock[]): void {
+  /** Restore a SETTLED thinking entry from one durable assistant message.
+   * The embedded stream's reasoning is the PRIMARY source — the same
+   * projection that owns lane order/usage (decode-once, plan §4.4/§12.5) —
+   * and the assembled `message.content` blocks are the fallback when the
+   * stream carries no reasoning. The durable message is authoritative: it
+   * replaces any earlier same-step reasoning, including replacing it with
+   * no entry. */
+  private restoreThinkingFromMessage(
+    turn: number,
+    step: number,
+    projection: AssistantStreamProjection | undefined,
+    blocks: readonly ContentBlock[],
+  ): void {
     const key = stepKey(turn, step)
-    let text = ''
-    for (const block of blocks) {
-      if (block.type === 'reasoning') text += block.text
-    }
+    let text = reasoningBlockText(projection?.blocks)
+    if (text === '') text = reasoningBlockText(blocks)
     if (text === '') {
       const existing = this.thinkingEntries.get(key)
       // Legacy/live messages may omit reasoning blocks even though the live
@@ -2926,11 +3943,18 @@ export class TranscriptFolder {
       }
       return
     }
-    const entry = this.thinkingEntry(turn, step)
+    const entry = this.thinkingEntry(turn, step, projection?.thinkingStartedAt)
     this.hiddenThinkingEntries.delete(entry)
     entry.text = text
     this.markStreamingEntryDirty(`thinking:${key}`)
-    this.closeThinking(entry)
+    // The durable lane timing is AUTHORITY at settlement: a same-step
+    // replacement re-anchors BOTH bounds (§12.6), never only the end. A
+    // streamless settlement has no lane authority — closeThinking falls
+    // back to the last accepted live reasoning evidence.
+    if (projection?.thinkingStartedAt !== undefined) {
+      setTranscriptTiming(entry, { startedAt: projection.thinkingStartedAt, running: true })
+    }
+    this.closeThinking(entry, projection?.thinkingEndedAt)
     this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
 
@@ -2964,7 +3988,7 @@ export class TranscriptFolder {
   /** Build the grouped output list (the full projection). */
   private groupedMessages(): TranscriptMessage[] {
     const grouped: TranscriptMessage[] = []
-    for (let index = 0; index < this.items.length; index += 1) {
+    for (const index of this.displayOrderedRawIds()) {
       const group = this.groupOf.get(index)
       if (group !== undefined) {
         const members = this.groupMembers.get(group)
@@ -3036,7 +4060,7 @@ export class TranscriptFolder {
     if (itemStart === undefined || itemEnd < itemStart || firstTurnValue === undefined || lastTurnValue === undefined) {
       return { messages: kept, tools }
     }
-    for (let index = itemStart; index <= itemEnd; index += 1) {
+    for (const index of this.displayOrderedRawIds(itemStart, itemEnd)) {
       const group = this.groupOf.get(index)
       if (group !== undefined) {
         // A cross-turn group may begin before the selected raw range. Its
@@ -3091,7 +4115,15 @@ export class TranscriptFolder {
     const maxTurns = Math.max(1, Math.trunc(options.maxTurns))
     let range = this.indexedWindowRange(maxTurns, options.endTurn)
 
-     if (range === undefined) return { messages: [], hasOlder: false, hasNewer: false }
+    // A turn-less session is not an empty transcript: standalone-only rows
+    // (commands, compaction cards) still project, with no turn navigation
+    // facts (post-PR166 plan §8.2). No fake summary row is synthesized.
+    if (range === undefined) {
+      const standalone = this.groupedMessages()
+      return standalone.length === 0
+        ? { messages: [], hasOlder: false, hasNewer: false }
+        : { messages: standalone, hasOlder: false, hasNewer: false }
+    }
      if (this.turnsMonotonic && this.crossTurnGroups > 0) {
        const groupedRange = this.groupedWindowRange(maxTurns, options.endTurn)
        if (groupedRange !== undefined) {
@@ -3109,11 +4141,44 @@ export class TranscriptFolder {
     // long read run cannot make every navigation repaint rescan history.
     if (!this.turnsMonotonic) {
       const full = this.groupedMessages()
-       const allTurns = [...new Set(full.filter(message => 'turn' in message).map(message => message.turn))]
-         .sort((a, b) => a - b)
+       // Turn-less standalone rows (commands AND fused manual-compaction owners)
+       // follow the SHARED placement authority — never the turn predicates of the
+       // pure `windowMessages` helper (which keeps every turn-less row
+       // unconditionally and would fold a fused owner away by its legacy turn).
+       // They are windowed separately here and merged back in raw order, so a
+       // small window never drags every historical command/compaction in (the
+       // bounded-window and anchored-search contracts, plan §8).
+      const anchoredRows = new Map<TranscriptMessage, number>()
+      const windowInput: TranscriptMessage[] = []
+      for (const message of full) {
+       const anchor = this.placementAnchorOf(message)
+       if (anchor !== undefined) anchoredRows.set(message, anchor)
+       else windowInput.push(message)
+      }
+      const allTurns = [...new Set(windowInput.filter(message => 'turn' in message).map(message => message.turn))]
+       .sort((a, b) => a - b)
 
-      const messages = windowMessages(full, maxTurns, options.endTurn)
-       const visibleSet = new Set(messages.filter(message => 'turn' in message).map(message => message.turn))
+      const windowed = windowMessages(windowInput, maxTurns, options.endTurn)
+      const sortedDesc = [...allTurns].sort((a, b) => b - a)
+      const anchorIndex = options.endTurn === undefined ? -1 : sortedDesc.indexOf(options.endTurn)
+      const windowTurnSet = new Set(anchorIndex >= 0
+       ? sortedDesc.slice(anchorIndex, anchorIndex + maxTurns)
+       : sortedDesc.slice(0, maxTurns))
+      const summaryRows = windowed.filter(message => message.kind === 'summary')
+      const windowedBody = new Set<TranscriptMessage>(windowed.filter(message => message.kind !== 'summary'))
+      const messages: TranscriptMessage[] = [...summaryRows]
+      for (const message of full) {
+       const anchor = anchoredRows.get(message)
+       if (anchor !== undefined) {
+         if (windowTurnSet.has(anchor)) messages.push(message)
+         continue
+       }
+       if (windowedBody.has(message)) messages.push(message)
+      }
+      const visibleSet = new Set<number>()
+      for (const message of messages) {
+        if ('turn' in message) visibleSet.add(message.turn)
+      }
        const visibleTurnValues = [...visibleSet].sort((a, b) => a - b)
        const firstTurn = visibleTurnValues[0] ?? this.turnValues[range.start]
        const lastTurn = visibleTurnValues[visibleTurnValues.length - 1] ?? this.turnValues[range.end]
@@ -3134,6 +4199,27 @@ export class TranscriptFolder {
     }
 
     const projected = this.projectIndexedRange(range.start, range.end)
+    // The LEADING standalone region (raw items before the first turn-owned
+    // row) belongs to the first turn's window by PLACEMENT, not blindly: an
+    // ANCHORED window (a search/navigation jump) keeps a leading row only
+    // when its placement anchor is the first selected turn (a pre-turn row
+    // adopted by it); a turn whose only standalone row anchored elsewhere
+    // (e.g. an in-turn-0 command of a session whose turn 0 has no other rows)
+    // stays out. The latest/fallback window shows the whole prefix.
+    const firstTurnBoundary = this.turnStarts[0]
+    if (range.start === 0 && firstTurnBoundary !== undefined && firstTurnBoundary > 0) {
+     const firstTurnValue = this.turnValues[0]
+     const leading: TranscriptMessage[] = []
+     for (let index = 0; index < firstTurnBoundary; index += 1) {
+       const item = this.items[index]
+       if (item === undefined || !this.isVisible(item)) continue
+       const anchor = this.placementAnchorOf(item)
+       if (anchored && firstTurnValue !== undefined && anchor !== undefined && anchor !== firstTurnValue) continue
+       leading.push(item)
+     }
+     if (leading.length > 0) projected.messages = [...leading, ...projected.messages]
+    }
+
     const visibleTurns = projected.messages
       .filter(message => 'turn' in message)
       .map(message => message.turn)
@@ -3165,10 +4251,12 @@ export class TranscriptFolder {
     return this.window({ maxTurns, ...options }).messages
   }
 
-  /** The search-projection revision: bumped on EVERY entry mutation
-   * (append, settlement, group reflow). The runner's query refinement must
-   * never reuse previous candidates across a revision — the projection may
-   * hold new matches the old candidate list cannot see. */
+  /** The search-projection revision: bumped on EVERY projection change —
+   * entry mutations (append, settlement, group reflow) and lane
+   * display-order mutations (`setLaneDisplay`/`dropLaneDisplayFor`). The
+   * runner's query refinement must never reuse previous candidates across
+   * a revision — the projection may hold new matches OR a new match order
+   * the old candidate list cannot see. */
   searchRevision(): number {
     return this.searchRevisionCounter
   }
@@ -3176,12 +4264,13 @@ export class TranscriptFolder {
   /** Full-history transcript search over the lightweight projection — same
    * corpus and ORDER as the legacy full search (`messages()` + filter +
    * per-message lowercase), but never materializes the grouped transcript
-   * and never re-lowercases history per query. Results are deduplicated by
-   * CURRENT group representative: a merged read card yields exactly ONE
-   * visible match no matter how many members hit, and Next/Prev never loop
-   * on one card. `refinement` (optional) narrows a previous result set when
-   * the new query extends it AND the projection revision is unchanged —
-   * otherwise the full lightweight scan runs.
+   * and never re-lowercases history per query. Results are OCCURRENCE-level:
+   * a card emits one match per non-overlapping occurrence in its
+   * representative corpus (each with its semantic `source` + ordinal), and a
+   * merged read card yields occurrences from its members' text rather than
+   * hidden member-level results. `refinement` (optional) narrows a previous
+   * result set when the new query extends it AND the projection revision is
+   * unchanged — otherwise the full lightweight scan runs.
    * @param query - the raw query (trimmed + lowercased here, like legacy).
    * @param refinement - the previous query's matches for prefix refinement;
    * the folder validates the prefix AND the revision internally.
@@ -3219,16 +4308,45 @@ export class TranscriptFolder {
       // Tombstoned failed-attempt text is not part of the corpus.
       const item = this.items[id]
       if (item !== undefined && !this.isVisible(item)) return
-      if (!entry.normalizedText.includes(needle)) return
       if (seen.has(representative)) return
+      if (!entry.normalizedText.includes(needle)) return
       seen.add(representative)
-      matches.push({ id: representative, turn: entry.turn })
+      // Enumerate every NON-OVERLAPPING occurrence in the representative
+      // corpus: the overlay count is occurrence-level, and each occurrence
+      // carries its semantic source for reveal/highlight.
+      let start = 0
+      let occurrence = 0
+      const sourceOccurrences = new Map<string, number>()
+      while (true) {
+        const index = entry.normalizedText.indexOf(needle, start)
+        if (index < 0) break
+        const span = resolveSearchSource(entry.spans, index)
+        const source: TranscriptSearchSource = span?.source ?? { kind: 'message' }
+        const sourceKey = span?.sourceKey ?? 'message'
+        const sourceOccurrence = sourceOccurrences.get(sourceKey) ?? 0
+        sourceOccurrences.set(sourceKey, sourceOccurrence + 1)
+        matches.push({ id: representative, turn: entry.turn, occurrence, source, sourceOccurrence })
+        occurrence += 1
+        start = index + Math.max(1, needle.length)
+      }
     }
     if (canRefine) {
-      for (const match of refinement.previousMatches) consider(match.id)
+      // Dedupe the previous matches to their CURRENT representatives FIRST:
+      // a card with 10k occurrences would otherwise re-run the same failing
+      // `includes()` 10k times. Refinement cost is O(candidate CARDS).
+      const representatives = new Set<number>()
+      for (const match of refinement.previousMatches) representatives.add(this.representativeOf(match.id))
+      for (const id of representatives) {
+        this.searchRefineCandidates += 1
+        consider(id)
+      }
       this.searchRefineCount += 1
     } else {
-      for (let id = 0; id < this.searchEntries.length; id += 1) consider(id)
+      // The full lightweight scan walks DISPLAY order (the shared
+      // `displayOrderedRawIds` traversal): match order mirrors the
+      // transcript the user sees, while match ids stay the stable raw
+      // indexes.
+      for (const id of this.displayOrderedRawIds()) consider(id)
       this.searchFullScanCount += 1
     }
     return matches
@@ -3253,6 +4371,7 @@ export class TranscriptFolder {
     dirtyScans: number
     fullScans: number
     refinedScans: number
+    refinedCandidates: number
   } {
     return {
       entries: this.searchEntries.length,
@@ -3261,12 +4380,27 @@ export class TranscriptFolder {
       dirtyScans: this.searchDirtyScanCount,
       fullScans: this.searchFullScanCount,
       refinedScans: this.searchRefineCount,
+      refinedCandidates: this.searchRefineCandidates,
     }
   }
 
-  /** Remove one thinking entry from the open-lifecycle index. */
-  private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>): void {
+  /** Settle one thinking entry: it stops streaming and records its
+   * authoritative end in the timing sidecar (post-F6 plan §12.6). An absent
+   * `endedAt` (an abandoned attempt, a streamless legacy settlement) falls
+   * back to the last ACCEPTED reasoning evidence — the honest end — never
+   * the settlement's own late time; with neither, `endedAt` stays
+   * undefined. Consumers treat unknown as UNKNOWN, never zero. */
+  private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>, endedAt?: number): void {
     entry.running = false
+    const evidenceEnd = endedAt ?? thinkingLastEvidence.get(entry)
+    const startedAt = transcriptTimingOf(entry)?.startedAt ?? evidenceEnd
+    if (startedAt !== undefined) {
+      setTranscriptTiming(entry, {
+        startedAt,
+        ...(evidenceEnd === undefined ? {} : { endedAt: Math.max(startedAt, evidenceEnd) }),
+        running: false,
+      })
+    }
     const open = this.openThinkingByTurn.get(entry.turn)
     if (open === undefined) return
     open.delete(entry)
@@ -3278,6 +4412,10 @@ export class TranscriptFolder {
     const key = stepKey(turn, step)
     const entry = this.thinkingEntries.get(key)
     if (entry === undefined) return
+    // A tombstoned lane row can no longer honor a display displacement —
+    // drop the mapping so the surviving lane falls back to its physical
+    // slot (the raw index stays the stable TranscriptItemId).
+    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`thinking:${key}`) ?? -1)
     entry.text = ''
     this.closeThinking(entry)
     this.thinkingEntries.delete(key)
@@ -3309,20 +4447,29 @@ export class TranscriptFolder {
     activity.revision += 1
   }
 
-  /** Settle only the thinking entries owned by one ended turn. */
-  private closeThinkingForTurn(turn: number): void {
+  /** Settle only the thinking entries owned by one ended turn: the
+   * authoritative `turn/end` time is their end (post-F6 plan §12.6). */
+  private closeThinkingForTurn(turn: number, endedAt?: number): void {
     const open = this.openThinkingByTurn.get(turn)
     if (open === undefined) return
-    for (const entry of open) entry.running = false
+    for (const entry of open) this.closeThinking(entry, endedAt)
     this.openThinkingByTurn.delete(turn)
+    const activity = this.activityByTurn.get(turn)
+    if (activity?.thinkingStep !== undefined) this.markThinkSettled(activity, activity.thinkingStep)
   }
 
-  /** The thinking entry object for one (turn, step), created on first reasoning. */
-  private thinkingEntry(turn: number, step: number): Extract<TranscriptMessage, { kind: 'thinking' }> {
+  /** The thinking entry object for one (turn, step), created on first
+   * reasoning. The first accepted reasoning evidence's time is the row's
+   * sidecar start (post-F6 plan §12.6). A retried REOPEN deletes the stale
+   * sidecar and reuses the same entry object — the new attempt's first
+   * chunk re-records the start here (first-wins: an entry that already has
+   * timing keeps it). */
+  private thinkingEntry(turn: number, step: number, startedAt?: number): Extract<TranscriptMessage, { kind: 'thinking' }> {
     const key = stepKey(turn, step)
     let entry = this.thinkingEntries.get(key)
     if (entry === undefined) {
       entry = { kind: 'thinking', turn, text: '', running: true }
+      if (startedAt !== undefined) setTranscriptTiming(entry, { startedAt, running: true })
       this.thinkingEntries.set(key, entry)
       this.searchIndexByStepKey.set(`thinking:${key}`, this.appendItem(entry))
       let open = this.openThinkingByTurn.get(turn)
@@ -3331,6 +4478,8 @@ export class TranscriptFolder {
         this.openThinkingByTurn.set(turn, open)
       }
       open.add(entry)
+    } else if (startedAt !== undefined && transcriptTimingOf(entry) === undefined) {
+      setTranscriptTiming(entry, { startedAt, running: true })
     }
     return entry
   }
@@ -3358,7 +4507,7 @@ export class TranscriptFolder {
    * so a resumed session still shows its compaction records.
    */
   private applyCompactionEvent(
-    event: { type: string; data: Record<string, unknown> },
+    event: { type: string; data: Record<string, unknown>; seq?: unknown },
     kind: string,
   ): void {
     const data = event.data as { compactionId?: unknown } & Record<string, unknown>
@@ -3403,6 +4552,96 @@ export class TranscriptFolder {
       if (typeof error === 'string' && error !== '') entry.error = error
       if (compactionId !== undefined) this.compacting.delete(compactionId)
     }
+    // Manual-compaction correlation evidence (post-PR166 plan §7): the
+    // summary's event sequence is leg 2's direct lookup target, and a
+    // lifecycle-carried `sourceCommandId` is leg 1. Both are recorded as
+    // presentation metadata on the card, then any already-known command is
+    // fused immediately — a lifecycle event may land after the command's own
+    // `command/done`.
+    const seq = Number(event.seq)
+    if (kind === 'compaction/summary' && Number.isSafeInteger(seq) && seq >= 0) {
+      entry.summaryEventSeq = seq as SessionEventSeq
+      this.compactionBySummarySeq.set(seq as SessionEventSeq, index)
+    }
+    const sourceCommandId = data.sourceCommandId
+    if (typeof sourceCommandId === 'string' && sourceCommandId !== '') {
+      entry.sourceCommandId = sourceCommandId as CommandId
+      this.compactionBySourceCommandId.set(entry.sourceCommandId, index)
+    }
+    if (entry.sourceCommandId !== undefined) {
+      const command = this.commands.get(entry.sourceCommandId)
+      if (command !== undefined) this.fuseCompactionCommand(command.message, command.index)
+    }
+  }
+
+  /**
+   * Fuse one command with its compaction card — establishing the ONE
+   * combined manual-compaction owner (post-PR166 plan §7, official
+   * `manual-compaction` node semantics). Leg 1 — the compaction lifecycle's
+   * `sourceCommandId` — is the ownership AUTHORITY: the moment the official
+   * event names the initiating command, the relationship is proven, so the
+   * ownership is established immediately even while the command is still
+   * running (never two visible cards for one manual compaction). Leg 2 — a
+   * settled outcome's `sourceEventSeq` pointing at a `compaction/summary`
+   * event — fuses only when no leg-1 declaration exists, and only when both
+   * legs present must they agree: contradictions (including a leg-2 hit on a
+   * card declaring a DIFFERENT command) fuse nothing, fail soft. An
+   * established ownership is never re-decided or revoked by later evidence —
+   * the fold never guesses a new winner — while the command's settlement
+   * still refreshes the combined owner's search corpus (the command fields
+   * live on the card's entry).
+   */
+  private fuseCompactionCommand(message: TranscriptCommandMessage, index: number): void {
+    const ownedBy = this.compactionOwnerByCommandId.get(message.commandId)
+    if (ownedBy !== undefined) {
+      // Established combined owner: a settlement (outcome replaced) refreshes
+      // the owner's corpus — the command name/args/outcome it now carries.
+      this.markSearchEntryDirty(ownedBy)
+      this.markSearchEntryDirty(index)
+      return
+    }
+    const byCommandId = this.compactionBySourceCommandId.get(message.commandId)
+    const bySourceEventSeq = message.outcome !== null && message.outcome.kind === 'success' && message.outcome.sourceEventSeq !== undefined
+      ? this.compactionBySummarySeq.get(message.outcome.sourceEventSeq)
+      : undefined
+    if (byCommandId !== undefined && bySourceEventSeq !== undefined && byCommandId !== bySourceEventSeq) return
+    const target = byCommandId ?? bySourceEventSeq
+    if (target === undefined) return
+    const compaction = this.items[target]
+    if (compaction === undefined || compaction.kind !== 'compaction') return
+    // Reverse-leg validation (plan §7.2): a leg-2 hit on a card that
+    // EXPLICITLY declares a different initiating command contradicts the
+    // official evidence — the card belongs to that command, not this one.
+    // Fail soft: no fusion, no guess; both rows stay standalone.
+    if (compaction.sourceCommandId !== undefined && compaction.sourceCommandId !== message.commandId) return
+    compaction.sourceCommand = message
+    this.fusedCommands.add(message)
+    this.compactionOwnerByCommandId.set(message.commandId, target)
+    // The combined owner INHERITS the command's placement anchor: the card is
+    // the visible/searchable representative now, and its legacy `turn` (the
+    // fold-time currentTurn, which never regresses for replays and is 0 for
+    // a pre-turn manual compaction) must not steer the anchored window.
+    const anchor = this.commandPlacementTurns.get(message)
+    if (anchor !== undefined) this.setPlacementAnchor(message, index, anchor)
+    // A fused owner whose legacy turn is a GHOST singleton (that turn's only
+    // raw item is this very card — e.g. a pre-turn manual compaction
+    // registering the initial currentTurn) drops the ghost turn
+    // registration: the card is placement-anchored now, and the ghost would
+    // otherwise claim the leading raw prefix and push the first REAL turn's
+    // segment past it, hiding the card from the first-turn window.
+    const ghostIndex = this.turnValues.indexOf(compaction.turn)
+    if (ghostIndex >= 0 && this.turnStarts[ghostIndex] === target
+      && this.activityByTurn.get(compaction.turn)?.startedAt === undefined
+      && (ghostIndex + 1 >= this.turnStarts.length || this.turnStarts[ghostIndex + 1]! === target + 1)) {
+      this.turnValues.splice(ghostIndex, 1)
+      this.turnStarts.splice(ghostIndex, 1)
+      this.turnValueSet.delete(compaction.turn)
+      this.removeGroupedTurn(compaction.turn)
+    }
+    // The card's corpus now carries the command fields and the raw command
+    // entry stops producing hits — both entries re-normalize lazily.
+    this.markSearchEntryDirty(target)
+    this.markSearchEntryDirty(index)
   }
 
   /** Fold the structural durable payload emitted by the present tool. The
@@ -3514,7 +4753,7 @@ export class TranscriptFolder {
       return
     }
     if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end' || kind === 'session/end-seed') {
-      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
+      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown>; seq?: unknown }, kind)
       return
     }
     if (kind === 'llm/retry-started') {
@@ -3540,23 +4779,49 @@ export class TranscriptFolder {
       // transient/open presentation. Its usage is still folded independently
       // below so Focus and Stats keep the same late-fact policy.
       const alreadySettled = existingActivity?.settledSteps.has(data.step) === true
-      const stream = data.stream ?? []
-      this.liveAssistantBlocks.delete(stepKey(data.turn, data.step))
-      const projection = alreadySettled ? undefined : this.assistantStreamProjection(stream)
-      // The durable embedded stream is COMPLETE and authoritative for
-      // reasoning; restore the first lane before the other one so cold replay
-      // preserves the live Thinking → Assistant / Assistant → Thinking order.
-      if (projection?.firstLane === 'thinking') this.restoreThinkingFromProjection(data.turn, data.step, projection)
-      if (projection !== undefined) this.restoreAssistantAttempt(data.turn, data.step, projection)
-      this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantSettlement('attempt', undefined, stream))
-      const activity = this.activityFor(data.turn)
       const key = stepKey(data.turn, data.step)
-      if (projection !== undefined && projection.firstLane !== 'thinking') {
+      // Whether the step already had a stored durable lane authority: a
+      // REPLACEMENT attempt (one existed) is newer authoritative evidence
+      // and may converge the lane topology; a FIRST attempt preserves the
+      // live chronology anchor (§4.5 — the message path's same rule).
+      const hadLaneAuthority = this.stepLaneOrders.has(key)
+      const stream = data.stream ?? []
+      this.liveAssistantBlocks.delete(key)
+      // One durable stream projection per settlement: lane order, restored
+      // reasoning and usage come from the same pass (plan §4.4/§12.5).
+      const projection = this.assistantStreamProjection(stream, data.turn, data.step)
+      this.absorbPreparingStarts(projection.toolCallStarts, data.turn, data.step)
+      if (!alreadySettled) {
+        // Store/refresh the step's lane authority from the attempt; a later
+        // message settlement (higher authority) overwrites it.
+        if (projection.firstLane !== undefined) {
+          this.stepLaneOrders.set(key, projection.firstLane)
+        }
+        // The durable embedded stream is COMPLETE and authoritative for
+        // reasoning; restore the first lane before the other one so cold
+        // replay preserves the live Thinking → Assistant / Assistant →
+        // Thinking order.
+        if (projection.firstLane === 'thinking') this.restoreThinkingFromProjection(data.turn, data.step, projection)
+        this.restoreAssistantAttempt(data.turn, data.step, projection)
+      }
+      this.usage.onAssistantAttempt(data.turn, data.step, projection.usage)
+      const activity = this.activityFor(data.turn)
+      if (!alreadySettled && projection.firstLane !== 'thinking') {
         this.restoreThinkingFromProjection(data.turn, data.step, projection)
+      }
+      // A replacement durable attempt is newer authoritative evidence: after
+      // both lanes are restored, converge their display order to the just-
+      // stored authority (same model as the message path's replacement rule —
+      // without this, attempt B's topology flip would never reach the rows
+      // and would even survive into the final message settlement via the
+      // §4.5 first-settlement gate).
+      if (!alreadySettled && hadLaneAuthority && projection.firstLane !== undefined) {
+        this.convergeStepLaneOrder(data.turn, data.step)
       }
       this.syncUsage(activity)
       const thinking = this.thinkingEntries.get(key)
       if (thinking !== undefined && thinking.running) this.closeThinking(thinking)
+      this.markThinkSettled(activity, data.step)
       activity.revision += 1
       return
     }
@@ -3607,6 +4872,9 @@ export class TranscriptFolder {
         // A failed attempt closes at step/end even when the turn continues;
         // expose its preserved evidence without waiting for turn/end.
         this.markAttemptEvidenceInterrupted(event.data.turn, event.data.step)
+        // The step's preparing evidence is dead with the attempt: a later
+        // attempt reusing the identity must not inherit its timer.
+        this.clearPreparingStartsForStep(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
         // Owner lifecycle: the step closed — clear the matching open step
@@ -3631,6 +4899,11 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed || activity.startedAt !== undefined) break
         activity.startedAt = event.time
+        // Only an ACCEPTED turn/start adopts the leading standalone prefix:
+        // a replayed start for an already-finalized (or already-open) turn
+        // breaks above and must not consume the pending anchors — the first
+        // REAL turn owns the prefix (round-5 review finding).
+        this.adoptLeadingAnchors(event.data.turn)
         activity.completed = false
         activity.reason = undefined
         if (event.data.turn === this.currentTurn) {
@@ -3658,8 +4931,12 @@ export class TranscriptFolder {
         const text = textWithAttachmentMarkers(blocks)
         // Only direct human prompts use the generalized finalized-content
         // predicate. Injected context keeps its text-only empty gate: a
-        // process block must not turn into an empty system row.
-        if (event.data.source.kind === 'user') {
+        // process block must not turn into an empty system row. The source
+        // kind is read through the SINGLE context parser, so a restored or
+        // foreign log that records a null/undefined/non-object source folds
+        // as standalone injected Context instead of crashing the whole fold.
+        const sourcePresentation = contextPresentation(event.data.source)
+        if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
           const activity = this.activityFor(this.currentTurn)
           if (activity.pendingPreSteerAnswerStep !== undefined) {
@@ -3698,6 +4975,10 @@ export class TranscriptFolder {
             // context (never orchestration like llm/retry or max-tokens),
             // so Focus may treat it as turn foundation.
             context: true as const,
+            // Presentation-only provenance (form/kind/sender) for the
+            // form-aware Context roles Compact and Focus present. The
+            // semantic marker above stays the surfaced authority.
+            contextPresentation: sourcePresentation,
           })
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of
@@ -3720,14 +5001,35 @@ export class TranscriptFolder {
         // A stale step may not own Focus final selection, but it must remain
         // available in the ordinary transcript and search projections.
         this.liveAssistantBlocks.delete(key)
-        const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
+        // Decode the durable embedded stream ONCE for this settlement: the
+        // lane chronology authority, the restored Thinking text, the
+        // first-visible reply time and the usage all come from the same
+        // projection (post-F6 plan §4.4 — the one durable step projection
+        // shared by message and attempt settlements).
+        const projection = event.data.stream !== undefined && event.data.stream.length > 0
+          ? this.assistantStreamProjection(event.data.stream, event.data.turn, event.data.step)
+          : undefined
+        if (projection !== undefined) this.absorbPreparingStarts(projection.toolCallStarts, event.data.turn, event.data.step)
+        const messageUsage = event.data.usage ?? projection?.usage
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
-        const firstVisible = firstVisibleAssistantTimeFromStream(event.data.stream)
+        const firstVisible = projection?.firstVisibleAt
         if (firstVisible === undefined) activity.firstVisibleAssistantTimes.delete(event.data.step)
         else activity.firstVisibleAssistantTimes.set(event.data.step, firstVisible)
+        // The step's durable evidence owns its lane chronology (§4.3): store
+        // it so this and later settlements (same-step replacement) and late
+        // diagnostic reasoning place lanes by AUTHORITY — row existence
+        // proves nothing about chronology ownership.
+        const laneOrder = this.durableLaneOrder(projection, messageBlocks)
+        if (laneOrder !== undefined) this.stepLaneOrders.set(key, laneOrder)
         const wasVisible = entry !== undefined && this.isVisible(entry)
+        // Whether the Thinking row predates this settlement: a row that
+        // already existed (live reasoning stream / earlier attempt restore)
+        // anchors the live chronology — §4.5 keeps it in place on the FIRST
+        // settlement. A REPLACEMENT settlement (alreadySettled) is newer
+        // authoritative evidence and owns the topology.
+        const thinkingRowPreExisting = this.thinkingEntries.get(key) !== undefined
         if (entry !== undefined) {
           rememberAssistantStep(entry, event.data.step)
           entry.text = text
@@ -3769,9 +5071,19 @@ export class TranscriptFolder {
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
-        // assembled `reasoning` blocks in the durable message restore the
-        // settled thinking entry (Session v2 embedded-stream parity).
-        this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
+        // reasoning restored here comes from the step's durable evidence
+        // (embedded stream primary, assembled content fallback; Session v2
+        // embedded-stream parity).
+        this.restoreThinkingFromMessage(event.data.turn, event.data.step, projection, messageBlocks)
+        // Then converge the step's lanes to the stored authority: a lane row
+        // materialized out of order (missing-lane replay, same-step
+        // replacement flipping the topology) is relocated HERE at the
+        // canonical owner — never in a preset projection (plan §4.7). A
+        // pre-existing Thinking row on a first settlement anchored the live
+        // chronology and is left in place (§4.5).
+        if (alreadySettled || !thinkingRowPreExisting) {
+          this.convergeStepLaneOrder(event.data.turn, event.data.step)
+        }
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
@@ -3868,7 +5180,26 @@ export class TranscriptFolder {
           args: event.data.arguments,
           result: '',
           status: 'running',
+          // Genuine model tool/call provenance (post-F6 plan §10.2): the
+          // span `tools` stat and the Tool-slot ownership read THIS, never
+          // the projected card shape.
+          callCount: 1,
         }
+        // The call's wall span starts at its earliest authoritative
+        // evidence: the first streamed arguments delta when the call was
+        // preparing, else the tool/call event (post-F6 plan §12.7/§12.14 —
+        // never a Preparing → durable elapsed reset).
+        const preparingStart = this.toolCallPreparingStarts.get(key)
+        this.toolCallPreparingStarts.delete(key)
+        setTranscriptTiming(card, {
+          startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart.at, event.time),
+          running: true,
+        })
+        // Post-turn replay provenance: this card is NEWLY materialized, so if
+        // its owning turn already ended it is transcript/diagnostic evidence
+        // only (read the map BEFORE `activityFor` below can create a fresh,
+        // non-completed activity for the turn).
+        if (this.activityByTurn.get(callTurn)?.completed === true) markPostTurnReplayEvidence(card)
         this.appendItem(card)
         this.pendingCalls.set(key, {
           name: event.data.name,
@@ -3891,34 +5222,48 @@ export class TranscriptFolder {
         // (replay artifact) must not mutate the Focus counts or the Tool
         // slot (review finding). The transcript card still folds.
         if (!activity.completed) {
-          activity.toolCalls += 1
-          activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
+          // A surfaced-interaction tool call (question / Plan review) is
+          // human-decision evidence, not ordinary work: it never increments
+          // the turn's tool count, never appears in the tool-type stats, and
+          // never owns the latest-meaningful-Tool slot. It still confirms the
+          // message candidate below (a real step boundary), so final answer
+          // selection is unchanged.
+          if (!isSurfacedInteractionToolName(event.data.name)) {
+            activity.toolCalls += 1
+            activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
+            activity.tool = {
+              callId: event.data.callId,
+              name: event.data.name,
+              args: event.data.arguments,
+              status: 'running',
+            }
+          }
           this.confirmMessageCandidate(activity)
           this.syncMessage(activity)
-          activity.tool = {
-            callId: event.data.callId,
-            name: event.data.name,
-            args: event.data.arguments,
-            status: 'running',
-          }
           activity.revision += 1
         }
         break
       }
       case 'tool/result': {
-        const block = event.data.message.content[0]
-        const key = block?.toolCallId
-        const pending = key !== undefined ? this.pendingCalls.get(key) : undefined
-        const name = key === undefined ? 'tool' : (this.callNames.get(key) ?? 'tool')
-        const text = textOf(block?.content ?? [])
-        const status = event.data.error !== undefined || block?.isError === true ? 'error' : 'ok'
+        // Session V4: the durable event carries a first-class tool-role
+        // message. The call identity is `message.toolCallId` (the value
+        // official admission keeps equal to `source.callId`), the content is
+        // the direct structured result, and `message.isError` is the only
+        // durable outcome authority (`event.data.error` remains optional
+        // presentation detail).
+        const message = event.data.message
+        const key = message.toolCallId
+        const pending = this.pendingCalls.get(key)
+        const name = this.callNames.get(key) ?? 'tool'
+        const text = textOf(message.content)
+        const status = message.isError === true ? 'error' : 'ok'
         // The result's OWN turn (event.data.turn) when no pending call
         // pairs it — never this.currentTurn: an orphan result of a replay
         // fragment must not land in the stale current turn (review
         // finding).
         const turn = pending?.turn ?? event.data.turn
-        this.pendingCalls.delete(key ?? '')
-        if (key !== undefined) this.callNames.delete(key)
+        this.pendingCalls.delete(key)
+        this.callNames.delete(key)
         if (pending !== undefined) {
           // The call's own running card: parallel same-name calls pair
           // correctly because the card is keyed by callId, not by name.
@@ -3927,8 +5272,11 @@ export class TranscriptFolder {
           card.result = text
           card.args = pending.args
           card.turn = turn
+          // The paired result is the card's authoritative end (post-F6 plan
+          // §12.7).
+          settleToolTiming(card, event.time)
           // Raw result data for the tool-owned presentation (presentResult).
-          card.resultBlocks = block?.content
+          card.resultBlocks = message.content
           card.meta = event.data.meta
           card.error = event.data.error
           // The result text landed: mark the search entry dirty (lazy
@@ -3951,14 +5299,25 @@ export class TranscriptFolder {
               running.result = text
               running.args = ''
               running.turn = turn
-              running.resultBlocks = block?.content
+              settleToolTiming(running, event.time)
+              running.resultBlocks = message.content
               running.meta = event.data.meta
               running.error = event.data.error
               this.markSearchEntryDirty(runningIndex)
               this.scheduleGrouping(runningIndex)
             }
           } else {
-            this.appendItem({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta, error: event.data.error })
+            const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: message.content, meta: event.data.meta, error: event.data.error }
+            // An orphan settle has NO seen tool/call: explicit zero-call
+            // provenance — it must neither inflate `tools` nor own the Tool
+            // slot (Focus counts only genuine tool/call events, §10.2).
+            card.callCount = 0
+            setTranscriptTiming(card, pointTiming(event.time))
+            // This orphan card is NEWLY materialized (the branches above
+            // settle an EXISTING card, which stays legal evidence): if its
+            // owning turn already ended, it is post-turn replay evidence.
+            if (this.activityByTurn.get(turn)?.completed === true) markPostTurnReplayEvidence(card)
+            this.appendItem(card)
             this.scheduleGrouping(this.items.length - 1)
           }
         }
@@ -4070,17 +5429,21 @@ export class TranscriptFolder {
           if (key.startsWith(`${endTurn}/`)) this.liveAssistantBlocks.delete(key)
         }
         this.markAttemptEvidenceInterrupted(endTurn)
-        this.closeThinkingForTurn(endTurn)
+        this.closeThinkingForTurn(endTurn, event.time)
+        // The turn closed: its preparing starts are dead evidence.
+        this.clearPreparingStartsForTurn(endTurn)
         if (event.data.reason.kind === 'error') {
           // Defensive: a malformed/legacy reason without the error detail
           // degrades to the bare marker instead of crashing the fold
           // (plan §10.2 — Focus aggregates the same events).
           const error = event.data.reason.error
-          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: displayFailureText(error), status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: displayFailureText(error), status: 'error', origin: 'turn-error' })
         } else if (event.data.reason.kind === 'aborted') {
-          this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error', origin: 'turn-interrupted' })
+        } else if (event.data.reason.kind === 'interrupted') {
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'interrupted', status: 'error', origin: 'turn-interrupted' })
         } else if (event.data.reason.kind === 'max-tokens') {
-          this.appendItem({ kind: 'system', turn: endTurn, text: 'max tokens reached — output truncated' })
+          this.appendItem({ kind: 'system', turn: endTurn, text: 'max tokens reached — output truncated', origin: 'turn-max-tokens' })
         }
         // Focus aggregation: turn/end is the authoritative finalization —
         // it settles timing, the end reason, and makes the final assistant
@@ -4167,58 +5530,105 @@ export class TranscriptFolder {
         // the failed attempt immediately, while the later retry-started event
         // only opens the next usage replacement slot.
         this.resetThinkingForRetry(turn, step)
+        // The retry invalidates the failed attempt's preparing starts: a
+        // reused call id must never inherit the old attempt's timer
+        // (post-F6 plan §12.14).
+        this.clearPreparingStartsForStep(turn, step)
         const maxRetries = 'maxRetries' in event.data ? event.data.maxRetries : undefined
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
           : `llm retry ${retry}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
-        this.appendItem({ kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}` })
+        const retryCard: Extract<TranscriptMessage, { kind: 'system' }> = { kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}`, origin: 'llm-retry' }
+        // A retry row has only its event time: it contributes point
+        // evidence to the enclosing Activity wall span (post-F6 plan
+        // §12.9) — never an invented retry duration.
+        setTranscriptTiming(retryCard, pointTiming(event.time))
+        this.appendItem(retryCard)
         // Focus aggregation: retries are orchestration, not a Tool — they
         // stay in the expanded process and never touch the Tool slot
         // (plan §16.2).
         break
       }
       case 'command/run': {
-        this.commandNames.set(event.data.commandId, event.data.name)
+        // A duplicated/replayed run with a known id fails soft: the original
+        // lifecycle identity wins and no duplicate visible row is created.
+        if (this.commands.has(event.data.commandId)) break
+        const message: TranscriptCommandMessage = {
+          kind: 'command',
+          commandId: event.data.commandId,
+          seq: event.seq,
+          time: event.time,
+          name: event.data.name,
+          args: typeof event.data.args === 'string' ? event.data.args : null,
+          outcome: null,
+        }
+        const index = this.appendItem(message)
+        this.commands.set(event.data.commandId, { index, message })
+        // A compaction card may ALREADY have declared this command id (its
+        // lifecycle events landed while the run fragment was unavailable, or
+        // simply later in the same batch): leg 1 is proven the moment the
+        // declaration exists, so resolve the combined ownership now — even
+        // while the command is still running.
+        this.fuseCompactionCommand(message, index)
         break
       }
       case 'command/done': {
-        const name = this.commandNames.get(event.data.commandId) ?? 'command'
-        this.commandNames.delete(event.data.commandId)
-        // Success text (e.g. "title set: x") carries the command's settlement
-        // message; errors prefix it with the failure marker.
-        const outcome = event.data.kind === 'error'
-          ? ` — error: ${event.data.text ?? 'failed'}`
-          : event.data.text === undefined || event.data.text === ''
-            ? ''
-            : ` — ${event.data.text}`
-        this.appendItem({ kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok' })
+        const outcome = commandOutcomeOf(event)
+        const known = this.commands.get(event.data.commandId)
+        if (known === undefined) {
+          // A done fragment without its run (a folded log fragment): one
+          // fail-soft fallback row at the done event's real position, never
+          // an invented turn and never a fake `/command` Tool.
+          const message: TranscriptCommandMessage = {
+            kind: 'command',
+            commandId: event.data.commandId,
+            seq: event.seq,
+            time: event.time,
+            name: null,
+            args: null,
+            outcome,
+          }
+          const index = this.appendItem(message)
+          this.commands.set(event.data.commandId, { index, message })
+          this.fuseCompactionCommand(message, index)
+          break
+        }
+        known.message.outcome = outcome
+        this.markSearchEntryDirty(known.index)
+        this.fuseCompactionCommand(known.message, known.index)
         break
       }
       case 'subagent/descriptor': {
-        // Durable delegation record: one card per subagent launch.
-        const { label, mode, provider } = event.data
-        const model = 'agentModel' in event.data ? event.data.agentModel : undefined
-        const result = [
-          mode !== undefined ? `mode: ${mode}` : '',
-          provider !== undefined ? `provider: ${provider}` : '',
-          model !== undefined ? `model: ${model}` : '',
-        ].filter(part => part !== '').join(' · ')
-        this.appendItem({
-          kind: 'tool',
-          turn: this.currentTurn,
-          name: 'subagent',
-          args: label ?? 'subagent',
-          result,
-          status: 'ok',
-        })
-        // Focus aggregation: a delegation record is a durable lifecycle
-        // event, NOT a model tool/call — it never touches the Tool slot or
-        // the tool count (plan §17).
+        // Child identity metadata, NOT transcript content: the viewer holds
+        // the authoritative child identity (id/label/mode/activity) through
+        // its own catalog state, and the parent's genuine
+        // `tool/call name=subagent` remains the delegation evidence. No
+        // TranscriptMessage is materialized for the descriptor.
         break
       }
       default:
         break
     }
+  }
+}
+
+/** Validate and retain the official `command/done` outcome (post-PR166 plan
+ * §6): only a SUCCESS may carry the `sourceEventSeq` relationship, and the
+ * sequence must be a safe non-negative integer — anything malformed is
+ * dropped fail-soft (partial/migrated logs), never a throw and never a
+ * re-parse of the result text. */
+function commandOutcomeOf(event: SessionEvent): TranscriptCommandOutcome {
+  const data = event.data as { kind?: unknown; text?: unknown; sourceEventSeq?: unknown }
+  const kind = data.kind === 'error' ? 'error' : 'success'
+  const text = typeof data.text === 'string' ? data.text : undefined
+  const sourceEventSeq = kind === 'success' && typeof data.sourceEventSeq === 'number'
+    && Number.isSafeInteger(data.sourceEventSeq) && data.sourceEventSeq >= 0
+    ? (data.sourceEventSeq as SessionEventSeq)
+    : undefined
+  return {
+    kind,
+    ...(text === undefined ? {} : { text }),
+    ...(sourceEventSeq === undefined ? {} : { sourceEventSeq }),
   }
 }
 
@@ -4241,11 +5651,12 @@ export function foldTranscript(events: readonly SessionEvent[], options?: FoldOp
 /**
  * A child session's OWN events: everything after the LAST tagged inherited
  * `session/end-seed` marker. The fork provider seeds a child with the
- * PARENT's completed-turn prefix (upstream: "a fork seed replays the
- * parent's log"), so the child log's pre-marker events are the parent's
- * history — parent completion notices included. The subagent viewer must
- * never render them as the child's transcript. Ordinary untagged markers
- * delimit restore/replay lifecycles and do not change child ownership.
+ * PARENT's inherited prefix — the exact cut may land mid-turn, and the
+ * child-owned synthetic repair always follows the marker (upstream: "a fork
+ * seed replays the parent's log"), so the child log's pre-marker events are
+ * the parent's history — parent completion notices included. The subagent
+ * viewer must never render them as the child's transcript. Ordinary untagged
+ * markers delimit restore/replay lifecycles and do not change child ownership.
  * Supported seeded logs always carry the tagged marker; an unseeded child has
  * no ownership marker, so all of its events remain visible.
  */
@@ -4305,8 +5716,8 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
       parts.push(`> ${escapeMarkdownInline(fileAttachmentSummary(attachment))} · attachment \`${attachment.attachmentId}\``)
     } else if (block.type === 'reasoning' || block.type === 'tool-call') {
       // These known process blocks have their existing dedicated transcript
-      // semantics; a finalized tool-result has no separate assistant surface,
-      // so it uses the explicit bounded fallback below.
+      // semantics; every other finalized block uses the explicit bounded
+      // fallback below.
       continue
     } else {
       flush()
@@ -4406,8 +5817,7 @@ export function renderTranscriptMarkdown(session: {
         break
       }
       case 'tool/result': {
-        const block = event.data.message.content[0]
-        const text = markdownContent(block?.content ?? [])
+        const text = markdownContent(event.data.message.content)
         if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
         break
       }

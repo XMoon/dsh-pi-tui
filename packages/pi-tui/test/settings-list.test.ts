@@ -306,6 +306,74 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		assert.deepStrictEqual(changes, [{ id: "setting-0", value: "off" }], "the surviving item row must stay clickable");
 	});
 
+	it("rejects a main-list click before the close repaint (no stale submenu-paint hit)", () => {
+		const changes: Array<{ id: string; value: string }> = [];
+		let done: ((selected?: string) => void) | undefined;
+		const submenu = {
+			render: () => ["submenu content"],
+			handleInput: () => {},
+			handleMouse: () => undefined,
+			dispose: () => {},
+		} as unknown as Component;
+		const list = new SettingsList(
+			[
+				{ id: "a", label: "Alpha", currentValue: "on", values: ["on", "off"], submenu: (_cv, d) => { done = d; return submenu; } },
+				{ id: "b", label: "Bravo", currentValue: "on", values: ["on", "off"] },
+			],
+			10,
+			testTheme,
+			(id, value) => changes.push({ id, value }),
+			() => {},
+		);
+		const mainPainted = list.render(80);
+		const rowB = mainPainted.findIndex((line) => line.includes("Bravo"));
+		assert.ok(rowB >= 0, `row B must paint:\n${mainPainted.join("\n")}`);
+		list.handleInput("\r"); // open the submenu on row A
+		list.render(80); // the submenu is the painted owner
+		done!(); // close WITHOUT a repaint
+		list.handleMouse(mouse("press", rowB));
+		list.handleMouse(mouse("click", rowB));
+		assert.deepStrictEqual(changes, [], "a click before the close repaint must not activate a hidden main row");
+		// The repaint clears the stale submenu owner and the main map is valid again.
+		list.render(80);
+		list.handleMouse(mouse("press", rowB));
+		list.handleMouse(mouse("click", rowB));
+		assert.deepStrictEqual(changes, [{ id: "b", value: "off" }], "the repainted main row must be clickable");
+	});
+
+	it("consumes a pre-close press so it cannot activate after the close repaint", () => {
+		let done: ((selected?: string) => void) | undefined;
+		const submenu = {
+			render: () => ["submenu content"],
+			handleInput: () => {},
+			handleMouse: () => undefined,
+			dispose: () => {},
+		} as unknown as Component;
+		const list = new SettingsList(
+			[
+				{ id: "a", label: "Alpha", currentValue: "on", values: ["on", "off"] },
+				{ id: "b", label: "Bravo", currentValue: "on", values: ["on", "off"], submenu: (_cv, d) => { done = d; return submenu; } },
+			],
+			10,
+			testTheme,
+			() => {},
+			() => {},
+		);
+		list.render(80);
+		list.handleMouse(mouse("press", 1)); // press main row B (the submenu row)
+		list.handleInput("\r"); // keyboard opens B's submenu
+		list.render(80);
+		done!(); // close without a repaint
+		list.render(80); // main list repainted
+		list.handleMouse(mouse("click", 1)); // release after the repaint
+		// Without consuming the pre-close gesture, the stale pressed id would
+		// re-open B's submenu on the stray click.
+		assert.ok(
+			list.render(80).some((line) => line.includes("Alpha")),
+			"a pre-close press must not re-activate after the close repaint",
+		);
+	});
+
 	it("replaces the pressed identity on a delegated search press (no stale-latch activation)", () => {
 		const rows = [
 			{ id: "a", label: "A", currentValue: "on", values: ["on", "off"] },

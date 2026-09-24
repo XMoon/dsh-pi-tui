@@ -26,9 +26,28 @@
 
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
-      inject: [tuiStartup, piTuiExtensions, authorization]
+      # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork
+      # must observe the official workspace membership, and Cordis must have
+      # finished the registry's one-time history bootstrap before the surface
+      # can fork. The row below is this bundle's own, so the dependency is
+      # self-contained and a profile that disables it fails loud instead of
+      # silently forking without workspace inheritance.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry]
       config:
         sessionId: ''
+
+    # Host-owned workspace membership (`ctx.workspaceRegistry`): D2.4 Direct
+    # fork mirrors the official Host rule (use the source's directly owning
+    # workspace, else the nearest ancestor workspace of a subagent source) and
+    # attaches the child after publication. That association only exists while
+    # this service is mounted, so the TUI inserts the same official row the web
+    # bundle does (the DSH installation already ships the package). Activating
+    # it also performs the official one-time history bootstrap that groups
+    # stored Session headers by canonical cwd into durable workspace records —
+    # an upstream migration, not a TUI invention, and the reason the row is
+    # documented in docs/client-server-coupling.md.
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
 
     # The authorization seam (`ctx.authorization`): plugin-owned credential-
     # obtaining flows, one attempt per key, transport-neutral notices and
@@ -42,14 +61,16 @@
     - id: authorization
       name: '@deepseek-ai/dsh-authorization'
 
-    # Official shipped presets are the composition authority. The upstream
-    # service defaults includeShippedRoot/includeUserRoot to true, so this
-    # bundle deliberately owns no duplicate standard/ptc/minimal/cordis root.
-    # DSH's V2→V3 format migration owns historical session preset conversion;
-    # the settings/default compatibility shim is kept separately at the TUI
-    # request boundary and does not add another preset row.
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
+    # The 0.1.7 declarative preset registry: preset identity, revisions and
+    # default/selection policy are registry-owned (deployment `default` here;
+    # the user's `selectedDefault` rides the profile form). The four shipped
+    # preset declarations follow as separate patch files under
+    # generated/dsh-presets/, listed after this file in package.json
+    # `dsh.bundle.patch` — a generated, parity-gated byte-exact mirror of
+    # @deepseek-ai/dsh-web-app's exported preset assets (0.1.7
+    # dsh.bundle.patch cannot reference another package's files).
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
 
@@ -63,12 +84,6 @@
     - id: subagent-model-selection-settings
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 
-    # Host-plane TypeScript runtime: the `ptc` preset's `tool-presentation`
-    # row waits for `codeRuntime` and fails the preset at mount without it
-    # (same host row the web bundle inserts).
-    - id: code-runtime
-      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
-
     # Host-plane cordis runner: the `cordis` preset's `tool-cordis` row waits
     # for `dynamicCordisRunner`/`cordisInspect` and fails the preset at mount
     # without them (same host row the web bundle inserts).
@@ -81,7 +96,8 @@
 # its tools, its prompt sections, its delegation backends. The base keeps them
 # for single-session surfaces that compose their agent process-wide; the TUI
 # now composes one preset per session, so these rows are disabled here and the
-# `agent-presets` row above lets each session mount a preset instead.
+# official `agent-preset-registry` row above, plus the declarations it resolves,
+# lets each session mount a preset instead.
 #
 # Disabling rather than deleting is deliberate: the base is shared, and a row
 # absent from a surface overlay would silently reappear the day someone
@@ -93,7 +109,10 @@
 # goal/jobs/compaction services and
 # their host infrastructure, `permission`, `approval`, `sandbox*`,
 # `fs-observation-policy`, `spill*`, `timeout-policy`, `repeat-tool-reminder`,
-# `session-*`, `token-meter`. `command-goal` is disabled below and reintroduced
+# `session-*`, `token-meter`. The base's official `ptc-runtime` row also stays:
+# it provides `ptcRuntime`, which the `ptc` preset's `tool-presentation` row
+# waits for, and this overlay owns no second PTC runtime.
+# `command-goal` is disabled below and reintroduced
 # only by presets that own that command in their scoped composition.
 
 - id: tool-bash
@@ -147,7 +166,7 @@
 - id: tool-subagent-fork
   disabled: true
 
-- id: workflow-worker-thread
+- id: workflow-ptc
   disabled: true
 
 - id: tool-workflow

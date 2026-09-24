@@ -44,6 +44,7 @@ import {
   isFocusable,
   type OverlayHandle,
   type OverlayOptions,
+  type RowBudgetAware,
   type SettingItem,
   type SlashCommand,
   type Terminal,
@@ -52,7 +53,9 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
   type TuiMouseDispatchResult,
+  AltScreenSearchIndex,
   dispatchMouseEvent,
+  type AltScreenSearchMatch,
 } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
@@ -79,7 +82,9 @@ import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-f
 import { TaskBrowserPanel, type TaskBrowserViewState, type TaskPanelItem } from './task-panel.ts'
 import type { TaskBrowserSummary } from './task-browser-runtime.ts'
 import type { StatusStore } from './status/store.ts'
-import type { AccessStatus, CompositionStatus, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
+import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './display-preset.ts'
+import { displayPolicyFor, isDisplayPresetAvailable, isFocusDisplayPreset } from './display-preset.ts'
+import type { AccessStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
@@ -123,7 +128,6 @@ import {
   compactToolPresentation,
   compactToolExpandedLines,
   isCompactActionTool,
-  focusToolDisplay,
   systemContextBody,
   toolCardHeader,
   toolIconSemantic,
@@ -133,12 +137,24 @@ import {
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
 import { CompactTextPreview } from './compact-text-preview.ts'
+import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
+import {
+  SearchHighlightComponent,
+  buildSourceGeometry,
+  selectRenderedSearchMatch,
+  selectRenderedSearchScrollRange,
+  type RenderedSearchSelection,
+  type RenderedSearchScrollRange,
+  type RenderedSearchSelector,
+  type SearchSourceRegion,
+} from './search-presentation.ts'
 import {
   workflowCountsText,
   workflowPhasePresentations,
@@ -150,7 +166,19 @@ import {
 } from './workflow-presentation.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
-import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
+import { createScrollRenderProfiler } from './scroll-render-profile.ts'
+import { FocusActivityComponent, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation, type CompactActionSource, type CompactActionStats } from './compact-process-preview.ts'
+import { projectCompact } from './compact-projection.ts'
+import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
+import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './transcript-disclosure.ts'
+import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan, type CompactWorkSummary } from './compact-work.ts'
+import { ContextClusterComponent } from './context-cluster.ts'
+import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
+import { NoticeContextRow, RecallContextRow, RelayContextRow } from './context-row.ts'
+import { thinkingPreviewTail } from './thinking-preview.ts'
+import { FocusTimingStore } from './focus-timing.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
 import { iconFor, iconLead, iconPrefix, type IconStyle } from './icons.ts'
 import { indeterminateProgressFrames } from './progress.ts'
@@ -160,6 +188,7 @@ import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './input-router.ts'
 import { AppActionDispatcher, type AppActionHost } from './keybindings/action-dispatcher.ts'
+import { componentKeymap } from './keybindings/component-keymap.ts'
 import { deriveKeybindingContext } from './keybindings/context.ts'
 import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './keybindings/definitions.ts'
 import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
@@ -190,6 +219,14 @@ import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapsh
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
 
+/** Semantic inspection actions that may cross a response modal boundary. */
+const MODAL_INSPECTION_ACTIONS: readonly AppKeybindingId[] = [
+  'app.transcript.toggleExpand',
+  'app.transcript.toggleThinking',
+  'app.transcript.jumpLatest',
+  'app.todo.toggle',
+]
+
 /** Fullscreen Focus anchoring (plan §8.6): the collapsed Thought's header
  * lands one row below the viewport top so the previous context row stays
  * visible above it. Used on the COLLAPSE direction; the EXPAND direction
@@ -218,16 +255,32 @@ export type FocusFullscreenViewportIntent = 'follow-end' | 'preserve' | 'anchor-
  * a virtual transcript window is replaced by its overlapping neighbor. */
 export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
 
+/** Why the transcript-search overlay is closing. The runner uses this explicit
+ * intent to distinguish an in-place dismiss from a latest reset or a physical
+ * surface swap. */
+export type TranscriptSearchCloseReason = 'dismiss' | 'jump-latest' | 'surface-change'
+
 /** One rendered transcript row used to restore a viewport after re-windowing.
  * Object identity is preferred for overlapping folder projections; row kind and
- * occurrence preserve the discriminator when a caller supplies fresh objects. */
+ * occurrence preserve the discriminator when a caller supplies fresh objects.
+ * `message`/`activity` rows are identified by their turn; a Compact Work /
+ * Context-cluster row by its stable owner message; an ephemeral
+ * `pending-user` block has neither and is identified by its stable pending key
+ * (a local echo and its authoritative replacement share it). */
 export interface TranscriptViewportAnchorPoint {
-  readonly turn: number
-  readonly rowKind: 'message' | 'activity'
+  readonly rowKind: 'message' | 'activity' | 'pending-user' | 'work' | 'context-cluster'
+  /** The owning turn (`message`/`activity`/`work`/`context-cluster` rows). */
+  readonly turn?: number
   /** The zero-based occurrence of this row kind within its turn. */
   readonly occurrence: number
   readonly message?: TranscriptMessage
   readonly activity?: TurnActivity
+  /** The stable pending-user disclosure key (`pending-user` rows only). */
+  readonly pendingKey?: string
+  /** The stable Work-span owner (`work` rows only). */
+  readonly workOwner?: TranscriptMessage
+  /** The stable cluster owner (`context-cluster` rows only). */
+  readonly clusterOwner?: TranscriptMessage
   /** The line inside the row that was at the selected viewport edge. */
   readonly rowOffset: number
   /** The line's offset from the viewport top (0 for the top edge). */
@@ -242,17 +295,58 @@ export interface TranscriptViewportAnchor {
   readonly bottom?: TranscriptViewportAnchorPoint
 }
 
-/** Whether a message is a Focus SECONDARY disclosure: a foldable process
- * card inside an expanded Thought that has its own compact/full two-state
- * renderer (plan §10). Shared by the render rule and the click handler —
- * never two different foldable sets. Workflow is deliberately NOT in the
- * set (PR2 plan §7.1/§12.3): the Workflow card owns its own Run/Phase
- * disclosure and must never be wrapped in a second generic fold. */
-function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
+/** Whether a message has a generic compact/full disclosure of its own.
+ * Workflow is deliberately NOT in the set (PR2 plan §7.1/§12.3): the
+ * Workflow card owns its own Run/Phase disclosure and must never be wrapped
+ * in a second generic fold. Surfaced context remains generic-foldable so its
+ * own click/search disclosure can survive independently of a Thought root.
+ * A COMMAND row owns its own standalone disclosure the same way (a real
+ * `kind: 'command'` node renders through the Command-owned host path). */
+function isFoldableMessageDisclosure(message: TranscriptMessage): boolean {
   return message.kind === 'thinking'
     || message.kind === 'tool'
     || message.kind === 'system'
     || message.kind === 'compaction'
+    || message.kind === 'command'
+}
+
+/** Whether a generic foldable message is a Thought-owned Focus secondary.
+ * Surfaced context is persistent input/context, not process revealed by the
+ * Thought, so root auto-reveal and secondary cleanup must exclude it. */
+function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
+  // A COMMAND row is a turn-less standalone BOUNDARY, never Thought-owned
+  // process detail: its own fold must stay independent of the Focus root, so
+  // it is exempt exactly like a settled surfaced-interaction card (nor may a
+  // root collapse reset a command card the user opened).
+  return isFoldableMessageDisclosure(message) && !isSurfacedContext(message) && message.kind !== 'command'
+}
+
+/** Whether a message is a TEXT-ONLY durable user message — the only kind
+ * eligible for the long-user-message disclosure. Mixed-content user bubbles
+ * (attachment/image/file blocks) keep their existing presentation. The
+ * width-dependent "long enough" decision stays in the render layer; this
+ * helper only classifies the message. User messages are deliberately NOT
+ * folded into {@link isFoldableMessageDisclosure}: they are turn
+ * foundations, not process detail. */
+function isUserMessageDisclosureCandidate(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'user' }> {
+  return message.kind === 'user'
+    && !(message.content !== undefined && message.content.some(block => block.type !== 'text'))
+}
+
+/** The assistant delivered-files tail folds after this many files. */
+const DELIVERED_FILES_FOLDED_LIMIT = 4
+
+/** Whether one assistant message owns a delivered-files disclosure with a
+ * VISIBLE effect (more files than the folded limit). Deliberately narrow:
+ * assistant messages are not generic foldable cards, so they are never folded
+ * into {@link isFoldableMessageDisclosure}; only the capped tail gets a master
+ * owner, and a short tail mints no override that would have no visual effect. */
+function isDeliveredFilesDisclosureCandidate(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'assistant' }> {
+  return message.kind === 'assistant'
+    && message.deliverables !== undefined
+    && message.deliverables.length > DELIVERED_FILES_FOLDED_LIMIT
 }
 
 /** The Workflow run header pill: the REAL status (plan §7.1 — the run's
@@ -326,6 +420,95 @@ export type WorkflowHit =
   | { readonly kind: 'phase-agents'; readonly runId: string; readonly phaseKey: string }
   | { readonly kind: 'run-agents'; readonly runId: string }
 
+/** The temporary search presentation target (plan §6): the current match, its
+ * query and the resolved CURRENT visible card. While search is open it drives
+ * presentation only — effective Focus/secondary/PTC/Workflow reveal and the
+ * rendered highlight. An ordinary dismiss may promote the CURRENT effective
+ * reveal through the close transaction into an existing user disclosure owner. */
+export interface TranscriptSearchPresentationTarget {
+  readonly query: string
+  readonly match: TranscriptSearchMatch
+  readonly message: TranscriptMessage
+}
+
+/** One ATOMIC search-presentation commit (perf plan S2 §5.1): the weak-match
+ * representative set and the current target are published together, so a query
+ * change / Next / Prev rebuilds the message tree AT MOST ONCE per projection
+ * epoch. `grantReveal` marks an explicit navigation (which re-grants the
+ * temporary reveal); a passive projection rebind leaves the current grant —
+ * including a user collapse — intact.
+ *
+ * `matchMessages` is compared by REFERENCE: the runner must pass the SAME set
+ * object while the resolved representative cards are unchanged (it does — see
+ * the runner's `resolveSearchMatchMessages`). A fresh equal set is treated as a
+ * change, which is why the runner mirrors the published identity. */
+export interface TranscriptSearchPresentation {
+  readonly matchMessages: ReadonlySet<TranscriptMessage>
+  readonly target?: TranscriptSearchPresentationTarget
+  readonly grantReveal?: boolean
+}
+
+/** Test-only structural counters for the search presentation hot path
+ * (perf plan S1 §4.1): prove a same-window search interaction performs at most
+ * one rebuild, no remeasure and no full transcript render. */
+export interface TranscriptSearchPresentationDiagnostics {
+  /** `rebuildMessages()` entries. */
+  rebuilds: number
+  /** `refreshMessageRows()` entries. */
+  remeasures: number
+  /** Calls to the indexed rendered-search lookup in the normal host path. */
+  renderedMatchLookups: number
+  /** Full rendered-result cache hits (`AltScreenSearchResult.changed === false`). */
+  renderedMatchResultCacheHits: number
+  /** Full `messagesView.render()` height probes. */
+  fullRenders: number
+  /** `setTranscript()` commits. */
+  transcriptSets: number
+}
+
+/** Test-only counters for transcript presentation invalidation. These counters
+ * describe work that actually happened, not the intended branch. */
+export interface TranscriptPresentationDiagnostics {
+  setCalls: number
+  structuralCommits: number
+  contentCommits: number
+  noopCommits: number
+  dirtyBlocks: number
+  mountReplacements: number
+  rowMapRefreshes: number
+  structuralFallbacks: number
+  /** Uncached `searchRevealOwnerFor()` resolutions. A single projection must
+   * resolve the active reveal owner at most once, no matter how many rows or
+   * Work spans it projects (a per-row resolution is the accidental O(n^2)). */
+  searchOwnerResolutions: number
+}
+
+/** Internal labels for the structural rebuild sites. */
+type TranscriptRebuildReason =
+  | 'transcript-structure'
+  | 'search-presentation'
+  | 'focus-disclosure'
+  | 'window'
+  | 'resize'
+  | 'renderer-registry'
+  | 'theme-keymap'
+  | 'local-card'
+  | 'other'
+
+/** Whether two search targets denote the SAME semantic navigation: the query,
+ * the stable match identity (id + ordinals + source key) and the resolved card
+ * object. Object reference is deliberately NOT the authority — the runner
+ * builds a fresh target per projection commit, and a reference compare would
+ * re-grant a user-collapsed reveal on every passive repaint. */
+function sameSearchTarget(left: TranscriptSearchPresentationTarget | undefined, right: TranscriptSearchPresentationTarget | undefined): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  if (left.query !== right.query || left.message !== right.message) return false
+  if (left.match.id !== right.match.id || left.match.turn !== right.match.turn) return false
+  if (left.match.occurrence !== right.match.occurrence || left.match.sourceOccurrence !== right.match.sourceOccurrence) return false
+  return transcriptSearchSourceKey(left.match.source) === transcriptSearchSourceKey(right.match.source)
+}
+
 /** The compaction lifecycle phase the working row advertises: idle (no
  * compaction), summarizing (compaction/start seen, the summary is being
  * generated), or applying (the summary landed, the compacted surface is
@@ -348,6 +531,10 @@ export interface StreamingToolPreview {
   readonly summary?: string
   /** Bounded partial args retained until summary is found or a known-name scan reaches the cap. */
   readonly scanPrefix?: string
+  /** The first streamed delta's time (post-F6 plan §12.14): the pending
+   * Activity card's duration and the durable call's start both read it, so
+   * the elapsed time never resets across the Preparing → durable handoff. */
+  readonly startedAt?: number
 }
 
 /** The indeterminate progress-bar frames shown while a compaction runs:
@@ -359,6 +546,20 @@ const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
  * full lists are visually identical, so the state machine skips the
  * redundant full state entirely (summary ↔ list only). */
 export const TODO_COMPACT_LIMIT = 5
+/** The compact cap on a SHORT fullscreen: a 16-row terminal cannot afford
+ * the five-row list plus its surroundings, so the first click opens three. */
+export const TODO_SHORT_COMPACT_LIMIT = 3
+/** The short-screen boundary in terminal ROWS: at or below this the compact
+ * Todo panel uses {@link TODO_SHORT_COMPACT_LIMIT}. The policy is purely
+ * vertical — terminal width never changes the item count. */
+export const TODO_SHORT_SCREEN_MAX_ROWS = 16
+
+/** The effective compact Todo cap for a terminal `rows` tall (the single
+ * source of truth shared by the overflow check, the render slice and the
+ * click state machine). */
+export function todoCompactLimit(rows: number): number {
+  return rows <= TODO_SHORT_SCREEN_MAX_ROWS ? TODO_SHORT_COMPACT_LIMIT : TODO_COMPACT_LIMIT
+}
 /** The todo click-coalescing window: rapid clicks on the todo SEMANTIC
  * target (dock summary + panel rows) within this window are treated as
  * ONE gesture. The fullscreen layout MUTATES between the clicks — the
@@ -651,17 +852,35 @@ interface ResponsiveOverlayGeometry {
 class ResponsiveOverlayFrame extends FocusForwardingFrame {
   private readonly geometryOf: () => ResponsiveOverlayGeometry
   private readonly onGeometry: ((geometry: ResponsiveOverlayGeometry) => void) | undefined
+  /** Teardown notification: fired exactly once when the overlay is hidden and
+   *  this frame is disposed — the ONLY hide-independent signal (Esc, the
+   *  returned closer, and a fullscreen screen swap all dispose the entry). */
+  private readonly onDispose: (() => void) | undefined
+  private disposeNotified = false
   private lastGeometryKey = ''
+  /** Geometry key of the last PAINTED frame (empty before the first paint). */
+  private lastPaintGeometryKey = ''
 
   constructor(
     child: Component,
     geometryOf: () => ResponsiveOverlayGeometry,
     onGeometry?: (geometry: ResponsiveOverlayGeometry) => void,
+    onDispose?: () => void,
   ) {
     super(child, true)
     this.geometryOf = geometryOf
     this.onGeometry = onGeometry
+    this.onDispose = onDispose
     this.syncGeometry()
+  }
+
+  /** Notify a teardown observer exactly once, whatever hide path removed the
+   *  overlay (the frame is the owner disposed by disposeOnHide). */
+  dispose(): void {
+    super.dispose()
+    if (this.disposeNotified) return
+    this.disposeNotified = true
+    this.onDispose?.()
   }
 
   /** Re-run the geometry callback without scheduling a frame. */
@@ -674,11 +893,27 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
     return geometry
   }
 
+  /**
+   * Last-painted-geometry fence (plan §16.7): a terminal resize changes the
+   * overlay's clamped geometry and centering, but until the next frame the
+   * frame's child offset/width and the child's hit map still describe the
+   * PREVIOUS screen. A pointer event in that window must be rejected rather
+   * than resolved against stale geometry.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    if (this.geometryOf().key !== this.lastPaintGeometryKey) return undefined
+    return super.handleMouse(event)
+  }
+
   render(width: number): string[] {
     const geometry = this.syncGeometry()
     const availableWidth = Math.max(1, Math.floor(width))
     const frameWidth = Math.max(1, Math.min(availableWidth, Math.floor(geometry.width)))
     const lines = super.render(frameWidth)
+    // Only a COMPLETED composition counts as a paint: if the child render
+    // throws, the offsets/hit map are still the previous frame's, so the key
+    // must stay old and keep the fence closed.
+    this.lastPaintGeometryKey = geometry.key
     if (frameWidth === availableWidth) return lines
     const left = Math.max(0, Math.floor((availableWidth - frameWidth) / 2))
     // The centered frame shifts the child content box right by `left`
@@ -1136,9 +1371,15 @@ export function transcriptContentWidth(width: number): number {
  * tree).
  */
 export class TranscriptGutterComponent implements Component {
-  private readonly child: Component
+  private child: Component
 
   constructor(child: Component) {
+    this.child = child
+  }
+
+  /** Replace the mounted presentation child without taking ownership of either
+   * the old or new component. The message/focus caches own disposal. */
+  replace(child: Component): void {
     this.child = child
   }
 
@@ -1254,7 +1495,10 @@ export class BulletedComponent implements Component {
  *   - a narrow → wide resize restores the full-width preview instead of
  *     freezing the old narrow truncation.
  * The EMPTY entry renders the bare title — never a fake "No reasoning"
- * row (plan §13.3). The output is REFERENCE-STABLE per width: the same
+ * row (plan §13.3). While the entry is RUNNING its preview is windowed at
+ * the reasoning tail (the newest token stays visible); a settled entry
+ * reads from the start of its latest line. The output is
+ * REFERENCE-STABLE per width: the same
  * component + same width returns the same array instance, so steady
  * frames keep the fork's per-frame processed-line reuse (DIVERGENCES.md
  * X035).
@@ -1295,15 +1539,55 @@ export class ThinkingCompactComponent implements Component {
       lines = [truncateToWidth(title, Math.max(1, width), '…')]
     } else {
       const hintVerb = this.hint || 'the expand key'
+      // The body budget excludes the fixed two-cell indent. While the row
+      // is RUNNING the reasoning body is windowed at its right edge (the
+      // latest token stays visible — dsh-web running collapsed parity); a
+      // settled row keeps head truncation.
+      const bodyBudget = Math.max(1, width - visibleWidth('  '))
+      const body = this.message.running === true
+        ? thinkingPreviewTail(previewLine, bodyBudget)
+        : truncateToWidth(previewLine, bodyBudget, '…')
       lines = [
         truncateToWidth(title, Math.max(1, width), '…'),
-        truncateToWidth(color.textDimItalic(`  ${previewLine}`), Math.max(1, width), '…'),
+        truncateToWidth(color.textDimItalic(`  ${body}`), Math.max(1, width), '…'),
         truncateToWidth(color.textDim(`  (${hintVerb} to expand)`), Math.max(1, width), '…'),
       ]
     }
     this.cached.set(width, lines)
     return lines
   }
+}
+
+/** Long user-message disclosure constants (code constants — no setting in
+ * the first version). The threshold and the kept head/tail are VISUAL ROWS
+ * at the current inner width, so terminal wrapping, CJK and wide cells are
+ * accounted for. */
+const USER_MESSAGE_COMPACT_THRESHOLD_ROWS = 10
+const USER_MESSAGE_HEAD_ROWS = 4
+const USER_MESSAGE_TAIL_ROWS = 3
+/** Bounded renderer-reconcile attempts: a renderer may mutate the registry
+ * re-entrantly inside `render()`, so a single rebuild can still leave a stale
+ * renderer selection. Shared by the global renderer-revision reconcile pass
+ * and the long-user ownership helper. */
+const RENDERER_RECONCILE_ATTEMPTS = 3
+
+/** The collapsed long user bubble's marker builder. It receives the hidden
+ * visual-row count and the available inner width so a narrow bubble can fall
+ * back to the short form instead of wrapping the marker. */
+type UserBubbleCompactMarker = (hiddenRows: number, availableWidth: number) => string
+
+/** Options for the render-time visual-row compaction of one user bubble.
+ * Absent = render the full content (short messages, mixed-content bubbles and
+ * the ephemeral pending echo). */
+interface UserBubbleCompactOptions {
+  readonly thresholdRows: number
+  readonly headRows: number
+  readonly tailRows: number
+  readonly compactMarker: UserBubbleCompactMarker
+  /** Whether this bubble currently renders EXPANDED (full content) while
+   * still being compact-capable: the caller then owns the tail collapse
+   * control row. */
+  readonly expanded: boolean
 }
 
 /**
@@ -1324,15 +1608,24 @@ export class UserBubbleComponent implements Component {
   private readonly marker: string
   private readonly markerWidth: number
   private readonly bg: (text: string) => string
+  private readonly compactOptions: UserBubbleCompactOptions | undefined
   private lastChild: string[] | undefined
   private lastWidth = -1
   private cached: string[] | undefined
+  private lastCompactMarkerRow: number | undefined
+  private lastCollapseEligible = false
 
-  constructor(child: Component, marker: string, bg: (text: string) => string) {
+  constructor(
+    child: Component,
+    marker: string,
+    bg: (text: string) => string,
+    compactOptions?: UserBubbleCompactOptions,
+  ) {
     this.child = child
     this.marker = marker
     this.markerWidth = visibleWidth(marker)
     this.bg = bg
+    this.compactOptions = compactOptions
   }
 
   invalidate(): void {
@@ -1341,6 +1634,22 @@ export class UserBubbleComponent implements Component {
 
   dispose(): void {
     this.child.dispose?.()
+  }
+
+  /** The row offset (within this component's rendered rows) of the collapsed
+   * compact marker, or undefined when the current render is not compacted.
+   * Set during the last render, so it always matches the painted rows at the
+   * current width (the fullscreen marker hit target). */
+  compactMarkerRow(): number | undefined {
+    return this.lastCompactMarkerRow
+  }
+
+  /** Whether the current render is an EXPANDED compact-capable bubble: the
+   * visual rows exceed the threshold, so the caller must place a tail
+   * collapse control after the body (the spacer row when one follows, or one
+   * dedicated presentation row for the final block). */
+  showsCollapseControl(): boolean {
+    return this.lastCollapseEligible
   }
 
   render(width: number): string[] {
@@ -1352,7 +1661,8 @@ export class UserBubbleComponent implements Component {
     this.lastChild = child
     this.lastWidth = width
     const indent = ' '.repeat(this.markerWidth)
-    this.cached = child.map((line, index) => {
+    const rows = this.compactRows(child, inner)
+    this.cached = rows.map((line, index) => {
       const prefix = index === 0 ? this.marker : indent
       // Pad to the full row so the bubble background covers the whole
       // line, wrapped continuation rows included.
@@ -1361,17 +1671,118 @@ export class UserBubbleComponent implements Component {
     })
     return this.cached
   }
+
+  /** Collapse the child's FULL visual rows to head + marker + tail when the
+   * row-count threshold is exceeded. The decision and the slice both run on
+   * the rows the current width actually produces, so a resize re-decides
+   * (no baked compact count/marker position). An EXPANDED bubble keeps the
+   * full rows and only records that it is collapse-eligible. */
+  private compactRows(child: string[], inner: number): string[] {
+    this.lastCompactMarkerRow = undefined
+    this.lastCollapseEligible = false
+    const options = this.compactOptions
+    if (options === undefined) return child
+    // The SAME shared window the relay Context row uses: decide and slice on
+    // the visual rows the current width produced.
+    const window = longMessageDisclosureWindow(child, options, {
+      expanded: options.expanded,
+      marker: (hidden) => {
+        const raw = options.compactMarker(hidden, inner)
+        // Final single-row guard: a narrow bubble never lets the marker wrap or
+        // overflow — it truncates instead (the builder may already have
+        // dropped its verb, but an extreme width still needs clipping).
+        return visibleWidth(raw) <= inner ? raw : truncateToWidth(raw, inner, '…')
+      },
+    })
+    if (options.expanded) {
+      this.lastCollapseEligible = window.long
+      return child
+    }
+    this.lastCompactMarkerRow = window.markerRow
+    return [...window.rows]
+  }
+}
+
+/**
+ * The ephemeral pending user-input row: the SAME floating user bubble as a
+ * durable human message, plus one dim pending-status line so it reads as
+ * accepted-but-not-yet-materialized rather than as durable transcript content.
+ * `PendingUserComponent` is presentation-only and is never inserted into the
+ * transcript folder. It exposes the same disclosure geometry as the durable
+ * bubble (the compact marker row and the expanded collapse-control
+ * eligibility) so the row map shares ONE hit model for both.
+ */
+class PendingUserComponent implements Component {
+  private readonly container: Container
+  private readonly bubble: UserBubbleComponent
+
+  constructor(row: PendingUserRow, running: boolean, compactOptions?: UserBubbleCompactOptions) {
+    this.bubble = new UserBubbleComponent(
+      new Text(row.text, 0, 0),
+      `${color.roleUser('❯')} `,
+      color.roleUserBg,
+      compactOptions,
+    )
+    this.container = new Container()
+    this.container.addChild(this.bubble)
+    this.container.addChild(new Text(color.textDim(`  ${pendingUserStatusText(row, running)}`), 0, 0))
+  }
+
+  render(width: number): string[] {
+    return this.container.render(width)
+  }
+
+  invalidate(): void {
+    this.container.invalidate?.()
+  }
+
+  dispose(): void {
+    this.container.dispose?.()
+  }
+
+  compactMarkerRow(): number | undefined {
+    return this.bubble.compactMarkerRow()
+  }
+
+  showsCollapseControl(): boolean {
+    return this.bubble.showsCollapseControl()
+  }
+}
+
+/**
+ * The presentation-only pending status label. An accepted steer whose subject
+ * is RUNNING reads `steering…`. When an AUTHORITATIVE steering occurrence's
+ * turn is no longer running (an Interrupted turn) the Host leaves it PARKED in
+ * the inbox until the next wake, so `steering…` would misreport an active
+ * turn: it reads `waiting for next turn…` instead. A client-local steering
+ * echo is never parked — it has no Host occurrence yet — so it keeps
+ * `steering…` while its submission is in flight. The semantic row itself is
+ * never modified — only this label.
+ */
+function pendingUserStatusText(row: PendingUserRow, running: boolean): string {
+  if (row.status === 'sending') return 'sending…'
+  if (!row.local && row.status === 'steering' && !running) return 'waiting for next turn…'
+  return 'steering…'
 }
 
 /** Host-owned tail for explicit files delivered by the present tool. Paths
  * are always shown first; the folded view caps entries while an expanded
  * transcript view re-renders the complete declaration list. */
 class DeliveredFilesComponent implements Component {
-  private static readonly FOLDED_LIMIT = 4
   private readonly files: readonly PresentedFilePresentation[]
   private readonly workspaceRoot: string | undefined
   private readonly expanded: boolean
   private readonly cached = new Map<number, string[]>()
+  /** The visible row/column spans of every rendered path/description field,
+   * relative to THIS component's rows (render output, refreshed on every
+   * width). Consumed by the search source-geometry walker. */
+  lastFieldSpans: ReadonlyArray<{
+    readonly index: number
+    readonly pathRow: number
+    readonly pathStart: number
+    readonly pathEnd: number
+    readonly descriptionRows: ReadonlyArray<{ readonly row: number; readonly start: number; readonly end: number }>
+  }> = []
 
   constructor(
     files: readonly PresentedFilePresentation[],
@@ -1392,20 +1803,36 @@ class DeliveredFilesComponent implements Component {
     const previous = this.cached.get(safeWidth)
     if (previous !== undefined) return previous
 
-    const shown = this.expanded ? this.files : this.files.slice(0, DeliveredFilesComponent.FOLDED_LIMIT)
+    const shown = this.expanded ? this.files : this.files.slice(0, DELIVERED_FILES_FOLDED_LIMIT)
     const rows = [truncateToWidth(color.textDim(`Delivered files · ${this.files.length}`), safeWidth, '…')]
-    for (const file of shown) {
+    const spans: Array<{
+      index: number
+      pathRow: number
+      pathStart: number
+      pathEnd: number
+      descriptionRows: Array<{ row: number; start: number; end: number }>
+    }> = []
+    for (const [index, file] of shown.entries()) {
       const path = relativizeToCwd(file.path, this.workspaceRoot).replace(/\r\n|\r|\n/g, ' ')
+      const pathRow = rows.length
+      const pathStart = visibleWidth('  ')
       rows.push(truncateToWidth(color.textDim(`  ${path}`), safeWidth, '…'))
-      if (file.description === undefined || file.description === '') continue
-      const descriptionWidth = Math.max(1, safeWidth - 4)
-      for (const line of wrapTextWithAnsi(file.description, descriptionWidth)) {
-        rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))
+      const descriptionRows: Array<{ row: number; start: number; end: number }> = []
+      if (file.description !== undefined && file.description !== '') {
+        const descriptionWidth = Math.max(1, safeWidth - 4)
+        for (const line of wrapTextWithAnsi(file.description, descriptionWidth)) {
+          const descriptionRow = rows.length
+          const start = visibleWidth('    ')
+          rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))
+          descriptionRows.push({ row: descriptionRow, start, end: start + visibleWidth(line) })
+        }
       }
+      spans.push({ index, pathRow, pathStart, pathEnd: pathStart + visibleWidth(path), descriptionRows })
     }
     if (!this.expanded && this.files.length > shown.length) {
       rows.push(truncateToWidth(color.textDim(`  … +${this.files.length - shown.length}`), safeWidth, '…'))
     }
+    this.lastFieldSpans = spans
     this.cached.set(safeWidth, rows)
     return rows
   }
@@ -1529,11 +1956,43 @@ class ApprovalDialogSurface implements Component {
   }
 }
 
-/** The live job-output viewer body: a title line + refreshable text panel. */
+/** The job-output viewer overlay width (cells) and max height (rows); the
+ * responsive shell and the fork overlay share these so the body row budget
+ * always matches the physically granted box. */
+const OUTPUT_VIEWER_WIDTH = 88
+const OUTPUT_VIEWER_MAX_HEIGHT = 24
+/** The chrome rows around the viewer body: one blank separator above and
+ * one below (the hint row itself is counted separately). */
+const OUTPUT_VIEWER_SEPARATOR_ROWS = 2
+// Supported-height floor (documented, not a fallback): the bordered viewer
+// needs one row above and one below its content, so the action-hint contract
+// holds while the terminal grants at least TWO rows (top border + the hint).
+// A ONE-row terminal cannot render any bordered-overlay content at all — the
+// fork keeps only the first `maxHeight` lines and the frame's top border is
+// always first. The panel still degrades to the hint alone (never overflows).
+
+/**
+ * The live job-output viewer: a title line, a refreshable body, and a
+ * fixed BOTTOM action hint. The hint is panel chrome (never appended to
+ * the body string). The fork keeps only the FIRST `maxHeight` rendered
+ * lines (`overlayLines.slice(0, maxHeight)`), dropping the tail, so the
+ * layout reserves the hint and title BEFORE the body: on a long body or a
+ * short terminal the body shrinks (to zero) rather than the hint vanishing.
+ * The chrome also has a HORIZONTAL priority: the close/back verb outranks
+ * Stop, so a wrapped `S stop · Esc back` degrades to `Esc back` instead of
+ * leaving the first wrapped line (all Stop) on screen.
+ */
 class OutputViewerPanel implements Component {
   private readonly title: Text
   private readonly body: Text
-  /** Key routing installed by openOutputViewer (Esc closes, `s` stops). */
+  private readonly hint: Text
+  /** The close-only hint used when the full hint does not fit one row. */
+  private readonly hintFallback: Text
+  /** The granted CONTENT row budget (set by the responsive shell: the
+   * overlay's clamped max height minus its top/bottom border rows). */
+  private maxRows = OUTPUT_VIEWER_MAX_HEIGHT - 2
+  /** Key routing installed by openOutputViewer (Esc closes, the stop
+   * semantic stops). */
   handleInput?: (data: string) => void
   /** The refresh interval. The PANEL owns it (X007 ownership): final
    * teardown (overlay disposeOnHide → FocusForwardingFrame.dispose →
@@ -1541,18 +2000,23 @@ class OutputViewerPanel implements Component {
    * closer — a ref'd interval must not outlive the surface. */
   private timer: NodeJS.Timeout | undefined
   private refresh: (() => string) | undefined
+  private liveHint: (() => { hint: string; fallback: string }) | undefined
   private requestRender: (() => void) | undefined
   /** Latched by dispose(): an in-flight tick must not render. */
   private disposed = false
 
-  constructor(title: string, initial: string) {
+  constructor(title: string, initial: string, hint: string, hintFallback: string) {
     this.title = new Text(title, 0, 0)
     this.body = new Text(initial, 0, 0)
+    this.hint = new Text(hint, 0, 0)
+    this.hintFallback = new Text(hintFallback, 0, 0)
   }
 
   invalidate(): void {
     this.title.invalidate()
     this.body.invalidate()
+    this.hint.invalidate()
+    this.hintFallback.invalidate()
   }
 
   /** Replace the output body (the caller refreshes it on a timer). */
@@ -1561,17 +2025,37 @@ class OutputViewerPanel implements Component {
     this.body.invalidate()
   }
 
+  /** Adopt the granted overlay row budget (resize-aware). */
+  setMaxRows(maxRows: number): void {
+    this.maxRows = Math.max(1, Math.floor(maxRows))
+  }
+
   /** Start the refresh timer (openOutputViewer wires the live callbacks).
    * The interval is unref'd so a viewer left open never blocks process
    * exit by itself, and owned by THIS panel so the dispose chain stops
-   * it exactly once. */
-  startRefreshing(refresh: () => string, requestRender: () => void, intervalMs: number): void {
+   * it exactly once. The optional `liveHint` re-evaluates BOTH hint forms
+   * on every tick, so a stop capability that expires while the viewer is
+   * open updates the chrome with the body. */
+  startRefreshing(
+    refresh: () => string,
+    requestRender: () => void,
+    intervalMs: number,
+    liveHint?: () => { hint: string; fallback: string },
+  ): void {
     this.refresh = refresh
     this.requestRender = requestRender
+    this.liveHint = liveHint
     this.timer = setInterval(() => {
       if (this.disposed) return
       this.body.setText(this.refresh!())
       this.body.invalidate()
+      if (this.liveHint !== undefined) {
+        const next = this.liveHint()
+        this.hint.setText(next.hint)
+        this.hint.invalidate()
+        this.hintFallback.setText(next.fallback)
+        this.hintFallback.invalidate()
+      }
       this.requestRender!()
     }, intervalMs)
     this.timer.unref()
@@ -1587,7 +2071,32 @@ class OutputViewerPanel implements Component {
   }
 
   render(width: number): string[] {
-    return [...this.title.render(width), '', ...this.body.render(width)]
+    const maxRows = Math.max(1, this.maxRows)
+    // HORIZONTAL priority: the close/back verb must survive even when the
+    // combined hint word-wraps (a wrapped first line could be all Stop).
+    const fullHintLines = this.hint.render(width)
+    const hintLines = fullHintLines.length > 1 ? this.hintFallback.render(width) : fullHintLines
+    // VERTICAL priority: the (chosen) hint is mandatory chrome, then the
+    // title, then the separators, then the body. The body absorbs the
+    // remainder (0 rows on a genuinely short box). Output length is <=
+    // maxRows in every branch, so the fork's first-`maxHeight`-lines clip can
+    // never reach the bottom hint.
+    const hint = hintLines.slice(0, maxRows)
+    let remaining = maxRows - hint.length
+    const titleLines = this.title.render(width)
+    const title = titleLines.slice(0, remaining)
+    remaining -= title.length
+    const bodyLines = this.body.render(width)
+    if (remaining <= 0) return [...title, ...hint]
+    if (remaining === 1) return [...title, ...bodyLines.slice(0, 1), ...hint]
+    if (remaining === 2) return [...title, '', ...bodyLines.slice(0, 1), ...hint]
+    return [
+      ...title,
+      '',
+      ...bodyLines.slice(0, remaining - OUTPUT_VIEWER_SEPARATOR_ROWS),
+      '',
+      ...hint,
+    ]
   }
 }
 
@@ -1685,15 +2194,23 @@ export type ComposerSubmitGesture = 'enter' | 'accelerated'
  */
 export type ComposerSubmitRequest = ComposerSubmitGesture | 'explicit-queue'
 
-/** A semantic follow-up submit from the interactive subagent viewer: the
- * runner's write path is the official `ctx.subagents.prompt(…)` human
- * prompt (a distinct FIFO turn in the child's inbox), NEVER
- * `ctx.subagents.sendMessage` (the Agent-authored Steer path) and never
+/** Whether a viewer submit is the empty accelerated queue-steer gesture. */
+export function isEmptyAcceleratedViewerSubmit(text: string, gesture: ComposerSubmitRequest): boolean {
+  return gesture === 'accelerated' && text.trim() === ''
+}
+
+/** A semantic submit from the interactive subagent viewer: non-empty text
+ * uses the runner's write path, which is the official `ctx.subagents.prompt(…)` human prompt;
+ * an empty accelerated text is the child queue steer-all signal and must not
+ * become an empty prompt. Neither path uses `ctx.subagents.sendMessage` or
  * the main-session submit/steer/queue path. */
 export interface SubagentViewerSubmit {
   readonly parentSessionId: string
   readonly childSessionId: string
   readonly text: string
+  /** The raw submit gesture; the runner resolves it against child activity
+   * and the busy-Enter preference before crossing the subagent port. */
+  readonly gesture: ComposerSubmitRequest
 }
 
 /** One semantic Workflow card action (PR2 plan §12.5/§14.2): the TUI emits
@@ -1791,16 +2308,18 @@ export interface TuiAppEventsBase {
   onRewind?: () => void
   /**
    * Steer with the current draft, possibly empty (the steer action,
-   * default: Ctrl+S). The runner sends the whole queue when it has
-   * messages, with the draft riding along, and falls back to the draft
-   * alone otherwise. Optional.
+   * default: Ctrl+S). The runner gives a payload-bearing draft priority and
+   * sends it alone; with no payload it steers semantic `queued` occurrences
+   * FIFO. Already-`steering` and `context` placements are not swept.
+   * Optional.
    */
   onSteer?: (text: string) => void
   /**
-   * A follow-up submit from the INTERACTIVE subagent viewer (Enter while
-   * viewing a `continuable` child): the runner delivers the text through
-   * the official `ctx.subagents.prompt(…)` human prompt — never
-   * `subagents.sendMessage` and never the main-session submit/steer/queue
+   * A submit from the INTERACTIVE subagent viewer (Enter or the accelerated gesture while
+   * viewing a `continuable` child): non-empty text resolves delivery against child activity and reaches
+   * the official `ctx.subagents.prompt(…)` human prompt; an empty accelerated submit is the child queue
+   * steer-all and never calls prompt. Neither path uses
+   * `ctx.subagents.sendMessage` and never the main-session submit/steer/queue
    * path. The draft has ALREADY been cleared by the app; the runner
    * restores it (merged) when the delivery is rejected, through the app's
    * viewer-draft API. Optional.
@@ -1810,9 +2329,9 @@ export interface TuiAppEventsBase {
    * write — the toggle action has no default key; Ctrl+F is transcript
    * search). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
-   /** The transcript search overlay opened; the host may capture its window
-    * origin before a match moves the presentation into history. */
-   onSearchOpen?: () => void
+  /** The transcript search overlay opened; the host may clear
+   * stale presentation before a match moves the view into history. */
+  onSearchOpen?: () => void
   /** The transcript-search query changed (the search action opened it;
    * the search keys are fixed overlay contracts). Optional. */
   onSearchQuery?: (query: string) => void
@@ -1820,8 +2339,8 @@ export interface TuiAppEventsBase {
   onSearchNext?: () => void
   /** The search's previous-match key (fixed): jump to the previous match. Optional. */
   onSearchPrev?: () => void
-  /** The search was closed (its close key, fixed). Optional. */
-  onSearchClose?: () => void
+  /** The search was closed with an explicit lifecycle reason. Optional. */
+  onSearchClose?: (reason: TranscriptSearchCloseReason) => void
   /**
    * A fullscreen viewport reached the older edge. Returning true means the
    * host replaced the transcript window and consumed the boundary gesture;
@@ -1863,9 +2382,10 @@ export interface TuiAppEventsBase {
    */
   onOpenTasks?: () => void
   /**
-   * The dequeue action (default: Alt+↑): pull every queued message back
-   * into the editor draft (pi's dequeue). The host clears the inbox and
-   * the draft lands via {@link TuiApp.setDraft}. Optional.
+   * The TUI-only recall-all action (default: Alt+↑): remove every queued
+   * message occurrence and pull its content into the editor draft. The host
+   * clears the inbox and the draft lands via {@link TuiApp.setDraft}. This is
+   * not the official in-place queue edit operation. Optional.
    */
   onDequeue?: () => void
   /**
@@ -2146,9 +2666,10 @@ export interface TaskBrowserOptions {
   header?: string
   /** Text shown when no row matches the filter. */
   noMatchText?: string
-  /** Pre-fill the search input. */
+  /** Pre-fill the search input. Ignored in Quick mode, which owns no search state. */
   initialQuery?: string
-  /** Preserve explicit search-mode state during Quick/Full transitions. */
+  /** Preserve explicit search-mode state during Quick/Full transitions.
+   * Ignored (forced off) in Quick mode, which owns no search state. */
   initialSearchMode?: boolean
   /** Overlay width in cells, or a terminal-width percentage. */
   width?: number | `${number}%`
@@ -2156,8 +2677,8 @@ export interface TaskBrowserOptions {
   maxHeight?: number | `${number}%`
   /** Rows visible before the list scrolls (default 10). */
   maxVisible?: number
-  /** Quick or full presentation mode. Omit for legacy picker behavior. */
-  mode?: 'quick' | 'full'
+  /** Quick (navigation-only) or full (management) presentation mode. */
+  mode: 'quick' | 'full'
   /** Whether Esc from full should return to a Quick Tasks parent. */
   openedFrom?: 'quick' | 'command'
   scope?: 'active' | 'all'
@@ -2176,9 +2697,6 @@ export interface TaskBrowserOptions {
   onRefresh?: () => void
   /** Quick Tasks → full Task Center transition. */
   onViewFull?: (state: TaskBrowserViewState) => void
-  /** Legacy row-level action (`i` interrupt) for mode-less direct callers;
-   * the signature is unchanged so typed old embedders keep compiling. */
-  onAction?: (value: string, action: 'interrupt') => void
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
   /** First-time viewport exposure of attention rows (the ack signal). */
@@ -2266,17 +2784,62 @@ export interface StatusData {
   usage?: UsageStatus
 }
 
-/** One queued inbox row for the queue pane (mirrors the agent Inbox's lists). */
+/** One semantic queued pending-input row for the queue pane. */
 export interface QueueItem {
-  /** The pending message id (agent inbox identity). */
+  /** The pending message id (agent inbox identity), or a local request id. */
   id: string
   /** The message text, single-line display form. */
   text: string
   /** next-turn followup vs next-step steer. */
   mode: 'followup' | 'steer'
-  /** Plugin notice (e.g. a background-job completion): NOT steerable — it
-   * renders with its own marker and the hint drops the steer verbs. */
-  notice?: boolean
+  /** The correlation identity (authoritative rpc id or local request id). */
+  rpcId?: string
+  /** A client-local echo not yet backed by an authoritative occurrence. */
+  local?: boolean
+}
+
+/** One pending user-input row for the ephemeral conversation-tail lane: an
+ * authoritative `steering` occurrence or a client-local submission echo. It is
+ * never durable transcript content. */
+export interface PendingUserRow {
+  /** The occurrence id (Host) or request id (local echo). */
+  id: string
+  /** Display text (attachment markers included). */
+  text: string
+  /** The correlation identity (authoritative rpc id or local request id). */
+  rpcId?: string
+  /** A client-local echo not yet backed by an authoritative occurrence. */
+  local?: boolean
+  /** The pending status line: an accepted steer reads `steering…`, an idle
+   * prompt awaiting its durable message reads `sending…`. */
+  status?: 'steering' | 'sending'
+  /** Whether `text` is the row's COMPLETE content (text-only user input), so
+   * the same visual-row disclosure as a durable text-only user message
+   * applies. ABSENT means UNKNOWN and fails open to the FULL presentation —
+   * a pending row carrying attachment markers must never be folded only to
+   * materialize as a full mixed-content durable bubble. */
+  foldableText?: boolean
+}
+
+/** The stable presentation identity of one pending-user row: the rpc
+ * correlation when present (a local echo and its authoritative occurrence
+ * share it), the occurrence/request id otherwise. Never text, and never the
+ * entry index — a projection update must not transfer disclosure state (or a
+ * stale click) to a different pending row. */
+function pendingUserDisclosureKey(row: PendingUserRow): string {
+  return row.rpcId !== undefined ? `rpc:${row.rpcId}` : `id:${row.id}`
+}
+
+/** The single atomic pending-input presentation update. Queue rows, the
+ * ephemeral steering/transcript lane, and the subject's activity move
+ * together so a handoff never paints an intermediate blank/duplicate frame. */
+export interface PendingInputPresentation {
+  /** Authoritative `queued` occurrences plus client-local queued echoes. */
+  queued: readonly QueueItem[]
+  /** Authoritative `steering` occurrences plus local user echoes. */
+  steering: readonly PendingUserRow[]
+  /** Activity of the same pending-input subject (drives the queue steer hint). */
+  running: boolean
 }
 
 /** One queued prompt awaiting the user's y/n/esc decision. */
@@ -2330,6 +2893,8 @@ export interface TuiAppOptions {
    * the surface works identically without it.
    */
   statusStore?: StatusStore
+  /** The shared canonical display authority. Standalone surfaces default to Full. */
+  displayState?: DisplayState
   /** M5: fired when the terminal WIDTH materially changed (the command
    * surface refreshes on width changes — the runner coalesces to its
    * interval). */
@@ -2368,12 +2933,13 @@ export interface TuiAppOptions {
    */
   editorRegistry?: EditorRegistry
   /**
-   * Host-owned clipboard strategy for fullscreen drag-selection copy
-   * (issue #7). When wired, the alt screen's selection copy routes
-   * through this callback (the shared tmux → platform helper → OSC 52
-   * policy in src/clipboard.ts) instead of the vendor's raw OSC 52
-   * write; the returned boolean drives the `Copied!` / `Copy failed`
-   * flash. Optional — absent keeps the vendor's OSC 52 fallback.
+   * Client-local clipboard delivery for fullscreen drag-selection copy
+   * (issue #7). When wired, the alt screen's selection copy routes through
+   * this callback (the shared policy in src/clipboard.ts: an independent
+   * terminal-client OSC 52 leg plus an independent native/platform
+   * compatibility leg) instead of the vendor's raw OSC 52 write; the
+   * returned boolean drives the `Copied!` / `Copy failed` flash. Optional —
+   * absent keeps the vendor's OSC 52 fallback.
    */
   copySelection?: (text: string) => Promise<boolean>
   /**
@@ -2499,24 +3065,169 @@ function deepFreeze(value: unknown): unknown {
  * `undefined` — a card that is ALWAYS expanded (regular Focus
  * non-Thinking secondaries, no hint needed). Each disclosure has exactly
  * one bulk owner: Ctrl+O never touches Thinking. */
-type ExpandHint = 'click' | 'fold' | 'thinking' | undefined
+type ExpandHint = 'click' | 'click-fold' | 'fold' | 'thinking' | undefined
+
+/** The outer-to-inner container nodes the temporary search reveal must open so
+ * the matched row becomes visible. Every node is a container that actually
+ * HIDES the row on the current surface; a flat/fail-open container mints no
+ * node. The Focus root is represented by its own `searchTargetTurn()` reveal
+ * and is not repeated here. */
+type SearchRevealPath = TranscriptContainerPath
+
+/** The STABLE ancestry of one search target on the current preset/surface: the
+ * canonical Work span and/or Context cluster that could hide it. The current
+ * open/hidden state is deliberately NOT part of this value (plan §30). */
+interface SearchRevealAncestry {
+  readonly work?: TranscriptWorkSpan
+  readonly cluster?: ContextCluster
+}
+
+/** The Work a live Preparing call belongs to: the turn's still-open trailing
+ * Process run, or a NEW (ephemeral) pending run when that run was closed. */
+type WorkPreparingOwner =
+  | { readonly kind: 'trailing-run'; readonly span: TranscriptWorkSpan }
+  | { readonly kind: 'pending-run' }
 
 /** One live-only transcript block containing preparing tool rows. It is
  * kept outside FocusProjectedBlock so no ephemeral row can enter the Focus
  * activity projection or durable transcript model. Focus-expanded blocks carry
- * their owner turn only for visual placement and blank-row hit testing. */
-type TranscriptRenderBlock = FocusProjectedBlock | {
+ * their owner turn only for visual placement and blank-row hit testing. The
+ * Compact Work/Context-cluster blocks are presentation-only projections: their
+ * owners are the stable first-member TranscriptMessages. */
+type TranscriptWorkBlock = {
+  kind: 'work'
+  span: TranscriptWorkSpan
+  /** The live Preparing summary of the NEWEST Work span of its turn (the
+   * only span whose Tool slot may claim the streaming call). */
+  preparingSummary?: string
+  /** The outer-to-inner semantic container ancestry of the Work header
+   * (Focus nests it under its Thought root). */
+  containerPath?: TranscriptContainerPath
+}
+type TranscriptClusterBlock = { kind: 'context-cluster'; cluster: ContextCluster; expanded: boolean; containerPath?: TranscriptContainerPath }
+type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | TranscriptClusterBlock | {
   kind: 'streaming-tool-previews'
   previews: readonly StreamingToolPreview[]
   turn?: number
-  collapseFocusOwnerOnClick?: number
+  /** Compact only: render the live call as an EPHEMERAL pending Work card
+   * (it belongs to a new Process run, not to any durable Work span). */
+  pendingWork?: true
+  /** The semantic container ancestry of a live preview inserted into an open
+   * Work/Thought tail (never the globally appended pending card). */
+  containerPath?: TranscriptContainerPath
+} | {
+  kind: 'pending-user'
+  row: PendingUserRow
+}
+
+/** Canonical Work/cluster membership for one `messages` window, memoized on
+ * the array identity (one linear projection per window). */
+interface CanonicalTranscriptIndex {
+  readonly messages: readonly TranscriptMessage[]
+  readonly workSpans: readonly TranscriptWorkSpan[]
+  readonly workByMember: ReadonlyMap<TranscriptMessage, TranscriptWorkSpan>
+  readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
+}
+
+/** Compare the semantic container ancestry of two blocks (absent === absent). */
+function sameBlockContainerPath(left: TranscriptRenderBlock, right: TranscriptRenderBlock): boolean {
+  const leftPath = 'containerPath' in left ? left.containerPath : undefined
+  const rightPath = 'containerPath' in right ? right.containerPath : undefined
+  if (leftPath === undefined || rightPath === undefined) return leftPath === rightPath
+  return sameTranscriptContainerPath(leftPath, rightPath)
+}
+
+/** Compare one Work span's presentation TOPOLOGY: the stable owner identity
+ * plus the raw member identity order. Content changes (thinking text, tool
+ * status) keep both, so the collapsed header can refresh in place; a boundary
+ * change or a member add/remove is structural. */
+function sameWorkSpanShape(left: TranscriptWorkSpan, right: TranscriptWorkSpan): boolean {
+  if (left.owner !== right.owner || left.members.length !== right.members.length) return false
+  for (let index = 0; index < left.members.length; index += 1) {
+    if (left.members[index] !== right.members[index]) return false
+  }
+  return true
+}
+
+/** The same topology comparison for one ambient Context cluster. */
+function sameContextClusterShape(left: ContextCluster, right: ContextCluster): boolean {
+  if (left.owner !== right.owner || left.members.length !== right.members.length) return false
+  for (let index = 0; index < left.members.length; index += 1) {
+    if (left.members[index] !== right.members[index]) return false
+  }
+  return true
+}
+
+/** Compare only the mounted block topology. Content and activity revisions are
+ * deliberately excluded so they can use the in-place refresh path. */
+function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: TranscriptRenderBlock): boolean {
+  if (left.kind !== right.kind || !sameBlockContainerPath(left, right)) return false
+  if (left.kind === 'message' && right.kind === 'message') {
+    if (left.message.kind === 'summary' || right.message.kind === 'summary') {
+      return left.message.kind === 'summary' && right.message.kind === 'summary'
+        && left.message.text === right.message.text
+    }
+    return left.message === right.message && left.truncated === right.truncated
+  }
+  if (left.kind === 'activity' && right.kind === 'activity') {
+    return left.activity === right.activity && left.owner === right.owner
+  }
+  if (left.kind === 'work' && right.kind === 'work') return sameWorkSpanShape(left.span, right.span)
+  if (left.kind === 'context-cluster' && right.kind === 'context-cluster') {
+    return left.expanded === right.expanded && sameContextClusterShape(left.cluster, right.cluster)
+  }
+  if (left.kind === 'streaming-tool-previews' && right.kind === 'streaming-tool-previews') {
+    return left.turn === right.turn
+      && (left.pendingWork === true) === (right.pendingWork === true)
+      && sameStreamingToolPreviewShape(left.previews, right.previews)
+  }
+  if (left.kind === 'pending-user' && right.kind === 'pending-user') {
+    return pendingUserDisclosureKey(left.row) === pendingUserDisclosureKey(right.row)
+  }
+  return false
+}
+
+/** Compare preview slot identity; argument/name changes remain content-only. */
+function sameStreamingToolPreviewShape(left: readonly StreamingToolPreview[], right: readonly StreamingToolPreview[]): boolean {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!
+    const b = right[index]!
+    if (a.callId !== b.callId || a.turn !== b.turn || a.step !== b.step || a.index !== b.index) return false
+  }
+  return true
+}
+
+function sameStreamingToolPreviews(left: readonly StreamingToolPreview[], right: readonly StreamingToolPreview[]): boolean {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!
+    const b = right[index]!
+    if (a.callId !== b.callId || a.turn !== b.turn || a.step !== b.step || a.index !== b.index
+      || a.name !== b.name || a.argumentBytes !== b.argumentBytes || a.summary !== b.summary || a.scanPrefix !== b.scanPrefix) return false
+  }
+  return true
+}
+
+function samePendingUserRow(left: PendingUserRow, right: PendingUserRow): boolean {
+  return left.id === right.id && left.rpcId === right.rpcId && left.text === right.text
+    && left.local === right.local && left.status === right.status && left.foldableText === right.foldableText
 }
 
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
+  /** Lazily-owned rendered-search corpus/results cache. It follows this
+   * message's live component entry and is pruned with it. */
+  renderedSearchIndex?: AltScreenSearchIndex
   /** The fold boundary the component was built at (Ctrl+O / windowing). */
   boundary: number
+  /** The long-user fold boundary the component was built at. It is derived
+   * from USER turns only, so a change in the user turn set that does not move
+   * the process boundary (e.g. a newer user prompt arriving) must still
+   * rebuild the affected user bubbles — hence its own cache-identity slot. */
+  userBoundary: number
   /** The transcript content width a width-BAKING build truncated its
    * folded rows at — set ONLY when the host build bakes width into the
    * component (folded system/compaction/tool cards; see
@@ -2551,6 +3262,11 @@ interface MessageComponentEntry {
    * fold hint — the semantic owner alone cannot detect a remap (review
    * finding). */
   keymapRev: number
+  /** The search presentation revision at build time: a Workflow search-only
+   * context row or a PTC search reveal changes the rendered rows without
+   * changing the semantic expansion, so the search revision must invalidate
+   * the cached component. */
+  searchPresentationRev?: number
   /** The values the component was built from, for O(1) staleness checks:
    * text-bearing kinds compare the CURRENT text object — an unchanged
    * message keeps the same string instance, so the check is O(1) and
@@ -2595,6 +3311,14 @@ interface MessageComponentEntry {
   items?: number
   tokens?: number
   errorText?: string
+  /** Command card facts (kind 'command'): the settled outcome object —
+   * replaced (never mutated) on settlement, so identity is the cache key.
+   * The compaction card reuses it for its fused command's outcome. */
+  commandOutcome?: unknown
+  /** The fused manual-compaction command (kind 'compaction'): the combined
+   * owner appears when the correlation is established — a later fuse or
+   * settlement must rebuild the card. */
+  compactionSourceCommand?: unknown
   /** M7: the renderer that produced this component, when one did (the
    * cache identity — plan §12.1: a renderer HMR/unload must rebuild). */
   rendererId?: string
@@ -2615,6 +3339,23 @@ interface ExitConfirmationTrigger {
   readonly clearsDraft: boolean
 }
 
+/** The semantic press/release fence for one fullscreen transcript cell. */
+type TranscriptCellGesture = {
+  ownerId: string
+  row: number
+  hitId: string
+  columns: number
+  termRows: number
+}
+
+/** One Question-owned inspection gesture. The Question object identity is
+ * part of the fence so a press cannot survive a question settle or transfer
+ * to the normal fullscreen click path. */
+type QuestionTranscriptGesture = TranscriptCellGesture & {
+  question: QuestionState
+  target: 'transcript' | 'todo'
+}
+
 /** One rendered transcript block in the fullscreen row map (mouse
  * hit-testing): the message/activity owner, the painted height, the
  * attachment spans, the PTC sub-call header spans, the Workflow card hit
@@ -2623,12 +3364,58 @@ interface ExitConfirmationTrigger {
 type FullscreenRowEntry = {
   message?: TranscriptMessage
   activity?: TurnActivity
+  /** The stable disclosure identity of an ephemeral pending-user block. */
+  pendingKey?: string
+  /** The stable disclosure identity of a Compact Work span (its owner). */
+  workOwner?: TranscriptMessage
+  /** The stable disclosure identity of an ambient Context cluster (its owner). */
+  clusterOwner?: TranscriptMessage
   height: number
   attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
-  collapseFocusOwnerOnClick?: number
+  /** The outer-to-inner semantic container ancestry of this row (projected, not
+   * geometry-guessed). `undefined` means the row is owned by no container. */
+  containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
+  /** The ONE visible long-user disclosure control (entry-relative): the
+   * compact marker when collapsed (expand) or the tail control row when
+   * expanded (collapse). Every other row of the bubble stays inert so
+   * ordinary user text keeps selection/copy semantics and never becomes an
+   * implicit button. */
+  userDisclosureHit?: UserDisclosureHit
   hasTrailingSpacer: boolean
+}
+
+/** The direction one visible long-user disclosure control performs. */
+type UserDisclosureAction = 'expand' | 'collapse'
+
+/** What one long-user disclosure control acts on: a durable transcript
+ * message or an ephemeral pending-user row (identified by its stable key). */
+type UserDisclosureTarget =
+  | { readonly kind: 'durable'; readonly message: TranscriptMessage }
+  | { readonly kind: 'pending'; readonly key: string }
+
+/** One bidirectional long-user disclosure control. `row` is entry-relative;
+ * the action is explicit so a stale press/release fence can never confuse an
+ * expand target with a collapse target that repainted onto the same cell. */
+type UserDisclosureHit = {
+  readonly row: number
+  readonly action: UserDisclosureAction
+  readonly target: UserDisclosureTarget
+}
+
+/** The Host-owned long-user disclosure geometry. Only the two Host bubbles
+ * implement it, and the row map never reaches into their children. The brand
+ * is EXPLICIT (`instanceof`): a plugin renderer that happens to expose
+ * same-named methods must never be mistaken for a Host disclosure component
+ * (the M7 plugin-owned `kind: 'user'` contract). */
+function userDisclosureComponentOf(
+  component: Component,
+): UserBubbleComponent | PendingUserComponent | undefined {
+  if (component instanceof UserBubbleComponent || component instanceof PendingUserComponent) {
+    return component
+  }
+  return undefined
 }
 
 /** One transcript block rendered once for the current Focus projection. The
@@ -2637,12 +3424,25 @@ type FullscreenRowEntry = {
 type RenderedTranscriptBlock = {
   block: TranscriptRenderBlock
   component: Component
+  /** The component mounted into `messagesView`: the raw component, or the
+   * search-decorated wrapper while this block owns the current search target.
+   * Geometry/hit maps always use `component` (the raw render). */
+  mountedComponent?: Component
   rendered: string[]
+  /** The current search selection for this block (block-relative rows). */
+  searchSelection?: RenderedSearchSelection
+  /** The selector matching {@link searchSelection} for the CURRENT render
+   * epoch: remeasure uses it to re-sync the mounted highlight wrapper. */
+  searchSelector?: RenderedSearchSelector
+  /** Physical non-owning gutter mount; absent for zero-height blocks. */
+  mount?: TranscriptGutterComponent
   truncatedMarker: boolean
   attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
-  collapseFocusOwnerOnClick?: number
+  /** The outer-to-inner semantic container ancestry of this rendered block. */
+  containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
+  userDisclosureHit?: UserDisclosureHit
 }
 
 /** Presentation-only high-water for one running Focus turn. The activity
@@ -2662,6 +3462,11 @@ export class TuiApp {
   /** The unified status projection store (M0): the footer's single input.
    * The runner's store when wired; an internal projection otherwise. */
   private readonly statusStore: StatusStore
+  /** The app-owned live Focus timer (presentation-only ephemeral state).
+   * Per-surface, never a process global: one app owns one run-phase
+   * timeline, and a fresh surface must not inherit another's pause
+   * windows. */
+  private readonly focusTiming = new FocusTimingStore()
   /** The store-notify render subscription (M0/M5): the unified footer
    * render path. Disposed with the surface so a long-lived EXTERNAL store
    * never retains a dead TuiApp's listener. */
@@ -2733,6 +3538,10 @@ export class TuiApp {
    * validates it before acting — a question advance / repaint between
    * press and release must never transfer the click. */
   private questionPressGesture: import('./question.ts').QuestionMouseGesture | undefined
+  /** The Question-owned inspection press gesture. Kept separate from the
+   * normal fullscreen gesture so a Question cannot leak a background press
+   * into the normal click ladder after it settles. */
+  private questionTranscriptGesture: QuestionTranscriptGesture | undefined
   /** The press-time semantic identity of a fullscreen transcript/todo
    * cell (mouse parity): the release click may only act on the EXACT
    * identity that was pressed — an async transcript projection change
@@ -2745,9 +3554,17 @@ export class TuiApp {
    * sub-call / Workflow run-phase-member / attachment / Focus owner
    * collapse): a repaint that reinterprets the row can never pass the
    * fence even when the card object and the relative row are unchanged. */
-  private fullscreenCellGesture:
-    | { ownerId: string; row: number; hitId: string; columns: number; termRows: number }
-    | undefined
+  private fullscreenCellGesture: TranscriptCellGesture | undefined
+
+  /** Invalidate every fullscreen press/release latch at an ownership or
+   * surface boundary. A gesture captured by one owner must never be
+   * interpreted by a later modal, session, or screen. */
+  private clearFullscreenPointerGestures(): void {
+    this.fullscreenCellGesture = undefined
+    this.questionPressGesture = undefined
+    this.questionTranscriptGesture = undefined
+  }
+
   /** Flows waiting behind the active one (FIFO; shown on settle). */
   private readonly questionQueue: QuestionState[] = []
   /** The active Save Location prompt, if any (one on screen at a time). */
@@ -2771,7 +3588,7 @@ export class TuiApp {
    * bulk instead (toggleFullscreenFocusRoots) and this master is not
    * consulted there; the bulk Collapse All normalizes it OFF (plan §8) so
    * a later surface/Focus switch starts from a clean baseline. */
-  private toolOutputExpanded = false
+  private transcriptDetailExpanded = false
   /** Alt+T: the ONE Thinking disclosure preference — whether Thinking
    * blocks render FULL (true) or COMPACT with a preview (false). Thinking
    * is never hidden: a block exists whenever the model produced reasoning
@@ -2813,8 +3630,13 @@ export class TuiApp {
    * the queue is empty.
    */
   private readonly queuePane: Text
-  /** The pending inbox messages (next-turn followups and next-step steers). */
+  /** The semantic queued pending-input occurrences for the active subject. */
   private queueItems: readonly QueueItem[] = []
+  /** The ephemeral pending user-input lane (authoritative steering + local
+   * submission echoes) rendered after the live transcript tail. */
+  private pendingUserRows: readonly PendingUserRow[] = []
+  /** Activity of the same pending-input subject shown in queueItems. */
+  private queueRunning = true
 
   /** Whether any background task is running/stopping. */
   private tasksActive = false
@@ -2857,16 +3679,16 @@ export class TuiApp {
   private readonly onWorkflowAction: ((action: WorkflowAction) => void) | undefined
 
   /** Whether the Ctrl+O expansion master switch is on. */
-  isToolOutputExpanded(): boolean {
-    return this.toolOutputExpanded
+  isTranscriptDetailExpanded(): boolean {
+    return this.transcriptDetailExpanded
   }
 
   /** Set the Ctrl+O expansion master switch and repaint. */
-  setToolOutputExpanded(expanded: boolean): void {
-    if (this.toolOutputExpanded === expanded) return
+  setTranscriptDetailExpanded(expanded: boolean): void {
+    if (this.transcriptDetailExpanded === expanded) return
     this.clearFocusLiveHeightState()
-    this.toolOutputExpanded = expanded
-    this.rebuildMessages()
+    this.transcriptDetailExpanded = expanded
+    this.rebuildMessages('focus-disclosure')
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
@@ -2894,12 +3716,95 @@ export class TuiApp {
   private searchOverlay: OverlayHandle | undefined
   /** The search input component, while one is open (for match counts). */
   private searchComponent: TranscriptSearchComponent | undefined
+  /** The temporary search presentation target: while set, its owner turn /
+   * card is revealed and the query highlighted — presentation only, never
+   * written into any user disclosure map. */
+  private searchTarget: TranscriptSearchPresentationTarget | undefined
+  /** The representative cards of the CURRENT semantic search result set
+   * (runner-owned). Only these cards may receive a weak visual highlight; a
+   * card that merely renders the query in UI chrome is never decorated. */
+  private searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
+  /** Bumped whenever the search presentation target changes: part of the
+   * message-component cache identity so a Workflow search context row / PTC
+   * search reveal is rebuilt even when the semantic expansion is unchanged. */
+  private searchPresentationRevision = 0
+  /** Whether the CURRENT search target may force its reveal (plan §6): an
+   * explicit navigation grants it, an explicit user collapse revokes it until
+   * the next navigation. Never written into user disclosure maps. */
+  private searchRevealGranted = false
+  /** The Host-ownership admission latched at grant time for a long-user
+   * target: a later plugin unload / registry settle must NOT resurrect a
+   * reveal that was not admitted (the "no phantom Host expansion" invariant). */
+  private searchRevealHostOwned = false
+  /** The long-user expand affordance the surface offered AT GRANT TIME. A
+   * regular grant without the key never becomes a fullscreen click reveal
+   * later (no surface-change resurrection); a key-based grant stops applying
+   * once the key is disabled. */
+  private searchRevealAffordance: 'fullscreen' | 'key' | 'none' = 'none'
+  /** PTC sub-calls the user explicitly collapsed while the search reveal had
+   * them open: they stay collapsed until the next explicit navigation. */
+  private readonly searchSuppressedSubCalls = new Set<string>()
+  /** The block-relative transcript range of the current search selection
+   * (welcome card excluded), recomputed on every rebuild/remeasure. */
+  private currentSearchTranscriptRange: RenderedSearchScrollRange | undefined
+  /** The transcript content height (welcome card + rows + hint/notify) measured
+   * by the LAST rebuild/remeasure. `scrollToSearchTarget` reads it instead of
+   * re-rendering the whole mounted view for every ordinary search jump. */
+  private transcriptContentHeight = 0
+  /** The welcome card's height as of the last rebuild/remeasure. */
+  private transcriptWelcomeHeight = 0
+  /** The window-hint + notify chrome rows as of the last rebuild. */
+  private transcriptChromeHeight = 0
+  /** Test-only structural counters for the search presentation hot path. */
+  private readonly searchPresentationDiagnostics: TranscriptSearchPresentationDiagnostics = {
+    rebuilds: 0,
+    remeasures: 0,
+    renderedMatchLookups: 0,
+    renderedMatchResultCacheHits: 0,
+    fullRenders: 0,
+    transcriptSets: 0,
+  }
+  /** Test-only structural/content invalidation counters. */
+  private readonly transcriptPresentationDiagnostics: TranscriptPresentationDiagnostics = {
+    setCalls: 0,
+    structuralCommits: 0,
+    contentCommits: 0,
+    noopCommits: 0,
+    dirtyBlocks: 0,
+    mountReplacements: 0,
+    rowMapRefreshes: 0,
+    structuralFallbacks: 0,
+    searchOwnerResolutions: 0,
+  }
+  private readonly transcriptRenderProfiler = createTranscriptRenderProfiler()
+  /** Opt-in scroll-frame profiler (`DSH_TUI_SCROLL_PROFILE=1`, diagnosis
+   * only). The mutable fields below accumulate one coalesced scroll frame;
+   * every write is gated by `enabled`, so the disabled path is one boolean
+   * check per stage. */
+  private readonly scrollProfiler = createScrollRenderProfiler()
+  private scrollFramePending = false
+  private scrollFrameStart = 0
+  private scrollFrameWriteMs = 0
+  private scrollFrameBytes = 0
+  private scrollFrameRowsRewritten = 0
+  private scrollFrameRemeasureMs = 0
+  /** The pre-wrap `terminal.write` (diagnostic builds only): restored in
+   * dispose() so the opt-in instrumentation never outlives the app. */
+  private scrollProfileOriginalWrite: ((data: string) => void) | undefined
   /** The Ctrl+R input-history panel, while one is open. */
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
   private historyOverlay: OverlayHandle | undefined
   /** The responsive shell survives a resize and a fullscreen screen swap. */
   private historyResponsiveFrame: ResponsiveOverlayFrame | undefined
+  /** The `/model` picker component while one is open: retained across a
+   *  fullscreen screen swap (the remountable overlay opts out of
+   *  disposeOnHide, so the SAME component keeps its query/view/selection). */
+  private modelPickerComponent: (Component & RowBudgetAware) | undefined
+  /** The live overlay handle of the /model picker (hide() closes it). */
+  private modelPickerOverlay: OverlayHandle | undefined
+  /** The live responsive frame of the /model picker. */
+  private modelPickerFrame: ResponsiveOverlayFrame | undefined
   /** Footer configurators own paste timers outside the generic overlay
    * disposal path; final surface disposal closes every still-open one. */
   private readonly footerConfiguratorClosers = new Set<() => void>()
@@ -2927,10 +3832,19 @@ export class TuiApp {
   private readonly keybindingEditorPanels = new Set<Component>()
   /** M8: still-owned plugin overlay leases (closed by the final dispose —
    * plan §13.3: leases are generation-scoped). */
-  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle>()
+  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void }>()
   /** Phase 2: still-owned ADVANCED interactive overlay leases (closed by
    * the final dispose; re-mounted across fullscreen screen swaps). */
   private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void }>()
+  /** Physical remount callbacks per stable managed handle: a fullscreen swap
+   * rebinds every remountable node by looking its callback up here. The ORDER
+   * comes from the broker's CURRENT logical z-order, never a creation
+   * ordinal. */
+  private readonly overlayRemounts = new Map<OverlayHandle, () => void>()
+  /** Live approval frames: a fullscreen rebind REPLACES the frame for the
+   * same logical node, and the replaced one is disposed explicitly (the
+   * approval opts out of disposeOnHide). */
+  private readonly approvalFrames = new Set<ResponsiveOverlayFrame>()
   /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
    * resize so the plugin's render(ctx) sees the new geometry). */
   private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
@@ -3048,15 +3962,19 @@ export class TuiApp {
    * action resolver + leader machine. Built by the constructor when the
    * runner did not inject one. */
   private readonly keybindings: HostKeybindingManager
+  /** True only while the modal router feeds the leader machine; the callback
+   * uses this narrow scope to reject non-inspection completions. */
+  private modalInspectionLeader = false
   /** The semantic action → host method router (plan §9). */
   private readonly actionDispatcher: AppActionDispatcher
   /** M7: the transcript/tool renderer registry (optional). */
   private readonly renderers: RendererRegistry | undefined
   /** M9: the editor registry (optional). */
   private readonly editorRegistry: EditorRegistry | undefined
-  /** Issue #7: the host-owned clipboard strategy for fullscreen drag
-   * selection (tmux → platform helper → OSC 52); undefined keeps the
-   * vendor's raw OSC 52 write. */
+  /** Issue #7: the client-local clipboard delivery for fullscreen drag
+   * selection — the shared independent-legs policy (terminal-client OSC 52
+   * plus native/platform compatibility); undefined keeps the vendor's raw
+   * OSC 52 write. */
   private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
   private readonly openExternalUrl: ((url: string) => void) | undefined
   private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
@@ -3070,6 +3988,12 @@ export class TuiApp {
    * rebuild only re-runs renderers for entries whose identity changed.
    */
   private lastRendererRevision = -1
+  /** The renderer-revision reconcile re-entrancy guard: `rebuildMessages()`
+   * ends with `requestRender()`, and a renderer may bump the registry revision
+   * inside `render()` — without this guard the two would recurse synchronously
+   * until the stack overflowed. While set, a nested request only schedules the
+   * physical frame. */
+  private reconcilingRendererRevision = false
   /** M9: the editor seat holder (the atomic handoff + current occupant). */
   private readonly editorSeatHolder: EditorSeatHolder
   /** The durable-image loader (plan M8): optional, wired by the runner. */
@@ -3094,6 +4018,11 @@ export class TuiApp {
    * regardless of the fold or the override.
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
+  /** Per-pending-row long-user disclosure overrides, keyed by the stable
+   * {@link pendingUserDisclosureKey}. Presentation-only ephemeral state: it
+   * never enters the transcript folder, persistence, or the session, and it
+   * is pruned to the live pending keys on every presentation update. */
+  private readonly pendingUserExpanded = new Map<string, boolean>()
   /** PTC sub-call bodies the user expanded by subCallId (stable across
    * live updates, replay and sibling insertion — never an array index). */
   private readonly subCallExpanded = new Set<string>()
@@ -3102,10 +4031,16 @@ export class TuiApp {
   private subCallExpandedRevision = 0
   /** The block-relative sub-call hit rows recorded at render time, keyed by
    * the root message object (the renderer knows the exact layout). */
-  private readonly subCallHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; subCallId: string }>; total: number }>()
+  private readonly subCallHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; subCallId: string }>; regions: ReadonlyArray<SearchSourceRegion>; total: number }>()
   /** The block-relative Workflow card hit rows recorded at render time,
    * keyed by the message object (the renderer owns the exact layout). */
   private readonly workflowHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>; total: number }>()
+  /** PROVEN search source regions in absolute block coordinates, recorded by
+   * the owning renderer (Workflow rows, tool header fields, …). Search
+   * selection consumes them to map a semantic occurrence to its rendered
+   * occurrence; a source with no provable occurrence anchors at its region row
+   * and shows NO strong highlight. */
+  private readonly searchSourceRegionsByMessage = new Map<TranscriptMessage, readonly SearchSourceRegion[]>()
   /** Per-run Workflow disclosure state (PR2 plan §7), keyed by the durable
    * `runId`. Session-scoped: cleared on session switch. */
   private readonly workflowDisclosure = new Map<string, WorkflowRunDisclosureState>()
@@ -3118,13 +4053,13 @@ export class TuiApp {
    * transition): the render-cache identity for Workflow cards. */
   private workflowDisclosureRevision = 0
   /**
-   * Focus Mode (plan): the persisted preference is applied through
-   * {@link setFocusMode}; while ON, the transcript projection replaces each
-   * turn's intermediate activity with a live Thought block (see
-   * focus-activity.ts). The WorkingIndicator is NEVER hidden by Focus —
-   * the two surfaces are independent (plan §3).
+   * The shared DisplayState derives Focus when its preset is `focus`; while
+   * active, the transcript projection replaces each turn's intermediate
+   * activity with a live Thought block (see focus-activity.ts). The
+   * WorkingIndicator is NEVER hidden by Focus — the two surfaces are
+   * independent.
    */
-  private focusModeEnabled = false
+  private readonly displayState: DisplayState
   /**
    * The user's per-turn Thought disclosures. LIVE running turns are
    * allowed (plan §2.3) and `turn/end` NEVER clears the choice (plan
@@ -3133,14 +4068,101 @@ export class TuiApp {
    * §16.4).
    */
   private readonly focusExpandedTurns = new Set<number>()
+  /**
+   * The user's per-Work-span disclosures, keyed by the span OWNER (the first
+   * member TranscriptMessage — a stable identity that survives content-only
+   * updates). Work ownership is preset-neutral: the preset/surface only
+   * decides the DEFAULT and whether a collapsed header is operable, never this
+   * manual override.
+   */
+  private readonly expandedWorkOwners = new Set<TranscriptMessage>()
+  /**
+   * The user's per-Context-cluster disclosures, keyed by the cluster owner
+   * (its first member). Clustering exists in every preset; only a manual
+   * disclosure, a surface default or a temporary search reveal opens one.
+   */
+  private readonly expandedContextClusterOwners = new Set<TranscriptMessage>()
+  /**
+   * Members of every Work span currently OPEN (or flat/fail-open) in the
+   * current projection. Recomputed once per projection. The regular surface
+   * full-reveals these rows (no mouse ⇒ no per-card fold affordance), so
+   * `Ctrl+O` can never be advertised as a card's expand key while it actually
+   * collapses the Work span.
+   */
+  private openWorkRunMembers: ReadonlySet<TranscriptMessage> = new Set()
+  /**
+   * Canonical structure indexes for the CURRENT `messages` array identity. One
+   * linear projection per window; disclosure/search/pruning read Work and
+   * cluster ownership from here instead of re-projecting Compact per query.
+   */
+  private canonicalIndexMemo: CanonicalTranscriptIndex | undefined
+  /** Memoized Ctrl+O process/user boundaries for the current window + master. */
+  private expandBoundaryMemo: { readonly messages: readonly TranscriptMessage[]; readonly master: boolean; readonly boundary: number } | undefined
+  private userExpandBoundaryMemo: { readonly messages: readonly TranscriptMessage[]; readonly master: boolean; readonly boundary: number } | undefined
+  /**
+   * The Work owners effectively open in the CURRENT projection: manual owners,
+   * the regular master's recent-turn bulk, and (regular Focus) the Work nested
+   * in an effectively expanded Thought root. Recomputed once per projection so
+   * rendering and the Preparing pass read an O(1) set; the temporary search
+   * reveal is layered separately by {@link workSpanExpanded}.
+   */
+  private openWorkOwners: ReadonlySet<TranscriptMessage> = new Set()
+  /**
+   * The reveal owner memoized for the CURRENT (target, preset, surface,
+   * window) identity. `revealedSearchOwner()` is consulted once per projected
+   * row and once per Work span / cluster component, so resolving it freshly
+   * each time would re-project the whole transcript per row — an accidental
+   * O(n^2) while a search is active. The memo key holds every input the
+   * resolution reads, so it needs no separate invalidation across session,
+   * window, preset, surface or search changes.
+   */
+  private revealedOwnerMemo: {
+    readonly target: TranscriptMessage
+    readonly preset: DisplayPreset
+    readonly fullscreen: boolean
+    readonly disclosureAvailable: boolean
+    readonly messages: readonly TranscriptMessage[]
+    readonly ancestry: SearchRevealAncestry
+  } | undefined
+  /** `focusRootHidesSearchTarget()` memo: the collapsed Focus visibility of one
+   * search target for the current window/activity epoch. */
+  private collapsedFocusHiddenMemo: {
+    readonly messages: readonly TranscriptMessage[]
+    readonly activities: ReadonlyMap<number, TurnActivity>
+    readonly target: TranscriptMessage
+    readonly hidden: boolean
+  } | undefined
+  /** The CompactWorkComponent cache, keyed by the span owner. */
+  private readonly workComponents = new Map<TranscriptMessage, {
+    component: CompactWorkComponent
+    span: TranscriptWorkSpan
+    expanded: boolean
+    themeRev: number
+    iconStyle: IconStyle
+    signature: string
+  }>()
+  /** The ContextClusterComponent cache, keyed by the cluster owner. */
+  private readonly contextClusterComponents = new Map<TranscriptMessage, {
+    component: ContextClusterComponent
+    cluster: ContextCluster
+    expanded: boolean
+    themeRev: number
+    iconStyle: IconStyle
+    signature: string
+  }>()
   /** The folder's per-turn activities (same fold state as `messages`). */
   private turnActivities: ReadonlyMap<number, TurnActivity> = new Map()
-  /** The FocusActivityComponent cache, keyed by turn: rebuilds on the
-   * activity revision, the expansion state, the theme revision, the icon
-   * style, or the precomputed Tool display (plan §39 + §34.9). render()
-   * still re-reads Date.now() per frame, so the running duration refreshes
-   * on the WorkingIndicator's repaint heartbeat. */
-  private readonly focusActivityComponents = new Map<number, {
+  /** The FocusActivityComponent cache, keyed by the Thought block's run
+   * OWNER (the run's first `TranscriptMessage`) — NOT by turn: one turn can
+   * materialize several Thought runs (a turn-less window entry splits it),
+   * each with its own hidden rows/Action winner/component. Rebuilds on the
+   * activity object/revision, the expansion state, the theme revision, the
+   * icon style, the bounded Action + ActionStats signatures, or the live
+   * Preparing summary (plan §39 + §34.9; addendum v2 §39 — synthetic Action
+   * changes must repaint even when `TurnActivity.tool` did not move).
+   * render() still re-reads Date.now() per frame, so the running duration
+   * refreshes on the WorkingIndicator's repaint heartbeat. */
+  private readonly focusActivityComponents = new Map<TranscriptMessage, {
     /** The activity object the component was built from (identity key). */
     activity: TurnActivity
     component: FocusActivityComponent
@@ -3148,7 +4170,8 @@ export class TuiApp {
     expanded: boolean
     themeRev: number
     iconStyle: IconStyle
-    toolDisplay?: string
+    actionSignature: string
+    statsSignature: string
     preparingSummary?: string
   }>()
   /** The parent session's expansion set while the subagent viewer covers
@@ -3185,6 +4208,23 @@ export class TuiApp {
    * session log; compatible floors remain active during historical browsing
    * and release only at explicit lifecycle or structural boundaries. */
   private readonly focusLiveHeightStates = new Map<number, FocusLiveHeightState>()
+  /**
+   * The transcript block batch currently committed to `messagesView` by
+   * {@link rebuildMessages}. It is the presentation metadata of the MOUNTED
+   * batch: `refreshMessageRows()` remeasures these exact component instances and
+   * must never project or create another batch, otherwise measurement advances
+   * the message-component cache ownership independently of what is still
+   * mounted.
+   *
+   * ZERO-HEIGHT EXCEPTION: a block whose measured height is 0 keeps its entry
+   * (and its component) in this batch but is NOT wrapped in a gutter, so it has
+   * no mounted counterpart. The identity invariant is therefore over the batch's
+   * components, with zero-height blocks having no mounted row — see
+   * `docs/focus-replay-harness.md`.
+   */
+  private mountedTranscriptBlocks: readonly RenderedTranscriptBlock[] = []
+  /** Whether one structural transcript batch has been mounted. */
+  private transcriptPresentationCommitted = false
   /** The currently measured inert padding after a Focus turn's boundary
    * spacer. Padding components read this map at paint time, retaining the
    * compatible floor while historical and releasing it with the same explicit
@@ -3246,8 +4286,27 @@ export class TuiApp {
          * so a repaint that reinterprets the pressed row can never pass
          * the release fence. */
         rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+        /** The PAINTED content rows whose copy source is blank presentation
+         * chrome (the expanded long-user tail control). Derived at the paint
+         * boundary from the same projection as `rows`, so the copy filter and
+         * the user's visible frame share one epoch — a rebuild that has not
+         * repainted yet must never reinterpret a painted row. */
+        copyBlankRows: ReadonlySet<number>
       }
     | undefined
+
+  /** Whether transcript geometry may have changed since the last fullscreen
+   * paint-snapshot commit (perf plan §19 candidate 1). Raised by the only two
+   * writers of the row map (`updateTranscriptGeometry` / `refreshMessageRows`),
+   * by the async image-settle seam (a thumbnail invalidates without either),
+   * and by a terminal resize (detected at the commit). A frame that only
+   * scrolls or repaints chrome keeps the flag clear and reuses the committed
+   * `rows` + `copyBlankRows` verbatim; chrome heights and scroll state are
+   * re-read fresh every commit. The click-time live re-checks
+   * (`handleFullscreenClick` / `completeQuestionTranscriptInspection`) still
+   * call `refreshMessageRows` themselves, so the stale-frame release fence
+   * keeps measuring live state exactly as before. */
+  private fullscreenRowsDirty = true
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
@@ -3322,7 +4381,27 @@ export class TuiApp {
       },
     })
     this.terminal = resizeAware
+    // Scroll profiler (diagnostic, DSH_TUI_SCROLL_PROFILE=1): time write
+    // calls and count the per-frame rewrite volume on the SAME terminal
+    // instance both screens write through. Disabled builds never wrap.
+    if (this.scrollProfiler.enabled) {
+      const profiled = this.terminal as Terminal & { write: (data: string) => void }
+      const originalWrite = profiled.write.bind(profiled)
+      this.scrollProfileOriginalWrite = originalWrite
+      profiled.write = (data: string): void => {
+        const start = performance.now()
+        originalWrite(data)
+        this.scrollFrameWriteMs += performance.now() - start
+        this.scrollFrameBytes += Buffer.byteLength(data, 'utf8')
+        let erases = 0
+        for (let index = 0; index < data.length; index += 1) {
+          if (data.charCodeAt(index) === 0x1b && data.startsWith('\x1b[2K', index)) erases += 1
+        }
+        this.scrollFrameRowsRewritten += erases
+      }
+    }
     this.events = events
+    this.displayState = options.displayState ?? { preset: 'full' }
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
@@ -3332,6 +4411,9 @@ export class TuiApp {
     // footer always composes from a snapshot (headless tests drive it
     // through setStatus).
     this.statusStore = options.statusStore ?? new StatusStoreImpl(initialStatusSnapshot('0.0.0'))
+    // The shared display state is the authority even for an externally
+    // supplied store; seed its interaction section before the first frame.
+    this.statusStore.update({ interaction: { displayPreset: this.displayState.preset } })
     // M0/M5: the store notify IS the footer's render path — every
     // ACCEPTED projection (activity, surface, view, host facts) re-renders
     // the composer. The old per-caller `projectActivity(); renderFooter()`
@@ -3398,12 +4480,20 @@ export class TuiApp {
         this.clearExitConfirmation()
         if (this.messagesView !== undefined) {
           this.refreshTranscriptWindowHint()
-          this.rebuildMessages()
+          this.rebuildMessages('theme-keymap')
         }
         this.requestRender()
       },
       onLeaderStateChange: () => this.renderFooter(),
       onLeaderActivate: (action, key) => {
+        // A response modal may arm the shared leader machine, but only the
+        // explicit inspection plane can complete there. Return consumed=true
+        // for blocked actions so their completion key cannot become answer
+        // text or a Question/Approval response after this callback returns.
+        if (this.modalInspectionLeader
+          && !MODAL_INSPECTION_ACTIONS.includes(action as AppKeybindingId)) {
+          return true
+        }
         // M6: a leader sequence must never bypass the viewer's
         // parent-action guard — a `<leader>X` binding of a parent action
         // (e.g. app.input.steer) is inert inside the continuable viewer,
@@ -3473,6 +4563,11 @@ export class TuiApp {
       question: () => this.activeQuestions,
       saveLocation: () => this.activeSaveLocation,
       setFocusSeat: (seat) => this.setFocusSeat(seat),
+      // The close path re-derives the final seat from the LIVE surface: a
+      // restored dependent capturing overlay keeps keyboard ownership; the
+      // editor owns it only when no capturing overlay remains.
+      reconcileFocusSeat: () => this.publishFocusSeat(),
+      focusSeatOwner: () => this.focusSeatOwner(),
     })
 
     this.tui = new TuiMainScreen(resizeAware)
@@ -3489,6 +4584,7 @@ export class TuiApp {
     })
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
+      const gesture: ComposerSubmitGesture = 'enter'
       // Enter is a fresh submit attempt, including an empty no-op attempt.
       this.clearExitConfirmation()
       // The shell-editor-mode boundary: the editor buffer holds the bare
@@ -3535,6 +4631,7 @@ export class TuiApp {
           parentSessionId: target.parentSessionId,
           childSessionId: target.childSessionId,
           text: serialized,
+        gesture,
         })
         return
       }
@@ -3866,6 +4963,9 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     this.clearExitConfirmation()
     this.lastEscapeAt = undefined
+    // The stopped screen cannot paint: a latched profiler window would
+    // otherwise bill the $EDITOR dwell time to the next post-resume frame.
+    this.resetScrollProfileFrame()
     if (this.fullscreen !== undefined) {
       this.fullscreen.stop({ preserveScreen: true })
     } else {
@@ -3919,6 +5019,7 @@ export class TuiApp {
     for (const dispose of this.schemeDisposers) dispose()
     this.schemeDisposers = []
     this.clearFocusLiveHeightState()
+    this.resetScrollProfileFrame()
     this.tui.stop()
     this.fullscreen?.stop()
     this.fullscreen = undefined
@@ -3936,6 +5037,13 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // The diagnostic scroll-profiler instrumentation dies with the app: the
+    // write-wrap is unwrapped first and any latched frame window discarded.
+    this.resetScrollProfileFrame()
+    if (this.scrollProfileOriginalWrite !== undefined) {
+      (this.terminal as Terminal & { write: (data: string) => void }).write = this.scrollProfileOriginalWrite
+      this.scrollProfileOriginalWrite = undefined
+    }
     // The process live-TUI slot stays CLAIMED through the whole final
     // teardown (review-loop round 2): every step below still owns the
     // process-global keybinding namespace (the host keybinding manager
@@ -3994,6 +5102,9 @@ export class TuiApp {
     for (const lease of this.unstableMountLeases) lease.close()
     this.unstableMountLeases.clear()
     this.unstableMountAdapters.clear()
+    // Every lease close drops its own remount callback; drop any straggler
+    // (history / model picker) so no disposed surface keeps a callback.
+    this.overlayRemounts.clear()
     // Phase 4: settle every still-open imperative broker promise (select/
     // custom) — the picker/overlay dies with the surface; the promises
     // must not hang.
@@ -4019,8 +5130,10 @@ export class TuiApp {
     }
     this.terminalSchemeListeners.clear()
     this.expandedOverride.clear()
+    this.pendingUserExpanded.clear()
     this.disposeMessageComponents()
     this.localMessages.length = 0
+    this.pendingUserRows = []
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
@@ -4030,6 +5143,12 @@ export class TuiApp {
     this.historyPanel?.dispose()
     this.historyPanel = undefined
     this.historyOverlay = undefined
+    // The /model picker component dies with the surface too: a remountable
+    // overlay opts out of disposeOnHide, so final teardown owns it explicitly.
+    this.modelPickerComponent?.dispose?.()
+    this.modelPickerComponent = undefined
+    this.modelPickerOverlay = undefined
+    this.modelPickerFrame = undefined
     this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
     // Detach the extension surface host: its subscriptions and capability
     // set die with the surface (M2 stale-generation contract).
@@ -4346,6 +5465,8 @@ export class TuiApp {
       this.clearExitConfirmation()
       return this.handleSaveLocationKey(data)
     }
+    const modalInspection = this.handleModalInspectionAction(data)
+    if (modalInspection !== undefined) return modalInspection
     if (this.activeQuestions !== undefined) {
       this.clearExitConfirmation()
       return this.handleQuestionKey(data)
@@ -4361,9 +5482,9 @@ export class TuiApp {
     // - continuable: the editor is LIVE (typing falls through to it), but
     //   Enter submits to the SUBAGENT (never the parent) and every
     //   parent-owned lifecycle key is consumed here, BEFORE the host
-    //   ladder, so the viewer can never steer/queue/dequeue the parent
+    //   ladder, so the viewer can never steer/queue/recall-all the parent
     //   session or exit the TUI from inside the child view.
-    if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
+    if (this.viewerMode !== undefined && !this.overlayBroker.hasFocusedOverlay()) {
       // A viewer owns this input stage; no parent keyboard exit request can
       // be confirmed from inside it. Treat the viewer event as fresh input
       // and discard any stale parent confirmation.
@@ -4412,7 +5533,12 @@ export class TuiApp {
           return { consume: true }
         }
         if (this.isSubmitKey(data)) {
-          this.submitSubagentDraft()
+          this.submitSubagentDraft('enter')
+          return { consume: true }
+        } else if (this.keybindings.matches(data, 'app.input.steer')) {
+          // The accelerated steer gesture is parent-owned in the main
+          // surface, but targets the child draft while this viewer is open.
+          this.submitSubagentDraft('accelerated')
           return { consume: true }
         } else if (this.viewerParentLockedKey(data)) {
           return { consume: true }
@@ -4466,9 +5592,13 @@ export class TuiApp {
     }
     // A managed non-search overlay owns the focused component. App-level
     // lifecycle handlers must not consume its keys before pi-tui dispatches
-    // them to that component. Discard any stale exit confirmation before
-    // letting the focused component process this fresh interaction.
-    if (this.activeScreen.hasOverlayEntries) {
+    // them to that component. Only a capturing overlay that HOLDS keyboard
+    // focus is an owner: a nonCapturing notice never takes focus, and a
+    // blurred interactive overlay has released it, so the Host shortcut
+    // ladder (and the editor) must keep working in both cases. Discard any
+    // stale exit confirmation before letting the focused component process
+    // this fresh interaction.
+    if (this.overlayBroker.hasFocusedOverlay()) {
       this.clearExitConfirmation()
       return undefined
     }
@@ -4808,8 +5938,9 @@ export class TuiApp {
       this.events.onCancel?.()
       return { consume: true }
     }
-    // Overlays (pickers, settings) own Esc while they are up.
-    if (this.activeScreen.hasOverlayEntries) return undefined
+    // Overlays (pickers, settings) own Esc while they are up. A nonCapturing
+    // notice is not a keyboard owner, so Esc still belongs to the editor.
+    if (this.overlayBroker.hasFocusedOverlay()) return undefined
     // Autocomplete owns Esc while the dropdown is open: let the editor
     // close it (TuiEditor intercepts; kimi parity). Without this the
     // app-level consume swallows Esc and the dropdown cannot close.
@@ -4936,7 +6067,7 @@ export class TuiApp {
         return true
       },
       dequeueDraft: () => {
-        // The dequeue action: pull queued input back into the editor.
+        // The TUI-only recall-all action: pull queued input back into the editor.
         this.events.onDequeue?.()
         return true
       },
@@ -4965,17 +6096,69 @@ export class TuiApp {
         return true
       },
       toggleTranscriptExpand: () => {
-        // Fullscreen + Focus: Ctrl+O is the Thought-root bulk owner (plan
-        // §3) — no expanded root → expand the recent `EXPAND_RECENT_TURNS`
-        // eligible roots; any expanded root → Collapse All. Every other
-        // surface/Focus combination keeps the historical tool/system detail
-        // master (regular behavior untouched).
-        if (this.fullscreen !== undefined && this.focusModeEnabled) {
-          this.toggleFullscreenFocusRoots()
+        // Fullscreen Compact: Ctrl+O owns the Work-span bulk ONLY (plan §5.3) —
+        // the mouse owns the other local disclosures there. Regular Compact
+        // does NOT reserve the key: it flows through the common
+        // transcript-detail master below so Work, clusters, ordinary folds and
+        // long-user folds all have one operable owner (plan §5.2).
+        if (this.fullscreen !== undefined && this.displayState.preset === 'compact') {
+          this.toggleTranscriptWorkSpans()
           return true
         }
-        this.toolOutputExpanded = !this.toolOutputExpanded
-        this.rebuildMessages()
+        // Fullscreen + Focus: Ctrl+O owns the Thought-root bulk (plan §3) —
+        // any expanded root → Collapse All, none → expand the recent
+        // `EXPAND_RECENT_TURNS` eligible roots — AND it collapses an
+        // explicitly expanded long user bubble/pending row (plan §6.4/§21.7):
+        // a visible long-user override with no expanded root consumes the
+        // press as a user collapse, so the Thought roots are untouched. The
+        // root storage/expansion rule itself is unchanged.
+        if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
+          if (this.hasVisibleExpandedFocusRoots()) {
+            // Clear the user overrides BEFORE the single root-collapse
+            // rebuild so one pass paints both, and keep the root contract's
+            // own `anchor-turn` viewport (never a generic user anchor).
+            this.clearUserDisclosureOverrides()
+            if (this.searchTarget !== undefined && isUserMessageDisclosureCandidate(this.searchTarget.message)) {
+              this.suppressSearchReveal()
+            }
+            this.toggleFullscreenFocusRoots()
+          } else if (this.hasVisibleExpandedUserDisclosure()) {
+            this.mutateTranscriptDisclosure(() => {
+              this.clearUserDisclosureOverrides()
+              // An explicit user collapse revokes the temporary search reveal
+              // (the semantic match/highlight stays current).
+              this.suppressSearchReveal()
+            })
+          } else {
+            this.toggleFullscreenFocusRoots()
+          }
+          return true
+        }
+        // Every other surface keeps the ONE transcript-detail master (plan
+        // §43/§44). Ctrl+O collapses what it owns: the recent-turn master, the
+        // visible Work/cluster owners it controls (regular surface only), and
+        // any explicit long-user expansion; otherwise it turns the master ON
+        // and the derived recent-turn expansion applies consistently. The
+        // disclosure change is viewport-safe: following the live tail keeps
+        // following it, and a historical position stays on the same semantic
+        // row.
+        if (this.transcriptDetailExpanded || this.hasVisibleExpandedUserDisclosure()
+          || this.hasVisibleRegularMasterOwnedDisclosure()
+          || this.hasVisibleDeliveredFilesMasterDisclosure()) {
+          this.mutateTranscriptDisclosure(() => {
+            this.transcriptDetailExpanded = false
+            this.clearUserDisclosureOverrides()
+            this.clearRegularMasterOwnedDisclosures()
+            this.clearDeliveredFilesMasterDisclosure()
+            if (this.searchTarget !== undefined && isUserMessageDisclosureCandidate(this.searchTarget.message)) {
+              this.suppressSearchReveal()
+            }
+          })
+        } else {
+          this.mutateTranscriptDisclosure(() => {
+            this.transcriptDetailExpanded = true
+          })
+        }
         return true
       },
       toggleThinking: () => {
@@ -5063,15 +6246,18 @@ export class TuiApp {
    * the live editor is only read when a rule predicate actually needs it
    * (the input path must not add a draft read per keystroke). */
   private keybindingContext(): KeybindingContext {
+    // The keyboard-ownership fact: a capturing overlay that HOLDS focus —
+    // never a nonCapturing notice, nor a blurred/hidden entry.
+    const keyboardOwner = this.overlayBroker.hasFocusedOverlay()
     return deriveKeybindingContext({
-      focusedSeat: this.activeScreen.hasOverlayEntries ? 'overlay' : 'editor',
+      focusedSeat: keyboardOwner ? 'overlay' : 'editor',
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
-      viewerMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
+      viewerMode: this.viewerMode === undefined || keyboardOwner
         ? 'none'
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
       searchActive: this.searchOverlay !== undefined,
-      overlayActive: this.activeScreen.hasOverlayEntries,
+      overlayActive: keyboardOwner,
       agentRunning: this.busy,
       editorEmpty: () => this.seatEditor().getText().trim() === '',
       // LAZY like editorEmpty: the VISIBLE seat editor's input mode decides
@@ -5084,17 +6270,19 @@ export class TuiApp {
 
   /** The live surface context the InputRouter reads (M6). */
   private inputRouterContext(): Parameters<InputRouter['route']>[1] {
+    const keyboardOwner = this.overlayBroker.hasFocusedOverlay()
     return {
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
       // The viewer's input mode: 'readonly' locks the editor (one-shot AND
       // nested — only an interactive direct child edits), 'continuable'
       // keeps it live (the HOST guard already consumed the parent-owned
-      // chords before the router is consulted).
-      viewerInputMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
+      // chords before the router is consulted). A nonCapturing notice does
+      // not change the viewer's input mode.
+      viewerInputMode: this.viewerMode === undefined || keyboardOwner
         ? 'none'
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
-      hasOverlay: this.activeScreen.hasOverlayEntries,
+      hasOverlay: keyboardOwner,
       searchActive: this.searchOverlay !== undefined,
       // The router's physical-key seams (the read-only viewer fold
       // pass-through, the search overlay ownership) consult the EFFECTIVE
@@ -5204,30 +6392,27 @@ export class TuiApp {
     const merged: OverlayOptions = ownership.remountable === true
       ? { ...options, disposeOnHide: false }
       : { disposeOnHide: true, ...options }
-    const handle = this.activeScreen.showOverlay(component, merged)
-    // M8: the stacking graph + suspension rules live in the broker (plan
-    // §13 — behavior identical; the existing modal-stacking tests gate
-    // the extraction).
-    return this.overlayBroker.track(handle, { nonCapturing: options?.nonCapturing === true })
+    // Two-phase mount: the broker snapshots the CURRENT logical roots and
+    // their focus intent, mounts the raw projection WITHOUT the fork taking
+    // focus, then commits the whole logical graph and performs the single
+    // physical focus transition itself. A plugin onFocus that mounts another
+    // overlay therefore always sees the complete committed graph.
+    const prepared = this.overlayBroker.prepareMount({
+      nonCapturing: options?.nonCapturing === true,
+      remountable: ownership.remountable === true,
+    })
+    const raw = this.activeScreen.showOverlay(component, { ...merged, initialFocus: false })
+    return this.overlayBroker.commitMount(prepared, raw)
   }
 
-  /**
-   * Question-aware close for one tracked overlay handle (the wrapper's
-   * hide). Without an active question this matches the historical behavior:
-   * the handle's dependents are unhidden, the graph is cleaned, and the
-   * overlay is removed. While a question owns the seat, the handle leaves
-   * the question's suspension set, every dependency set drops it (no parent
-   * retains a dead child), and its still-mounted dependents remain hidden
-   * and become DIRECTLY owned by the question — they must not flash back
-   * while the question is still up.
-   */
-  private closeOverlayHandle(handle: OverlayHandle): void {
-    // M8: the broker owns the graph + question-aware close; the host
-    // recomputes the focused seat from the live state after (follow-up
-    // P1 — the broker's editor-seat report is a coarse signal, the host
-    // re-derives the truth).
-    this.overlayBroker.closeForHost(handle)
-    this.publishFocusSeat()
+  /** Mount a fresh PHYSICAL projection for an existing logical node during a
+   * fullscreen rebind (no topology / suppression side effects). */
+  private rebindOverlayRaw(handle: OverlayHandle, component: Component, options: OverlayOptions): void {
+    // X056: a rebind must not auto-focus a capturing entry — the broker
+    // restores the real keyboard owner afterwards, so an automatic focus here
+    // would emit a spurious onFocus/onBlur pair on every screen swap.
+    const raw = this.activeScreen.showOverlay(component, { ...options, disposeOnHide: false, initialFocus: false })
+    this.overlayBroker.rebind(handle, raw)
   }
 
   /**
@@ -5368,7 +6553,7 @@ export class TuiApp {
   pushLocalMessage(message: TranscriptMessage): TranscriptMessage {
     this.localMessages.push(message)
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
     return message
   }
 
@@ -5400,7 +6585,7 @@ export class TuiApp {
     if (token !== undefined) this.identityTokens.set(next, token)
     this.localMessages[index] = next
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
     return next
   }
 
@@ -5414,7 +6599,7 @@ export class TuiApp {
     if (token !== undefined) this.identityTokens.set(message, token)
     this.localMessages[index] = message
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
   }
 
   /** Drop all local cards (session switch). */
@@ -5422,7 +6607,7 @@ export class TuiApp {
     if (this.localMessages.length === 0) return
     this.localMessages.length = 0
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
   }
 
   /**
@@ -5438,7 +6623,7 @@ export class TuiApp {
     this.localMessages.length = 0
     this.localMessages.push(...running)
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
   }
 
   /**
@@ -5492,28 +6677,31 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    this.clearFullscreenPointerGestures()
+    this.fullscreenPaintSnapshot = undefined
+    // Entering fullscreen from a regular surface with NO effective expand key:
+    // that surface never folded, so it cannot hold long-user disclosure state.
+    // The clear is deliberately GLOBAL for the transition (the override map
+    // has no source tag and the plan forbids a parallel state): a stale
+    // regular disclosure override must not leak a full render into fullscreen
+    // Focus, whose only long-user affordance is the compact marker — and, as a
+    // consequence, an earlier fullscreen expansion does not survive a trip
+    // through such a regular surface (re-entry re-derives folded). The
+    // temporary SEARCH reveal is separate state: the runner closes the search
+    // overlay on a surface swap, which clears the target.
+    if (enabled && !this.userDisclosureAffordanceAvailable()) {
+      this.clearUserDisclosureOverrides()
+    }
     this.clearFocusLiveHeightState()
-    const pending = this.activeApproval
-    const history = this.historyPanel
-    pending?.handle?.hide()
     this.disposeTrackedKeybindingEditors()
-    // overlayHandles holds RAW handles (showOverlayOnHost stores them before
-    // wrapping), so this loop calls the pi-tui hide directly: it removes
-    // every overlay from the OLD screen's stack. The tracking graph below
-    // (overlayHandles, overlayDependents, the active question's suspension)
-    // is then cleared wholesale — every one of those handles is dead, and
-    // the pending-approval rebuild re-suspends a fresh handle on the new
-    // screen. Footer configurators have a timer-bearing panel behind their
-    // generic Frame, so close those explicitly before dropping the graph.
+    // The LOGICAL broker graph, the Question/Save suspensions, visibility
+    // intent, focus intent and z-order all SURVIVE the swap: only the raw
+    // physical projections die with the old screen (detachPhysical). The
+    // remount callbacks re-create them for the same logical nodes (including
+    // the approval, whose logical node keeps its suppressed children hidden).
     for (const close of [...this.footerConfiguratorClosers]) close()
     this.footerConfiguratorClosers.clear()
-    for (const handle of this.overlayBroker.handles()) handle.hide()
-    this.overlayBroker.clear()
-    if (this.activeQuestions !== undefined) this.activeQuestions.suspendedOverlays.clear()
-    // The Save Location prompt's suspended handles are dead after the
-    // teardown too; the settle's isTracked guard skips them, but drop them
-    // now so the set never accumulates stale handles (question symmetry).
-    if (this.activeSaveLocation !== undefined) this.activeSaveLocation.suspendedOverlays.clear()
+    this.overlayBroker.detachPhysical()
     // The ordinary search overlay is NOT remounted across the screen swap
     // (only extension/advanced/unstable/history leases are): its raw
     // handle died with the old screen — close it properly (the runner's
@@ -5522,9 +6710,10 @@ export class TuiApp {
     if (this.searchOverlay !== undefined) {
       this.searchOverlay = undefined
       this.searchComponent = undefined
-      this.events.onSearchClose?.()
+      this.events.onSearchClose?.('surface-change')
     }
     if (enabled) {
+      const openExternalUrl = this.openExternalUrl
       // The alt screen owns mouse handling (wheel scroll, drag selection,
       // right-click paste — pi's fullscreen behavior); a same-cell primary
       // click reaches us through its onCellClick callback so cards can be
@@ -5577,16 +6766,37 @@ export class TuiApp {
         onScrollBoundary: (direction, source) => direction < 0
           ? this.events.onTranscriptMoveOlder?.(source) === true
           : this.events.onTranscriptMoveNewer?.(source) === true,
-        // Issue #7: the host clipboard policy (tmux-aware, platform
-        // helpers, OSC 52 last) replaces the vendor's raw OSC 52 write —
-        // the alt screen never needs to understand tmux/SSH/Wayland/X11.
+        // The fullscreen jump-to-latest affordance (X028): a bottom-centered,
+        // clickable label shown whenever the user has left the live tail. The
+        // label resolves the EFFECTIVE jump-latest key (never a hard-coded
+        // Ctrl+End); the show predicate reads the Host's virtual-window mode,
+        // so a history window keeps the label even when its local view already
+        // follows its end; the click reuses the existing semantic jumpLatest
+        // action — the fork never scrolls a stale history view to its own
+        // bottom instead of returning to the global latest.
+        scrollToEndIndicator: () => {
+          const key = this.keybindings.keyHint('app.transcript.jumpLatest')
+          return color.textDim(key === '' ? '↓ Latest' : `↓ Latest · ${key}`)
+        },
+        shouldShowScrollToEndIndicator: () => this.transcriptWindow?.mode === 'history',
+        onScrollToEndIndicator: () => this.events.onTranscriptJumpLatest?.() === true,
+        // Issue #7: the client-local shared clipboard policy — an
+        // independent terminal-client OSC 52 leg plus an independent
+        // native/platform compatibility leg — replaces the vendor's raw
+        // OSC 52 write; the alt screen never needs to understand
+        // tmux/SSH/Wayland/X11.
         copySelection: this.copySelection,
+        // The expanded long-user tail control is presentation chrome: it must
+        // never reach the clipboard. Its visual row copies as the blank
+        // separator it replaced (fork seam X057), so a selection crossing the
+        // message tail stays byte-faithful to the old separator semantics.
+        selectionLineText: context => this.selectionLineText(context),
         // Fullscreen mouse capture also swallows native OSC 8 link
         // activation and (on Windows) the native right-click paste — the
         // host owns both: the opener validates http/https and the paste
         // reads the clipboard then feeds a bracketed paste to the focused
         // component.
-        openUrl: this.openExternalUrl,
+        openUrl: openExternalUrl,
         onRightClickPaste: this.readClipboardText === undefined ? undefined : () => {
           this.rightClickPasteFromClipboard()
         },
@@ -5609,6 +6819,32 @@ export class TuiApp {
         primary: true,
         scrollbar: 'auto',
       })
+      // Scroll profiler (diagnostic): a scroll request opens a frame window
+      // that closes at the next paint-snapshot commit, so coalesced frames
+      // emit exactly one line describing the frame the user actually saw.
+      // Semantic choice: only a scrollBy that CHANGES scroll state (the
+      // offset moves or the follow-end state flips) counts as a scroll
+      // frame. The alt-screen wheel/PageUp path repaints unconditionally,
+      // so a boundary no-op wheel still paints — it is simply not a scroll
+      // frame and emits no line.
+      if (this.scrollProfiler.enabled) {
+        const scrollView = this.fullscreenScroll
+        const originalScrollBy = scrollView.scrollBy.bind(scrollView)
+        scrollView.scrollBy = (lines: number): number => {
+          const scrollTopBefore = scrollView.scrollTop
+          const followingEndBefore = scrollView.isFollowingEnd
+          const started = performance.now()
+          const remainder = originalScrollBy(lines)
+          const requestedRepaint = scrollView.scrollTop !== scrollTopBefore || scrollView.isFollowingEnd !== followingEndBefore
+          if (!requestedRepaint) return remainder
+          if (!this.scrollFramePending) {
+            this.resetScrollProfileFrame()
+            this.scrollFramePending = true
+            this.scrollFrameStart = started
+          }
+          return remainder
+        }
+      }
       const root = new VStack([
         // The zero-row paint probe rides the layout root: every frame
         // re-stamps the geometry the screen is actually drawn at (the
@@ -5641,8 +6877,6 @@ export class TuiApp {
       // PREVIOUS alt instance's last-painted snapshot (and any in-flight
       // gesture) BEFORE start, so a press immediately after re-entry can
       // never resolve against a frame the new surface never drew.
-      this.fullscreenPaintSnapshot = undefined
-      this.fullscreenCellGesture = undefined
       alt.start()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
@@ -5657,6 +6891,8 @@ export class TuiApp {
       this.fullscreen?.stop()
       this.fullscreen = undefined
       this.fullscreenScroll = undefined
+      // A latched profiler window must not leak across a fullscreen swap.
+      this.resetScrollProfileFrame()
       this.tui.start()
       // The alt screen's stop disables focus reporting (?1004l rides the
       // mouse-disable sequence). The main screen keeps needing focus
@@ -5671,12 +6907,11 @@ export class TuiApp {
       } catch {
         // A broken stdout degrades focus reporting silently.
       }
-      // Regular never re-reads a fullscreen per-card state: drop the
-      // Thinking overrides a fullscreen click (or a search reveal)
-      // created, so returning to fullscreen later starts from the bulk
-      // preference again (plan §6.2's preferred cleanup — the regular
-      // surface's only Thinking state is the bulk preference; search
-      // reveals set fresh overrides as needed).
+      // Regular never re-reads a fullscreen per-card state: drop the Thinking
+      // override a fullscreen click created, so returning to fullscreen later
+      // starts from the bulk preference again (plan §6.2's preferred cleanup
+      // — the regular surface's only Thinking state is the bulk preference).
+      // Search reveals are separate temporary state and write no override.
       this.clearThinkingExpansionOverrides()
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
@@ -5688,26 +6923,17 @@ export class TuiApp {
       this.refreshSchemeRegistrations()
     }
     this.events.onFullscreenChange?.(enabled)
-    // M8 (round-1 finding 2): still-open plugin overlay leases re-mount on
-    // the CURRENT active screen (their raw handles died with the old
-    // screen's teardown above). Phase 2: the ADVANCED interactive overlay
-    // leases follow the same migration.
-    this.remountExtensionOverlays()
-    this.remountAdvancedOverlays()
-    this.remountUnstableMounts()
-    // The old screen's raw history handle was removed above without
-    // disposing its remountable panel. Reattach that same stateful panel to
-    // the new screen before restoring any modal that sat above it.
-    this.historyOverlay = undefined
-    this.historyResponsiveFrame = undefined
-    if (history !== undefined) this.mountHistoryOverlay(history)
-    if (pending !== undefined) this.renderApprovalDialog(pending)
+    // Re-create every remountable raw projection on the CURRENT active
+    // screen, back → front by the broker's CURRENT logical z-order (not the
+    // creation order, and never grouped by overlay kind).
+    for (const handle of this.overlayBroker.remountOrder()) {
+      this.overlayRemounts.get(handle)?.()
+    }
+    this.overlayBroker.restoreFocusAfterSwap()
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
-    // screen — the flow's input routing is screen-agnostic. The old screen's
-    // overlay handles are dead and were dropped from the tracking graph
-    // above; the rebuilt approval (if any) is suspended afresh on the new
-    // screen.
+    // screen — the flow's input routing is screen-agnostic. The approval (if
+    // any) was rebind-restored above as the same logical node.
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
       (this.fullscreen ?? this.tui).setFocus(question.frame)
@@ -5755,17 +6981,23 @@ export class TuiApp {
       width: '40%',
       minWidth: 24,
       margin: 1,
+      // Fullscreen: the search box keeps keyboard focus, but the transcript
+      // viewport stays interactive (wheel/PageUp/PageDown/scrollbar/background
+      // selection) while the box itself did not handle the event
+      // (fork seam X058; inert on the main screen, where the terminal owns
+      // scrollback).
+      viewportPassthrough: true,
     })
   }
 
   /** Close host/fullscreen transcript search and report whether either closed. */
-  closeTranscriptSearch(): boolean {
+  closeTranscriptSearch(reason: TranscriptSearchCloseReason = 'dismiss'): boolean {
     const closedFullscreen = this.fullscreen?.clearSearch() ?? false
     if (this.searchOverlay === undefined) return closedFullscreen
     this.searchOverlay.hide()
     this.searchOverlay = undefined
     this.searchComponent = undefined
-    this.events.onSearchClose?.()
+    this.events.onSearchClose?.(reason)
     return true
   }
 
@@ -5808,25 +7040,40 @@ export class TuiApp {
     this.mountHistoryOverlay(panel)
   }
 
-  /** Mount an existing history panel on the current physical screen. */
+  /** Mount an existing history panel on the current physical screen (first
+   * mount) and register its fullscreen rebind. */
   private mountHistoryOverlay(panel: HistoryPanel): void {
+    const frame = this.createHistoryFrame(panel)
+    this.historyResponsiveFrame = frame
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } },
+      { remountable: true },
+    )
+    this.historyOverlay = handle
+    this.overlayRemounts.set(handle, () => {
+      if (this.historyPanel !== panel || this.historyOverlay !== handle) return
+      const next = this.createHistoryFrame(panel)
+      this.historyResponsiveFrame = next
+      this.rebindOverlayRaw(handle, next, { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } })
+    })
+  }
+
+  private createHistoryFrame(panel: HistoryPanel): ResponsiveOverlayFrame {
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
       return {
         width: geometry.width,
         maxHeight: geometry.maxHeight,
-        key: `${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
+        // The raw terminal dims are part of the identity: once the history
+        // geometry caps are reached a pure resize would otherwise leave the
+        // key unchanged and defeat the last-painted-geometry mouse fence.
+        key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
       }
     }
-    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+    return new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
       panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
     })
-    this.historyResponsiveFrame = frame
-    this.historyOverlay = this.showOverlayOnHost(
-      frame,
-      { width: '100%', maxHeight: '100%' },
-      { remountable: true },
-    )
   }
 
   /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). */
@@ -5836,6 +7083,7 @@ export class TuiApp {
     this.historyOverlay = undefined
     this.historyResponsiveFrame = undefined
     this.historyPanel = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
     overlay?.hide()
     // Remountable history overlays intentionally opt out of disposeOnHide so
     // fullscreen migration can retain query/results/selection. The final
@@ -5854,17 +7102,20 @@ export class TuiApp {
     return this.searchOverlay !== undefined
   }
 
-  /** Rebuild the history hint from the current effective keymap. */
+  /** Rebuild the history LOCATION hint. The gutter only says where the
+   * window is; how to get back to the live tail is the fullscreen
+   * jump-to-latest affordance's job (the floating `↓ Latest · key` label),
+   * so the gutter no longer repeats the key. */
   private refreshTranscriptWindowHint(): void {
     const window = this.transcriptWindow
-    const latestHint = this.keybindings.keyHint('app.transcript.jumpLatest')
     this.transcriptWindowHint = window?.mode === 'history' && window.firstTurn !== undefined && window.lastTurn !== undefined
-      ? `History · turn ${window.firstTurn}–${window.lastTurn}${latestHint === '' ? '' : ` · ${latestHint} latest`}`
+      ? `History · turn ${window.firstTurn}–${window.lastTurn}`
       : ''
   }
 
   /**
-   * Replace the transcript and rebuild the message components. Collapsible
+   * Replace the transcript and commit its structural/content/no-op presentation.
+   * Collapsible
    * entries (tool, system cards) render folded unless the Ctrl+O master
    * switch is on and the entry belongs to the most recent turns (or, in
    * REGULAR Focus, an expanded Thought root full-reveals its process —
@@ -5883,34 +7134,104 @@ export class TuiApp {
     activities?: ReadonlyMap<number, TurnActivity>,
     window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
+    searchPresentation?: TranscriptSearchPresentation,
   ): void {
+    this.searchPresentationDiagnostics.transcriptSets += 1
+    this.transcriptPresentationDiagnostics.setCalls += 1
+    const profileStart = this.transcriptRenderProfiler.begin()
     const previousWindow = this.transcriptWindow
+    const previousWindowHint = this.transcriptWindowHint
+    const activitiesChanged = activities !== undefined && activities !== this.turnActivities
     const windowChanged = previousWindow?.mode !== window?.mode
       || previousWindow?.endTurn !== window?.endTurn
+      || previousWindow?.firstTurn !== window?.firstTurn
+      || previousWindow?.lastTurn !== window?.lastTurn
+      || previousWindow?.hasNewer !== window?.hasNewer
     // Passive legacy callers may omit activities while retaining the host's
-    // current map; only an explicit map replacement or window-value change
-    // is a structural transcript signal here.
-    if ((activities !== undefined && activities !== this.turnActivities) || windowChanged) {
-      this.clearFocusLiveHeightState()
-    }
+    // current map; an explicit map replacement stays on the structural path
+    // because the activity ownership epoch cannot be proven in place.
+    if (activitiesChanged || windowChanged) this.clearFocusLiveHeightState()
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
+    // Observe newly published activity objects at the phase they actually
+    // entered; this preserves the pre-wait active span.
+    if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
     this.refreshTranscriptWindowHint()
-    // The Workflow disclosure transitions fold BEFORE the rebuild: the
-    // renderer reads the advanced state (PR2 plan §7.5–§7.7). A changed
-    // workflow snapshot is a structural presentation epoch even when the
-    // automatic fold did not mutate a user override.
-    if (this.updateWorkflowDisclosure(messages)) this.clearFocusLiveHeightState()
-    // Repaints do NOT clear the transient notify line: an active session
-    // repaints every frame (streaming chunks, tool cards), and clearing on
-    // each repaint would make every notice — including error blocks like
-    // error blocks — flash for a frame. The notify expires via
-    // its 8s auto-clear timer or an explicit clear (user submit, session
-    // switch, stop).
-    // (The component cache is pruned inside rebuildMessages below.)
-    this.rebuildMessages()
+    const windowHintChanged = previousWindowHint !== this.transcriptWindowHint
+    // Workflow disclosure transitions fold BEFORE the presentation commit.
+    const workflowChanged = this.updateWorkflowDisclosure(messages)
+    if (workflowChanged) this.clearFocusLiveHeightState()
+    // Search presentation is applied before deriving the visible blocks so the
+    // commit remains one semantic presentation epoch.
+    const searchChanged = searchPresentation !== undefined
+      ? this.applySearchPresentation(searchPresentation)
+      : false
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    const blocks = this.transcriptBlocks(projectionExpanded)
+    // A page/window change is a new disclosure epoch: a Compact Work/cluster
+    // owner that the new window no longer projects must be dropped. Object
+    // identity alone can never expire it — `TranscriptFolder` returns the SAME
+    // TranscriptMessage object when a page is revisited, so A → B → A would
+    // otherwise resurrect the old expansion.
+    if (windowChanged) this.pruneTranscriptContainerDisclosuresToWindow()
+    const classifiedAt = this.transcriptRenderProfiler.mark(profileStart)
+    const structural = !this.transcriptPresentationCommitted
+      || activitiesChanged
+      || windowChanged
+      || windowHintChanged
+      || workflowChanged
+      || searchChanged
+    if (structural) {
+      this.transcriptPresentationDiagnostics.structuralCommits += 1
+      const reason: TranscriptRebuildReason = searchChanged
+        ? 'search-presentation'
+        : windowChanged || windowHintChanged
+          ? 'window'
+          : workflowChanged
+            ? 'focus-disclosure'
+            : 'transcript-structure'
+      this.rebuildMessages(reason, projectionExpanded, blocks)
+      this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'structural', {
+        reason,
+        visible: blocks.length,
+        rows: this.messageRows.length,
+      })
+      return
+    }
+
+    const result = this.refreshTranscriptContent(blocks, projectionExpanded, this.transcriptRenderWidth())
+    if (result.kind === 'structural') {
+      this.transcriptPresentationDiagnostics.structuralFallbacks += 1
+      this.transcriptPresentationDiagnostics.structuralCommits += 1
+      this.transcriptPresentationDiagnostics.dirtyBlocks += result.dirtyBlocks
+      this.transcriptPresentationDiagnostics.mountReplacements += result.mountReplacements
+      this.rebuildMessages('transcript-structure', projectionExpanded, blocks)
+      this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'structural', {
+        reason: 'transcript-structure',
+        dirty: result.dirtyBlocks,
+        visible: blocks.length,
+        rows: this.messageRows.length,
+      })
+      return
+    }
+    if (result.kind === 'content') {
+      this.transcriptPresentationDiagnostics.contentCommits += 1
+      this.transcriptPresentationDiagnostics.dirtyBlocks += result.dirtyBlocks
+      this.transcriptPresentationDiagnostics.mountReplacements += result.mountReplacements
+      this.transcriptPresentationDiagnostics.rowMapRefreshes += 1
+      this.requestRender()
+      this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'content', {
+        dirty: result.dirtyBlocks,
+        visible: blocks.length,
+        rows: this.messageRows.length,
+      })
+      return
+    }
+    this.transcriptPresentationDiagnostics.noopCommits += 1
+    this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'noop', { visible: blocks.length, rows: this.messageRows.length })
+
   }
 
   /** Replace ONLY the turn activities (the messages stay). The runner
@@ -5919,29 +7240,44 @@ export class TuiApp {
   setTurnActivities(activities: ReadonlyMap<number, TurnActivity>): void {
     this.clearFocusLiveHeightState()
     this.turnActivities = activities
-    this.rebuildMessages()
+    // See setTranscript: a newly published activity must be observed at the
+    // current phase so the Focus timer keeps its pre-wait active span; the
+    // windows are cleared once the pass has seeded a live activity.
+    if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
+    this.rebuildMessages('focus-disclosure')
   }
 
   /** Whether Focus Mode is currently projecting the transcript. */
   isFocusModeEnabled(): boolean {
-    return this.focusModeEnabled
+    return isFocusDisplayPreset(this.displayState.preset)
   }
 
-  /** Turn Focus Mode on/off (the runner's unified setter — the persisted
-   * preference, the system-prompt section and this surface all read the
-   * SAME runtime state). Off restores the ordinary transcript projection
-   * immediately; the expansion set is kept but not consulted (plan §16.4). */
-  setFocusMode(enabled: boolean): void {
-    if (this.focusModeEnabled === enabled) return
+  /** The canonical display preset for status/command consumers. */
+  displayPreset(): DisplayPreset {
+    return this.displayState.preset
+  }
+
+  /** Apply the canonical display preset through the shared runtime state.
+   * Changing presets keeps the existing disclosure owners intact; a preset
+   * without a real projection is rejected by the availability gate. */
+  setDisplayPreset(preset: DisplayPreset): DisplayPresetApplyResult {
+    if (!isDisplayPresetAvailable(preset)) return { kind: 'unsupported', preset }
+    if (this.displayState.preset === preset) return { kind: 'unchanged', preset }
     this.clearFocusLiveHeightState()
-    this.focusModeEnabled = enabled
+    this.displayState.preset = preset
     // Focus is a transcript PROJECTION, never a Thinking preference
     // owner: switching Focus ON/OFF leaves the shared thinkingExpanded
     // bulk preference untouched (plan §17). The rebuild re-derives the
     // projection for the new mode.
-    this.projectStatus({ interaction: { focusMode: enabled } })
-    this.rebuildMessages()
+    this.projectStatus({ interaction: { displayPreset: preset } })
+    this.rebuildMessages('focus-disclosure')
     this.requestRender()
+    return { kind: 'applied', preset }
+  }
+
+  /** @deprecated Use setDisplayPreset; retained for existing headless callers. */
+  setFocusMode(enabled: boolean): DisplayPresetApplyResult {
+    return this.setDisplayPreset(enabled ? 'focus' : 'full')
   }
 
   /** Switch the structural icon palette at runtime (the /settings write
@@ -5958,7 +7294,7 @@ export class TuiApp {
     // Default working frames follow the style; an explicit custom frame
     // set (extension/advanced indicator) is never overwritten.
     this.working.setIconStyleFrames(workingFramesFor(style))
-    this.rebuildMessages()
+    this.rebuildMessages('theme-keymap')
     this.requestRender()
   }
 
@@ -5978,7 +7314,11 @@ export class TuiApp {
    * was already following live output; a collapse always anchors the
    * Thought header in view (the PR #29 contract). */
   toggleFocusTurn(turn: number): void {
-    if (this.focusExpandedTurns.has(turn)) {
+    // The EFFECTIVE open state includes a granted search-only reveal, which is
+    // not written into `focusExpandedTurns`: the first explicit click on a
+    // search-opened Thought must collapse it (and revoke the reveal), never
+    // re-expand as a no-op.
+    if (this.focusExpandedTurns.has(turn) || this.searchTargetTurn() === turn) {
       this.collapseFocusTurn(turn, { fullscreenViewport: 'anchor-turn' })
       return
     }
@@ -6008,24 +7348,585 @@ export class TuiApp {
     this.setFocusTurnExpanded(turn, true)
   }
 
-  /** Reveal one search-matched message: open its owner Thought (Focus on)
-   * and full-reveal the matched SECONDARY card, so the hit is visible
-   * even though the FULLSCREEN process timeline defaults to compact (plan
-   * §28 — regular mode full-reveals the whole process anyway). A hit
-   * inside Thinking full-reveals ONLY that block via its per-message
-   * override — the thinkingExpanded bulk preference is never touched by
-   * search (plan §14). The search caller owns the jump target — no
-   * anchor. */
-  revealSearchMatch(message: TranscriptMessage): void {
-    const turn = 'turn' in message ? message.turn : undefined
-    if (turn !== undefined && this.focusModeEnabled) {
-      this.setFocusTurnExpanded(turn, true)
+  /** Toggle one Compact Work span's disclosure (header click / Ctrl+O bulk).
+   * The transition reuses the viewport-safe disclosure transaction: a user
+   * following the live tail keeps following it, a historical reader stays on
+   * the same semantic row. An explicit collapse REVOKES the temporary search
+   * reveal whenever the granted target lives INSIDE this owner — asking "is the
+   * target inside the collapsing container?", never "is the search what opened
+   * it?" (a manual-open container that the target also sits in would otherwise
+   * silently reopen on the next rebuild). */
+  toggleWorkSpan(owner: TranscriptMessage): void {
+    const span = this.eligibleWorkSpans().find(candidate => candidate.owner === owner)
+    const revealed = span !== undefined && this.workSpanRevealedBySearch(span)
+    const revokesReveal = this.searchTargetInsideWork(owner)
+    if (this.expandedWorkOwners.has(owner) || revealed) {
+      this.mutateTranscriptDisclosure(() => {
+        this.expandedWorkOwners.delete(owner)
+        if (revealed || revokesReveal) this.suppressSearchReveal()
+      })
+      return
     }
-    if (isFocusSecondaryDisclosure(message)) {
-      if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
+    this.mutateTranscriptDisclosure(() => {
+      this.expandedWorkOwners.add(owner)
+    })
+  }
+
+  /** Toggle one ambient Context cluster's disclosure (header click). An
+   * explicit collapse revokes the temporary search reveal whenever the target
+   * lives inside this cluster (same ownership rule as Work). */
+  toggleContextCluster(owner: TranscriptMessage): void {
+    const cluster = this.canonicalStructureIndex().clusterByMember.get(owner)
+    const revealed = cluster !== undefined && this.clusterRevealedBySearch(cluster)
+    const revokesReveal = this.searchTargetInsideCluster(owner)
+    if (this.expandedContextClusterOwners.has(owner) || revealed) {
+      this.mutateTranscriptDisclosure(() => {
+        this.expandedContextClusterOwners.delete(owner)
+        if (revealed || revokesReveal) this.suppressSearchReveal()
+      })
+      return
+    }
+    this.mutateTranscriptDisclosure(() => {
+      this.expandedContextClusterOwners.add(owner)
+    })
+  }
+
+  /** Whether the GRANTED search target is a member of this Work span (the
+   * explicit-collapse ownership question). */
+  private searchTargetInsideWork(owner: TranscriptMessage): boolean {
+    const target = this.searchRevealedMessage()
+    return target !== undefined && this.canonicalStructureIndex().workByMember.get(target)?.owner === owner
+  }
+
+  /** Whether the GRANTED search target is a member of this Context cluster. */
+  private searchTargetInsideCluster(owner: TranscriptMessage): boolean {
+    const target = this.searchRevealedMessage()
+    return target !== undefined && this.canonicalStructureIndex().clusterByMember.get(target)?.owner === owner
+  }
+
+  /** Canonical Work/cluster membership for the CURRENT window, memoized on
+   * the `messages` array identity (one linear projection per window).
+   * Disclosure, search and pruning read ownership through this index instead
+   * of re-projecting a preset materialization per query. */
+  private canonicalStructureIndex(): CanonicalTranscriptIndex {
+    const memo = this.canonicalIndexMemo
+    if (memo !== undefined && memo.messages === this.messages) return memo
+    const structure = projectTranscriptStructure(this.messages)
+    const workSpans: TranscriptWorkSpan[] = []
+    for (const block of structure) {
+      if (block.kind === 'work') workSpans.push(block.span)
+    }
+    const next = {
+      messages: this.messages,
+      workSpans,
+      workByMember: workByMemberOf(structure),
+      clusterByMember: clusterByMemberOf(structure),
+    }
+    this.canonicalIndexMemo = next
+    return next
+  }
+
+  /** Every canonical Work span in the current window, in visual order. */
+  private eligibleWorkSpans(): TranscriptWorkSpan[] {
+    return [...this.canonicalStructureIndex().workSpans]
+  }
+
+  /** Ctrl+O under Compact: any visible open Work span → collapse them all
+   * (revoking any temporary search reveal that opened one), otherwise expand
+   * the recent spans. One mutation, one rebuild, one viewport pass — the
+   * existing fold-disclosure master semantics. */
+  private toggleTranscriptWorkSpans(): void {
+    const spans = this.eligibleWorkSpans()
+    const open = spans.filter(span => this.workSpanExpanded(span))
+    // Fullscreen Compact: Ctrl+O owns the Work spans ONLY, in ONE
+    // mutation/rebuild/viewport pass. Regular Compact flows through the common
+    // transcript-detail master instead. No other fullscreen-Compact fold
+    // advertises this key: a row that has no operable owner is presented in
+    // full by the disclosure capability, so nothing here leaves a dead hint.
+    if (open.length > 0) {
+      this.mutateTranscriptDisclosure(() => {
+        for (const span of open) this.expandedWorkOwners.delete(span.owner)
+        // A span open ONLY by the granted reveal must actually close: revoke
+        // the reveal with the manual owners in the SAME rebuild.
+        const target = this.searchRevealedMessage()
+        if (target !== undefined && open.some(span => span.members.includes(target))) this.suppressSearchReveal()
+      })
+      return
+    }
+    const recent = spans.slice(-EXPAND_RECENT_TURNS)
+    if (recent.length === 0) return
+    this.mutateTranscriptDisclosure(() => {
+      for (const span of recent) this.expandedWorkOwners.add(span.owner)
+    })
+  }
+
+  /** Set (or clear) the TEMPORARY search presentation target (plan §6). The
+   * target drives effective reveal (Focus Thought, secondary cards, Thinking,
+   * long user, PTC ancestors, Workflow run/phase, the Workflow hidden-member
+   * context row) and the rendered occurrence highlight. Search navigation stays
+   * presentation-only; an ordinary dismiss may promote the CURRENT effective
+   * reveal through the close transaction into an existing user owner. */
+  setTranscriptSearchTarget(target: TranscriptSearchPresentationTarget | undefined): void {
+    this.setTranscriptSearchPresentation({ matchMessages: this.searchMatchMessages, target, grantReveal: true })
+  }
+
+  /** Commit the representative set and the current target ATOMICALLY (perf plan
+   * S2 §5.1): a query change / Next / Prev reaches the message tree as ONE
+   * rebuild. Returns whether anything actually changed. */
+  setTranscriptSearchPresentation(presentation: TranscriptSearchPresentation): boolean {
+    if (!this.applySearchPresentation(presentation)) return false
+    this.rebuildMessages('search-presentation')
+    return true
+  }
+
+  /** Finish one transcript-search close transaction. An ordinary dismiss may
+   * promote only the CURRENT effective search reveal into an existing durable
+   * disclosure owner; the presentation is then cleared in the same rebuild. */
+  finishTranscriptSearchPresentation(
+    matchMessages: ReadonlySet<TranscriptMessage>,
+    options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {},
+  ): boolean {
+    if (options.preserveCurrentReveal === true) this.promoteCurrentSearchReveal()
+    this.searchSuppressedSubCalls.clear()
+    if (!this.applySearchPresentation({ matchMessages, target: undefined, grantReveal: false })) return false
+    if (options.rebuild !== false) this.rebuildMessages('search-presentation')
+    return true
+  }
+
+  /** Promote the CURRENT effective search reveal into the existing disclosure
+   * owners. Search navigation remains presentation-only until this boundary;
+   * this method never creates a second search-pinned state. */
+  private promoteCurrentSearchReveal(): boolean {
+    const target = this.searchTarget
+    if (!this.searchRevealGranted || target === undefined) return false
+
+    const message = target.message
+    let changed = false
+    const messageReveal = this.searchForcesMessageExpanded(message)
+    // Long-user disclosure has a real Host owner on either surface when the
+    // navigation-time ownership/affordance latch admitted the reveal.
+    if (isUserMessageDisclosureCandidate(message) && messageReveal
+      && this.expandedOverride.get(message) !== true) {
       this.expandedOverride.set(message, true)
+      changed = true
     }
-    this.rebuildMessages()
+    // Foldable message cards have a durable per-card owner on EITHER surface
+    // after F6: fullscreen through the click affordance, regular through the
+    // shared Ctrl+O master (which normalizes these overrides on collapse).
+    // Surfaced context uses this local owner without becoming Thought-owned.
+    if (isFoldableMessageDisclosure(message) && messageReveal
+      && this.expandedOverride.get(message) !== true) {
+      this.expandedOverride.set(message, true)
+      changed = true
+    }
+    // A delivered-files tail has the same durable owner ONLY where the current
+    // surface's Ctrl+O actually owns it (regular / fullscreen Full); on
+    // fullscreen Focus/Compact Ctrl+O owns something else, so persisting an
+    // override there would be a dead expansion with no affordance to undo it.
+    if (isDeliveredFilesDisclosureCandidate(message) && messageReveal
+      && this.deliveredFilesMasterOwned()
+      && this.expandedOverride.get(message) !== true) {
+      this.expandedOverride.set(message, true)
+      changed = true
+    }
+
+    // A revealed Work span / ambient cluster becomes the SAME kind of
+    // user-controllable owner the Focus root and the foldable cards get: an
+    // ordinary dismiss keeps the container open instead of collapsing it under
+    // the still-current match. Every node of the reveal path is promoted
+    // atomically (the Focus root has its own promotion below).
+    const revealPath = this.searchRevealOwnerFor(message)
+    for (const owner of revealPath ?? []) {
+      if (owner.kind === 'work' && !this.expandedWorkOwners.has(owner.owner)) {
+        this.expandedWorkOwners.add(owner.owner)
+        changed = true
+      }
+      if (owner.kind === 'context-cluster' && !this.expandedContextClusterOwners.has(owner.owner)) {
+        this.expandedContextClusterOwners.add(owner.owner)
+        changed = true
+      }
+    }
+
+    // A real Focus Thought root is represented by the current turn's activity
+    // in the current transcript projection. Do not promote a bare message turn
+    // when Focus has no actual Thought root to own.
+    const turn = this.searchTargetTurn()
+    if (isFocusDisplayPreset(this.displayState.preset) && turn !== undefined
+      && this.messages.includes(message) && this.turnActivities.has(turn)
+      && !this.focusExpandedTurns.has(turn)) {
+      this.focusExpandedTurns.add(turn)
+      changed = true
+    }
+
+    if (this.fullscreen !== undefined && target.match.source.kind === 'subcall-field') {
+      let subCallChanged = false
+      for (const subCallId of target.match.source.subCallIds) {
+        if (!this.searchForcesSubCallExpanded(subCallId) || this.subCallExpanded.has(subCallId)) continue
+        this.subCallExpanded.add(subCallId)
+        subCallChanged = true
+      }
+      if (subCallChanged) {
+        this.subCallExpandedRevision += 1
+        changed = true
+      }
+    }
+
+    if (message.kind === 'workflow') {
+      const state = this.workflowDisclosure.get(message.runId)
+      let workflowChanged = false
+      if (state !== undefined && this.searchForcesWorkflowRunOpen(message.runId) && state.userOpen !== true) {
+        state.userOpen = true
+        workflowChanged = true
+      }
+      const phaseKey = this.searchTargetPhaseKey()
+      const phase = phaseKey === undefined ? undefined : state?.phases.get(phaseKey)
+      if (state !== undefined && phaseKey !== undefined && phase !== undefined
+        && this.searchForcesWorkflowPhaseOpen(message.runId, phaseKey) && phase.userOpen !== true) {
+        phase.userOpen = true
+        workflowChanged = true
+      }
+      if (workflowChanged) {
+        this.workflowDisclosureRevision += 1
+        changed = true
+      }
+    }
+
+    if (changed) this.clearFocusLiveHeightState()
+    return changed
+  }
+
+  /** Apply a search presentation to the live state WITHOUT rebuilding. The
+   * projection-commit path calls this before the single `setTranscript()`
+   * rebuild, so the target/reveal is in effect when the render blocks are
+   * built. Returns whether anything changed. */
+  private applySearchPresentation(presentation: TranscriptSearchPresentation): boolean {
+    let changed = false
+    if (this.searchMatchMessages !== presentation.matchMessages) {
+      this.searchMatchMessages = presentation.matchMessages
+      changed = true
+    }
+    const next = presentation.target
+    // Compare SEMANTICALLY, never by object reference: the runner builds a
+    // fresh target object per repaint, and reference inequality would re-grant
+    // the reveal (undoing a user collapse) on every passive projection.
+    const sameTarget = sameSearchTarget(this.searchTarget, next)
+    // An EXPLICIT navigation (grantReveal) ALWAYS re-grants and re-opens every
+    // PTC sub-call the user collapsed while the previous target held them open
+    // — even when it wraps to the SAME match (a single-result Next/Prev), which
+    // `sameTarget` alone would treat as a no-op. A passive rebind never does.
+    const navigation = presentation.grantReveal === true && next !== undefined
+    if (!sameTarget || navigation) {
+      this.searchTarget = next
+      if (next === undefined) {
+        this.searchRevealGranted = false
+        this.searchRevealHostOwned = false
+        this.searchRevealAffordance = 'none'
+      } else if (presentation.grantReveal === true) {
+        // Every explicit navigation (re-)grants the temporary reveal. A long
+        // user reveal latches HOST ownership and the surface affordance here so
+        // a later plugin unload / surface swap cannot resurrect an expansion
+        // that was not admitted at navigation time.
+        this.searchRevealGranted = true
+        // The runner sets the target BEFORE the anchored window is repainted, so
+        // a long-user hit may not have a cached component yet. Seed it first so
+        // the Host-ownership decision is real rather than a false "not owned".
+        if (isUserMessageDisclosureCandidate(next.message) && this.messageComponents.get(next.message) === undefined) {
+          this.componentForMessage(next.message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
+        }
+        this.searchRevealHostOwned = !isUserMessageDisclosureCandidate(next.message)
+          || this.isHostUserDisclosure(next.message)
+        this.searchRevealAffordance = !this.userDisclosureAffordanceAvailable()
+          ? 'none'
+          : this.fullscreen !== undefined ? 'fullscreen' : 'key'
+        // A new navigation re-opens every PTC sub-call the previous target's
+        // reveal had covered.
+        this.searchSuppressedSubCalls.clear()
+      }
+      // A passive rebind (grantReveal !== true) with a replaced card object
+      // keeps the existing grant/reveal flags — a user collapse stays revoked.
+      changed = true
+    }
+    if (!changed) return false
+    this.searchPresentationRevision += 1
+    this.clearFocusLiveHeightState()
+    return true
+  }
+
+  /** Publish the current semantic-match representatives (deduped by card, the
+   * runner owns this). Weak highlights are limited to this set; passing the
+   * same reference is a no-op. */
+  setSearchMatchMessages(messages: ReadonlySet<TranscriptMessage>): void {
+    this.setTranscriptSearchPresentation({ matchMessages: messages, target: this.searchTarget, grantReveal: false })
+  }
+
+  /** Rebind the CURRENT search target to the freshly projected card object for
+   * the SAME match (a live group reflow replaces the representative object).
+   * The runner calls this after every passive repaint while search is active,
+   * so object identity is never the long-lived authority. Presentation-only:
+   * it does NOT re-grant the reveal, so a user collapse stays collapsed. */
+  rebindTranscriptSearchTarget(message: TranscriptMessage | undefined): void {
+    const target = this.searchTarget
+    if (target === undefined) return
+    if (message === undefined) {
+      this.setTranscriptSearchTarget(undefined)
+      return
+    }
+    if (target.message === message) return
+    this.setTranscriptSearchPresentation({
+      matchMessages: this.searchMatchMessages,
+      target: { query: target.query, match: target.match, message },
+      grantReveal: false,
+    })
+  }
+
+  /** Test-only presentation work counters (perf plan S1 §4.1). */
+  searchPresentationDiagnosticsForTest(): TranscriptSearchPresentationDiagnostics {
+    return { ...this.searchPresentationDiagnostics }
+  }
+
+  /** Reset the test-only presentation work counters. */
+  resetSearchPresentationDiagnosticsForTest(): void {
+    this.searchPresentationDiagnostics.rebuilds = 0
+    this.searchPresentationDiagnostics.remeasures = 0
+    this.searchPresentationDiagnostics.renderedMatchLookups = 0
+    this.searchPresentationDiagnostics.renderedMatchResultCacheHits = 0
+    this.searchPresentationDiagnostics.fullRenders = 0
+    this.searchPresentationDiagnostics.transcriptSets = 0
+  }
+
+  /** Test-only transcript presentation counters. */
+  transcriptPresentationDiagnosticsForTest(): TranscriptPresentationDiagnostics {
+    return { ...this.transcriptPresentationDiagnostics }
+  }
+
+  /** Reset test-only transcript presentation counters. */
+  resetTranscriptPresentationDiagnosticsForTest(): void {
+    for (const key of Object.keys(this.transcriptPresentationDiagnostics) as Array<keyof TranscriptPresentationDiagnostics>) {
+      this.transcriptPresentationDiagnostics[key] = 0
+    }
+  }
+
+  /** The cached transcript content geometry (perf plan S2 §5.6): the height the
+   * last rebuild/remeasure published for the search viewport anchor. Test-only. */
+  transcriptContentHeightForTest(): number {
+    return this.transcriptContentHeight
+  }
+
+  /** The live search presentation identity (perf plan S5 §8.1 harness): the
+   * current target's stable match key, the resolved card object and the reveal
+   * grant. Test-only. */
+  transcriptSearchPresentationForTest(): {
+    readonly query: string
+    readonly matchId: number
+    readonly matchTurn: number
+    readonly occurrence: number
+    readonly sourceOccurrence: number
+    readonly sourceKey: string
+    readonly message: TranscriptMessage | undefined
+    readonly revealGranted: boolean
+  } | undefined {
+    const target = this.searchTarget
+    if (target === undefined) return undefined
+    return {
+      query: target.query,
+      matchId: target.match.id,
+      matchTurn: target.match.turn,
+      occurrence: target.match.occurrence,
+      sourceOccurrence: target.match.sourceOccurrence,
+      sourceKey: transcriptSearchSourceKey(target.match.source),
+      message: target.message,
+      revealGranted: this.searchRevealGranted,
+    }
+  }
+
+  /** The published weak-match representative cards. Test-only. */
+  searchMatchMessagesForTest(): ReadonlySet<TranscriptMessage> {
+    return this.searchMatchMessages
+  }
+
+  /** Revoke the temporary search reveal (an explicit user collapse): the
+   * semantic match/highlight stay current, but the target no longer forces
+   * its card open until the next explicit navigation. */
+  private suppressSearchReveal(): void {
+    if (!this.searchRevealGranted) return
+    this.searchRevealGranted = false
+    this.searchPresentationRevision += 1
+  }
+
+  /** Message-only convenience over {@link setTranscriptSearchTarget} for a
+   * caller that resolved a card without an occurrence identity (the search
+   * overlay always uses the full target). */
+  revealSearchMatch(message: TranscriptMessage): void {
+    this.setTranscriptSearchTarget({
+      query: '',
+      match: {
+        id: -1,
+        turn: 'turn' in message ? message.turn : 0,
+        occurrence: 0,
+        source: { kind: 'message' },
+        sourceOccurrence: 0,
+      },
+      message,
+    })
+  }
+
+  /** Whether a card's RENDERED ROWS (not just its expansion) depend on the
+   * search presentation target: the Workflow card grows a search-only context
+   * row and the PTC root's sub-call bodies can be search-forced open. */
+  private searchPresentationSensitive(message: TranscriptMessage): boolean {
+    return message.kind === 'workflow' || (message.kind === 'tool' && (message.subCalls?.length ?? 0) > 0)
+  }
+
+  /** The current search target's owner turn, but ONLY when collapsed Focus
+   * actually HIDES that row (Focus temporary reveal). Gated on the grant: after
+   * an explicit collapse the target must not force the Focus root open either.
+   *
+   * This is the reveal-NECESSITY authority: it resolves the collapsed Focus
+   * projection itself (the same visibility rules the renderer uses), so a user
+   * prompt, the final assistant, a committed answer, a compaction card, a
+   * surfaced interaction, a forced-visible notice or a fail-open delivered tail
+   * that is already on screen never opens — or promotes — a Thought root. */
+  private searchTargetTurn(): number | undefined {
+    if (!this.searchRevealGranted) return undefined
+    if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
+    const message = this.searchTarget?.message
+    if (message === undefined || !('turn' in message)) return undefined
+    if (!this.focusRootHidesSearchTarget(message)) return undefined
+    return message.turn
+  }
+
+  /** Whether the COLLAPSED Focus projection hides one row (so the search target
+   * needs the Focus-root reveal). Computed from the real `projectFocus`
+   * collapsed output — never from "the row has a turn" — and memoized per
+   * window/activity/target. `collapsedFocusForcedVisible()` is included, so a
+   * hidden mid-turn notice is already surfaced and needs no root reveal. */
+  private focusRootHidesSearchTarget(message: TranscriptMessage): boolean {
+    const memo = this.collapsedFocusHiddenMemo
+    if (memo !== undefined && memo.messages === this.messages && memo.activities === this.turnActivities
+      && memo.target === message) return memo.hidden
+    const blocks = projectFocus(
+      this.messages,
+      this.turnActivities,
+      new Set(),
+      true,
+      this.collapsedFocusForcedVisible(),
+    )
+    const visible = blocks.some(block => block.kind === 'message' && block.message === message)
+    this.collapsedFocusHiddenMemo = {
+      messages: this.messages,
+      activities: this.turnActivities,
+      target: message,
+      hidden: !visible,
+    }
+    return !visible
+  }
+
+  /** Whether the CURRENT search target owns this message (effective reveal).
+   * A long-user reveal is admitted only for the HOST bubble that actually
+   * compacts at the current width and still offers an expand affordance; the
+   * Host-ownership decision is LATCHED at navigation time (see
+   * {@link setTranscriptSearchTarget}). */
+  private searchForcesMessageExpanded(message: TranscriptMessage): boolean {
+    if (!this.searchRevealGranted || this.searchTarget?.message !== message) return false
+    if (isUserMessageDisclosureCandidate(message)) {
+      if (!this.searchRevealHostOwned) return false
+      // The affordance latched at grant time must still be available. The
+      // capability gates every kind (a surface that presents the fold in full has
+      // no long-user disclosure at all), and the LATCHED KIND still decides the
+      // rest: a key-based grant stops applying once the key is disabled and never
+      // becomes a fullscreen click reveal later.
+      const affordanceAvailable = this.userRevealAffordanceAvailable()
+      if (!affordanceAvailable || !this.userMessageCompactsAtCurrentWidth(message)) return false
+      // A prompt the master already expanded is visible; revealing it again
+      // would only mint a redundant durable override on dismiss (plan §35).
+      return !this.messageExpandedIgnoringSearch(message)
+    }
+    return this.searchNeedsMessageDisclosureReveal(message)
+  }
+
+  /** Whether the CURRENT granted match is ACTUALLY hidden by this message's own
+   * disclosure, so a temporary reveal is necessary. A card the surface presents
+   * in full (no operable owner), a card already expanded without the search, a
+   * delivered file inside the folded limit, and a non-foldable row are all
+   * already visible — search must neither expand them nor mint an owner on
+   * dismiss (plan §35). */
+  private searchNeedsMessageDisclosureReveal(message: TranscriptMessage): boolean {
+    if (isDeliveredFilesDisclosureCandidate(message)) {
+      if (!this.deliveredFilesMasterOwned()) return false
+      const source = this.searchTarget?.match.source
+      // Only the hidden tail (index beyond the folded limit) needs a reveal; a
+      // hit in the already-visible files or the assistant body does not.
+      if (source?.kind !== 'assistant-deliverable') return false
+      if (source.index < DELIVERED_FILES_FOLDED_LIMIT) return false
+      // A tail the master already expanded needs no temporary reveal, and
+      // promoting it on dismiss would mint a redundant durable override.
+      return !this.messageExpandedIgnoringSearch(message)
+    }
+    // Thinking is Alt+T-owned, never the Ctrl+O master: its reveal necessity
+    // must not depend on `messageFoldDisclosureAvailable()`. A surface without
+    // an operable Thinking owner fails open, so nothing is hidden to reveal.
+    if (message.kind === 'thinking') {
+      return this.thinkingDisclosureAvailable() && !this.messageExpandedIgnoringSearch(message)
+    }
+    if (!isFoldableMessageDisclosure(message)) return false
+    if (!this.messageFoldDisclosureAvailable()) return false
+    return !this.messageExpandedIgnoringSearch(message)
+  }
+
+  /** The effective expansion of one foldable message with the GRANTED search
+   * reveal ignored — the "is anything actually hidden?" probe. */
+  private messageExpandedIgnoringSearch(message: TranscriptMessage): boolean {
+    return this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary(), true)
+  }
+
+  /** Whether the current search target's PTC path contains this sub-call. */
+  private searchForcesSubCallExpanded(subCallId: string): boolean {
+    if (!this.searchRevealGranted) return false
+    if (this.searchSuppressedSubCalls.has(subCallId)) return false
+    const source = this.searchTarget?.match.source
+    return source?.kind === 'subcall-field' && source.subCallIds.includes(subCallId)
+  }
+
+  /** Whether the current search target is inside this Workflow run (temporary
+   * reveal; never written into the run's `userOpen`). */
+  private searchForcesWorkflowRunOpen(runId: string): boolean {
+    if (!this.searchRevealGranted) return false
+    const target = this.searchTarget
+    if (target === undefined || target.message.kind !== 'workflow') return false
+    if (target.message.runId !== runId) return false
+    const kind = target.match.source.kind
+    return kind === 'workflow-run' || kind === 'workflow-phase' || kind === 'workflow-member'
+  }
+
+  /** Whether the current search target is inside this Workflow phase. */
+  private searchForcesWorkflowPhaseOpen(runId: string, phaseKey: string): boolean {
+    if (!this.searchRevealGranted) return false
+    const target = this.searchTarget
+    if (target === undefined || target.message.kind !== 'workflow') return false
+    if (target.message.runId !== runId) return false
+    const source = target.match.source
+    if (source.kind === 'workflow-phase') return source.phaseKey === phaseKey
+    if (source.kind === 'workflow-member') return source.phaseKey === phaseKey
+    return false
+  }
+
+  /** The phase key the current search target lives in, when its source names
+   * a Workflow phase or member. */
+  private searchTargetPhaseKey(): string | undefined {
+    const source = this.searchTarget?.match.source
+    if (source?.kind === 'workflow-phase') return source.phaseKey
+    if (source?.kind === 'workflow-member') return source.phaseKey
+    return undefined
+  }
+
+  /** The Workflow member the current search target locates inside this card
+   * (the search-only context row owner), when the source names one. */
+  private searchContextMember(message: Extract<TranscriptMessage, { kind: 'workflow' }>): { phaseKey: string; seq: number } | undefined {
+    if (!this.searchRevealGranted) return undefined
+    const target = this.searchTarget
+    if (target === undefined || target.message !== message) return undefined
+    const source = target.match.source
+    return source.kind === 'workflow-member' ? { phaseKey: source.phaseKey, seq: source.seq } : undefined
   }
 
   /** Clear every secondary expansion of one turn (the root Collapse All
@@ -6040,7 +7941,29 @@ export class TuiApp {
       if (!('turn' in message)) continue
       if (message.turn !== turn) continue
       if (!isFocusSecondaryDisclosure(message)) continue
+      // A SETTLED surfaced-interaction card (question / Plan review) is
+      // human-decision evidence, not a Thought-owned process detail: its own
+      // disclosure is independent of the Focus root, so a root collapse never
+      // resets it.
+      if (isSurfacedInteractionTool(message)) continue
       this.expandedOverride.delete(message)
+    }
+    // An explicit root collapse is the "reopen compact" contract: the turn's
+    // nested manual Work owners are cleared with it (F6 decision, §20), while a
+    // temporary search-only reveal is revoked by `setFocusTurnExpanded` below.
+    this.clearWorkExpansionsForTurns(new Set([turn]))
+    // The search-reveal revocation is left to `setFocusTurnExpanded` (called
+    // right after by {@link collapseFocusTurn}): it suppresses AND rebuilds, so
+    // a search-only root actually repaints collapsed. Suppressing here would
+    // bump the revision without a rebuild and leave the stale expanded frame.
+  }
+
+  /** Clear the manual Work owners nested in the given Focus turns (the explicit
+   * root-collapse "reopen compact" reset). Work owners of other turns — and the
+   * temporary search reveal — are never touched by this helper. */
+  private clearWorkExpansionsForTurns(turns: ReadonlySet<number>): void {
+    for (const span of this.canonicalStructureIndex().workSpans) {
+      if (turns.has(span.turn)) this.expandedWorkOwners.delete(span.owner)
     }
   }
 
@@ -6069,10 +7992,351 @@ export class TuiApp {
    * fold — the Ctrl+O state machine follows what the user SEES (plan
    * §22: "any expanded Thought" = an expanded Thought in view). */
   private hasVisibleExpandedFocusRoots(): boolean {
+    const searchTurn = this.searchTargetTurn()
     for (const turn of this.eligibleFocusRootTurns()) {
-      if (this.focusExpandedTurns.has(turn)) return true
+      if (this.focusExpandedTurns.has(turn) || turn === searchTurn) return true
     }
     return false
+  }
+
+  /** Whether the CURRENT rendered presentation of one user message is the
+   * HOST long-user bubble — the registry's own ownership signal (`rendererId`
+   * is unset only when no extension renderer produced the view). An extension
+   * renderer that owns `kind: 'user'` presents the message itself (its
+   * snapshot carries no `expanded` state and the Host renders no compact
+   * marker), so the Host long-user disclosure state must neither be written
+   * nor counted for it — an invisible override would otherwise consume the
+   * next Ctrl+O.
+   *
+   * The registry batches its invalidation, so a just-registered/unloaded
+   * renderer is not reflected in the cached entry until the deferred rebuild.
+   * When the entry's `rendererRevision` is stale, reconcile synchronously
+   * through the normal build path and trust only an entry whose selection
+   * revision is CURRENT — deciding on a stale one would write a Host override
+   * that a plugin then mounts over (or skip the reveal a returning Host bubble
+   * legitimately needs). Because a renderer may itself mutate the registry
+   * re-entrantly inside `render()`, one reconcile can still leave a stale
+   * entry: keep reconciling until stable, bounded so a pathological renderer
+   * cannot stall the surface. If the bound is reached with the entry still
+   * stale, fail CLOSED (report not-Host-owned) rather than trust an entry whose
+   * revision is not current — the next ordinary rebuild reconciles again. */
+  private isHostUserDisclosure(message: TranscriptMessage): boolean {
+    let entry = this.messageComponents.get(message)
+    if (entry === undefined) return false
+    const registry = this.renderers
+    if (registry === undefined) return entry.rendererId === undefined
+    for (let attempt = 0; ; attempt += 1) {
+      if (entry.rendererRevision === registry.revisionOf()) break
+      if (attempt >= RENDERER_RECONCILE_ATTEMPTS) return false
+      this.componentForMessage(message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
+      entry = this.messageComponents.get(message)
+      if (entry === undefined) return false
+    }
+    return entry.rendererId === undefined
+  }
+
+  /** Whether the CURRENT projection shows a long user disclosure that is
+   * ACTUALLY compacted and explicitly expanded (the Ctrl+O user-collapse
+   * target, plan §6.4/§21.7) — a durable message OR an ephemeral pending row.
+   * Only VISIBLE, HOST-rendered, compact-capable entries count: a parked
+   * override on a windowed-away message, a stale override on a
+   * short/resized-short bubble with no visible effect, or an override on a
+   * plugin-owned presentation must not consume the Ctrl+O press and wedge the
+   * toggle into a no-op. */
+  private hasVisibleExpandedUserDisclosure(): boolean {
+    for (const message of this.messages) {
+      if (!isUserMessageDisclosureCandidate(message)) continue
+      // The temporary search reveal counts as a VISIBLE expanded user
+      // disclosure so one Ctrl+O press collapses it (instead of expanding
+      // Thought roots while the bubble stays open).
+      if (this.expandedOverride.get(message) !== true && !this.searchForcesMessageExpanded(message)) continue
+      if (!this.isHostUserDisclosure(message)) continue
+      if (this.userMessageCompactsAtCurrentWidth(message)) return true
+    }
+    for (const row of this.pendingUserRows) {
+      if (row.foldableText !== true) continue
+      if (this.pendingUserExpanded.get(pendingUserDisclosureKey(row)) !== true) continue
+      if (this.pendingUserCompactsAtCurrentWidth(row)) return true
+    }
+    return false
+  }
+
+  /** Clear every long-user disclosure override (the Ctrl+O user-collapse
+   * pass): durable message overrides AND ephemeral pending-row overrides. It
+   * filters by the user-disclosure classification ONLY — thinking, tool,
+   * system and compaction overrides are never touched. */
+  private clearUserDisclosureOverrides(): void {
+    for (const message of [...this.expandedOverride.keys()]) {
+      if (!isUserMessageDisclosureCandidate(message)) continue
+      this.expandedOverride.delete(message)
+    }
+    this.pendingUserExpanded.clear()
+  }
+
+  /** Whether one Work owner is MATERIALIZED as a container on the current
+   * preset/window: Full keeps Work flat, and Focus only materializes it inside
+   * an expanded Thought. A long-term manual owner parked behind a collapsed
+   * root or a flat preset must never decide the current regular Ctrl+O press. */
+  private workOwnerMaterialized(owner: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
+    const policy = displayPolicyFor(this.displayState.preset)
+    if (policy.turnLayer === 'open' && policy.processLayer === 'collapsed') {
+      return this.canonicalStructureIndex().workByMember.get(owner)?.owner === owner
+    }
+    if (policy.focusBehavior) {
+      const span = this.canonicalStructureIndex().workByMember.get(owner)
+      return span !== undefined && projectionExpanded.has(span.turn)
+    }
+    return false
+  }
+
+  /** Whether one Context-cluster owner is MATERIALIZED (header-backed) on the
+   * current surface. A flat/fail-open surface hides nothing, so its clusters
+   * are never visible master-owned disclosures. */
+  private clusterOwnerMaterialized(owner: TranscriptMessage): boolean {
+    if (this.contextClusterDefaultExpanded()) return false
+    return this.canonicalStructureIndex().clusterByMember.has(owner)
+  }
+
+  /** Whether one per-card override row is MATERIALIZED on the current
+   * projection: a current-window top-level row, an OPEN Work member, or a row
+   * the Focus projection actually emits (compaction always; a Focus secondary
+   * only inside an expanded root; surfaced context unless collapsed Focus hides
+   * the mid-turn notice). */
+  private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
+    // A local (non-session) card — e.g. a `!`/`!!` shell card — is always
+    // appended to the rendered transcript and participates in NO canonical
+    // Work/cluster/Focus ancestry, so it is always materialized. It is NOT in
+    // `this.messages` (it lives in `localMessages`).
+    if (this.localMessages.includes(message)) return true
+    if (!this.messages.includes(message)) return false
+    const index = this.canonicalStructureIndex()
+    const span = index.workByMember.get(message)
+    if (span !== undefined) {
+      return this.workOwnerMaterialized(span.owner, projectionExpanded) && this.workSpanExpanded(span)
+    }
+    // A cluster member's own per-card disclosure is materialized only while its
+    // parent cluster is materialized AND effectively open: a parked override
+    // behind a collapsed cluster must not consume the master's first press.
+    const cluster = index.clusterByMember.get(message)
+    if (cluster !== undefined) {
+      return this.clusterOwnerMaterialized(cluster.owner) && this.contextClusterExpanded(cluster)
+    }
+    const policy = displayPolicyFor(this.displayState.preset)
+    if (policy.focusBehavior && 'turn' in message) {
+      // Compaction cards are emitted by BOTH Focus branches (collapsed and
+      // expanded), so they are always materialized in the current window.
+      if (message.kind === 'compaction') return true
+      if (isFocusSecondaryDisclosure(message)) return projectionExpanded.has(message.turn)
+      // Surfaced context is emitted unless collapsed Focus hides it (the
+      // mid-turn notice); a granted forced-visible reveal materializes it too.
+      if (isSurfacedContext(message)) {
+        if (projectionExpanded.has(message.turn)) return true
+        return !isCollapsedFocusHiddenRow(this.messages, message)
+          || this.collapsedFocusForcedVisible().has(message)
+      }
+    }
+    return true
+  }
+
+  /** The granted search target when it is a message-local foldable the REGULAR
+   * transcript-detail master owns (not Thinking/Alt+T, not a delivered tail,
+   * not a fail-open surfaced interaction), is materially projected, AND the
+   * reveal is ACTUALLY what opens it. A target already expanded without the
+   * search (root full reveal, master boundary, explicit override, open Work run)
+   * is not a closable disclosure: counting it would make the first Ctrl+O a
+   * visual no-op. */
+  private revealedRegularMasterFold(projectionExpanded: ReadonlySet<number>): TranscriptMessage | undefined {
+    const target = this.searchRevealedMessage()
+    if (target === undefined) return undefined
+    if (!isFoldableMessageDisclosure(target) || target.kind === 'thinking') return undefined
+    if (this.surfacedInteractionFailsOpen(target)) return undefined
+    if (!this.searchForcesMessageExpanded(target)) return undefined
+    return this.messageRowMaterialized(target, projectionExpanded) ? target : undefined
+  }
+
+  /** Whether the regular-master collapse transaction would leave the CURRENT
+   * granted search target HIDDEN, so the still-granted reveal would immediately
+   * reopen the owner the collapse just closed. Resolved from owner ancestry and
+   * the collapse's own consequences — never from "a search target exists".
+   * Evaluated after the master flag is already collapsed but BEFORE the owner
+   * sets are cleaned up. */
+  private regularMasterCollapseRevokesReveal(): boolean {
+    const target = this.searchRevealedMessage()
+    if (target === undefined) return false
+    const index = this.canonicalStructureIndex()
+    const span = index.workByMember.get(target)
+    if (span !== undefined) {
+      // Only a MANUAL Focus root survives this collapse. A Ctrl+O-derived
+      // recent root is removed by the very transaction we are about to run, so
+      // treating it as a surviving owner would leave the reveal active and let
+      // search immediately reopen the Thought/Work the user just collapsed.
+      const rootKeepsOpen = isFocusDisplayPreset(this.displayState.preset)
+        && this.focusExpandedTurns.has(span.turn)
+      return !rootKeepsOpen
+    }
+    if (index.clusterByMember.has(target)) return true
+    if (isDeliveredFilesDisclosureCandidate(target)) return this.deliveredFilesMasterCollapseHidesSearchTarget()
+    // Thinking is Alt+T-owned: the master collapse does not change its state.
+    if (target.kind === 'thinking') return false
+    if (isFoldableMessageDisclosure(target)) return this.messageFoldDisclosureAvailable()
+    const turn = this.searchTargetTurn()
+    return turn !== undefined && !this.focusExpandedTurns.has(turn)
+  }
+
+  /** Whether the delivered-files master collapse hides a matched hidden file
+   * (index beyond the folded limit) on a surface that owns the tail. */
+  private deliveredFilesMasterCollapseHidesSearchTarget(): boolean {
+    if (!this.deliveredFilesMasterOwned()) return false
+    const target = this.searchRevealedMessage()
+    if (target === undefined || !isDeliveredFilesDisclosureCandidate(target)) return false
+    const source = this.searchTarget?.match.source
+    return source?.kind === 'assistant-deliverable' && source.index >= DELIVERED_FILES_FOLDED_LIMIT
+  }
+
+  /**
+   * Whether a VISIBLE disclosure owned by the REGULAR transcript-detail master
+   * is currently open: a materially projected Work span / Context cluster, or a
+   * materially projected per-card ordinary (non-Thinking) fold override. Only
+   * the regular surface's master controls those owners — fullscreen Compact
+   * owns Work through its own bulk, fullscreen Full leaves clusters mouse-owned
+   * and per-card folds click-owned — so a Ctrl+O press there must not clear
+   * them. Long-term state that is NOT materialized in the current projection
+   * (Full Work, a Work parked behind a collapsed Focus root, a windowed-away
+   * override) must never consume a press.
+   */
+  private hasVisibleRegularMasterOwnedDisclosure(): boolean {
+    if (this.fullscreen !== undefined) return false
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    for (const span of this.canonicalStructureIndex().workSpans) {
+      if (!this.workOwnerMaterialized(span.owner, projectionExpanded)) continue
+      // Count only owners that CONTRIBUTE to the current effective disclosure:
+      // a search-only reveal is always closable, and a manual owner only while
+      // it is not already covered by an ancestor full reveal (regular Focus
+      // root, plan §21). A latent manual owner changes nothing on screen, so it
+      // must not arm the collapse branch.
+      if (this.workSpanRevealedBySearch(span) || this.workManualOwnerContributes(span)) return true
+    }
+    if (!this.contextClusterDefaultExpanded()) {
+      for (const cluster of new Set(this.canonicalStructureIndex().clusterByMember.values())) {
+        if (this.clusterOwnerMaterialized(cluster.owner) && this.contextClusterExpanded(cluster)) return true
+      }
+    }
+    for (const [message, expanded] of this.expandedOverride) {
+      if (expanded !== true || message.kind === 'thinking') continue
+      if (isUserMessageDisclosureCandidate(message)) continue
+      // A settled surfaced-interaction card that fails open on regular Focus is
+      // NOT master-owned (its override is fullscreen-owned and has no regular
+      // effect) — counting it would make Ctrl+O take the collapse branch for a
+      // state it must not touch.
+      if (this.surfacedInteractionFailsOpen(message)) continue
+      if (!isFoldableMessageDisclosure(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      if (!this.messageOverrideContributes(message)) continue
+      return true
+    }
+    // A granted reveal can be the ONLY opener of a master-owned foldable
+    // (compaction, local shell card, …): it is a visible disclosure too.
+    if (this.revealedRegularMasterFold(projectionExpanded) !== undefined) return true
+    return false
+  }
+
+  /** Whether one Work's MANUAL owner still contributes to the current effective
+   * presentation. A manual owner whose Work is already open through an ancestor
+   * full reveal (regular Focus root, plan §21) is latent: removing it changes
+   * nothing, so it must not consume a Ctrl+O press. */
+  private workManualOwnerContributes(span: TranscriptWorkSpan): boolean {
+    if (!this.expandedWorkOwners.has(span.owner)) return false
+    if (this.fullscreen === undefined && isFocusDisplayPreset(this.displayState.preset)
+      && this.focusProjectionExpandedTurnsBase().has(span.turn)) return false
+    return true
+  }
+
+  /** Whether one per-card override still contributes to the current effective
+   * disclosure. Called only on the regular surface: an OPEN Work run and an
+   * expanded Focus root already full-reveal their non-Thinking process, so a
+   * descendant override is latent (fullscreen keeps the per-card override as
+   * the real owner via the callers' early return). */
+  private messageOverrideContributes(message: TranscriptMessage): boolean {
+    if (this.openWorkRunMembers.has(message)) return false
+    if (isFocusDisplayPreset(this.displayState.preset) && 'turn' in message
+      && isFocusSecondaryDisclosure(message)
+      && this.focusProjectionExpandedTurnsBase().has(message.turn)) return false
+    return true
+  }
+
+  /**
+   * Whether a MATERIALIZED delivered-files disclosure is currently open under
+   * the CURRENT surface's Ctrl+O master. The delivered-files tail is owned by
+   * the regular transcript-detail master AND by fullscreen Full's generic
+   * master, so this is checked independently of the regular-only Work/cluster
+   * helper (fullscreen Compact/Focus own Ctrl+O for something else entirely).
+   */
+  private hasVisibleDeliveredFilesMasterDisclosure(): boolean {
+    if (!this.deliveredFilesMasterOwned()) return false
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    for (const [message, expanded] of this.expandedOverride) {
+      if (expanded !== true || !isDeliveredFilesDisclosureCandidate(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      return true
+    }
+    const target = this.searchRevealedMessage()
+    return target !== undefined && isDeliveredFilesDisclosureCandidate(target)
+      && this.searchForcesMessageExpanded(target)
+      && this.messageRowMaterialized(target, projectionExpanded)
+  }
+
+  /** Clear the delivered-files overrides the current surface's Ctrl+O master
+   * owns (materialized only) and revoke a reveal that the collapse would turn
+   * into the re-opener (a hidden file beyond the folded limit). */
+  private clearDeliveredFilesMasterDisclosure(): void {
+    if (!this.deliveredFilesMasterOwned()) return
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    for (const message of [...this.expandedOverride.keys()]) {
+      if (!isDeliveredFilesDisclosureCandidate(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      this.expandedOverride.delete(message)
+    }
+    if (this.deliveredFilesMasterCollapseHidesSearchTarget()) this.suppressSearchReveal()
+  }
+
+  /**
+   * Normalize the owners the regular transcript-detail master controls (plan
+   * §43): the MATERIALIZED Work/cluster owners, the materialized per-card
+   * ordinary (non-Thinking) fold overrides, and the long-user overrides cleared
+   * by the caller. Owners that are not visible in the current projection stay
+   * parked (F6 allows manual state to survive preset/surface switches). A
+   * granted search reveal that would immediately reopen a collapsed owner is
+   * revoked in the SAME transaction, resolved from the target's ancestry.
+   * Thinking (Alt+T) and unrelated fullscreen state stay untouched.
+   */
+  private clearRegularMasterOwnedDisclosures(): void {
+    if (this.fullscreen !== undefined) return
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    const revokesReveal = this.regularMasterCollapseRevokesReveal()
+    for (const owner of [...this.expandedWorkOwners]) {
+      if (!this.workOwnerMaterialized(owner, projectionExpanded)) continue
+      const span = this.canonicalStructureIndex().workByMember.get(owner)
+      // Keep a latent manual owner parked: an ancestor full reveal already owns
+      // the Work, so clearing it would change nothing on screen.
+      if (span !== undefined && !this.workManualOwnerContributes(span)) continue
+      this.expandedWorkOwners.delete(owner)
+    }
+    for (const owner of [...this.expandedContextClusterOwners]) {
+      if (this.clusterOwnerMaterialized(owner)) this.expandedContextClusterOwners.delete(owner)
+    }
+    for (const message of [...this.expandedOverride.keys()]) {
+      if (message.kind === 'thinking') continue
+      if (isUserMessageDisclosureCandidate(message)) continue
+      // The settled surfaced-interaction card that fails open on regular Focus
+      // is independent of the master (its own disclosure survives a root/root
+      // bulk reset, plan §16): keep its fullscreen-owned override.
+      if (this.surfacedInteractionFailsOpen(message)) continue
+      if (!isFoldableMessageDisclosure(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      if (!this.messageOverrideContributes(message)) continue
+      this.expandedOverride.delete(message)
+    }
+    if (revokesReveal) this.suppressSearchReveal()
   }
 
   /** The eligible Focus roots for Ctrl+O bulk expansion: turns with a
@@ -6114,7 +8378,7 @@ export class TuiApp {
       return activity !== undefined && !activity.completed
     })
     for (const turn of recent) this.focusExpandedTurns.add(turn)
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
     if (wasFollowingEnd && containsRunning) {
       this.applyFullscreenFollowEndViewport()
     } else {
@@ -6140,12 +8404,21 @@ export class TuiApp {
     // Snapshot the expanded roots BEFORE clearing: the secondary
     // override cleanup is scoped to exactly these turns (review P2) —
     // parked/windowed-away roots are still in the set and get cleaned,
-    // while a local shell card's override (turn Infinity) survives.
+    // while a local shell card's override (turn Infinity) survives. A granted
+    // search-only reveal is an effective root too and must be revoked.
+    const searchTurn = this.searchTargetTurn()
     const expandedTurns = new Set(this.focusExpandedTurns)
+    if (searchTurn !== undefined) expandedTurns.add(searchTurn)
     this.focusExpandedTurns.clear()
     this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
-    this.toolOutputExpanded = false
-    this.rebuildMessages()
+    // Collapse All always revokes a granted search reveal: the reveal is a
+    // TEMPORARY grant and may be what opened the root (`searchTargetTurn()`).
+    // A settled surfaced-interaction card's OWN disclosure is unaffected — it
+    // survives via the secondary-reset carve-out above, not by keeping the
+    // root open.
+    if (searchTurn !== undefined) this.suppressSearchReveal()
+    this.transcriptDetailExpanded = false
+    this.rebuildMessages('focus-disclosure')
     this.applyFullscreenFocusTurnAnchor(anchorTurn)
     this.requestRender()
   }
@@ -6160,9 +8433,10 @@ export class TuiApp {
     const welcomeHeight = this.welcomeCard.render(width).length
     const top = this.fullscreenScroll.scrollTop - welcomeHeight
     const bottom = top + this.fullscreenScroll.viewportHeight
+    const searchTurn = this.searchTargetTurn()
     let row = 0
     for (const entry of this.messageRows) {
-      if (entry.activity !== undefined && this.focusExpandedTurns.has(entry.activity.turn)) {
+      if (entry.activity !== undefined && (this.focusExpandedTurns.has(entry.activity.turn) || entry.activity.turn === searchTurn)) {
         if (row < bottom && row + entry.height > top) return entry.activity.turn
       }
       row += entry.height
@@ -6186,8 +8460,18 @@ export class TuiApp {
       if (!('turn' in message)) continue
       if (!turns.has(message.turn)) continue
       if (!isFocusSecondaryDisclosure(message)) continue
+      // The settled surfaced-interaction card (question / Plan review) keeps
+      // its own disclosure override across a root collapse, so it is EXEMPT
+      // from this secondary reset. (The caller still revokes any temporary
+      // search-reveal grant unconditionally: independence lives in the
+      // override, never in keeping the Thought root open.)
+      if (isSurfacedInteractionTool(message)) continue
       this.expandedOverride.delete(message)
     }
+    // The bulk Collapse All reset also returns every collapsed root's nested
+    // Work to the compact default (F6 decision, §20): reopening a Thought after
+    // the bulk fold starts at Compact depth.
+    this.clearWorkExpansionsForTurns(turns)
   }
 
   /**
@@ -6212,13 +8496,23 @@ export class TuiApp {
       previousScrollTop?: number
     } = {},
   ): void {
-    if (this.focusExpandedTurns.has(turn) === expanded) return
-    if (expanded) this.focusExpandedTurns.add(turn)
-    else this.focusExpandedTurns.delete(turn)
+    const manualChanged = this.focusExpandedTurns.has(turn) !== expanded
+    // A granted search-only reveal is not in `focusExpandedTurns`, so a
+    // collapse request on it would otherwise early-return without revoking the
+    // reveal (the Thought would stay open).
+    const searchCollapse = !expanded && this.searchTargetTurn() === turn
+    if (!manualChanged && !searchCollapse) return
+    if (manualChanged) {
+      if (expanded) this.focusExpandedTurns.add(turn)
+      else this.focusExpandedTurns.delete(turn)
+    }
+    // Closing a Thought is an explicit user collapse: revoke a search reveal
+    // whose target lives in that turn (the semantic match/highlight stays).
+    if (searchCollapse) this.suppressSearchReveal()
     // 1. flip the set → 2. rebuild the projection (rebuildMessages already
     // requests a render) → 3. re-measure the row map at the current width
     // (a thumbnail that just finished loading must not shift the anchor).
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
     if (options.fullscreenViewport !== undefined && this.fullscreenScroll !== undefined) {
       switch (options.fullscreenViewport) {
         case 'follow-end':
@@ -6235,6 +8529,14 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /** The mounted view's content height. Every fullscreen viewport pass measures
+   * through here so the test-only `fullRenders` counter observes a real render
+   * (perf plan S1 §4.1). */
+  private renderedTranscriptContentHeight(width: number): number {
+    this.searchPresentationDiagnostics.fullRenders += 1
+    return this.messagesView.render(width).length
+  }
+
   /** The fullscreen FOLLOW-END viewport pass (plan 2026-08-25 §13): re-measure
    * the row map, feed the layout the NEW projected content height (a stale
    * height would clamp the scroll), then scroll to the end and keep
@@ -6244,7 +8546,7 @@ export class TuiApp {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = this.fullscreenScroll.viewportHeight
     this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     this.fullscreenScroll.scrollToEnd()
@@ -6261,7 +8563,7 @@ export class TuiApp {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = this.fullscreenScroll.viewportHeight
     this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     this.fullscreenScroll.scrollTo(previousScrollTop, { disableFollow: true })
@@ -6280,7 +8582,7 @@ export class TuiApp {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = this.fullscreenScroll.viewportHeight
     this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     if (turn === undefined) return
@@ -6291,6 +8593,30 @@ export class TuiApp {
       welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
       { disableFollow: true },
     )
+  }
+
+  /** The single long-user disclosure transition (plan §10): capture the
+   * fullscreen viewport intent, mutate the disclosure state, rebuild once, and
+   * restore the SAME visual intent. A user who was following the live tail
+   * keeps following it (never a historical browse); a historical reader is
+   * restored to the SAME semantic row (durable message identity or the stable
+   * pending key) and viewport offset — never a raw delta-height scrollTop.
+   * Regular mode (no fullscreen scroll view) just rebuilds. Focus root
+   * transitions own their own `anchor-turn` contract and never route here. */
+  private mutateTranscriptDisclosure(mutate: () => void): void {
+    const scroll = this.fullscreenScroll
+    const wasFollowingEnd = scroll?.isFollowingEnd === true
+    const anchor = scroll === undefined || wasFollowingEnd
+      ? undefined
+      : this.captureTranscriptViewportAnchor()
+    mutate()
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages('focus-disclosure')
+    if (scroll !== undefined) {
+      if (wasFollowingEnd) this.applyFullscreenFollowEndViewport()
+      else if (anchor !== undefined) this.restoreTranscriptViewportAnchor(anchor, 'top')
+    }
+    this.requestRender()
   }
 
   /** The projected transcript row (in `messageRows` coordinates, welcome
@@ -6315,7 +8641,7 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.focusExpansionsStack.push(new Set(this.focusExpandedTurns))
     this.focusExpandedTurns.clear()
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
   }
 
   /** Leave the subagent-viewer scope, restoring the parent's disclosures. */
@@ -6325,7 +8651,7 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.focusExpandedTurns.clear()
     for (const turn of restored) this.focusExpandedTurns.add(turn)
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
   }
 
   /** Leave the subagent-viewer scope WITHOUT restoring: the parent session
@@ -6349,19 +8675,68 @@ export class TuiApp {
    * START of every rebuild, so local-card push/replace/clear paths prune
    * too (a replaced running card must not linger in the cache).
    */
-  private pruneMessageComponents(projectionExpanded: ReadonlySet<number>): void {
+  /** Drop the Work/Context-cluster disclosure owners the CURRENT window no
+   * longer projects (the window-epoch reset). `TranscriptFolder` returns the
+   * same message objects when a page is revisited, so object identity can
+   * never expire a stale owner; the window change itself must. A search jump
+   * keeps the same window and therefore keeps its owners.
+   *
+   * Liveness is derived from the CANONICAL structure of the new window, never a
+   * preset materialization: Work/cluster ownership is preset-neutral, so an
+   * owner that is still projected must survive regardless of the active preset
+   * or surface while a real page change still expires the stale owner. */
+  private pruneTranscriptContainerDisclosuresToWindow(): void {
+    const index = this.canonicalStructureIndex()
+    const liveWork = new Set<TranscriptMessage>()
+    for (const span of index.workSpans) liveWork.add(span.owner)
+    const liveClusters = new Set<TranscriptMessage>()
+    for (const cluster of index.clusterByMember.values()) liveClusters.add(cluster.owner)
+    for (const owner of [...this.expandedWorkOwners]) {
+      if (!liveWork.has(owner)) this.expandedWorkOwners.delete(owner)
+    }
+    for (const owner of [...this.expandedContextClusterOwners]) {
+      if (!liveClusters.has(owner)) this.expandedContextClusterOwners.delete(owner)
+    }
+  }
+
+  private pruneMessageComponents(
+    projectionExpanded: ReadonlySet<number>,
+    blocks: readonly TranscriptRenderBlock[] = this.projectedBlocks(projectionExpanded),
+  ): void {
     // The FocusActivityComponent cache is pruned to the LIVE projected
     // blocks INDEPENDENTLY of the message cache: a turn that left the
     // window — or Focus turned off — must not keep a stale Thought
     // component around, and a cleared message cache must not leave one
     // either.
     if (this.focusActivityComponents.size > 0) {
-      const liveTurns = new Set<number>()
-      for (const block of this.projectedBlocks(projectionExpanded)) {
-        if (block.kind === 'activity') liveTurns.add(block.activity.turn)
+      const liveActivityOwners = new Set<TranscriptMessage>()
+      for (const block of blocks) {
+        if (block.kind === 'activity') liveActivityOwners.add(block.owner)
       }
-      for (const turn of this.focusActivityComponents.keys()) {
-        if (!liveTurns.has(turn)) this.focusActivityComponents.delete(turn)
+      for (const owner of this.focusActivityComponents.keys()) {
+        if (!liveActivityOwners.has(owner)) this.focusActivityComponents.delete(owner)
+      }
+    }
+    // The Compact Work / Context-cluster component caches follow the same
+    // live-projection contract as the Focus activity cache: a span or cluster
+    // that left the window (or a preset switch) must not retain a stale
+    // component. The Compact disclosure SETS are user-owned within one window
+    // epoch (a search jump keeps them), but a page/window change prunes every
+    // owner the new window no longer projects — see
+    // pruneTranscriptContainerDisclosuresToWindow. Only the component caches are pruned
+    // here.
+    if (this.workComponents.size > 0 || this.contextClusterComponents.size > 0) {
+      const liveWork = new Set<TranscriptMessage>()
+      const liveClusters = new Set<TranscriptMessage>()
+      for (const block of blocks) {
+        if (block.kind === 'work') liveWork.add(block.span.owner)
+        if (block.kind === 'context-cluster') liveClusters.add(block.cluster.owner)
+      }
+      for (const owner of this.workComponents.keys()) {
+        if (!liveWork.has(owner)) this.workComponents.delete(owner)
+      }
+      for (const owner of this.contextClusterComponents.keys()) {
+        if (!liveClusters.has(owner)) this.contextClusterComponents.delete(owner)
       }
     }
     if (this.messageComponents.size === 0) return
@@ -6376,6 +8751,7 @@ export class TuiApp {
       // pruned with it for the same reason.
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
+      this.searchSourceRegionsByMessage.delete(message)
       const component = entry.component as { dispose?: () => void } | undefined
       if (component?.dispose !== undefined) {
         try {
@@ -6394,7 +8770,18 @@ export class TuiApp {
    * master — never written into focusExpandedTurns, so switching to
    * fullscreen does not inherit the keyboard full-reveal). */
   private focusProjectionExpandedTurns(): ReadonlySet<number> {
-    if (!this.focusModeEnabled || this.fullscreen !== undefined || !this.toolOutputExpanded) {
+    const base = this.focusProjectionExpandedTurnsBase()
+    const targetTurn = this.searchTargetTurn()
+    if (targetTurn === undefined) return base
+    const union = new Set(base)
+    union.add(targetTurn)
+    return union
+  }
+
+  /** The user-owned Focus expansion projection (no search target): manual
+   * disclosures PLUS the regular Ctrl+O derived recent turns. */
+  private focusProjectionExpandedTurnsBase(): ReadonlySet<number> {
+    if (!isFocusDisplayPreset(this.displayState.preset) || this.fullscreen !== undefined || !this.transcriptDetailExpanded) {
       return this.focusExpandedTurns
     }
     const boundary = this.expandBoundary()
@@ -6413,8 +8800,342 @@ export class TuiApp {
     return union
   }
 
-  private projectedBlocks(projectionExpanded: ReadonlySet<number>): FocusProjectedBlock[] {
-    return projectFocus(this.messages, this.turnActivities, projectionExpanded, this.focusModeEnabled)
+  /**
+   * The presentation projection over the current transcript window. The
+   * semantic segmentation is owned once by
+   * {@link projectTranscriptStructure} (`transcript-projection.ts`); this entry
+   * selects the materialization from the {@link displayPolicyFor} layers:
+   * Compact (turnLayer open + Process collapsed) renders Work cards, Focus
+   * (focusBehavior) runs the Focus turn projection and substitutes the canonical
+   * cluster identity, and Full (turnLayer open + Process expanded) emits the
+   * structure with Work flat. Ambient Context clustering applies to EVERY preset.
+   */
+  private projectedBlocks(projectionExpanded: ReadonlySet<number>): TranscriptRenderBlock[] {
+    const preset = this.displayState.preset
+    const policy = displayPolicyFor(preset)
+    // The capability decides whether a collapsed Work/cluster header may be
+    // rendered at all: a surface with no operable action presents those rows
+    // flat (never a dead header).
+    const workHeader = this.transcriptDisclosureActionAvailable()
+    // Regular Focus full-reveals the Work nested in an effectively expanded
+    // root (manual or recent-bulk — never a search-only root, whose reveal
+    // targets one container).
+    const regularFocusRootTurns = this.fullscreen === undefined && policy.focusBehavior
+      ? this.focusProjectionExpandedTurnsBase()
+      : undefined
+    const workOwners = this.effectiveWorkDisclosureOwners(regularFocusRootTurns)
+    this.openWorkOwners = workOwners
+    const expandedClusters = new Set(this.effectiveExpandedClusterOwners())
+    // The temporary search reveal opens exactly the containers that HIDE the
+    // target row, resolved through the same path the dismissal promotes.
+    const revealed = this.revealedSearchOwner()
+    const expandedWorkOwners = new Set(workOwners)
+    for (const owner of revealed ?? []) {
+      if (owner.kind === 'work') expandedWorkOwners.add(owner.owner)
+      else if (owner.kind === 'context-cluster') expandedClusters.add(owner.owner)
+    }
+    // Publish the scope the regular surface full-reveals: every member of every
+    // OPEN Work span (and of every span when the header fails open). Computed
+    // ONCE per projection (never per message) so the render-cache path stays
+    // O(1) per card. Only presets that materialize Work as a container
+    // participate: Full keeps its flat Process-expanded semantics.
+    const workIsContainer = workHeader
+      && (policy.focusBehavior || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed'))
+    const openRunMembers = new Set<TranscriptMessage>()
+    if (workIsContainer) {
+      for (const span of this.canonicalStructureIndex().workSpans) {
+        if (this.workSpanExpanded(span)) {
+          for (const member of span.members) openRunMembers.add(member)
+        }
+      }
+    }
+    this.openWorkRunMembers = openRunMembers
+    if (policy.turnLayer === 'open' && policy.processLayer === 'collapsed') {
+      return [
+        ...projectCompact(this.messages, {
+          expandedWorkOwners,
+          expandedClusters,
+          forcedExpanded: new Set(),
+          clusterHeader: !this.contextClusterDefaultExpanded(),
+          workHeader,
+        }),
+      ]
+    }
+    // One canonical segmentation per projection. Full materializes it directly
+    // (Work flat, the shared cluster presentation); Focus reorders/hoists rows,
+    // so it consumes the same canonical cluster identity in Focus-projected
+    // order through the projection-aware substitution helper.
+    const structure = projectTranscriptStructure(this.messages)
+    if (policy.focusBehavior) {
+      const blocks = projectFocus(this.messages, this.turnActivities, projectionExpanded, true, this.collapsedFocusForcedVisible())
+      const substituted = this.applyContextClusters(blocks, clusterByMemberOf(structure))
+      return this.materializeFocusWork(substituted)
+    }
+    return this.materializeTranscriptStructure(structure)
+  }
+
+  /**
+   * Materialize every canonical Work span the expanded Focus projection emitted
+   * as a nested container: the Work header block always renders, and its member
+   * rows render only while the Work is effectively open. Members carry the
+   * outer-to-inner ancestry `[focus-root, work]` so the direct-row and
+   * blank-row rules resolve the NEAREST owner without geometry guessing.
+   * When the surface has NO operable disclosure action the span fails open
+   * (members flat with a `[focus-root]` ancestry) exactly like the Compact
+   * fail-open path — never a collapsed Work header nobody can open.
+   */
+  private materializeFocusWork(blocks: readonly TranscriptRenderBlock[]): TranscriptRenderBlock[] {
+    const out: TranscriptRenderBlock[] = []
+    const workHeader = this.transcriptDisclosureActionAvailable()
+    for (const block of blocks) {
+      if (block.kind !== 'work' || !('focusOwnerTurn' in block) || block.focusOwnerTurn === undefined) {
+        out.push(block)
+        continue
+      }
+      if (!workHeader) {
+        const focusPath: TranscriptContainerPath = [{ kind: 'focus-root', turn: block.focusOwnerTurn }]
+        for (const member of block.span.members) {
+          out.push({ kind: 'message', message: member, containerPath: focusPath })
+        }
+        continue
+      }
+      const containerPath: TranscriptContainerPath = [
+        { kind: 'focus-root', turn: block.focusOwnerTurn },
+        { kind: 'work', owner: block.span.owner },
+      ]
+      out.push({ kind: 'work', span: block.span, containerPath })
+      if (!this.workSpanExpanded(block.span)) continue
+      for (const member of block.span.members) {
+        out.push({ kind: 'message', message: member, containerPath })
+      }
+    }
+    return out
+  }
+
+  /** The Work owners effectively OPEN in the current projection: manual
+   * owners, the regular master's recent-turn bulk, and (regular Focus) the Work
+   * nested in an effectively expanded Thought root. The temporary search reveal
+   * is layered by {@link workSpanExpanded}. */
+  private effectiveWorkDisclosureOwners(
+    regularFocusRootTurns: ReadonlySet<number> | undefined,
+  ): ReadonlySet<TranscriptMessage> {
+    const owners = new Set<TranscriptMessage>()
+    const bulk = this.fullscreen === undefined && this.transcriptDetailExpanded
+    const boundary = bulk ? this.expandBoundary() : Number.POSITIVE_INFINITY
+    for (const span of this.canonicalStructureIndex().workSpans) {
+      if (this.expandedWorkOwners.has(span.owner)
+        || (bulk && span.turn >= boundary)
+        || regularFocusRootTurns?.has(span.turn) === true) {
+        owners.add(span.owner)
+      }
+    }
+    return owners
+  }
+
+  /** The currently GRANTED search target message: undefined once an explicit
+   * collapse revoked the temporary reveal (the semantic target itself stays
+   * current). Every Compact forced-expansion decision reads THIS, never the
+   * raw `searchTarget`, so a revoked reveal cannot keep a span open. */
+  private searchRevealedMessage(): TranscriptMessage | undefined {
+    return this.searchRevealGranted ? this.searchTarget?.message : undefined
+  }
+
+  /**
+   * The temporary search reveal for collapsed Focus: the ONE hidden mid-turn
+   * `form:'notice'` the current grant must surface. Presentation-only — it
+   * never opens the Thought and never writes a manual disclosure owner, so an
+   * ordinary dismiss restores the collapsed view with no residue. Rows that
+   * collapsed Focus already shows, and hidden Process rows (which the turn
+   * expansion owns), are not forced here.
+   */
+  private collapsedFocusForcedVisible(): ReadonlySet<TranscriptMessage> {
+    const target = this.searchRevealedMessage()
+    if (target === undefined || !isCollapsedFocusHiddenRow(this.messages, target)) return new Set()
+    return new Set([target])
+  }
+
+  /**
+   * The STABLE ancestry (canonical Work span / Context cluster) that could hide
+   * one transcript row on the current preset/surface. The current open/hidden
+   * state is evaluated separately by {@link revealPathFromAncestry}, so a
+   * disclosure toggle can never be served a stale path.
+   */
+  private searchRevealAncestryFor(message: TranscriptMessage): SearchRevealAncestry {
+    this.transcriptPresentationDiagnostics.searchOwnerResolutions += 1
+    const ancestry: { work?: TranscriptWorkSpan; cluster?: ContextCluster } = {}
+    // Work is a real collapsed container only where the current materialization
+    // emits a header AND the surface has an operable disclosure action (a flat
+    // fail-open Work hides nothing, so it mints no reveal node).
+    const policy = displayPolicyFor(this.displayState.preset)
+    const workIsContainer = this.transcriptDisclosureActionAvailable()
+      && (policy.focusBehavior || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed'))
+    if (workIsContainer) {
+      const span = this.canonicalStructureIndex().workByMember.get(message)
+      if (span !== undefined) ancestry.work = span
+    }
+    // A FLAT cluster (no operable owner) has no header hiding its members, so
+    // it is not a disclosure owner: resolving or promoting it would strand a
+    // manual owner that would unexpectedly reopen the cluster on a surface
+    // change. The SEMANTIC clustering is untouched.
+    if (!this.contextClusterDefaultExpanded()) {
+      const cluster = this.canonicalStructureIndex().clusterByMember.get(message)
+      if (cluster !== undefined) ancestry.cluster = cluster
+    }
+    return ancestry
+  }
+
+  /** Memoize the STABLE ancestry on (target, preset, surface, capability,
+   * window) — never the mutable open state (plan §30). */
+  private searchRevealAncestry(target: TranscriptMessage): SearchRevealAncestry {
+    const disclosureAvailable = this.transcriptDisclosureActionAvailable()
+    const memo = this.revealedOwnerMemo
+    if (memo !== undefined && memo.target === target && memo.preset === this.displayState.preset
+      && memo.fullscreen === (this.fullscreen !== undefined)
+      && memo.disclosureAvailable === disclosureAvailable && memo.messages === this.messages) {
+      return memo.ancestry
+    }
+    const ancestry = this.searchRevealAncestryFor(target)
+    this.revealedOwnerMemo = {
+      target,
+      preset: this.displayState.preset,
+      fullscreen: this.fullscreen !== undefined,
+      disclosureAvailable,
+      messages: this.messages,
+      ancestry,
+    }
+    return ancestry
+  }
+
+  /** Evaluate the CURRENT reveal path from stable ancestry: only ancestors that
+   * actually hide the row right now become nodes. */
+  private revealPathFromAncestry(ancestry: SearchRevealAncestry): SearchRevealPath | undefined {
+    const path: TranscriptContainerOwner[] = []
+    if (ancestry.work !== undefined && !this.openWorkOwners.has(ancestry.work.owner)) {
+      path.push({ kind: 'work', owner: ancestry.work.owner })
+    }
+    if (ancestry.cluster !== undefined
+      && !this.expandedContextClusterOwners.has(ancestry.cluster.owner)
+      && !this.regularBulkOwnsTurn(ancestry.cluster.turn)) {
+      path.push({ kind: 'context-cluster', owner: ancestry.cluster.owner })
+    }
+    return path.length === 0 ? undefined : path
+  }
+
+  /**
+   * The user-controllable disclosure containers that currently HIDE one
+   * transcript row. The search reveal and the dismissal promotion both read
+   * THIS single resolution, so they can never disagree about who owns the row.
+   */
+  private searchRevealOwnerFor(message: TranscriptMessage): SearchRevealPath | undefined {
+    return this.revealPathFromAncestry(this.searchRevealAncestryFor(message))
+  }
+
+  /** The GRANTED reveal's container path (undefined when no reveal is active).
+   * The stable ancestry is memoized; the current open state is not. */
+  private revealedSearchOwner(): SearchRevealPath | undefined {
+    const target = this.searchRevealedMessage()
+    if (target === undefined) return undefined
+    return this.revealPathFromAncestry(this.searchRevealAncestry(target))
+  }
+
+  /** Whether one Work span is opened ONLY by the granted search reveal. */
+  private workSpanRevealedBySearch(span: TranscriptWorkSpan): boolean {
+    return this.revealedSearchOwner()?.some(owner => owner.kind === 'work' && owner.owner === span.owner) === true
+  }
+
+  /** Whether one ambient cluster is opened ONLY by the granted search reveal. */
+  private clusterRevealedBySearch(cluster: ContextCluster): boolean {
+    return this.revealedSearchOwner()
+      ?.some(owner => owner.kind === 'context-cluster' && owner.owner === cluster.owner) === true
+  }
+
+  /** Whether one ambient cluster is open: a manual disclosure, the regular
+   * master's recent-turn bulk, a granted search reveal whose target is one of
+   * its members, or the flat presentation default used where no cluster owner
+   * is operable. */
+  private contextClusterExpanded(cluster: ContextCluster): boolean {
+    return this.expandedContextClusterOwners.has(cluster.owner)
+      || this.clusterRevealedBySearch(cluster)
+      || this.regularBulkOwnsTurn(cluster.turn)
+      || this.contextClusterDefaultExpanded()
+  }
+
+  /** The manual + regular-bulk cluster expansion set the projection consumes
+   * (the search reveal is applied separately). Flat surfaces emit no header at
+   * all, so this set is irrelevant there. */
+  private effectiveExpandedClusterOwners(): ReadonlySet<TranscriptMessage> {
+    const owners = new Set(this.expandedContextClusterOwners)
+    if (this.contextClusterDefaultExpanded()) return owners
+    for (const cluster of new Set(this.canonicalStructureIndex().clusterByMember.values())) {
+      if (this.regularBulkOwnsTurn(cluster.turn)) owners.add(cluster.owner)
+    }
+    return owners
+  }
+
+  /**
+   * Materialize the canonical structure with Work FLAT and the shared cluster
+   * presentation. Full uses this directly: the canonical segmentation exists
+   * (Work boundaries are known), but Full's default Process disclosure is
+   * expanded, so a span emits its raw members with no Work chrome.
+   */
+  private materializeTranscriptStructure(structure: readonly TranscriptStructureBlock[]): TranscriptRenderBlock[] {
+    const out: TranscriptRenderBlock[] = []
+    for (const block of structure) {
+      if (block.kind === 'message') {
+        out.push({ kind: 'message', message: block.message })
+      } else if (block.kind === 'work') {
+        for (const member of block.span.members) out.push({ kind: 'message', message: member })
+      } else {
+        out.push(...this.materializeContextCluster(block.cluster))
+      }
+    }
+    return out
+  }
+
+  /**
+   * Present one canonical ambient cluster by surface capability: a FLAT
+   * member sequence where the surface has no operable cluster owner, otherwise
+   * the header block plus its members when open. Both Full and Focus consume
+   * this, so cluster presentation is never re-derived per preset.
+   */
+  private materializeContextCluster(cluster: ContextCluster): TranscriptRenderBlock[] {
+    const containerPath: TranscriptContainerPath = [{ kind: 'context-cluster', owner: cluster.owner }]
+    if (this.contextClusterDefaultExpanded()) {
+      return cluster.members.map(member => ({ kind: 'message', message: member, containerPath }) as TranscriptRenderBlock)
+    }
+    const expanded = this.contextClusterExpanded(cluster)
+    const out: TranscriptRenderBlock[] = [{ kind: 'context-cluster', cluster, expanded, containerPath }]
+    if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member, containerPath })
+    return out
+  }
+
+  /**
+   * Substitute canonical ambient Context clusters into an already projected
+   * block list (Focus). The cluster header replaces its owner's row; an open
+   * cluster re-emits EVERY member as an ordinary Context row (the existing
+   * message renderer owns each), and a closed cluster drops its non-owner
+   * members. Membership comes from the canonical structure's
+   * `byMember` identity — never a re-clustering of the Focus-reordered
+   * sequence — so a hidden Process row can never merge two Context rows
+   * (plan §11/§19.1/§26.2).
+   */
+  private applyContextClusters(
+    blocks: readonly TranscriptRenderBlock[],
+    canonicalByMember: ReadonlyMap<TranscriptMessage, ContextCluster>,
+  ): TranscriptRenderBlock[] {
+    if (canonicalByMember.size === 0) return [...blocks]
+    const out: TranscriptRenderBlock[] = []
+    for (const block of blocks) {
+      const message = block.kind === 'message' ? block.message : undefined
+      const cluster = message === undefined ? undefined : canonicalByMember.get(message)
+      if (cluster === undefined) {
+        out.push(block)
+        continue
+      }
+      if (message !== cluster.owner) continue
+      out.push(...this.materializeContextCluster(cluster))
+    }
+    return out
   }
 
   /** The live Preparing snapshot for one Focus turn, kept in model order. */
@@ -6425,81 +9146,236 @@ export class TuiApp {
   }
 
   /** Find the presentation insertion point for one expanded Thought. The
-   * process rows carry the existing owner marker; the final assistant is held
-   * back by projectFocus, so a preview block lands after process content and
-   * before that final answer. A turn without a projected activity is ignored
-   * rather than attaching a preview to an unrelated Thought. */
+   * live preview is the NEWEST turn event, so it lands after every durable row
+   * of the turn — including a trailing persistent fence such as a settled
+   * surfaced-interaction card (the same boundary the Compact projection uses,
+   * so a live call never jumps back before it). projectFocus appends the
+   * held-back final assistant LAST, so the preview goes immediately before it.
+   * A turn without a projected activity is ignored rather than attaching a
+   * preview to an unrelated Thought. */
   private focusPreparingInsertionIndex(
     blocks: readonly TranscriptRenderBlock[],
     turn: number,
   ): number | undefined {
     let activityIndex = -1
     let lastTurnIndex = -1
-    let lastProcessIndex = -1
-    let finalAssistantIndex = -1
+    let lastTurnIsHeldBackFinal = false
     for (let index = 0; index < blocks.length; index += 1) {
       const block = blocks[index]!
       if (block.kind === 'activity') {
         if (block.activity.turn === turn) {
           activityIndex = index
           lastTurnIndex = index
+          lastTurnIsHeldBackFinal = false
         }
         continue
       }
       if (block.kind === 'streaming-tool-previews') continue
+      if (block.kind === 'pending-user') continue
+      if (block.kind === 'work') continue
+      if (block.kind === 'context-cluster') {
+        // A fullscreen mid-turn ambient cluster is a durable persistent fence:
+        // the live call belongs AFTER it, exactly like a settled interaction
+        // card. (On the regular surface the same rows are flat messages and
+        // are counted below.)
+        if (block.cluster.turn === turn) {
+          lastTurnIndex = index
+          lastTurnIsHeldBackFinal = false
+        }
+        continue
+      }
       if (!('turn' in block.message) || block.message.turn !== turn) continue
       lastTurnIndex = index
-      if (block.collapseFocusOwnerOnClick === turn) lastProcessIndex = index
-      if (block.message.kind === 'assistant' && block.collapseFocusOwnerOnClick === undefined) {
-        finalAssistantIndex = index
-      }
+      lastTurnIsHeldBackFinal = block.message.kind === 'assistant' && block.containerPath === undefined
     }
     if (activityIndex === -1) return undefined
-    if (lastProcessIndex !== -1) return lastProcessIndex + 1
-    if (finalAssistantIndex !== -1) return finalAssistantIndex
-    return lastTurnIndex + 1
+    // The held-back final assistant is the LAST row projectFocus emits for the
+    // turn; insert before it. Otherwise insert after every durable row.
+    return lastTurnIsHeldBackFinal ? lastTurnIndex : lastTurnIndex + 1
   }
 
   /** Build the rendered transcript blocks in visual order. Focus keeps the
    * ephemeral Preparing state outside the durable projection: collapsed rows
    * are summarized by their Thought header, while expanded rows are inserted
-   * into the owning turn's process tail. Focus OFF retains the original
-   * standalone block between the durable projection and local cards. */
+   * into the owning turn's process tail. Compact folds a Preparing call into
+   * the owning Work span (its Tool slot while collapsed, an inserted preview
+   * block while expanded) and appends it only when no span exists yet. Every
+   * other preset retains the original standalone block. */
   private transcriptBlocks(projectionExpanded: ReadonlySet<number>): TranscriptRenderBlock[] {
     const blocks: TranscriptRenderBlock[] = [...this.projectedBlocks(projectionExpanded)]
-    if (!this.focusModeEnabled) {
+    const preset = this.displayState.preset
+    if (preset === 'compact') {
+      this.applyWorkPreparing(blocks)
+    } else if (!isFocusDisplayPreset(preset)) {
       if (this.streamingToolPreviews.length > 0) {
         blocks.push({ kind: 'streaming-tool-previews', previews: this.streamingToolPreviews })
       }
-    } else if (this.streamingToolPreviews.length > 0) {
-      const previewTurns = new Set(this.streamingToolPreviews.map(preview => preview.turn))
-      for (const turn of previewTurns) {
-        if (!projectionExpanded.has(turn)) continue
-        const previews = this.streamingToolPreviewsForTurn(turn)
-        if (previews.length === 0) continue
-        const insertion = this.focusPreparingInsertionIndex(blocks, turn)
-        if (insertion === undefined) continue
-        blocks.splice(insertion, 0, {
-          kind: 'streaming-tool-previews',
-          turn,
-          previews,
-          // This marker belongs to the preceding spacer's owner only; the
-          // preview block itself has no activity/message and remains inert.
-          collapseFocusOwnerOnClick: turn,
-        })
-      }
+    } else {
+      // Expanded Focus materializes canonical Work containers, so its live call
+      // uses the SAME Work-aware ownership as Compact (plan §23); a collapsed
+      // Thought's live process is summarised by its header and skipped.
+      this.applyWorkPreparing(blocks, projectionExpanded)
     }
     blocks.push(...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock))
+    // The ephemeral pending user-input lane sits at the LIVE conversation
+    // tail, after durable content and local cards. It is never projected into
+    // Focus, the search corpus, or the durable transcript.
+    for (const row of this.pendingUserRows) {
+      blocks.push({ kind: 'pending-user', row })
+    }
     return blocks
   }
 
-  /** The expanded Focus owner used only for the spacer immediately before a
-   * live Preparing block. The block itself still has no message/activity, so
-   * its content remains inert in the fullscreen hit map. */
-  private focusOwnerForRenderBlock(block: TranscriptRenderBlock): number | undefined {
-    return block.kind === 'message' || block.kind === 'streaming-tool-previews'
-      ? block.collapseFocusOwnerOnClick
-      : undefined
+  /** Whether one Work span is effectively open in the current projection: it
+   * belongs to {@link openWorkOwners} (manual disclosure, the regular master's
+   * recent-turn bulk, or a regular Focus root full-reveal) or to the granted
+   * search reveal whose target is one of its members. */
+  private workSpanExpanded(span: TranscriptWorkSpan): boolean {
+    return this.openWorkOwners.has(span.owner) || this.workSpanRevealedBySearch(span)
+  }
+
+  /** Whether one turn's contiguous Process run is still OPEN at the transcript
+   * tail: the LAST turn-bearing message of the window belongs to that turn and
+   * is a Work MEMBER under the projection's own boundary authority
+   * ({@link isTranscriptWorkMember}). ONLY an open run may absorb a live
+   * Preparing call. A live Preparing call is a Process row that has not landed
+   * durably yet, so once an Assistant / Context / Attention boundary — OR a
+   * settled surfaced-interaction card — has been recorded, the call starts a
+   * NEW run: drawing it back into the previous Work span would cross a
+   * chronology boundary the canonical projection forbids. */
+  private workRunOpenForTurn(turn: number): boolean {
+    for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+      const message = this.messages[index]!
+      if (!('turn' in message)) continue
+      // The run is open only while the trailing turn-bearing row is a Work
+      // MEMBER under the SAME boundary authority the projection uses: a
+      // settled surfaced-interaction card (question / Plan review) closes the
+      // run even though its base semantic class stays `process`.
+      return message.turn === turn && isTranscriptWorkMember(message)
+    }
+    return false
+  }
+
+  /**
+   * The single Work-aware live-Preparing pass, used by every presentation that
+   * materializes Work as a container (Compact and expanded Focus, plan §23).
+   * The ownership decision is read from THIS projection's already-projected
+   * spans plus the raw transcript tail, so the collapsed (Tool slot) and
+   * expanded (member insertion) representations can never drift onto different
+   * chronology snapshots.
+   *
+   * In Compact a `pending-run` call is appended as an ephemeral pending Work at
+   * the transcript tail. In expanded Focus it is placed in the owning turn's
+   * process tail, before the held-back final, and turns whose Thought is
+   * collapsed are skipped entirely (their header summarises the live call).
+   */
+  private applyWorkPreparing(
+    blocks: TranscriptRenderBlock[],
+    focusExpandedTurns?: ReadonlySet<number>,
+  ): void {
+    if (this.streamingToolPreviews.length === 0) return
+    // On a surface with no operable disclosure action the Work container is
+    // flat (materializeFocusWork / projectCompact(workHeader:false)), so a live
+    // call must render as an ordinary preview — never ephemeral `▸ Work`
+    // chrome that the durable handoff does not reproduce (plan §14/§23).
+    const workChrome = this.transcriptDisclosureActionAvailable()
+    const spans: TranscriptWorkSpan[] = []
+    for (const block of blocks) {
+      if (block.kind === 'work') spans.push(block.span)
+    }
+    const turns = [...new Set(this.streamingToolPreviews.map(preview => preview.turn))].sort((a, b) => a - b)
+    const pending: StreamingToolPreview[] = []
+    for (const turn of turns) {
+      const previews = this.streamingToolPreviewsForTurn(turn)
+      if (previews.length === 0) continue
+      const owner = this.workPreparingOwner(turn, spans)
+      if (owner.kind === 'pending-run') {
+        // The previous run was closed by a Conversation / Context / Attention
+        // boundary (or none exists yet): the call is a NEW Process run.
+        if (focusExpandedTurns === undefined) {
+          pending.push(...previews)
+        } else if (focusExpandedTurns.has(turn)) {
+          const insertion = this.focusPreparingInsertionIndex(blocks, turn)
+          if (insertion !== undefined) {
+            blocks.splice(insertion, 0, {
+              kind: 'streaming-tool-previews',
+              turn,
+              previews,
+              // A new ephemeral pending Work, exactly like Compact's tail
+              // card, so the durable Work card replaces it at the same height.
+              ...(workChrome ? { pendingWork: true as const } : {}),
+              containerPath: [{ kind: 'focus-root', turn }],
+            })
+          }
+        }
+        continue
+      }
+      if (focusExpandedTurns !== undefined && !focusExpandedTurns.has(turn)) continue
+      const span = owner.span
+      const workIndex = blocks.findIndex(block => block.kind === 'work' && block.span.owner === span.owner)
+      if (workIndex < 0) {
+        if (focusExpandedTurns === undefined) pending.push(...previews)
+        continue
+      }
+      const workBlock = blocks[workIndex]
+      if (this.workSpanExpanded(span)) {
+        // The open run renders the live call after its durable members.
+        const containerPath = workBlock?.kind === 'work' ? workBlock.containerPath : undefined
+        blocks.splice(workIndex + 1 + span.members.length, 0, {
+          kind: 'streaming-tool-previews',
+          turn,
+          previews,
+          ...(containerPath === undefined ? {} : { containerPath }),
+        })
+        continue
+      }
+      // The collapsed run's Tool slot owns the live call (plan §36).
+      const preparingSummary = compactPreparingSummary(previews)
+      if (workBlock?.kind === 'work' && preparingSummary !== undefined) {
+        blocks[workIndex] = { ...workBlock, preparingSummary }
+      }
+    }
+    if (pending.length > 0) {
+      blocks.push({
+        kind: 'streaming-tool-previews',
+        previews: pending,
+        ...(workChrome ? { pendingWork: true as const } : {}),
+      })
+    }
+  }
+
+  /**
+   * The Work owner of one live Preparing call, decided from the CURRENT
+   * projection snapshot:
+   * - the turn's trailing Process run must still be OPEN (the last turn-bearing
+   *   raw message belongs to that turn and is Process-classified), and
+   * - that run's projected span must be the last span of the turn.
+   * Otherwise the call starts a NEW run (`pending-run`) and must never be drawn
+   * back across the closed boundary.
+   */
+  private workPreparingOwner(turn: number, spans: readonly TranscriptWorkSpan[]): WorkPreparingOwner {
+    let trailing: TranscriptWorkSpan | undefined
+    for (const span of spans) {
+      if (span.turn === turn) trailing = span
+    }
+    if (trailing === undefined || !this.workRunOpenForTurn(turn)) return { kind: 'pending-run' }
+    return { kind: 'trailing-run', span: trailing }
+  }
+
+  /** The outer-to-inner semantic container ancestry of one rendered block.
+   * Message/preview rows carry the path from the projection; a Focus Thought
+   * header, a Work header and a cluster header synthesize their own container.
+   * The row map never infers ancestry from neighboring geometry. */
+  private rowContainerPath(block: TranscriptRenderBlock): TranscriptContainerPath | undefined {
+    if (block.kind === 'message' || block.kind === 'streaming-tool-previews') {
+      return block.containerPath
+    }
+    if (block.kind === 'activity') return [{ kind: 'focus-root', turn: block.activity.turn }]
+    if (block.kind === 'work') return block.containerPath ?? [{ kind: 'work', owner: block.span.owner }]
+    if (block.kind === 'context-cluster') {
+      return block.containerPath ?? [{ kind: 'context-cluster', owner: block.cluster.owner }]
+    }
+    return undefined
   }
 
   /** Render live Preparing rows with the formal tool identity, early summary
@@ -6533,52 +9409,71 @@ export class TuiApp {
     return new Text(lines.join('\n'), 0, 0)
   }
 
-  /** The precomputed Focus Tool-line display for one activity: presenter-
-   * first, static fallback second (plan §38/§9.4). The FocusActivityComponent
-   * stays a pure renderer — the presentation bridge lives here. */
-  private focusToolDisplayFor(activity: TurnActivity): string | undefined {
-    const tool = activity.tool
-    if (tool === undefined) return undefined
-    return focusToolDisplay(tool, { presenter: this.present, cwd: this.workspaceRoot })
+  /** The presenter bridge for one collapsed Action source
+   * (presentation-convergence addendum v2 §35): a genuine tool keeps the
+   * presenter-first display (`focusToolDisplay`, static fallback second —
+   * plan §38/§9.4); the synthetic kinds use the shared pure Action labels
+   * and never route through the ToolPresenter registry as fake tools. Focus
+   * and Activity consume this ONE bridge — no divergent focus/activity
+   * action paths. */
+  private compactActionPresentationFor(action: CompactActionSource | undefined): CompactActionPresentation | undefined {
+    return action === undefined
+      ? undefined
+      : compactActionPresentation(action, { presenter: this.present, cwd: this.workspaceRoot })
   }
 
   /** Get (or rebuild) the FocusActivityComponent for one turn: rebuilds
    * when the activity OBJECT changed (session/viewer switches mint fresh
    * folder objects, so the same turn number from another session can
    * never reuse this one's component), the activity revision moved, the
-   * disclosure flipped, the theme switched, the precomputed Tool display
-   * changed, or the live Preparing summary changed (plan §39). render()
-   * re-reads Date.now() every frame, so the running duration is always live. */
+   * disclosure flipped, the theme switched, the effective Action
+   * presentation/stats changed, or the live Preparing summary changed
+   * (plan §39; addendum v2 §39 — a subagent/command/retry landing moves
+   * NEITHER `TurnActivity.tool` NOR the usage facts, so the bounded Action
+   * + ActionStats signatures are mandatory cache keys). render() re-reads
+   * Date.now() every frame, so the running duration is always live. */
   private focusActivityComponentFor(
+    owner: TranscriptMessage,
     activity: TurnActivity,
     expanded: boolean,
-    toolDisplay: string | undefined,
+    action: CompactActionPresentation | undefined,
+    actionStats: CompactActionStats,
     preparingSummary: string | undefined,
   ): FocusActivityComponent {
-    const entry = this.focusActivityComponents.get(activity.turn)
+    const actionSignature = compactActionSignature(action)
+    const statsSignature = compactActionStatsSignature(actionStats)
+    const entry = this.focusActivityComponents.get(owner)
     if (entry !== undefined && entry.activity === activity
       && entry.revision === activity.revision
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
       && entry.iconStyle === this.iconStyle
-      && entry.toolDisplay === toolDisplay
+      && entry.actionSignature === actionSignature
+      && entry.statsSignature === statsSignature
       && entry.preparingSummary === preparingSummary) {
       return entry.component
     }
     const component = new FocusActivityComponent({
       activity,
       expanded,
-      toolDisplay,
+      // The phase is a LIVE provider over the authoritative unified status:
+      // an approval/question opens without a component rebuild, so a baked
+      // phase would strand the header on `Working` (plan §5.5).
+      phase: () => this.statusStore.snapshot().activity.phase,
+      ...(action === undefined ? {} : { action }),
+      actionStats,
       iconStyle: this.iconStyle,
       preparingSummary,
+      timing: this.focusTiming,
     })
-    this.focusActivityComponents.set(activity.turn, {
+    this.focusActivityComponents.set(owner, {
       activity,
       component,
       revision: activity.revision,
       expanded,
       themeRev: this.themeRevision,
       iconStyle: this.iconStyle,
-      toolDisplay,
+      actionSignature,
+      statsSignature,
       preparingSummary,
     })
     return component
@@ -6592,63 +9487,461 @@ export class TuiApp {
     return transcriptContentWidth(this.terminal.columns)
   }
 
-  /** Render every projected transcript block once for this rebuild. The same
-   * metadata feeds the mounted component tree and the fullscreen row map. */
-  private renderTranscriptBlocks(
+  /** The content signature of one Work card: everything the collapsed header
+   * and previews render from. Member topology is compared separately (a
+   * boundary change is structural); this only decides content refresh. The
+   * effective Action signature AND the span timing are part of the
+   * signature (post-F6 plan §9.4; addendum v2 §40): a nested
+   * child starting/stopping, a corrected durable timing (a same-step
+   * replacement with identical text), or a NEW synthetic Action (a
+   * subagent/command/retry landing) must refresh the collapsed Activity
+   * even when nothing else changes. All inputs stay bounded — the Think
+   * text is the span's bounded tail and the Action signature is the same
+   * one-line presentation the slot renders, never a raw payload (post-F6
+   * plan §20). Takes the ALREADY-SUMMARIZED span so one Activity refresh
+   * walks its members exactly once. */
+  private compactWorkSignature(
+    summary: CompactWorkSummary,
+    action: CompactActionPresentation | undefined,
+    preparingSummary: string | undefined,
+  ): string {
+    const timing = summary.timing
+    return [
+      compactActionStatsSignature(summary.actionStats),
+      summary.think?.text ?? '',
+      summary.think?.running === true ? '1' : '0',
+      compactActionSignature(action),
+      preparingSummary ?? '',
+      timing === undefined ? '' : `${timing.startedAt}\u0000${timing.endedAt ?? ''}\u0000${timing.running ? '1' : '0'}`,
+    ].join('\u0000')
+  }
+
+  /** Get (or rebuild) the CompactWorkComponent for one span. The span OWNER
+   * is the cache key (stable across content updates and rebuilds); the
+   * signature covers the span-local facts the card renders. The live
+   * Preparing summary arrives from the BLOCK (only the newest span of a turn
+   * carries it) and is consumed by a collapsed span's Action slot. The span
+   * is summarized ONCE and the summary feeds the signature, the shared
+   * Action bridge and the component (never a second member walk). */
+  private compactWorkComponentFor(span: TranscriptWorkSpan, blockPreparingSummary: string | undefined): CompactWorkComponent {
+    const expanded = this.workSpanExpanded(span)
+    const summary = summarizeWorkSpan(span)
+    const action = this.compactActionPresentationFor(summary.action)
+    // An EXPANDED span renders the standalone Preparing preview block instead
+    // of the Action slot, so the block's summary never reaches its card.
+    const preparingSummary = expanded ? undefined : blockPreparingSummary
+    const signature = this.compactWorkSignature(summary, action, preparingSummary)
+    const entry = this.workComponents.get(span.owner)
+    if (entry !== undefined && sameWorkSpanShape(entry.span, span)
+      && entry.expanded === expanded && entry.themeRev === this.themeRevision
+      && entry.iconStyle === this.iconStyle && entry.signature === signature) {
+      return entry.component
+    }
+    const component = new CompactWorkComponent({
+      span,
+      expanded,
+      summary,
+      ...(action === undefined ? {} : { action }),
+      ...(preparingSummary === undefined ? {} : { preparingSummary }),
+      iconStyle: this.iconStyle,
+    })
+    this.workComponents.set(span.owner, {
+      component,
+      span,
+      expanded,
+      themeRev: this.themeRevision,
+      iconStyle: this.iconStyle,
+      signature,
+    })
+    return component
+  }
+
+  /** The content signature of one cluster card: the structured member names
+   * its summary renders (never payload text). */
+  private compactClusterSignature(cluster: ContextCluster): string {
+    return cluster.members
+      .map(member => member.kind === 'system'
+        ? `${member.label ?? ''}|${contextPresentationKind(member) ?? ''}`
+        : '')
+      .join('\u0000')
+  }
+
+  /** Get (or rebuild) the ContextClusterComponent for one cluster. */
+  private contextClusterComponentFor(cluster: ContextCluster, expanded: boolean): ContextClusterComponent {
+    const signature = this.compactClusterSignature(cluster)
+    const entry = this.contextClusterComponents.get(cluster.owner)
+    if (entry !== undefined && sameContextClusterShape(entry.cluster, cluster)
+      && entry.expanded === expanded && entry.themeRev === this.themeRevision
+      && entry.iconStyle === this.iconStyle && entry.signature === signature) {
+      return entry.component
+    }
+    const component = new ContextClusterComponent({ cluster, expanded, iconStyle: this.iconStyle })
+    this.contextClusterComponents.set(cluster.owner, {
+      component,
+      cluster,
+      expanded,
+      themeRev: this.themeRevision,
+      iconStyle: this.iconStyle,
+      signature,
+    })
+    return component
+  }
+
+  /** Resolve one block's live component without rendering it. */
+  private componentForTranscriptBlock(
+    block: TranscriptRenderBlock,
     projectionExpanded: ReadonlySet<number>,
+    boundary: number,
+    userBoundary: number,
     width: number,
-  ): RenderedTranscriptBlock[] {
-    const boundary = this.expandBoundary()
-    return this.transcriptBlocks(projectionExpanded).map(block => {
-      let component: Component
-      let rendered: string[]
+  ): Component {
+    if (block.kind === 'activity') {
+      return this.focusActivityComponentFor(
+        block.owner,
+        block.activity,
+        projectionExpanded.has(block.activity.turn),
+        this.compactActionPresentationFor(block.action),
+        block.actionStats,
+        isFocusDisplayPreset(this.displayState.preset) && !projectionExpanded.has(block.activity.turn)
+          ? compactPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
+          : undefined,
+      )
+    }
+    if (block.kind === 'work') {
+      return this.compactWorkComponentFor(block.span, 'preparingSummary' in block ? block.preparingSummary : undefined)
+    }
+    if (block.kind === 'context-cluster') return this.contextClusterComponentFor(block.cluster, block.expanded)
+    if (block.kind === 'streaming-tool-previews') {
+      if (block.pendingWork === true) {
+        // The pending Activity card's elapsed time starts at the live
+        // call's earliest authoritative start (post-F6 plan §12.14).
+        const startedAt = block.previews
+          .map(preview => preview.startedAt)
+          .filter((at): at is number => at !== undefined)
+          .reduce((earliest, at) => Math.min(earliest, at), Number.POSITIVE_INFINITY)
+        return new CompactPendingWorkComponent({
+          preparingSummary: compactPreparingSummary(block.previews) ?? '',
+          iconStyle: this.iconStyle,
+          ...(Number.isFinite(startedAt) ? { startedAt } : {}),
+        })
+      }
+      return this.streamingToolPreviewComponent(block.previews, width)
+    }
+    if (block.kind === 'pending-user') return this.pendingUserComponentFor(block.row)
+    return this.componentForMessage(block.message, boundary, width, userBoundary)
+  }
+
+  /** Render one projected transcript block. The same helper serves the
+   * structural mount and the content-only refresh path. */
+  private renderTranscriptBlock(
+    block: TranscriptRenderBlock,
+    projectionExpanded: ReadonlySet<number>,
+    boundary: number,
+    userBoundary: number,
+    width: number,
+    resolvedComponent?: Component,
+  ): RenderedTranscriptBlock {
+      const component = resolvedComponent ?? this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
+      const rendered = component.render(width)
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
+      let subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined
+      let deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
-      const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
-      if (block.kind === 'activity') {
-        // The live Thought disclosure; the hidden process rows (if any)
-        // render as ordinary message blocks below it (plan §15).
-        component = this.focusActivityComponentFor(
-          block.activity,
-          projectionExpanded.has(block.activity.turn),
-          this.focusToolDisplayFor(block.activity),
-          this.focusModeEnabled && !projectionExpanded.has(block.activity.turn)
-            ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
-            : undefined,
-        )
-        rendered = component.render(width)
-      } else if (block.kind === 'streaming-tool-previews') {
-        // Live-only preview block.
-        component = this.streamingToolPreviewComponent(block.previews, width)
-        rendered = component.render(width)
-      } else {
-        // Persistent per-message components (stage J): unchanged messages
-        // reuse their component, so the fork's text-identity render caches
-        // actually hit — markdown is not re-parsed for unchanged content.
-        component = this.componentForMessage(block.message, boundary, width)
-        rendered = component.render(width)
+      let userDisclosureHit: UserDisclosureHit | undefined
+      const containerPath = this.rowContainerPath(block)
+      if (block.kind === 'pending-user') {
+        userDisclosureHit = this.userDisclosureHitFor(component, rendered, truncatedMarker, {
+          kind: 'pending',
+          key: pendingUserDisclosureKey(block.row),
+        })
+      } else if (block.kind === 'message') {
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
+        if (isUserMessageDisclosureCandidate(block.message)) {
+          userDisclosureHit = this.userDisclosureHitFor(component, rendered, truncatedMarker, {
+            kind: 'durable',
+            message: block.message,
+          })
+        }
         const subCallInfo = this.subCallHitsByMessage.get(block.message)
         subCallHits = subCallInfo === undefined
           ? undefined
           : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
+        if (subCallInfo !== undefined) {
+          const offset = rendered.length - subCallInfo.total
+          subCallRegions = subCallInfo.regions.map(region => ({
+            ...region,
+            anchorRow: region.anchorRow + offset,
+            rowStart: region.rowStart + offset,
+            rowEnd: region.rowEnd + offset,
+          }))
+        }
+        deliverableRegions = this.deliverableFieldRegionsOf(component, width, block.message)
         const workflowInfo = this.workflowHitsByMessage.get(block.message)
         workflowHits = workflowInfo === undefined
           ? undefined
           : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
       }
+      let mountedComponent: Component | undefined
+      let searchSelection: RenderedSearchSelection | undefined
+      let searchSelector: RenderedSearchSelector | undefined
+      const presentation = this.blockSearchPresentation(block, rendered, subCallRegions, deliverableRegions)
+      if (presentation.selector !== undefined && presentation.selection !== undefined) {
+        searchSelection = presentation.selection
+        searchSelector = presentation.selector
+        mountedComponent = new SearchHighlightComponent(component, presentation.selector, presentation.selection, width, rendered)
+      }
       return {
         block,
         component,
+        ...(mountedComponent === undefined ? {} : { mountedComponent }),
         rendered,
+        ...(searchSelection === undefined ? {} : { searchSelection }),
+        ...(searchSelector === undefined ? {} : { searchSelector }),
         truncatedMarker,
         attachments,
-        ...(collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick }),
+        ...(containerPath === undefined ? {} : { containerPath }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
+        ...(userDisclosureHit === undefined ? {} : { userDisclosureHit }),
+      }
+  }
+
+  /** Render every projected transcript block once for a structural rebuild. */
+  private renderTranscriptBlocks(
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+    blocks = this.transcriptBlocks(projectionExpanded),
+  ): RenderedTranscriptBlock[] {
+    const boundary = this.expandBoundary()
+    const userBoundary = this.userExpandBoundary()
+    return blocks.map(block =>
+      this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width),
+    )
+  }
+
+  /** Resolve rendered matches through the cache owned by the live message
+   * component entry. `componentForMessage()` has already established this
+   * entry before the normal search-presentation pass reaches this helper. */
+  private renderedSearchMatchesFor(
+    message: TranscriptMessage,
+    rendered: readonly string[],
+    query: string,
+  ): readonly AltScreenSearchMatch[] {
+    const entry = this.messageComponents.get(message)
+    if (entry === undefined) throw new Error('rendered search requires a live message component entry')
+    const index = entry.renderedSearchIndex ??= new AltScreenSearchIndex()
+    const result = index.search(rendered, query)
+    this.searchPresentationDiagnostics.renderedMatchLookups += 1
+    if (!result.changed) this.searchPresentationDiagnostics.renderedMatchResultCacheHits += 1
+    return result.matches
+  }
+
+  /** The rendered search presentation of ONE block while a search is active.
+   * The current target builds PROVEN source geometry from the renderer-declared
+   * regions; every other VISIBLE message block that is a semantic match card is
+   * decorated WEAKLY (approximate visual hint, never semantic identity). */
+  private blockSearchPresentation(
+    block: TranscriptRenderBlock,
+    rendered: readonly string[],
+    subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+    deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+  ): { selector?: RenderedSearchSelector; selection?: RenderedSearchSelection; current: boolean } {
+    const target = this.searchTarget
+    if (target === undefined || target.query === '' || block.kind !== 'message') return { current: false }
+    const current = block.message === target.message
+    // Non-current cards must be SEMANTIC match representatives: a card that
+    // merely renders the query in UI chrome is never highlighted.
+    if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
+    const matches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
+    if (!current && matches.length === 0) return { current: false }
+    if (current) {
+      const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
+      const geometry = buildSourceGeometry(matches, regions, transcriptSearchSourceKey(target.match.source))
+      const selector: RenderedSearchSelector = {
+        query: target.query,
+        sourceOccurrence: target.match.sourceOccurrence,
+        ...(geometry === undefined ? {} : { geometry }),
+      }
+      const selection = selectRenderedSearchMatch(matches, selector)
+      const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
+      return {
+        selector,
+        selection: scrollRange === undefined ? selection : { ...selection, scrollRange },
+        current,
+      }
+    }
+    const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0, weakOnly: true }
+    return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
+  }
+
+  /** The proven source regions of one rendered card: renderer-recorded absolute
+   * regions, offset-adjusted PTC sub-call regions, deliverable field regions,
+   * and (for message-kind cards) the whole card as the `message` source region. */
+  private searchSourceRegionsFor(
+    message: TranscriptMessage,
+    renderedLength: number,
+    subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+    deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+  ): SearchSourceRegion[] {
+    const regions: SearchSourceRegion[] = []
+    if (subCallRegions !== undefined) regions.push(...subCallRegions)
+    const cardRegions = this.searchSourceRegionsByMessage.get(message)
+    if (cardRegions !== undefined) regions.push(...cardRegions)
+    if (deliverableRegions !== undefined) regions.push(...deliverableRegions)
+    // A message-kind card's rendered body ALWAYS includes UI chrome (a
+    // `Thinking` header, the user bubble's `❯` marker/continuation indent,
+    // markdown transforms, attachments, the delivered-files tail, …), so the
+    // whole card is never an occurrence-ordinal-preserving projection of
+    // `message.text`: anchor-only. A renderer may later register a
+    // source-only region to upgrade it.
+    if (message.kind !== 'tool' && message.kind !== 'workflow') {
+      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
+    }
+    return regions
+  }
+
+  /** The PROVEN path/description regions of an assistant card's delivered-files
+   * tail. The owning component records each field's row/column span on render;
+   * the walker only adds the component's block-relative offset (prior children
+   * heights), so the geometry belongs to the CURRENT render output. */
+  private deliverableFieldRegionsOf(
+    component: Component,
+    width: number,
+    message: TranscriptMessage,
+  ): ReadonlyArray<SearchSourceRegion> | undefined {
+    if (message.kind !== 'assistant' || message.deliverables === undefined || message.deliverables.length === 0) return undefined
+    if (!(component instanceof Container)) return undefined
+    let row = 0
+    for (const child of component.children) {
+      if (child instanceof DeliveredFilesComponent) {
+        child.render(width)
+        const regions: SearchSourceRegion[] = []
+        for (const span of child.lastFieldSpans) {
+          // The path is RELATIVIZED (a dropped raw prefix shifts every
+          // ordinal): position-only, anchor the path row.
+          if (span.pathEnd > span.pathStart) {
+            regions.push({
+              sourceKey: transcriptSearchSourceKey({ kind: 'assistant-deliverable', index: span.index, field: 'path' }),
+              anchorRow: row + span.pathRow,
+              rowStart: row + span.pathRow,
+              rowEnd: row + span.pathRow + 1,
+              columns: { startCol: span.pathStart, endCol: span.pathEnd },
+              enumerable: false,
+            })
+          }
+          // The description is rendered verbatim but WRAPPED: `wrapTextWithAnsi`
+          // hard-breaks over-wide tokens, and the rendered matcher turns every
+          // physical line boundary into a space — so a raw occurrence can
+          // disappear and a surviving one would be renumbered. Anchor at the
+          // first description row; never enumerate.
+          const first = span.descriptionRows[0]
+          const last = span.descriptionRows[span.descriptionRows.length - 1]
+          if (first !== undefined && last !== undefined) {
+            regions.push({
+              sourceKey: transcriptSearchSourceKey({ kind: 'assistant-deliverable', index: span.index, field: 'description' }),
+              anchorRow: row + first.row,
+              rowStart: row + first.row,
+              rowEnd: row + last.row + 1,
+              enumerable: false,
+            })
+          }
+        }
+        return regions
+      }
+      row += child.render(width).length
+    }
+    return undefined
+  }
+
+  /** The ONE bidirectional disclosure control of a long-user bubble (durable
+   * or pending): the compact marker while collapsed, the tail row while an
+   * expanded compact-capable bubble needs one. The tail is FULLSCREEN-only:
+   * regular draws into the terminal main screen, where an app-owned copy
+   * filter cannot exist, so a visible label there WOULD be copied by the
+   * terminal's native selection — Ctrl+O stays the regular collapse owner. In
+   * fullscreen the tail row is the trailing separator row when one follows,
+   * or one dedicated presentation row charged to the final block (the height
+   * rule mirrors it). */
+  private userDisclosureHitFor(
+    component: Component,
+    rendered: readonly string[],
+    truncatedMarker: boolean,
+    target: UserDisclosureTarget,
+  ): UserDisclosureHit | undefined {
+    const bubble = userDisclosureComponentOf(component)
+    if (bubble === undefined) return undefined
+    const markerRow = bubble.compactMarkerRow()
+    if (markerRow !== undefined) return { row: markerRow, action: 'expand', target }
+    if (this.fullscreen === undefined) return undefined
+    if (!bubble.showsCollapseControl()) return undefined
+    return { row: rendered.length + (truncatedMarker ? 1 : 0), action: 'collapse', target }
+  }
+
+  /**
+   * Re-measure an already-mounted transcript batch without touching component
+   * lifecycle: the SAME `entry.component` instances are re-rendered at the
+   * current width and the height-derived geometry (attachment ranges, sub-call
+   * and workflow hit offsets) is re-derived. No projection, no
+   * `componentForMessage`, no cache replacement, no new component batch.
+   */
+  private remeasureTranscriptBlocks(
+    mounted: readonly RenderedTranscriptBlock[],
+    width: number,
+  ): RenderedTranscriptBlock[] {
+    return mounted.map(entry => {
+      const rendered = entry.component.render(width)
+      if (entry.block.kind === 'pending-user') {
+        const userDisclosureHit = this.userDisclosureHitFor(entry.component, rendered, entry.truncatedMarker, {
+          kind: 'pending',
+          key: pendingUserDisclosureKey(entry.block.row),
+        })
+        return {
+          ...entry,
+          rendered,
+          ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
+        }
+      }
+      if (entry.block.kind !== 'message') {
+        return { ...entry, rendered }
+      }
+      const attachments = this.attachmentRangesOf(entry.component, width)
+      const userDisclosureHit = isUserMessageDisclosureCandidate(entry.block.message)
+        ? this.userDisclosureHitFor(entry.component, rendered, entry.truncatedMarker, {
+            kind: 'durable',
+            message: entry.block.message,
+          })
+        : undefined
+      const subCallInfo = this.subCallHitsByMessage.get(entry.block.message)
+      const subCallHits = subCallInfo === undefined
+        ? undefined
+        : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
+      const subCallRegions = subCallInfo === undefined
+        ? undefined
+        : subCallInfo.regions.map(region => ({
+          ...region,
+          anchorRow: region.anchorRow + (rendered.length - subCallInfo.total),
+          rowStart: region.rowStart + (rendered.length - subCallInfo.total),
+          rowEnd: region.rowEnd + (rendered.length - subCallInfo.total),
+        }))
+      const deliverableRegions = this.deliverableFieldRegionsOf(entry.component, width, entry.block.message)
+      const workflowInfo = this.workflowHitsByMessage.get(entry.block.message)
+      const workflowHits = workflowInfo === undefined
+        ? undefined
+        : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
+      const searchPresentation = this.blockSearchPresentation(entry.block, rendered, subCallRegions, deliverableRegions)
+      const searchSelection = searchPresentation.selection
+      return {
+        ...entry,
+        rendered,
+        attachments,
+        ...(searchSelection === undefined ? { searchSelection: undefined } : { searchSelection }),
+        ...(searchPresentation.selector === undefined ? { searchSelector: undefined } : { searchSelector: searchPresentation.selector }),
+        ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
+        ...(workflowHits === undefined ? { workflowHits: undefined } : { workflowHits }),
+        ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
       }
     })
   }
@@ -6659,18 +9952,27 @@ export class TuiApp {
   private focusLiveTurnOf(block: TranscriptRenderBlock): number | undefined {
     if (block.kind === 'activity') return block.activity.turn
     if (block.kind === 'streaming-tool-previews') return block.turn
+    if (block.kind === 'pending-user') return undefined
+    if (block.kind === 'work') return block.span.turn
+    if (block.kind === 'context-cluster') return block.cluster.turn
     return 'turn' in block.message ? block.message.turn : undefined
   }
 
   /** The normal physical height charged to one rendered block, preserving the
-   * existing zero-row and original-index Spacer rules exactly. */
+   * existing zero-row and original-index Spacer rules exactly. An expanded
+   * long-user tail control REUSES the trailing separator row when one
+   * follows; for the final block it is one dedicated presentation row, so the
+   * height must charge it here (the row map and the mounted tree share this
+   * single rule). */
   private normalTranscriptBlockHeight(
     entry: RenderedTranscriptBlock,
     index: number,
     total: number,
   ): number {
     if (entry.rendered.length === 0 && !entry.truncatedMarker) return 0
-    return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + (index < total - 1 ? 1 : 0)
+    const trailing = index < total - 1 ? 1 : 0
+    const tailControl = entry.userDisclosureHit?.action === 'collapse' && trailing === 0 ? 1 : 0
+    return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + trailing + tailControl
   }
 
   /** Drop presentation floors and their measured padding. */
@@ -6683,7 +9985,7 @@ export class TuiApp {
    * epoch. Leaving history keeps the existing floor active; explicit lifecycle
    * and structural boundaries release it. */
   private focusLivePaddingEnabled(): boolean {
-    const enabled = this.focusModeEnabled
+    const enabled = isFocusDisplayPreset(this.displayState.preset)
       && this.fullscreen !== undefined
       && this.fullscreenScroll !== undefined
     if (!enabled) this.clearFocusLiveHeightState()
@@ -6769,85 +10071,211 @@ export class TuiApp {
     const block = entry.block
     return {
       ...(block.kind === 'message' ? { message: block.message } : block.kind === 'activity' ? { activity: block.activity } : {}),
-      ...(entry.collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick: entry.collapseFocusOwnerOnClick }),
+      ...(block.kind === 'pending-user' ? { pendingKey: pendingUserDisclosureKey(block.row) } : {}),
+      ...(block.kind === 'work' ? { workOwner: block.span.owner } : {}),
+      ...(block.kind === 'context-cluster' ? { clusterOwner: block.cluster.owner } : {}),
+      ...(entry.containerPath === undefined ? {} : { containerPath: entry.containerPath }),
       height,
       attachments: entry.attachments,
       ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
       ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
+      ...(entry.userDisclosureHit === undefined ? {} : { userDisclosureHit: entry.userDisclosureHit }),
       hasTrailingSpacer,
     }
   }
 
-  /** Rebuild the message component tree from the current transcript state. */
-  private rebuildMessages(): void {
-    // Every rebuild path (transcript updates AND local-card push/replace/
-    // clear) prunes the cache to the live set first. The derived
-    // projection set is computed ONCE per rebuild and shared by the
-    // pruning pass, the projection and every activity-component
-    // construction (review findings).
-    const projectionExpanded = this.focusProjectionExpandedTurns()
-    this.pruneMessageComponents(projectionExpanded)
-    this.messagesView.clear()
-    this.messagesView.addChild(this.welcomeCard)
-    // Row heights for mouse hit-testing: components render (and cache) at
-    // the transcript CONTENT width — the same width the gutter wrapper feeds
-    // the frame pass — so the heights match the screen exactly.
-    const width = this.transcriptRenderWidth()
-    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
+  /** Publish row geometry from one already-rendered block batch. Structural
+   * rebuilds also mount the batch; content commits reuse the existing mounts. */
+  private updateTranscriptGeometry(
+    renderedBlocks: readonly RenderedTranscriptBlock[],
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+    mount: boolean,
+  ): void {
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
-    // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
-    // a session never reads as one undifferentiated wall of text. The spacer
-    // remains charged to the preceding semantic block. Stabilizer rows are
-    // separate inert entries after that existing boundary spacer.
+    this.currentSearchTranscriptRange = undefined
+    let transcriptRow = 0
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
+      const scrollRange = entry.searchSelection?.scrollRange
+      if (scrollRange !== undefined) {
+        this.currentSearchTranscriptRange = {
+          startRow: transcriptRow + scrollRange.startRow,
+          endRow: transcriptRow + scrollRange.endRow,
+        }
+      }
       if (height === 0) {
         rows.push(this.fullscreenRowEntry(entry, 0, false))
       } else {
-        // The host-owned transcript gutter applies at THIS boundary: every
-        // block — host card or plugin-rendered component — renders inside
-        // the transcript content width, so no renderer needs to know the
-        // terminal gutter exists (the transcript right-gutter contract).
-        this.messagesView.addChild(new TranscriptGutterComponent(entry.component))
-        // The max-tokens truncated marker rides under the final assistant
-        // (plan §13.8): one muted row, charged to the message's hit region.
-        if (entry.truncatedMarker) {
-          const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
-          this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
+        if (mount) {
+          const gutter = new TranscriptGutterComponent(entry.mountedComponent ?? entry.component)
+          entry.mount = gutter
+          this.messagesView.addChild(gutter)
+          if (entry.truncatedMarker) {
+            const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
+            this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
+          }
+          const hasTrailingSpacer = index < renderedBlocks.length - 1
+          if (entry.userDisclosureHit?.action === 'collapse') {
+            this.messagesView.addChild(new TranscriptGutterComponent(this.userCollapseControlText(width)))
+          } else if (hasTrailingSpacer) {
+            this.messagesView.addChild(new Spacer())
+          }
         }
-        const hasTrailingSpacer = index < renderedBlocks.length - 1
-        rows.push(this.fullscreenRowEntry(entry, height, hasTrailingSpacer))
-        if (hasTrailingSpacer) this.messagesView.addChild(new Spacer())
+        rows.push(this.fullscreenRowEntry(entry, height, index < renderedBlocks.length - 1))
       }
       const padding = paddingRows.get(index) ?? 0
       if (padding > 0) {
-        this.messagesView.addChild(new FocusLivePaddingComponent(
-          () => this.focusLivePaddingRows.get(index) ?? 0,
-          () => this.focusLivePaddingEnabled(),
-        ))
+        if (mount) {
+          this.messagesView.addChild(new FocusLivePaddingComponent(
+            () => this.focusLivePaddingRows.get(index) ?? 0,
+            () => this.focusLivePaddingEnabled(),
+          ))
+        }
         rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
       }
+      transcriptRow += height + padding
     })
-    if (this.transcriptWindowHint !== '') {
-      // This is a presentation hint, not a transcript message: it is rebuilt
-      // with the bounded projection and never enters the full-history search
-      // corpus or Focus activity rows.
-      this.messagesView.addChild(new TranscriptGutterComponent(
-        new Text(color.textDim(this.transcriptWindowHint), 0, 0),
-      ))
+    let chromeHeight = this.transcriptChromeHeight
+    if (mount) {
+      chromeHeight = 0
+      if (this.transcriptWindowHint !== '') {
+        const hint = new TranscriptGutterComponent(new Text(color.textDim(this.transcriptWindowHint), 0, 0))
+        this.messagesView.addChild(hint)
+        chromeHeight += hint.render(this.terminal.columns).length
+      }
+      if (this.notifyText !== '') {
+        const line = this.notifyKind === 'info'
+          ? color.textDim(`ℹ ${this.notifyText}`)
+          : color.error(`✗ ${this.notifyText}`)
+        const notice = new TranscriptGutterComponent(new Text(line, 0, 0))
+        this.messagesView.addChild(notice)
+        chromeHeight += notice.render(this.terminal.columns).length
+      }
     }
-    if (this.notifyText !== '') {
-      // Errors flash red with a ✗; informational notices render dim with a ℹ
-      // so a successful action never reads as a failure. The notify row is
-      // part of the transcript visual surface: it shares the content width
-      // (plan §6.1), so a long notice wraps inside the gutter too.
-      const line = this.notifyKind === 'info'
-        ? color.textDim(`ℹ ${this.notifyText}`)
-        : color.error(`✗ ${this.notifyText}`)
-      this.messagesView.addChild(new TranscriptGutterComponent(new Text(line, 0, 0)))
-    }
+    this.transcriptChromeHeight = chromeHeight
+    if (mount) this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
+    this.fullscreenRowsDirty = true
+  }
+
+  /** Refresh aligned transcript blocks without clearing the mounted tree.
+   * Component caches decide which blocks are dirty; unchanged metadata remains
+   * reference-stable and is reused for the new row map. */
+  private refreshTranscriptContent(
+    blocks: readonly TranscriptRenderBlock[],
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+  ): { kind: 'content' | 'noop' | 'structural'; dirtyBlocks: number; mountReplacements: number } {
+    const mounted = this.mountedTranscriptBlocks
+    if (mounted.length !== blocks.length) return { kind: 'structural', dirtyBlocks: 0, mountReplacements: 0 }
+    for (let index = 0; index < blocks.length; index += 1) {
+      if (!sameTranscriptBlockShape(mounted[index]!.block, blocks[index]!)) {
+        return { kind: 'structural', dirtyBlocks: 0, mountReplacements: 0 }
+      }
+    }
+
+    const boundary = this.expandBoundary()
+    const userBoundary = this.userExpandBoundary()
+    const previousPadding = new Map(this.focusLivePaddingRows)
+    const refreshed: RenderedTranscriptBlock[] = []
+    let dirtyBlocks = 0
+    let mountReplacements = 0
+    for (let index = 0; index < blocks.length; index += 1) {
+      const previous = mounted[index]!
+      const block = blocks[index]!
+      let component: Component
+      if (block.kind === 'message' && previous.block.kind === 'message'
+        && block.message.kind === 'summary' && previous.block.message.kind === 'summary'
+        && block.message.text === previous.block.message.text) {
+        // `window()` creates a fresh summary object for equivalent projections;
+        // keep the already-mounted summary component instead of growing a
+        // cache entry for an object whose semantic presentation is unchanged.
+        component = previous.component
+      } else if (block.kind === 'streaming-tool-previews' && previous.block.kind === 'streaming-tool-previews'
+        && sameStreamingToolPreviews(block.previews, previous.block.previews)) {
+        component = previous.component
+      } else if (block.kind === 'pending-user' && previous.block.kind === 'pending-user'
+        && samePendingUserRow(block.row, previous.block.row)) {
+        component = previous.component
+      } else {
+        component = this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
+      }
+
+      if (component === previous.component) {
+        refreshed.push({ ...previous, block })
+        continue
+      }
+      // Search highlight wrappers carry geometry tied to the old rendered
+      // text. Until an in-place wrapper update is proven safe, one structural
+      // rebuild is the correctness-preserving fallback.
+      if (this.searchTarget !== undefined) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+      const next = this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width, component)
+      const oldZero = previous.rendered.length === 0 && !previous.truncatedMarker
+      const nextZero = next.rendered.length === 0 && !next.truncatedMarker
+      if (oldZero !== nextZero
+        || previous.truncatedMarker !== next.truncatedMarker
+        || previous.userDisclosureHit?.action !== next.userDisclosureHit?.action) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+      if (nextZero) {
+        refreshed.push({ ...next, mount: undefined })
+      } else {
+        const mount = previous.mount
+        if (mount === undefined) return { kind: 'structural', dirtyBlocks, mountReplacements }
+        mount.replace(next.mountedComponent ?? next.component)
+        refreshed.push({ ...next, mount })
+        mountReplacements += 1
+      }
+      dirtyBlocks += 1
+    }
+
+    if (dirtyBlocks === 0) {
+      // Equivalent fresh projections still advance the published block batch;
+      // no-op means no render or geometry work, not stale metadata.
+      this.mountedTranscriptBlocks = refreshed
+      return { kind: 'noop', dirtyBlocks: 0, mountReplacements: 0 }
+    }
+    this.mountedTranscriptBlocks = refreshed
+    this.updateTranscriptGeometry(refreshed, projectionExpanded, width, false)
+    for (const [index, rows] of this.focusLivePaddingRows) {
+      if ((previousPadding.has(index)) !== (rows > 0)) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+    }
+    for (const index of previousPadding.keys()) {
+      if (!this.focusLivePaddingRows.has(index)) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+    }
+    return { kind: 'content', dirtyBlocks, mountReplacements }
+  }
+
+  /** Rebuild the message component tree from the current transcript state. */
+  private rebuildMessages(
+    reason: TranscriptRebuildReason = 'other',
+    projectionExpanded = this.focusProjectionExpandedTurns(),
+    blocks = this.transcriptBlocks(projectionExpanded),
+  ): void {
+    void reason
+    this.searchPresentationDiagnostics.rebuilds += 1
+    // Every rebuild path prunes the cache to the live set first. The caller
+    // supplies the already-derived projection blocks when setTranscript() has
+    // classified the commit, so the semantic epoch is projected once.
+    this.pruneMessageComponents(projectionExpanded, blocks)
+    this.messagesView.clear()
+    this.messagesView.addChild(this.welcomeCard)
+    const width = this.transcriptRenderWidth()
+    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width, blocks)
+    // Publish the batch that this rebuild is about to mount. Measurement paths
+    // (refreshMessageRows) read it instead of projecting a second batch.
+    this.mountedTranscriptBlocks = renderedBlocks
+    this.updateTranscriptGeometry(renderedBlocks, projectionExpanded, width, true)
+    this.transcriptPresentationCommitted = true
     this.renderTodoPanel()
     this.requestRender()
   }
@@ -6936,22 +10364,105 @@ export class TuiApp {
    * Must measure at the SAME transcript content width the frame paints at
    * (the gutter contract), or the hit map drifts from the layout. */
   private refreshMessageRows(): void {
+    this.searchPresentationDiagnostics.remeasures += 1
     const width = this.transcriptRenderWidth()
-    // The derived projection set is computed ONCE per refresh (never per
-    // activity block — review finding), and the same rendered metadata drives
-    // both the high-water measurement and the hit map.
+    // Measurement-only: the derived projection set is read once, and the
+    // MOUNTED batch is remeasured in place. Projecting a second component batch
+    // here used to advance the message-component cache ownership independently
+    // of the components still mounted in `messagesView`, so a later prune could
+    // dispose the mounted live-assistant component and a paint rendered it as
+    // zero rows (fullscreen Focus transient collapse).
     const projectionExpanded = this.focusProjectionExpandedTurns()
-    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
+    const remeasureStart = this.scrollProfiler.enabled ? performance.now() : 0
+    const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
+    if (this.scrollProfiler.enabled) this.scrollFrameRemeasureMs += performance.now() - remeasureStart
+    // Keep the MOUNTED highlight wrapper on the SAME geometry epoch as this
+    // row map / scroll anchor: a stale selector would paint a strong occurrence
+    // for geometry the viewport no longer uses.
+    for (const entry of renderedBlocks) {
+      const mounted = entry.mountedComponent
+      if (!(mounted instanceof SearchHighlightComponent)) continue
+      if (entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
+        mounted.updateSelector(entry.searchSelector, entry.searchSelection, width, entry.rendered)
+      } else {
+        // The block is no longer part of the presentation: a measurement-only
+        // remeasure keeps the mounted wrapper, so explicitly stop decorating.
+        mounted.clear()
+      }
+    }
+    // Publish the remeasured metadata too. Otherwise the next no-op/content
+    // commit could reuse stale rendered lengths after an async image resize.
+    this.mountedTranscriptBlocks = renderedBlocks
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
+    this.currentSearchTranscriptRange = undefined
+    let transcriptRow = 0
     for (let index = 0; index < renderedBlocks.length; index += 1) {
       const entry = renderedBlocks[index]!
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
+      const scrollRange = entry.searchSelection?.scrollRange
+      if (scrollRange !== undefined) {
+        this.currentSearchTranscriptRange = {
+          startRow: transcriptRow + scrollRange.startRow,
+          endRow: transcriptRow + scrollRange.endRow,
+        }
+      }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
       if (padding > 0) rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+      transcriptRow += height + padding
     }
+    this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + this.transcriptChromeHeight
     this.messageRows = rows
+    this.fullscreenRowsDirty = true
+  }
+
+  /** Reveal the fullscreen transcript viewport on the current search range
+   * (plan S7 §12): reuse the geometry the last rebuild/remeasure already
+   * measured (perf plan S2 §5.6 — an ordinary search jump must NOT re-render
+   * the whole mounted view). An already-visible range is left in place; an
+   * outside range is positioned about one third down the viewport. Regular mode
+   * has no app-owned ScrollView — its materialized window is the contract. */
+  scrollToSearchTarget(): void {
+    const scroll = this.fullscreenScroll
+    const searchRange = this.currentSearchTranscriptRange
+    if (scroll === undefined || searchRange === undefined) return
+    const viewportHeight = scroll.viewportHeight
+    scroll.updateLayout(this.transcriptContentHeight, viewportHeight, () => this.requestRender())
+    if (viewportHeight <= 0) return
+
+    const before = scroll.scrollTop
+    const targetStart = this.transcriptWelcomeHeight + searchRange.startRow
+    const targetEnd = this.transcriptWelcomeHeight + searchRange.endRow
+    const visibleBottom = before + viewportHeight - 1
+    if (targetStart >= before && targetEnd <= visibleBottom) return
+
+    const desiredTop = Math.max(0, targetStart - Math.floor(viewportHeight / 3))
+    scroll.scrollTo(desiredTop, { disableFollow: true })
+  }
+
+  /** Discard any open scroll-profiler frame window WITHOUT emitting. Called
+   * by every seam that terminates or pauses the paint loop (fullscreen
+   * swap/exit, external-editor suspend, stop, dispose): the suspended
+   * lifecycle cannot paint, so a window latched across it would attribute
+   * the pause to whatever frame repaints after the resume. */
+  private resetScrollProfileFrame(): void {
+    this.scrollFramePending = false
+    this.scrollFrameWriteMs = 0
+    this.scrollFrameBytes = 0
+    this.scrollFrameRowsRewritten = 0
+    this.scrollFrameRemeasureMs = 0
+  }
+
+  /** An async image settle invalidates ONLY the thumbnail component: the
+   * resolved bytes can change the attachment's rendered rows, so the next
+   * paint-snapshot commit must remeasure instead of reusing the committed
+   * row geometry (geometry epoch — docs/perf-baseline.md). Every
+   * `ImageThumbnail` render-request wiring MUST go through here. */
+  private settleThumbnailRender(): void {
+    this.fullscreenRowsDirty = true
+    this.requestRender()
   }
 
   /** The live collapse flag for ONE image-block occurrence (message object
@@ -6976,7 +10487,7 @@ export class TuiApp {
     // Rebuild so the row map reflects the new heights immediately (the
     // thumbnail's render cache key carries the collapse bit, so the cached
     // message component re-renders in place).
-    this.rebuildMessages()
+    this.rebuildMessages('transcript-structure')
   }
 
   /**
@@ -7050,7 +10561,9 @@ export class TuiApp {
   /** Capture the rendered top and bottom transcript rows before replacing a
    * virtual window. The row identity plus intra-row offset lets the caller
    * preserve a real visual position even when neighboring messages have very
-   * different wrapped heights. */
+   * different wrapped heights. Compact Work / Context-cluster rows are
+   * identified by their stable owner message, so toggling the disclosure that
+   * owns the anchored row never loses the semantic position. */
   captureTranscriptViewportAnchor(): TranscriptViewportAnchor | undefined {
     const scroll = this.fullscreenScroll
     if (scroll === undefined || scroll.viewportHeight <= 0) return undefined
@@ -7063,26 +10576,26 @@ export class TuiApp {
       let rowTop = welcomeHeight
       let candidate: TranscriptViewportAnchorPoint | undefined
       for (const entry of this.messageRows) {
-        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
-        const turn = entry.message !== undefined && 'turn' in entry.message
-          ? entry.message.turn
-          : entry.activity?.turn
-        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
-        const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
-        if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
+        const identity = this.viewportAnchorIdentity(entry)
+        const { rowKind, turn } = identity
+        const occurrence = identity.occurrenceKey === undefined ? 0 : (occurrences.get(identity.occurrenceKey) ?? 0)
+        if (identity.occurrenceKey !== undefined) occurrences.set(identity.occurrenceKey, occurrence + 1)
         const visible = entry.height > 0
           && rowTop + entry.height > viewportTop
           && rowTop <= viewportBottom
-        if (visible && turn !== undefined) {
+        if (visible && (turn !== undefined || entry.pendingKey !== undefined)) {
           const line = fromTop
             ? Math.max(viewportTop, rowTop)
             : Math.min(viewportBottom, rowTop + entry.height - 1)
           const point: TranscriptViewportAnchorPoint = {
-            turn,
             rowKind,
+            ...(turn === undefined ? {} : { turn }),
             occurrence,
             ...(entry.message === undefined ? {} : { message: entry.message }),
             ...(entry.activity === undefined ? {} : { activity: entry.activity }),
+            ...(entry.pendingKey === undefined ? {} : { pendingKey: entry.pendingKey }),
+            ...(entry.workOwner === undefined ? {} : { workOwner: entry.workOwner }),
+            ...(entry.clusterOwner === undefined ? {} : { clusterOwner: entry.clusterOwner }),
             rowOffset: line - rowTop,
             viewportOffset: line - viewportTop,
           }
@@ -7100,6 +10613,31 @@ export class TuiApp {
     }
   }
 
+  /** The viewport-anchor identity of one row-map entry. Shared by the capture
+   * and the restore walk so both sides compute the EXACT same kind/turn/
+   * occurrence triple (a Compact Work span and a Context cluster are distinct
+   * kinds; several of them can share one turn). */
+  private viewportAnchorIdentity(entry: FullscreenRowEntry): {
+    rowKind: TranscriptViewportAnchorPoint['rowKind']
+    turn: number | undefined
+    occurrenceKey: string | undefined
+  } {
+    if (entry.pendingKey !== undefined) {
+      return { rowKind: 'pending-user', turn: undefined, occurrenceKey: `pending-user:${entry.pendingKey}` }
+    }
+    const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.workOwner !== undefined
+      ? 'work'
+      : entry.clusterOwner !== undefined
+        ? 'context-cluster'
+        : entry.activity === undefined ? 'message' : 'activity'
+    const turn = entry.message !== undefined && 'turn' in entry.message
+      ? entry.message.turn
+      : entry.activity?.turn
+        ?? (entry.workOwner !== undefined && 'turn' in entry.workOwner ? entry.workOwner.turn : undefined)
+        ?? (entry.clusterOwner !== undefined && 'turn' in entry.clusterOwner ? entry.clusterOwner.turn : undefined)
+    return { rowKind, turn, occurrenceKey: turn === undefined ? undefined : `${rowKind}:${turn}` }
+  }
+
   /** Restore a previously captured visual position after the transcript
    * projection changes. Paging toward older turns keeps the old top edge;
    * paging toward newer turns keeps the old bottom edge. If the preferred
@@ -7112,7 +10650,7 @@ export class TuiApp {
     if (scroll === undefined) return false
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = scroll.viewportHeight
     scroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     const welcomeHeight = this.welcomeCard.render(width).length
@@ -7121,23 +10659,27 @@ export class TuiApp {
       const occurrences = new Map<string, number>()
       let rowTop = welcomeHeight
       for (const entry of this.messageRows) {
-        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
-        const turn = entry.message !== undefined && 'turn' in entry.message
-          ? entry.message.turn
-          : entry.activity?.turn
-        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
-        const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
-        if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
+        const identity = this.viewportAnchorIdentity(entry)
+        const { rowKind, turn } = identity
+        const occurrence = identity.occurrenceKey === undefined ? 0 : (occurrences.get(identity.occurrenceKey) ?? 0)
+        if (identity.occurrenceKey !== undefined) occurrences.set(identity.occurrenceKey, occurrence + 1)
         if (entry.height <= 0) {
           rowTop += entry.height
           continue
         }
         const located = { top: rowTop, height: entry.height }
-        const exact = point.rowKind === rowKind && (
-          point.message !== undefined
-            ? entry.message === point.message
-            : point.activity !== undefined && entry.activity === point.activity
-        )
+        if (point.rowKind === 'pending-user') {
+          if (entry.pendingKey !== undefined && entry.pendingKey === point.pendingKey) return located
+          rowTop += entry.height
+          continue
+        }
+        let exact = false
+        if (point.rowKind === rowKind) {
+          if (point.message !== undefined) exact = entry.message === point.message
+          else if (point.activity !== undefined) exact = entry.activity === point.activity
+          else if (point.workOwner !== undefined) exact = entry.workOwner === point.workOwner
+          else if (point.clusterOwner !== undefined) exact = entry.clusterOwner === point.clusterOwner
+        }
         if (exact) return located
         if (turn === point.turn && rowKind === point.rowKind && occurrence === point.occurrence) return located
         rowTop += entry.height
@@ -7145,14 +10687,21 @@ export class TuiApp {
       return undefined
     }
     const points = edge === 'top' ? [anchor.top, anchor.bottom] : [anchor.bottom, anchor.top]
+    let sawPendingPoint = false
     for (const point of points) {
       if (point === undefined) continue
+      if (point.rowKind === 'pending-user') sawPendingPoint = true
       const row = rowFor(point)
       if (row === undefined) continue
       const rowOffset = Math.max(0, Math.min(row.height - 1, point.rowOffset))
       scroll.scrollTo(row.top + rowOffset - point.viewportOffset, { disableFollow: true })
       return true
     }
+    // A pending-user anchor is SEMANTIC-ONLY: the ephemeral row has no durable
+    // identity to fall back to, so an unresolved pending point never copies the
+    // pre-mutation absolute scrollTop over the live position (plan §35.8). The
+    // layout update above already clamped the current position; leave it there.
+    if (sawPendingPoint) return false
     scroll.scrollTo(anchor.scrollTop, { disableFollow: true })
     return false
   }
@@ -7210,6 +10759,11 @@ export class TuiApp {
     return this.notifyText
   }
 
+  /** Headless-test hook: the current pending-input presentation rows. */
+  pendingInputForTest(): { queued: readonly QueueItem[]; steering: readonly PendingUserRow[] } {
+    return { queued: this.queueItems, steering: this.pendingUserRows }
+  }
+
   fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined {
     if (this.fullscreenScroll === undefined) return undefined
     const contentHeight = this.messagesView.render(this.terminal.columns).length
@@ -7245,6 +10799,30 @@ export class TuiApp {
     return new Set(this.focusExpandedTurns)
   }
 
+  /** Test hook: a COPY of the live Compact Work-span disclosure owners. */
+  expandedWorkOwnersForTest(): ReadonlySet<TranscriptMessage> {
+    return new Set(this.expandedWorkOwners)
+  }
+
+  /** Test hook: a COPY of the live ambient Context-cluster disclosure owners. */
+  expandedContextClusterOwnersForTest(): ReadonlySet<TranscriptMessage> {
+    return new Set(this.expandedContextClusterOwners)
+  }
+
+  /** Test hook: open every canonical Work span (the nested-Work inspection
+   * precondition for the secondary-disclosure suites). */
+  expandAllWorkSpansForTest(): void {
+    for (const span of this.canonicalStructureIndex().workSpans) this.expandedWorkOwners.add(span.owner)
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages('focus-disclosure')
+  }
+
+  /** Test hook: the app-owned Focus timer store (the live duration facts a
+   * headless test asserts without a rendered header). */
+  focusTimingForTest(): FocusTimingStore {
+    return this.focusTiming
+  }
+
   /**
    * Set the live session's auto-generated title (from the session/title
    * log) for the header; undefined clears it.
@@ -7273,15 +10851,75 @@ export class TuiApp {
    * from its last-painted render (it lives inside the scroll content, so
    * it has no layout box of its own), the scroll state from the
    * ScrollView (final after the layout pass), and the transcript
-   * projection from a FRESH re-measure (the layout engine re-measures
-   * every component every frame, but the messageRows map is only rebuilt
-   * on transcript changes — an async image load that repainted between
-   * rebuilds would leave the map stale; the re-measure at this boundary
-   * is the painted projection). The snapshot keeps STABLE values only. */
+   * projection from the GEOMETRY EPOCH: the row map is re-measured here
+   * only when `fullscreenRowsDirty` says transcript geometry may have
+   * changed (a row-map writer ran, an async image settled, the terminal
+   * resized) or no snapshot exists yet; a pure repaint — a scroll, an
+   * editor keystroke, a chrome tick — reuses the committed rows and
+   * copyBlankRows verbatim. Async image staleness is owned by the settle
+   * seam (`settleThumbnailRender`), NOT by this boundary. The
+   * click-time live re-checks keep their own `refreshMessageRows` calls,
+   * so the press/release fence still measures live state. Chrome heights
+   * and scroll state are re-read fresh on EVERY commit. Contract:
+   * docs/perf-baseline.md ("geometry-epoch snapshot reuse"). The snapshot
+   * keeps STABLE values only. */
   private commitFullscreenPaintSnapshot(): void {
+    const snapshotStart = this.scrollProfiler.enabled ? performance.now() : 0
+    const previousSnapshot = this.fullscreenPaintSnapshot
+    const columns = this.terminal.columns
+    const termRows = this.terminal.rows
+    const resized = previousSnapshot !== undefined
+      && (previousSnapshot.columns !== columns || previousSnapshot.termRows !== termRows)
+    if (resized) {
+      this.clearFullscreenPointerGestures()
+      // A resize re-wraps every block at the new width: the committed row
+      // geometry cannot survive it even when no rebuild ran yet.
+      this.fullscreenRowsDirty = true
+    }
     const scroll = this.fullscreenScroll
     const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
-    this.refreshMessageRows()
+    // Geometry epoch (perf plan §19 candidate 1): the expensive row snapshot
+    // (remeasure + per-row hit identities) is only recomputed when transcript
+    // geometry may actually have changed. A pure repaint — a scroll, an
+    // editor keystroke, a footer/activity tick — reuses the committed `rows`
+    // and `copyBlankRows` verbatim; chrome heights and scroll state below are
+    // still re-read fresh from the painted frame. The click-time re-checks
+    // keep their own `refreshMessageRows` calls, so press/release validation
+    // measures live state exactly as before.
+    const rowsDirty = this.fullscreenRowsDirty
+    let rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+    let copyBlankRows: ReadonlySet<number>
+    const refreshStart = this.scrollProfiler.enabled ? performance.now() : 0
+    let refreshEnd = refreshStart
+    let hitsEnd = refreshStart
+    if (previousSnapshot === undefined || rowsDirty) {
+      this.refreshMessageRows()
+      this.fullscreenRowsDirty = false
+      refreshEnd = this.scrollProfiler.enabled ? performance.now() : 0
+      const welcomeHeight = this.welcomeCard.lastRenderedHeight
+      // The painted rows whose copy source is presentation chrome, derived from
+      // the SAME projection/height base as `rows` below (the last-painted
+      // frame), so the copy filter can never reinterpret a row against a newer,
+      // not-yet-painted rebuild.
+      const freshCopyBlankRows = new Set<number>()
+      let rowTop = welcomeHeight
+      for (const entry of this.messageRows) {
+        const hit = entry.userDisclosureHit
+        if (hit !== undefined && hit.action === 'collapse') freshCopyBlankRows.add(rowTop + hit.row)
+        rowTop += entry.height
+      }
+      const hitsStart = this.scrollProfiler.enabled ? performance.now() : 0
+      rows = this.messageRows.map((entry, index) => ({
+        ownerId: this.fullscreenRowOwnerId(entry, index),
+        height: entry.height,
+        hits: this.fullscreenRowHits(entry, index),
+      }))
+      hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
+      copyBlankRows = freshCopyBlankRows
+    } else {
+      rows = previousSnapshot.rows
+      copyBlankRows = previousSnapshot.copyBlankRows
+    }
     this.fullscreenPaintSnapshot = {
       columns: this.terminal.columns,
       termRows: this.terminal.rows,
@@ -7296,11 +10934,28 @@ export class TuiApp {
       dockHeight: paintedHeight(this.dock),
       scrollTop: scroll?.scrollTop ?? 0,
       viewportHeight: scroll?.viewportHeight ?? 0,
-      rows: this.messageRows.map((entry, index) => ({
-        ownerId: this.fullscreenRowOwnerId(entry, index),
-        height: entry.height,
-        hits: this.fullscreenRowHits(entry, index),
-      })),
+      rows,
+      copyBlankRows,
+    }
+    if (this.scrollProfiler.enabled && this.scrollFramePending) {
+      const now = performance.now()
+      this.scrollProfiler.emit({
+        latency: now - this.scrollFrameStart,
+        write: this.scrollFrameWriteMs,
+        snapshot: now - snapshotStart,
+        refresh: refreshEnd - refreshStart,
+        remeasure: this.scrollFrameRemeasureMs,
+        hits: hitsEnd - refreshEnd,
+        bytes: this.scrollFrameBytes,
+        rowsRewritten: this.scrollFrameRowsRewritten,
+        blocks: this.mountedTranscriptBlocks.length,
+        rows: this.messageRows.reduce((total, entry) => total + entry.height, 0),
+        viewport: scroll?.viewportHeight ?? 0,
+        scrollTop: scroll?.scrollTop ?? 0,
+        preset: this.displayPreset(),
+        searchActive: this.searchOverlay !== undefined,
+      })
+      this.scrollFramePending = false
     }
   }
 
@@ -7330,27 +10985,45 @@ export class TuiApp {
 
   /** The per-row SEMANTIC hit identity of one transcript row (mouse
    * parity): the row's ACTUAL action target, following the click-path
-   * priority EXACTLY (blank-row escape hatch > Focus activity > PTC
-   * sub-call > Workflow > attachment > Focus-secondary/card). A row
-   * inside a Workflow card that matches no hit is INERT (the card
-   * consumes every click — it must never fall through to the owner/card
-   * branch). Shared by the paint-snapshot commit and the release-click
-   * validation so both sides compute the EXACT same identity string. */
+   * priority EXACTLY (long-user disclosure > blank-row escape hatch > Focus
+   * activity > PTC sub-call > Workflow > attachment > Focus-secondary/card).
+   * The long-user control wins first because it shares the trailing separator
+   * row with the blank-row escape hatch; a row inside a Workflow card that
+   * matches no hit is INERT (the card consumes every click — it must never
+   * fall through to the owner/card branch). Shared by the paint-snapshot
+   * commit and the release-click validation so both sides compute the EXACT
+   * same identity string. */
   private fullscreenRowHitIdentity(
     entry: FullscreenRowEntry,
     inMessage: number,
     nextVisible: FullscreenRowEntry | undefined,
   ): string {
-    // The blank-row escape hatch: the click collapses the owner Thought
-    // (the boundary spacer is unclaimed → inert).
+    // The long-user disclosure control wins FIRST: it sits on the trailing
+    // separator row (or one dedicated final row), which the generic blank-row
+    // escape hatch would otherwise consume. Only the EXACT control row is a
+    // target; every other bubble row is INERT so ordinary user text keeps
+    // selection/copy semantics and never becomes an implicit button.
+    if (entry.userDisclosureHit !== undefined) {
+      return inMessage === entry.userDisclosureHit.row
+        ? this.userDisclosureHitIdentity(entry.userDisclosureHit)
+        : 'inert'
+    }
+    // The blank-row escape hatch: the click collapses the NEAREST shared
+    // semantic container of this row and the next VISIBLE row (the boundary
+    // spacer is unclaimed → inert).
     if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
-      const owner = this.blankRowFocusCollapseOwner(entry, nextVisible)
-      return owner !== undefined ? `focus:collapse:${owner}` : 'inert'
+      const owner = this.blankRowContainerCollapseOwner(entry, nextVisible)
+      return owner === undefined ? 'inert' : this.containerCollapseHitIdentity(owner)
     }
     // A Focus Thought block: the whole rendered block toggles the turn.
     if (entry.activity !== undefined) {
       return `focus:toggle:${entry.activity.turn}`
     }
+    // A Compact/Focus Work span / ambient Context cluster: the whole rendered
+    // block (header AND its collapsed preview rows) toggles that span's
+    // disclosure. The owner identity is the span/cluster OWNER message.
+    if (entry.workOwner !== undefined) return `work:toggle:${this.identityToken(entry.workOwner)}`
+    if (entry.clusterOwner !== undefined) return `cluster:toggle:${this.identityToken(entry.clusterOwner)}`
     const message = entry.message
     if (message === undefined) return 'inert'
     const token = this.identityToken(message)
@@ -7374,15 +11047,46 @@ export class TuiApp {
         return `attachment:${token}:${attachment.imageIndex}`
       }
     }
-    // Focus owner-marked rows: a SECONDARY card toggles ITSELF (the
-    // card-level identity); a NON-secondary process row collapses the
-    // owner turn.
-    if (entry.collapseFocusOwnerOnClick !== undefined) {
-      if (isFocusSecondaryDisclosure(message)) return `message:toggle:${token}`
-      return `focus:collapse:${entry.collapseFocusOwnerOnClick}`
+    // Nearest semantic container from the PROJECTED ancestry: a foldable card
+    // toggles ITSELF; every other process row collapses the nearest container
+    // (nested Work beats the outer Thought).
+    const container = this.nearestRowContainer(entry)
+    if (container !== undefined) {
+      if (isFoldableMessageDisclosure(message)) return `message:disclosure:${token}`
+      return this.containerCollapseHitIdentity(container)
     }
-    // The card-level toggle.
-    return `message:toggle:${token}`
+    // The card-level toggle. Generic foldable message cards get a distinct
+    // identity so the modal inspection whitelist can never reinterpret an
+    // ordinary message toggle as a disclosure after a repaint.
+    return isFoldableMessageDisclosure(message)
+      ? `message:disclosure:${token}`
+      : `message:toggle:${token}`
+  }
+
+  /** The innermost projected container owner of one rendered row, or undefined
+   * when the row belongs to no container. */
+  private nearestRowContainer(entry: FullscreenRowEntry): TranscriptContainerOwner | undefined {
+    const path = entry.containerPath
+    return path === undefined || path.length === 0 ? undefined : path[path.length - 1]
+  }
+
+  /** The per-row semantic hit identity of one container collapse target. */
+  private containerCollapseHitIdentity(owner: TranscriptContainerOwner): string {
+    if (owner.kind === 'focus-root') return `focus:collapse:${owner.turn}`
+    if (owner.kind === 'work') return `work:collapse:${this.identityToken(owner.owner)}`
+    return `cluster:collapse:${this.identityToken(owner.owner)}`
+  }
+
+  /** The press/release semantic identity of one long-user disclosure control:
+   * the durable message token or the stable pending key, ALWAYS qualified by
+   * the direction. A stale press must never transfer an expand target to a
+   * collapse target (or to a different pending row) that repainted onto the
+   * same cell. */
+  private userDisclosureHitIdentity(hit: UserDisclosureHit): string {
+    if (hit.target.kind === 'durable') {
+      return `user:${hit.action}:${this.identityToken(hit.target.message)}`
+    }
+    return `pending-user:${hit.action}:${hit.target.key}`
   }
 
   /** The semantic identity of one Workflow card row hit (the durable
@@ -7426,16 +11130,25 @@ export class TuiApp {
   }
 
   /** The press-time semantic identity of a transcript row (mouse parity):
-   * the message/activity owner (kind + turn + the per-object identity
-   * token, or the entry index for ownerless rows). Shared by the
-   * paint-snapshot commit and the release-click validation so both sides
-   * compute the EXACT same identity string. */
-  private fullscreenRowOwnerId(entry: { message?: TranscriptMessage; activity?: TurnActivity }, entryIndex: number): string {
+   * the message/activity/pending-user owner (kind + turn + the per-object
+   * identity token, the stable pending key, or the entry index for truly
+   * ownerless rows). Shared by the paint-snapshot commit and the release-click
+   * validation so both sides compute the EXACT same identity string. */
+  private fullscreenRowOwnerId(
+    entry: { message?: TranscriptMessage; activity?: TurnActivity; pendingKey?: string; workOwner?: TranscriptMessage; clusterOwner?: TranscriptMessage },
+    entryIndex: number,
+  ): string {
     return entry.message !== undefined
       ? `msg:${entry.message.kind}:${'turn' in entry.message ? entry.message.turn : 0}:${this.identityToken(entry.message)}`
       : entry.activity !== undefined
         ? `activity:${entry.activity.turn}:${this.identityToken(entry.activity)}`
-        : `entry:${entryIndex}`
+        : entry.pendingKey !== undefined
+          ? `pending-user:${entry.pendingKey}`
+          : entry.workOwner !== undefined
+            ? `work:${this.identityToken(entry.workOwner)}`
+            : entry.clusterOwner !== undefined
+              ? `cluster:${this.identityToken(entry.clusterOwner)}`
+              : `entry:${entryIndex}`
   }
 
   /** Resolve a fullscreen physical row to a transcript cell (the entry
@@ -7468,6 +11181,198 @@ export class TuiApp {
     return undefined
   }
 
+  /** The current Question frame's screen bounds, using the same footer and
+   * frame rows as the existing Question click path. */
+  private questionFrameBounds(question: QuestionState): { top: number; bottom: number } | undefined {
+    const frame = question.frame
+    if (frame === undefined) return undefined
+    const footerHeight = this.footer.render(this.terminal.columns).length
+    const bottom = this.terminal.rows - footerHeight
+    return { top: bottom - frame.rows, bottom }
+  }
+
+  /** A hit identity that is safe to inspect while a response modal owns
+   * the screen. This is an explicit positive allowlist: only presentation or
+   * disclosure targets pass, while workflow viewers/actions and unknown hits
+   * remain inert. */
+  private isModalInspectionSafeHit(hitId: string): boolean {
+    return hitId.startsWith('user:')
+      || hitId.startsWith('pending-user:')
+      || hitId.startsWith('focus:toggle:')
+      || hitId.startsWith('focus:collapse:')
+      || hitId.startsWith('work:toggle:')
+      || hitId.startsWith('work:collapse:')
+      || hitId.startsWith('cluster:toggle:')
+      || hitId.startsWith('cluster:collapse:')
+      || hitId.startsWith('ptc:')
+      || hitId.startsWith('message:disclosure:')
+      || hitId.startsWith('message:toggle:')
+      || hitId.startsWith('attachment:')
+      || hitId.startsWith('workflow:run:')
+      || hitId.startsWith('workflow:phase:')
+      || hitId === 'todo:dock'
+      || hitId === 'todo:panel'
+  }
+
+  /** Apply one already-fenced modal inspection hit. The caller has checked
+   * the painted and current semantic identities; this helper intentionally
+   * has no fallback to the ordinary fullscreen action ladder. */
+  private applyModalInspectionHit(entry: FullscreenRowEntry, entryIndex: number, inMessage: number): void {
+    const nextVisible = this.nextVisibleRowEntry(entryIndex)
+    if (entry.userDisclosureHit !== undefined) {
+      if (inMessage === entry.userDisclosureHit.row) this.applyUserDisclosureHit(entry.userDisclosureHit)
+      return
+    }
+    if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
+      const owner = this.blankRowContainerCollapseOwner(entry, nextVisible)
+      if (owner !== undefined) this.collapseRowContainer(owner)
+      return
+    }
+    if (entry.activity !== undefined) {
+      this.toggleFocusTurn(entry.activity.turn)
+      return
+    }
+    // Compact Work / ambient Context cluster disclosures are proven read-only:
+    // they participate in the modal inspection plane exactly like the Focus
+    // root and the generic foldable cards.
+    if (entry.workOwner !== undefined) {
+      this.toggleWorkSpan(entry.workOwner)
+      return
+    }
+    if (entry.clusterOwner !== undefined) {
+      this.toggleContextCluster(entry.clusterOwner)
+      return
+    }
+    const message = entry.message
+    if (message === undefined) return
+    if (entry.subCallHits !== undefined) {
+      const hit = entry.subCallHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined) {
+        this.toggleSubCallExpanded(hit.subCallId)
+        return
+      }
+    }
+    if (entry.workflowHits !== undefined) {
+      const hit = entry.workflowHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined && (hit.hit.kind === 'run' || hit.hit.kind === 'phase')) {
+        this.handleWorkflowHit(hit.hit)
+      }
+      return
+    }
+    for (const attachment of entry.attachments) {
+      if (inMessage >= attachment.start && inMessage < attachment.end) {
+        this.toggleAttachmentCollapsed(message, attachment.imageIndex)
+        return
+      }
+    }
+    const container = this.nearestRowContainer(entry)
+    if (container !== undefined) {
+      if (isFoldableMessageDisclosure(message)) this.toggleMessageExpanded(message)
+      else this.collapseRowContainer(container)
+      return
+    }
+    this.toggleMessageExpanded(message)
+  }
+
+  /** Resolve a painted Todo dock/panel row to its presentation target. */
+  private fullscreenTodoHit(
+    snapshot: {
+      termRows: number
+      footerHeight: number
+      editorHeight: number
+      workingHeight: number
+      queueHeight: number
+      goalHeight: number
+      todoHeight: number
+      dockHeight: number
+    },
+    y: number,
+  ): 'todo:dock' | 'todo:panel' | undefined {
+    const todoBottom = Math.max(0, Math.min(snapshot.termRows,
+      snapshot.termRows - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight
+      - snapshot.queueHeight - snapshot.goalHeight))
+    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
+    if (snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop) return 'todo:dock'
+    if (todoTop < todoBottom && y >= todoTop && y < todoBottom) return 'todo:panel'
+    return undefined
+  }
+
+  /** Record a Question-owned inspection press against the last painted
+   * snapshot. The Question identity is stored with the gesture so a
+   * settle/replacement cannot hand the release to another owner. */
+  private beginQuestionTranscriptInspection(question: QuestionState, y: number): void {
+    this.questionTranscriptGesture = undefined
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) return
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
+    const todoHit = this.fullscreenTodoHit(snapshot, y)
+    if (todoHit !== undefined) {
+      this.questionTranscriptGesture = {
+        question,
+        ownerId: todoHit,
+        row: 0,
+        hitId: 'todo',
+        columns: snapshot.columns,
+        termRows: snapshot.termRows,
+        target: 'todo',
+      }
+      return
+    }
+    const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
+    if (cell === undefined) return
+    const painted = snapshot.rows[cell.entryIndex]!
+    const hitId = painted.hits[cell.inMessage] ?? 'inert'
+    if (!this.isModalInspectionSafeHit(hitId)) return
+    this.questionTranscriptGesture = {
+      question,
+      ownerId: painted.ownerId,
+      row: cell.inMessage,
+      hitId,
+      columns: snapshot.columns,
+      termRows: snapshot.termRows,
+      target: 'transcript',
+    }
+  }
+
+  /** Complete a Question-owned inspection click with the same live semantic
+   * re-check as the normal fullscreen path. The snapshot supplies what the
+   * user pressed; the refreshed live row map proves that target still means
+   * the same disclosure before any action runs. */
+  private completeQuestionTranscriptInspection(question: QuestionState, y: number): void {
+    const pressed = this.questionTranscriptGesture
+    this.questionTranscriptGesture = undefined
+    if (pressed === undefined || pressed.question !== question) return
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) return
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
+    if (snapshot.columns !== pressed.columns || snapshot.termRows !== pressed.termRows) return
+    if (pressed.target === 'todo') {
+      const todoHit = this.fullscreenTodoHit(snapshot, y)
+      if (todoHit !== pressed.ownerId) return
+      if (todoHit === 'todo:dock') this.toggleTodoPanel()
+      else this.handleTodoPanelClick()
+      return
+    }
+    this.refreshMessageRows()
+    const cell = this.resolveFullscreenTranscriptCell(y, {
+      headerHeight: snapshot.headerHeight,
+      welcomeHeight: snapshot.welcomeHeight,
+      scrollTop: snapshot.scrollTop,
+      viewportHeight: snapshot.viewportHeight,
+      rows: this.messageRows,
+    })
+    if (cell === undefined) return
+    const entry = this.messageRows[cell.entryIndex]
+    if (entry === undefined) return
+    const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
+    const hitId = this.fullscreenRowHitIdentity(entry, cell.inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    if (!this.isModalInspectionSafeHit(hitId)
+      || pressed.ownerId !== ownerId
+      || pressed.row !== cell.inMessage
+      || pressed.hitId !== hitId) return
+    this.applyModalInspectionHit(entry, cell.entryIndex, cell.inMessage)
+  }
+
   /**
    * Map a fullscreen click (0-based screen cell, from the alt screen's
    * onCellClick) onto a transcript message and toggle its individual
@@ -7476,39 +11381,40 @@ export class TuiApp {
    * decides, and the Ctrl+O keyboard fold does not pierce them.
    */
   private handleFullscreenPress(x: number, y: number): void {
+    this.clearFullscreenPointerGestures()
     // The press half of a same-cell click: while a question owns the
     // modal front, record the flow's press-time semantic identity (the
     // release click in handleFullscreenClick validates it — a question
     // advance / repaint between press and release must never transfer
     // the click to a different target).
     const question = this.activeQuestions
-    if (question?.frame !== undefined) {
-      // The question owns the modal front: any pre-question todo/transcript
-      // gesture is dead — a press inside the frame must not leave a stale
-      // background identity that a later release (after the question
-      // closes) could resurrect.
-      this.fullscreenCellGesture = undefined
-      // A stale-geometry press cannot name a valid target: consume any
-      // prior gesture so a later release can never match it.
-      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
-        this.questionPressGesture = undefined
+    if (question !== undefined) {
+      // The question owns the response frame: its fixed surface remains local,
+      // while a separate Question-owned latch may name one proven
+      // presentation/inspection target outside the frame.
+      const frame = question.frame
+      // A question being remounted has no authoritative frame yet; consume
+      // the press rather than guessing background geometry.
+      if (frame === undefined) return
+      // A stale-geometry press cannot name a valid target: consume any prior
+      // gesture so a later release can never match it.
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) return
+      const width = this.terminal.columns
+      const bounds = this.questionFrameBounds(question)
+      if (bounds === undefined) return
+      if (y >= bounds.top && y < bounds.bottom) {
+        if (x >= 2 && x <= width - 3) {
+          this.questionPressGesture = question.flow.beginMousePress(y - bounds.top - 1)
+        }
         return
       }
-      const width = this.terminal.columns
-      const height = this.terminal.rows
-      const footerHeight = this.footer.render(width).length
-      const seatHeight = question.frame.rows
-      const seatBottom = height - footerHeight
-      const seatTop = seatBottom - seatHeight
-      if (y >= seatTop && y < seatBottom && x >= 2 && x <= width - 3) {
-        this.questionPressGesture = question.flow.beginMousePress(y - seatTop - 1)
-      }
+      this.beginQuestionTranscriptInspection(question, y)
       return
     }
-    this.questionPressGesture = undefined
-    // Any OTHER managed overlay owns the press: no transcript / dock /
-    // todo identity below is reachable (the click is inert behind it).
-    if (this.activeScreen.hasOverlayEntries) {
+    // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
+    // todo identity below is reachable (the click is inert behind it). A
+    // nonCapturing notice is non-modal, so background clicks still resolve.
+    if (this.overlayBlocksTranscriptPointer()) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -7539,14 +11445,10 @@ export class TuiApp {
     // keyboard todo-toggle between press and release repaints the dock
     // into the panel, and the same cell must not run the panel action
     // for a dock press.
-    const height = snapshot.termRows
-    const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
-    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
-    const inDock = snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop
-    const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
-    if (inDock || inPanel) {
+    const todoHit = this.fullscreenTodoHit(snapshot, y)
+    if (todoHit !== undefined) {
       this.fullscreenCellGesture = {
-        ownerId: inDock ? 'todo:dock' : 'todo:panel',
+        ownerId: todoHit,
         row: 0,
         hitId: 'todo',
         columns: snapshot.columns,
@@ -7573,6 +11475,17 @@ export class TuiApp {
     this.fullscreenCellGesture = undefined
   }
 
+  /** Whether a visible modal overlay blocks fullscreen transcript pointer
+   * inspection gestures. The transcript-search box is the ONE exception (fork
+   * seam X058): it is a viewport-passthrough overlay, so while it is the ONLY
+   * VISIBLE modal the background inspection clicks stay live. Any other modal —
+   * including one that SUPPRESSES the search box (the box itself is then
+   * hidden) — blocks exactly as before. */
+  private overlayBlocksTranscriptPointer(): boolean {
+    if (!this.overlayBroker.hasVisibleModalOverlay()) return false
+    return !this.overlayBroker.isOnlyVisibleModal(this.searchOverlay)
+  }
+
   private handleFullscreenClick(x: number, y: number): void {
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
@@ -7580,58 +11493,62 @@ export class TuiApp {
     // range is derived from the bottom: footer height + the frame's last
     // rendered height.
     const question = this.activeQuestions
-    if (question?.frame !== undefined) {
-      // The question owns the modal front: EVERY click while a question is
-      // up is captured here (in-frame clicks route to the flow; out-of-frame
-      // clicks and the stale-geometry window are ignored) — background todo/
-      // transcript interaction must not be reachable behind the modal. Any
-      // pre-question todo/transcript gesture is dead at branch entry (a
-      // cross-mode close before the release must not resurrect it on the
-      // background surface) — cleared BEFORE the stale-geometry guard, so
-      // a release that hits the resize-mismatch early return also drops it.
+    if (question !== undefined) {
+      // The question owns the modal front. Its frame keeps the existing
+      // editor-seat click behavior; outside the frame only the separately
+      // fenced transcript disclosure gesture is eligible.
       this.fullscreenCellGesture = undefined
-      // Stale-geometry guard: between a terminal resize (rows OR columns —
-      // a width change rewraps the body and shifts the flow's hit map) and
-      // the next repaint, the frame's rendered height and hit map still
-      // reflect the OLD terminal. A stale-geometry release cannot act:
-      // consume any prior gesture so it can never match a later click.
-      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
+      const frame = question.frame
+      // A question being remounted has no authoritative frame yet; consume
+      // the release rather than guessing background geometry.
+      if (frame === undefined) {
         this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
+        return
+      }
+      // A stale-geometry release cannot act against either the question or
+      // the background frame.
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) {
+        this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
         return
       }
       const width = this.terminal.columns
-      const height = this.terminal.rows
-      const footerHeight = this.footer.render(width).length
-      const seatHeight = question.frame.rows
-      const seatBottom = height - footerHeight
-      const seatTop = seatBottom - seatHeight
-      if (y >= seatTop && y < seatBottom) {
+      const bounds = this.questionFrameBounds(question)
+      if (bounds === undefined) {
+        this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
+        return
+      }
+      if (y >= bounds.top && y < bounds.bottom) {
         // Inside the frame: its side borders + padding occupy columns 0-1
         // and the last two; content rows start below the top border.
+        const gesture = this.questionPressGesture
+        this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
         if (x >= 2 && x <= width - 3) {
-          // The flow's content starts at seat column 2 (side borders +
-          // padding); pass the flow-local column so the free-text Input
-          // can position its cursor on a click while editing. The click
-          // may only act on the EXACT press-time identity (a question
-          // advance / repaint between press and release must not
-          // transfer it to a different target).
-          const gesture = this.questionPressGesture
-          this.questionPressGesture = undefined
-          question.flow.completeMouseClick(gesture, y - seatTop - 1, x - 2)
+          // The flow's content starts at seat column 2 (borders + padding);
+          // the flow validates the exact press-time question identity.
+          question.flow.completeMouseClick(gesture, y - bounds.top - 1, x - 2)
           this.requestRender()
         }
+        return
       }
+      this.questionPressGesture = undefined
+      this.completeQuestionTranscriptInspection(question, y)
       return
     }
     this.questionPressGesture = undefined
+    this.questionTranscriptGesture = undefined
     // Any OTHER managed overlay (search / settings / approvals / extension
     // overlays) owns the click: with one up, NO transcript / dock / todo
     // interaction below is reachable — concrete rows AND the blank-row
     // fallback stay inert behind it (plan §17/§23.7). The question frame
     // above is the only overlay that routes clicks itself. Any pre-overlay
     // todo/transcript gesture is dead (a cross-mode close before the
-    // release must not resurrect it on the background surface).
-    if (this.activeScreen.hasOverlayEntries) {
+    // release must not resurrect it on the background surface). A
+    // nonCapturing notice is non-modal and does not own the release.
+    if (this.overlayBlocksTranscriptPointer()) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -7670,21 +11587,11 @@ export class TuiApp {
       this.fullscreenCellGesture = undefined
       return
     }
-    const height = snapshot.termRows
-    const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
-    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
     // The dock strip (the todo summary row) sits directly above the panel:
-    // clicking it opens the panel (mouse parity with the todo-toggle
-    // action). The summary
-    // is hidden while the panel is open, so the dock renders zero rows and
-    // this branch is inert — the two regions never fight.
-    const dockHeight = snapshot.dockHeight
-    const inDock = dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop
-    // A click on the todo panel's own rows runs the state loop (compact →
-    // full list → back to the summary row), so the mouse opens AND closes
-    // the panel without the todo-toggle action.
-    const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
-    if (inDock || inPanel) {
+    // clicking it opens the panel (mouse parity with the todo-toggle action).
+    // A panel click runs the compact → full list → summary presentation loop.
+    const todoHit = this.fullscreenTodoHit(snapshot, y)
+    if (todoHit !== undefined) {
       // The dock and the panel are ONE coalescing family, and the first
       // click MUTATES the layout (the dock vanishes, the panel takes its
       // rows): a rapid second click at the same coordinate would land on
@@ -7703,7 +11610,7 @@ export class TuiApp {
         this.fullscreenCellGesture = undefined
         return
       }
-      if ((pressed.ownerId === 'todo:dock') !== inDock) {
+      if (pressed.ownerId !== todoHit) {
         this.fullscreenCellGesture = undefined
         return
       }
@@ -7711,7 +11618,7 @@ export class TuiApp {
       const now = Date.now()
       if (now < this.todoClickCoalesceUntil) return
       this.todoClickCoalesceUntil = now + TODO_CLICK_COALESCE_MS
-      if (inDock) this.toggleTodoPanel()
+      if (todoHit === 'todo:dock') this.toggleTodoPanel()
       else this.handleTodoPanelClick()
       return
     }
@@ -7766,6 +11673,15 @@ export class TuiApp {
     }
     this.fullscreenCellGesture = undefined
     {
+      // The long-user disclosure control is resolved FIRST (it shares the
+      // trailing separator row with the generic blank-row escape hatch, and
+      // the user disclosure target wins there). Only the EXACT control row
+      // acts; every other bubble row has an inert identity and never reaches
+      // this branch.
+      if (entry.userDisclosureHit !== undefined) {
+        if (inMessage === entry.userDisclosureHit.row) this.applyUserDisclosureHit(entry.userDisclosureHit)
+        return
+      }
       // NEW: the Thought internal blank-row escape hatch (plan §9/§23)
         // — a click on a blank visual row (the inter-block spacer charged
         // to this entry) that sits INSIDE an expanded Thought collapses
@@ -7787,11 +11703,10 @@ export class TuiApp {
             return
           }
           // The interior test follows the VISUAL sequence: zero-height
-          // blocks render nothing, so a spacer whose following entries are
-          // all zero-height is the Thought's BOUNDARY spacer — the next
-          // VISIBLE block decides (a reasoning-only process row at the
-          // tail must not make the boundary look interior).
-          let next: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }> | undefined
+          // blocks render nothing, so the next VISIBLE block decides the
+          // shared container (a reasoning-only process row at the tail must
+          // not make the boundary look interior).
+          let next: FullscreenRowEntry | undefined
           for (let nextIndex = cell.entryIndex + 1; nextIndex < this.messageRows.length; nextIndex += 1) {
             const candidate = this.messageRows[nextIndex]!
             if (candidate.height > 0) {
@@ -7799,10 +11714,8 @@ export class TuiApp {
               break
             }
           }
-          const owner = this.blankRowFocusCollapseOwner(entry, next)
-          if (owner !== undefined) {
-            this.collapseFocusTurn(owner, { fullscreenViewport: 'anchor-turn' })
-          }
+          const owner = this.blankRowContainerCollapseOwner(entry, next)
+          if (owner !== undefined) this.collapseRowContainer(owner)
           return
         }
         // A Focus Thought block: the whole rendered block (collapsed body
@@ -7810,6 +11723,16 @@ export class TuiApp {
         // the header is always a hit area; the collapsed preview rows too).
         if (entry.activity !== undefined) {
           this.toggleFocusTurn(entry.activity.turn)
+          return
+        }
+        // A Compact Work span / ambient Context cluster: the header and its
+        // collapsed preview rows toggle that section's disclosure.
+        if (entry.workOwner !== undefined) {
+          this.toggleWorkSpan(entry.workOwner)
+          return
+        }
+        if (entry.clusterOwner !== undefined) {
+          this.toggleContextCluster(entry.clusterOwner)
           return
         }
         // A message row (activity rows never reach here): narrow the
@@ -7851,26 +11774,23 @@ export class TuiApp {
             return
           }
         }
-        // A message row REVEALED BY an expanded Focus Thought (its
-        // thinking / tool / result / intermediate rows carry the owner
-        // mark from the projection, plan §8.8 / review P2): the click
-        // routes to the NEAREST disclosure owner (plan §14/§15) —
-        // attachment > secondary > outer Thought. The user's OWN rows
-        // and the FINAL assistant never carry the mark, so clicking them
-        // keeps the old behavior (ordinary card toggle, no Thought
-        // collapse).
-        if (entry.collapseFocusOwnerOnClick !== undefined) {
-          // 2. nearest disclosure: a SECONDARY card (thinking / tool /
-          // system / compaction) toggles ITSELF — the root Thought stays
-          // open (plan §14 step 2).
-          if (isFocusSecondaryDisclosure(message)) {
+        // A message row REVEALED BY an expanded Thought/Work container (its
+        // thinking / tool / result / intermediate rows carry the projected
+        // ancestry, plan §8.8/§41): the click routes to the NEAREST disclosure
+        // owner (attachment > secondary card > nearest container). Rows with
+        // no projected container keep the ordinary card toggle.
+        const container = this.nearestRowContainer(entry)
+        if (container !== undefined) {
+          // 2. nearest disclosure: a foldable card (thinking / tool / system /
+          // compaction) toggles ITSELF — its container stays open.
+          if (isFoldableMessageDisclosure(message)) {
             this.toggleMessageExpanded(message)
             return
           }
-          // 3. outer disclosure: a NON-secondary process row (e.g. an
-          // intermediate assistant) collapses the owner Thought — the
-          // header stays anchored in view (plan §14 step 3).
-          this.collapseFocusTurn(entry.collapseFocusOwnerOnClick, { fullscreenViewport: 'anchor-turn' })
+          // 3. outer disclosure: a NON-foldable process row (e.g. an
+          // intermediate assistant) collapses the nearest container — nested
+          // Work beats the outer Thought and the header stays anchored.
+          this.collapseRowContainer(container)
           return
         }
         // 4. ordinary message toggle (the pre-Focus behavior).
@@ -7879,23 +11799,89 @@ export class TuiApp {
       }
     }
 
-  /** The expanded Thought that OWNS a blank visual row — the inter-block
-   * spacer charged to `entry` (plan §9/§14): the row is INSIDE the
-   * Thought's outer region when the entry's own block and the FOLLOWING
-   * VISIBLE block both belong to the same expanded Thought (header →
-   * card, card → card; zero-height blocks render nothing and are skipped
-   * by the caller). The Thought's trailing boundary spacer — the next
-   * Thought / a user message / the final assistant follows — is NOT
-   * claimed, so a click there stays a no-op (plan §16: never guess a
-   * "nearest Thought"). Returns undefined for every non-Focus row. */
-  private blankRowFocusCollapseOwner(
-    entry: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }>,
-    next: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }> | undefined,
-  ): number | undefined {
-    const turn = entry.activity?.turn ?? entry.collapseFocusOwnerOnClick
-    if (turn === undefined || !this.focusExpandedTurns.has(turn)) return undefined
-    const nextTurn = next?.activity?.turn ?? next?.collapseFocusOwnerOnClick
-    return nextTurn === turn ? turn : undefined
+  /** The semantic container that OWNS a blank visual row (plan §9): the
+   * inter-block spacer charged to `entry` belongs to the DEEPEST container the
+   * entry and the FOLLOWING VISIBLE block share (zero-height blocks render
+   * nothing and are skipped by the caller). No shared container means the
+   * spacer is a boundary/global blank and stays inert — the rule never guesses
+   * a "nearest" owner from geometry. */
+  private blankRowContainerCollapseOwner(
+    entry: Readonly<{ containerPath?: TranscriptContainerPath }>,
+    next: Readonly<{ containerPath?: TranscriptContainerPath }> | undefined,
+  ): TranscriptContainerOwner | undefined {
+    const current = entry.containerPath
+    if (current === undefined || current.length === 0) return undefined
+    return deepestCommonTranscriptContainer(current, next?.containerPath ?? [])
+  }
+
+  /** Collapse the container a blank-row/direct-row click resolved to, using a
+   * semantic viewport anchor: the Focus root keeps its established anchor-turn
+   * contract; a Work/cluster collapse brings its own header near the viewport
+   * top (the escape hatch exists because the header may have scrolled away). */
+  private collapseRowContainer(owner: TranscriptContainerOwner): void {
+    if (owner.kind === 'focus-root') {
+      this.collapseFocusTurn(owner.turn, { fullscreenViewport: 'anchor-turn' })
+      return
+    }
+    const scroll = this.fullscreenScroll
+    const wasFollowingEnd = scroll?.isFollowingEnd === true
+    if (owner.kind === 'work') this.toggleWorkSpan(owner.owner)
+    else this.toggleContextCluster(owner.owner)
+    if (scroll !== undefined && !wasFollowingEnd) this.applyFullscreenContainerAnchor(owner)
+  }
+
+  /** The projected transcript row (welcome excluded) where one container's
+   * header starts, if the container is currently projected. */
+  private transcriptContainerRow(owner: TranscriptContainerOwner): number | undefined {
+    let row = 0
+    for (const entry of this.messageRows) {
+      if (owner.kind === 'work' && entry.workOwner === owner.owner) return row
+      if (owner.kind === 'context-cluster' && entry.clusterOwner === owner.owner) return row
+      if (owner.kind === 'focus-root' && entry.activity?.turn === owner.turn) return row
+      row += entry.height
+    }
+    return undefined
+  }
+
+  /** Anchor one Work/cluster header `FOCUS_ANCHOR_TOP_PADDING` rows below the
+   * viewport top with follow-end disabled, after re-measuring the shrunken
+   * content. `undefined` keeps the current position (the layout is still
+   * clamped) — never a raw scrollTop delta (plan §37/R22). */
+  private applyFullscreenContainerAnchor(owner: TranscriptContainerOwner): void {
+    if (this.fullscreenScroll === undefined) return
+    this.refreshMessageRows()
+    const width = this.terminal.columns
+    const contentHeight = this.renderedTranscriptContentHeight(width)
+    const viewportHeight = this.fullscreenScroll.viewportHeight
+    this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+    const row = this.transcriptContainerRow(owner)
+    if (row === undefined) return
+    const welcomeHeight = this.welcomeCard.render(width).length
+    this.fullscreenScroll.scrollTo(welcomeHeight + row - FOCUS_ANCHOR_TOP_PADDING, { disableFollow: true })
+  }
+
+  /** Apply one bidirectional long-user disclosure control click (fullscreen
+   * compact marker → expand, expanded tail control → collapse). The durable
+   * override reuses the per-message disclosure state; the pending override is
+   * presentation-only ephemeral state keyed by the stable pending identity.
+   * The canonical `message.text` is never touched. */
+  private applyUserDisclosureHit(hit: UserDisclosureHit): void {
+    const expanded = hit.action === 'expand'
+    this.mutateTranscriptDisclosure(() => {
+      if (hit.target.kind === 'durable') {
+        if (this.expandedOverride.get(hit.target.message) === expanded) return
+        this.expandedOverride.set(hit.target.message, expanded)
+      } else {
+        if (this.pendingUserExpanded.get(hit.target.key) === expanded) return
+        this.pendingUserExpanded.set(hit.target.key, expanded)
+      }
+      // An explicit collapse of the SEARCH TARGET revokes the temporary reveal
+      // so the collapsed card stays collapsed until the next navigation. An
+      // unrelated card's collapse must not hide the current target.
+      if (!expanded && hit.target.kind === 'durable' && hit.target.message === this.searchTarget?.message) {
+        this.suppressSearchReveal()
+      }
+    })
   }
 
   /** Toggle one collapsible message's individual expansion (mouse click).
@@ -7907,16 +11893,41 @@ export class TuiApp {
    * (override true) — the per-card override always expresses the
    * opposite of the effective state (plan §3.5/E4). */
   private toggleMessageExpanded(message: TranscriptMessage): void {
-    if (!isFocusSecondaryDisclosure(message)) return
+    if (!isFoldableMessageDisclosure(message)) return
+    // Only collapsing the SEARCH TARGET revokes the reveal: collapsing an
+    // unrelated card must not hide the current target.
+    const revokesSearchReveal = this.searchTarget?.message === message
     if (message.kind === 'thinking') {
       if (this.effectiveThinkingExpanded(message)) {
         if (this.thinkingExpanded) this.expandedOverride.set(message, false)
+        else if (this.searchForcesMessageExpanded(message)) this.expandedOverride.set(message, false)
         else this.expandedOverride.delete(message)
+        if (revokesSearchReveal) this.suppressSearchReveal()
+      } else {
+        this.expandedOverride.set(message, true)
+      }
+    } else if (message.kind === 'command') {
+      // A command's per-card click flips its EFFECTIVE state (the same
+      // model as Thinking): the default (the transcript-detail master)
+      // cannot be "delete"-toggled back like a generic card, because a
+      // command has no turn boundary that would re-derive it — without
+      // this branch the first click would write a no-op `true` and the
+      // card could never fold (post-PR166 plan §11 long-outcome operability).
+      const expanded = this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary())
+      if (expanded) {
+        this.expandedOverride.set(message, false)
+        if (revokesSearchReveal) this.suppressSearchReveal()
       } else {
         this.expandedOverride.set(message, true)
       }
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
+      if (revokesSearchReveal) this.suppressSearchReveal()
+    } else if (this.searchForcesMessageExpanded(message)) {
+      // The card is open only because of the search reveal: a click must
+      // collapse it explicitly (a deleted override would let search re-open).
+      this.expandedOverride.set(message, false)
+      this.suppressSearchReveal()
     } else {
       this.expandedOverride.set(message, true)
     }
@@ -7930,6 +11941,7 @@ export class TuiApp {
    * a clean run closes, a running/abnormal run opens. A completed run with
    * a failed member is abnormal and stays open (PR2 goal: abnormal first). */
   private workflowRunOpen(message: Extract<TranscriptMessage, { kind: 'workflow' }>): boolean {
+    if (this.searchForcesWorkflowRunOpen(message.runId)) return true
     const state = this.workflowDisclosure.get(message.runId)
     if (state?.userOpen !== undefined) return state.userOpen
     return workflowRunMode(message.status, message.members) !== 'clean'
@@ -7941,6 +11953,7 @@ export class TuiApp {
    * so any number of running→clean cycles fold and unfold (Web
    * advanceDisclosureState parity). */
   private workflowPhaseOpen(runId: string, phaseKey: string, phase: WorkflowPhasePresentation): boolean {
+    if (this.searchForcesWorkflowPhaseOpen(runId, phaseKey)) return true
     const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
     if (state?.userOpen !== undefined) return state.userOpen
     return phase.counts.completed !== phase.members.length
@@ -7955,6 +11968,9 @@ export class TuiApp {
     const message = this.workflowMessageOf(runId)
     if (message === undefined) return
     state.userOpen = !(state.userOpen ?? this.workflowRunOpen(message))
+    // An explicit user toggle on the search-target card revokes the temporary
+    // reveal so the user's choice wins (the semantic match stays current).
+    if (this.searchTarget?.message === message) this.suppressSearchReveal()
     this.workflowDisclosureRevision += 1
     this.clearFocusLiveHeightState()
     this.rebuildMessages()
@@ -7971,6 +11987,9 @@ export class TuiApp {
     const phase = workflowPhasePresentations(message.members).find(candidate => candidate.key === phaseKey)
     if (phase === undefined) return
     state.userOpen = !(state.userOpen ?? this.workflowPhaseOpen(runId, phaseKey, phase))
+    // Only a click on the TARGET'S OWN phase revokes the reveal: closing an
+    // unrelated phase must not hide the search target/context row.
+    if (this.searchTarget?.message === message && this.searchTargetPhaseKey() === phaseKey) this.suppressSearchReveal()
     this.workflowDisclosureRevision += 1
     this.clearFocusLiveHeightState()
     this.rebuildMessages()
@@ -8170,6 +12189,22 @@ export class TuiApp {
   clearSessionOverrides(): void {
     this.clearFocusLiveHeightState()
     this.expandedOverride.clear()
+    // The temporary search presentation is session-scoped too: a switched-in
+    // session must never inherit the old session's reveal/highlight or hold
+    // its message objects.
+    if (this.searchTarget !== undefined) {
+      this.searchTarget = undefined
+      this.searchRevealGranted = false
+      this.searchRevealHostOwned = false
+      this.searchPresentationRevision += 1
+      this.currentSearchTranscriptRange = undefined
+    }
+    this.searchSuppressedSubCalls.clear()
+    this.searchMatchMessages = new Set()
+    this.searchSourceRegionsByMessage.clear()
+    // Pending-user disclosure is presentation-only ephemeral state too: a
+    // session switch must drop it with the lane it belongs to.
+    this.pendingUserExpanded.clear()
     // A session switch is a pointer-gesture boundary too: the new session
     // can reuse the same turn numbers AND the same todo dock/panel
     // geometry, so an in-flight press from the old session must never
@@ -8179,7 +12214,8 @@ export class TuiApp {
     // click-coalescing window is equally session-scoped: a fresh click in
     // the new session must never be swallowed by the old session's
     // window.
-    this.fullscreenCellGesture = undefined
+    this.clearFullscreenPointerGestures()
+    this.fullscreenPaintSnapshot = undefined
     this.todoClickCoalesceUntil = 0
     // The Focus disclosures are session-scoped transient state too: a
     // switched-in session must never inherit the old session's turn
@@ -8191,6 +12227,19 @@ export class TuiApp {
     // then a no-op; see that method).
     this.focusExpandedTurns.clear()
     this.focusExpansionsStack.length = 0
+    // The Compact Work/cluster disclosures and their component caches are
+    // session-scoped too — a switched-in session must never inherit the old
+    // session's span owners (they hold the OLD message objects).
+    this.expandedWorkOwners.clear()
+    this.expandedContextClusterOwners.clear()
+    this.openWorkRunMembers = new Set()
+    this.workComponents.clear()
+    this.contextClusterComponents.clear()
+    // The live Focus timer's shared phase/pause timeline is session-scoped
+    // too: its per-activity segments are keyed by activity object (so a new
+    // session cannot collide), but a stale pause window from the old session
+    // must never be subtracted from the new session's first live turn.
+    this.focusTiming.resetSessionScope()
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
@@ -8207,12 +12256,14 @@ export class TuiApp {
     this.workflowDisclosure.clear()
     this.workflowSeen.clear()
     this.workflowHitsByMessage.clear()
+    this.searchSourceRegionsByMessage.clear()
     this.workflowDisclosureRevision += 1
     // The per-message render cache is session-scoped too: old messages are
     // unreachable after a switch, so drop their cached components — with
     // disposal so thumbnail loader subscriptions never leak (round-2
     // finding 2).
     this.disposeMessageComponents()
+    this.transcriptPresentationCommitted = false
   }
 
   /** Dispose every cached message component, then clear the cache. The
@@ -8461,10 +12512,11 @@ export class TuiApp {
       // shell-mode draft round-trips through the viewer with its mode.
       this.mainDraftBeforeViewer = this.expandedSeatWireDraft()
       // The viewer renders ONLY the child transcript: the main session's
-      // local cards (`!` shell runs) must never leak into it. The runner
-      // repaints the child folder right after, so the cleared list is
-      // rebuilt from the child content.
+      // local cards (`!` shell runs) and its ephemeral pending user lane must
+      // never leak into it. The runner repaints the child folder right after,
+      // so the cleared lists are rebuilt from the child content.
       this.localMessages.length = 0
+      this.pendingUserRows = []
       this.rebuildMessages()
     } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
       // Switching child: park the outgoing child's draft first.
@@ -8630,12 +12682,12 @@ export class TuiApp {
     this.subagentDrafts.set(childSessionId, current === '' ? text : `${current}\n\n${text}`)
   }
 
-  /** Enter in a continuable viewer: snapshot the child draft, clear the
+  /** A composer submit gesture in a continuable viewer: snapshot the child draft, clear the
    * visible editor, and hand the follow-up to the runner through
    * {@link TuiAppEvents.onSubagentSubmit}. The draft is cleared BEFORE
    * the async delivery; a rejection restores it (merged) — the user's
    * input never silently disappears. */
-  private submitSubagentDraft(): void {
+  private submitSubagentDraft(gesture: ComposerSubmitGesture): void {
     if (this.disposed) return
     const target = this.viewerMode
     if (target === undefined || target.mode !== 'continuable') return
@@ -8649,7 +12701,9 @@ export class TuiApp {
     // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
     // shell mode has an empty BODY but a non-empty wire form, and must
     // reach the child like the literal prefix did before the mode feature.
-    if (serialized.trim() === '') return
+    // An empty accelerated submit is meaningful: it is the child-scoped
+    // steer-all gesture, not an empty prompt. Enter remains a no-op.
+    if (serialized.trim() === '' && !isEmptyAcceleratedViewerSubmit(serialized, gesture)) return
     this.clearNotify()
     // Snapshot + clear the visible child draft. The per-child SLOT is
     // cleared EXPLICITLY — not via the onChange mirror — because a
@@ -8665,6 +12719,7 @@ export class TuiApp {
       parentSessionId: target.parentSessionId,
       childSessionId: target.childSessionId,
       text: serialized,
+      gesture,
     })
   }
 
@@ -8673,8 +12728,10 @@ export class TuiApp {
    * editor, and inside the viewer they must be inert (the child is the
    * only input target). ACTION-based (plan §1.2/M1): the key resolves
    * through the effective keymap, so a user remap of a parent action
-   * stays blocked automatically — the guard never maintains a physical
-   * key list. Esc/Ctrl+O/Enter are deliberately NOT listed — they fall
+   * stays blocked automatically — except `app.input.steer`, which is
+   * explicitly retargeted to the child as the accelerated submit gesture.
+   * The guard never maintains a physical key list. Esc/Ctrl+O/Enter are
+   * deliberately NOT listed — they fall
    * through to the host's exit/fold/submit paths. */
   private viewerParentLockedKey(data: string): boolean {
     const action = this.keybindings.actionFor(data, this.keybindingContext())
@@ -8726,10 +12783,38 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
-  /** The turn threshold at or above which collapsible entries expand. */
+  /** The turn threshold at or above which collapsible PROCESS entries
+   * (thinking/system/tool) expand under the Ctrl+O master. Memoized on the
+   * window identity + master flag: the boundary is consulted per projected
+   * Work span / message state, so recomputing it (O(n log n)) per query would
+   * be quadratic on a long window. */
   private expandBoundary(): number {
-    if (!this.toolOutputExpanded || EXPAND_RECENT_TURNS <= 0) return Number.POSITIVE_INFINITY
-    return recentTurnThreshold(this.messages, EXPAND_RECENT_TURNS, ['thinking', 'system', 'tool'])
+    const memo = this.expandBoundaryMemo
+    if (memo !== undefined && memo.messages === this.messages && memo.master === this.transcriptDetailExpanded) {
+      return memo.boundary
+    }
+    const boundary = !this.transcriptDetailExpanded || EXPAND_RECENT_TURNS <= 0
+      ? Number.POSITIVE_INFINITY
+      : recentTurnThreshold(this.messages, EXPAND_RECENT_TURNS, ['thinking', 'system', 'tool'])
+    this.expandBoundaryMemo = { messages: this.messages, master: this.transcriptDetailExpanded, boundary }
+    return boundary
+  }
+
+  /** The turn threshold at or above which long USER prompts expand under the
+   * Ctrl+O master. It measures USER turns only — reusing the process boundary
+   * would let a sparse Thinking/System/Tool distribution decide the user fold,
+   * and in a pure-chat transcript (no process turns) that threshold collapses
+   * to 0 and expands EVERY prompt, defeating the fold's whole purpose. */
+  private userExpandBoundary(): number {
+    const memo = this.userExpandBoundaryMemo
+    if (memo !== undefined && memo.messages === this.messages && memo.master === this.transcriptDetailExpanded) {
+      return memo.boundary
+    }
+    const boundary = !this.transcriptDetailExpanded || EXPAND_RECENT_TURNS <= 0
+      ? Number.POSITIVE_INFINITY
+      : recentTurnThreshold(this.messages, EXPAND_RECENT_TURNS, ['user'])
+    this.userExpandBoundaryMemo = { messages: this.messages, master: this.transcriptDetailExpanded, boundary }
+    return boundary
   }
 
 
@@ -8797,15 +12882,23 @@ export class TuiApp {
     // overlay must survive a fullscreen toggle, not become a stale handle
     // on the dead screen). The raw handle dies with the old screen; the
     // lease re-creates it after the swap.
-    let raw: OverlayHandle | undefined
-    let hiddenByLease = false
+    // The broker owns every logical state (visibility intent, focus intent,
+    // z-order); the lease only holds the STABLE managed handle, whose raw
+    // projection the broker rebinds after a screen swap.
+    let handle: OverlayHandle | undefined
     let closed = false
-    const mount = (): void => {
-      if (closed || raw !== undefined) return
+    const remount = (): void => {
+      if (closed || handle === undefined) return
       const compiled = compileView(view)
       const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
-      raw = this.showOverlayOnHost(component, mountOptions, { remountable: true })
-      if (hiddenByLease) raw.setHidden(true)
+      this.rebindOverlayRaw(handle, component, mountOptions)
+    }
+    const mount = (): void => {
+      if (closed || handle !== undefined) return
+      const compiled = compileView(view)
+      const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
+      handle = this.showOverlayOnHost(component, mountOptions, { remountable: true })
+      this.overlayRemounts.set(handle, remount)
     }
     mount()
     const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void } = {
@@ -8815,27 +12908,21 @@ export class TuiApp {
         // Drop the lease from the owned set (round-1 finding 1: a closed
         // lease must not leak until dispose).
         this.extensionOverlayLeases.delete(lease)
-        raw?.hide()
-        raw = undefined
+        if (handle !== undefined) this.overlayRemounts.delete(handle)
+        handle?.hide()
+        handle = undefined
       },
       hide: () => {
         if (closed) return
-        hiddenByLease = true
-        raw?.setHidden(true)
+        handle?.setHidden(true)
       },
       show: () => {
         if (closed) return
-        hiddenByLease = false
-        raw?.setHidden(false)
+        handle?.setHidden(false)
       },
-      // Host-internal: re-create the raw handle on the CURRENT active
-      // screen after a fullscreen swap (the old raw handle died with the
-      // old screen). Idempotent (a live raw handle skips).
-      _remount: () => {
-        if (closed) return
-        raw = undefined
-        mount()
-      },
+      // Host-internal: re-create the raw projection on the CURRENT active
+      // screen after a fullscreen swap (the broker keeps the logical node).
+      _remount: remount,
     }
     // The surface's dispose closes every still-owned lease: track it.
     this.extensionOverlayLeases.add(lease)
@@ -8855,18 +12942,6 @@ export class TuiApp {
       ...(options.col === undefined ? {} : { col: options.col }),
       ...(options.margin === undefined ? {} : { margin: options.margin }),
       nonCapturing: options.nonCapturing === true,
-    }
-  }
-
-  /**
-   * M8: re-mount every still-open plugin lease on the CURRENT active
-   * screen. Called by the host after a fullscreen toggle (the old screen's
-   * overlays died with it — plan §13.3: a managed lease survives the
-   * screen migration).
-   */
-  private remountExtensionOverlays(): void {
-    for (const lease of this.extensionOverlayLeases) {
-      ;(lease as unknown as { _remount(): void })._remount()
     }
   }
 
@@ -8914,21 +12989,33 @@ export class TuiApp {
     // The lease KEEPS the component + options so a fullscreen screen swap
     // can RE-MOUNT it on the new active screen (the raw handle dies with
     // the old screen — same contract as the stable overlay lease).
+    // The broker owns visibility intent, focus intent and z-order; the lease
+    // only holds the STABLE managed handle plus the current host wrapper (the
+    // plugin's own component survives the screen swap untouched).
     let wrapper: import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent | undefined
-    let raw: OverlayHandle | undefined
-    let hiddenByLease = false
+    let handle: OverlayHandle | undefined
     let closed = false
-    const mount = (): void => {
-      if (closed || raw !== undefined) return
-      const created = new AdvancedOverlayComponent(
+    const createWrapper = (): import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent =>
+      new AdvancedOverlayComponent(
         component,
         () => this.advancedRenderContext(),
         (message: string) => this.notify(`advanced overlay: ${message}`, 'error'),
       )
+    const remount = (): void => {
+      if (closed || handle === undefined) return
+      if (wrapper !== undefined) this.advancedOverlayWrappers.delete(wrapper)
+      const created = createWrapper()
       wrapper = created
       this.advancedOverlayWrappers.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      if (hiddenByLease) raw.setHidden(true)
+      this.rebindOverlayRaw(handle, created, mountOptions)
+    }
+    const mount = (): void => {
+      if (closed || handle !== undefined) return
+      const created = createWrapper()
+      wrapper = created
+      this.advancedOverlayWrappers.add(created)
+      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
+      this.overlayRemounts.set(handle, remount)
     }
     mount()
     const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
@@ -8937,17 +13024,15 @@ export class TuiApp {
         return !closed
       },
       get focused() {
-        return raw?.isFocused() ?? false
+        return handle?.isFocused() ?? false
       },
       focus: () => {
         if (closed) return
-        hiddenByLease = false
-        raw?.setHidden(false)
-        raw?.focus()
+        handle?.focus()
       },
       blur: () => {
         if (closed) return
-        raw?.unfocus()
+        handle?.unfocus()
       },
       invalidate: () => {
         if (closed) return
@@ -8965,35 +13050,22 @@ export class TuiApp {
           // overlay.
           wrapper.dispose()
         }
-        raw?.hide()
-        raw = undefined
+        if (handle !== undefined) this.overlayRemounts.delete(handle)
+        handle?.hide()
+        handle = undefined
         wrapper = undefined
       },
       hide: () => {
         if (closed) return
-        hiddenByLease = true
-        raw?.setHidden(true)
+        handle?.setHidden(true)
       },
       show: () => {
         if (closed) return
-        hiddenByLease = false
-        raw?.setHidden(false)
+        handle?.setHidden(false)
       },
-      // Host-internal: re-create the raw handle on the CURRENT active
-      // screen after a fullscreen swap (the old raw handle died with the
-      // old screen). Idempotent (a live raw handle skips). The OLD wrapper
-      // is dropped from the live set WITHOUT disposing it — the plugin
-      // component must survive the screen migration (the lease stays
-      // live); the dead screen's overlay stack is the only remaining
-      // reference and dies with the screen.
-      _remount: () => {
-        if (closed) return
-        if (wrapper !== undefined) {
-          this.advancedOverlayWrappers.delete(wrapper)
-        }
-        raw = undefined
-        mount()
-      },
+      // Host-internal: re-create the raw projection on the CURRENT active
+      // screen after a fullscreen swap (the broker keeps the logical node).
+      _remount: remount,
       // Host-internal: recompile the plugin's render() output (terminal
       // resize — the plugin's render(ctx) must see the new geometry).
       _recompile: () => {
@@ -9004,15 +13076,6 @@ export class TuiApp {
     // The surface's dispose closes every still-owned lease: track it.
     this.advancedOverlayLeases.add(lease)
     return lease
-  }
-
-  /** Phase 2: re-mount every still-open ADVANCED lease on the CURRENT
-   * active screen (fullscreen toggle — the old screen's overlays died
-   * with it; a managed lease survives the screen migration). */
-  private remountAdvancedOverlays(): void {
-    for (const lease of this.advancedOverlayLeases) {
-      lease._remount()
-    }
   }
 
   /** Phase 2: recompile every live ADVANCED overlay wrapper (terminal
@@ -9147,19 +13210,28 @@ export class TuiApp {
     )
     const id = `unstable-mount-${++this.unstableMountCounter}`
     let adapter: import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter | undefined
-    let raw: OverlayHandle | undefined
-    let hiddenByLease = false
+    let handle: OverlayHandle | undefined
     let closed = false
-    const mount = (): void => {
-      if (closed || raw !== undefined) return
-      const created = new UnstableMountedComponentAdapter(
+    const createAdapter = (): import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter =>
+      new UnstableMountedComponentAdapter(
         component,
         (message: string) => this.notify(`unstable mount: ${message}`, 'error'),
       )
+    const remount = (): void => {
+      if (closed || handle === undefined) return
+      if (adapter !== undefined) this.unstableMountAdapters.delete(adapter)
+      const created = createAdapter()
       adapter = created
       this.unstableMountAdapters.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      if (hiddenByLease) raw.setHidden(true)
+      this.rebindOverlayRaw(handle, created, mountOptions)
+    }
+    const mount = (): void => {
+      if (closed || handle !== undefined) return
+      const created = createAdapter()
+      adapter = created
+      this.unstableMountAdapters.add(created)
+      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
+      this.overlayRemounts.set(handle, remount)
     }
     mount()
     const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
@@ -9168,17 +13240,15 @@ export class TuiApp {
         return !closed
       },
       get focused() {
-        return raw?.isFocused() ?? false
+        return handle?.isFocused() ?? false
       },
       focus: () => {
         if (closed) return
-        hiddenByLease = false
-        raw?.setHidden(false)
-        raw?.focus()
+        handle?.focus()
       },
       blur: () => {
         if (closed) return
-        raw?.unfocus()
+        handle?.unfocus()
       },
       invalidate: () => {
         if (closed) return
@@ -9192,43 +13262,25 @@ export class TuiApp {
           this.unstableMountAdapters.delete(adapter)
           adapter.dispose()
         }
-        raw?.hide()
-        raw = undefined
+        if (handle !== undefined) this.overlayRemounts.delete(handle)
+        handle?.hide()
+        handle = undefined
         adapter = undefined
       },
       hide: () => {
         if (closed) return
-        hiddenByLease = true
-        raw?.setHidden(true)
+        handle?.setHidden(true)
       },
       show: () => {
         if (closed) return
-        hiddenByLease = false
-        raw?.setHidden(false)
+        handle?.setHidden(false)
       },
-      // Host-internal: re-create the raw handle on the CURRENT active
-      // screen after a fullscreen swap. The OLD adapter is dropped from
-      // the live set WITHOUT disposing it (the plugin component must
-      // survive the screen migration).
-      _remount: () => {
-        if (closed) return
-        if (adapter !== undefined) {
-          this.unstableMountAdapters.delete(adapter)
-        }
-        raw = undefined
-        mount()
-      },
+      // Host-internal: re-create the raw projection on the CURRENT active
+      // screen after a fullscreen swap (the broker keeps the logical node).
+      _remount: remount,
     }
     this.unstableMountLeases.add(lease)
     return lease
-  }
-
-  /** Phase 3: re-mount every still-open UNSTABLE lease on the CURRENT
-   * active screen (fullscreen toggle). */
-  private remountUnstableMounts(): void {
-    for (const lease of this.unstableMountLeases) {
-      lease._remount()
-    }
   }
 
   /** Phase 3 test hook: the number of still-owned UNSTABLE mount leases. */
@@ -9287,11 +13339,12 @@ export class TuiApp {
       },
       requestEditorFocus: () => {
         if (app.disposed) return
-        // Best-effort: focus the seat component only when no capturing
-        // flow (question/approval/overlay) owns the seat — those flows
-        // restore their own focus and must never be stolen.
+        // Best-effort: focus the seat component only when no capturing flow
+        // (question/approval, or a capturing overlay that HOLDS focus) owns
+        // the seat — those flows restore their own focus and must never be
+        // stolen. A nonCapturing or blurred overlay owns no keyboard.
         if (app.activeQuestions !== undefined || app.activeApproval !== undefined
-          || app.activeScreen.hasOverlayEntries) return
+          || app.overlayBroker.hasFocusedOverlay()) return
         app.activeScreen.setFocus(app.seatEditor().component)
       },
     }
@@ -9375,8 +13428,15 @@ export class TuiApp {
       // The surface's dispose settles the prompt (the picker overlay dies
       // with the surface; the promise must not hang). Guarded: an
       // already-aborted signal settles synchronously inside openPicker —
-      // the entry must not be added afterwards.
-      if (!settled) this.pendingBrokerSettles.add(brokerSettle)
+      // the entry must not be added afterwards. If the MOUNT itself settled
+      // (e.g. a component that settles from its focus callback), close the
+      // just-mounted picker instead of leaking it alongside a stale settle.
+      if (settled) {
+        handle.close?.()
+        handle = undefined
+      } else {
+        this.pendingBrokerSettles.add(brokerSettle)
+      }
     })
   }
 
@@ -9477,9 +13537,18 @@ export class TuiApp {
       // returns early on `settled`).
       if (!settled) {
         lease = this.showAdvancedInteractiveOverlay(component, options)
-        // The surface's dispose settles the promise (the overlay dies with
-        // the surface).
-        this.pendingBrokerSettles.add(brokerSettle)
+        if (settled) {
+          // The MOUNT itself settled synchronously: the atomic commit focuses
+          // the new overlay only after registering its node, so a component
+          // onFocus can call host.done() before this call returns. Close the
+          // just-mounted overlay and do NOT register the stale settle.
+          lease.close()
+          lease = undefined
+        } else {
+          // The surface's dispose settles the promise (the overlay dies with
+          // the surface).
+          this.pendingBrokerSettles.add(brokerSettle)
+        }
       }
     })
   }
@@ -9497,8 +13566,8 @@ export class TuiApp {
 
   /**
    * Phase 4: the ADVANCED host-state facade (plan §4D) — theme query/
-   * select, title override, working-indicator override and tool-expansion
-   * preference. A disposed surface is inert.
+   * select, title override, working-indicator override and
+   * transcript-detail expansion. A disposed surface is inert.
    */
   advancedHostState(): import('./extension/advanced-types.ts').AdvancedHostState {
     const app = this
@@ -9527,9 +13596,15 @@ export class TuiApp {
         app.reconcileWorkingRow()
         app.requestRender()
       },
+      // Both names drive the SAME runtime state — one field, two spellings
+      // (post-F6 plan §5.6: `setToolsExpanded` is the deprecated alias).
+      setTranscriptDetailExpanded: (expanded) => {
+        if (app.disposed) return
+        app.setTranscriptDetailExpanded(expanded)
+      },
       setToolsExpanded: (expanded) => {
         if (app.disposed) return
-        app.setToolOutputExpanded(expanded)
+        app.setTranscriptDetailExpanded(expanded)
       },
     }
   }
@@ -9683,8 +13758,10 @@ export class TuiApp {
    * the editor seat currently owns input — after a handoff the plugin
    * editor's component must actually receive keys (typing, arrows), not
    * leave the old host Editor focused. Focus transfer is skipped while a
-   * capturing flow (question/approval) owns the seat — those flows
-   * restore their own focus.
+   * capturing owner (question/approval/save-location or a capturing overlay
+   * that HOLDS keyboard focus) holds the seat — those owners restore their
+   * own focus. A nonCapturing or blurred overlay has released the keyboard
+   * and therefore never fences the handoff.
    */
   private mountSeatChild(): void {
     // Re-vendor lifecycle follow-up P1: the CAPTURE FENCE — while a
@@ -9699,12 +13776,15 @@ export class TuiApp {
     const component = this.seatEditor().component
     this.editorSeat.replace(component)
     // Focus follows the occupant: if the seat owns input right now (no
-    // question/approval/overlay is capturing), the NEW component must be
-    // the focused component — otherwise every key after a handoff still
-    // targets the old host Editor (P1-06 probe would see the WRONG
-    // focused component and plugin bindings would steal editor keys).
+    // question/approval/save-location and no capturing overlay that HOLDS
+    // keyboard focus), the NEW component must be the focused component —
+    // otherwise every key after a handoff still targets the old host Editor
+    // (P1-06 probe would see the WRONG focused component and plugin bindings
+    // would steal editor keys). A nonCapturing or blurred capturing overlay
+    // has released the keyboard, so it must NOT fence the handoff.
     if (this.activeQuestions === undefined && this.activeApproval === undefined
-      && !this.activeScreen.hasOverlayEntries) {
+      && this.activeSaveLocation === undefined
+      && !this.overlayBroker.hasFocusedOverlay()) {
       this.activeScreen.setFocus(component)
     }
   }
@@ -9770,7 +13850,7 @@ export class TuiApp {
    */
   private taskBrowserAvailable(): boolean {
     return this.tasksActive
-      && !this.activeScreen.hasOverlayEntries
+      && !this.overlayBroker.hasFocusedOverlay()
       && this.seatEditor().getText().trim() === ''
       && this.seatInputMode() === 'prompt'
   }
@@ -9819,6 +13899,21 @@ export class TuiApp {
     return this.seatEditor()
   }
 
+  /** Focus test hook: the ACTUAL component holding physical keyboard focus
+   * (the component the next key dispatches to), independent of the derived
+   * seat. Probes the "overlay visible but editor focused" invariant. */
+  focusedComponentForTest(): Component | null {
+    return this.activeScreen.getFocusedComponent()
+  }
+
+  /** Focus test hook: the DERIVED focused seat (the surface projection's
+   * truth). Probes the shared overlay-close reconciliation without needing
+   * an attached extension host (whose render mirror would mask a stale
+   * seat). */
+  focusSeatForTest(): 'editor' | 'overlay' | 'editor-panel' | 'none' {
+    return this.focusSeat
+  }
+
   /** P2-R5 test hook: the HIDDEN host editor's live text (probes that a
    * display-only replacement editor never silently routes typing into the
    * hidden host editor while the plugin seat is visible). */
@@ -9864,6 +13959,11 @@ export class TuiApp {
       }
       case 'summary':
         return { kind: 'summary', turn: 0, text: message.text }
+      case 'command':
+        // Host-owned card: extension renderers never present command rows
+        // (the public message-renderer snapshot has no command shape yet —
+        // post-PR166 plan §12 keeps the extension boundary unchanged).
+        return undefined
       case 'workflow':
         // Host-owned card: extension renderers never present workflow
         // records (the host fallback below renders them).
@@ -9882,7 +13982,7 @@ export class TuiApp {
    * not pollute each other). Both count: regular mode full-reveals ANY
    * expanded root. */
   private isInsideExpandedFocus(message: TranscriptMessage, boundary: number): boolean {
-    if (!this.focusModeEnabled || !('turn' in message)) return false
+    if (!isFocusDisplayPreset(this.displayState.preset) || !('turn' in message)) return false
     const turn = message.turn
     return this.focusExpandedTurns.has(turn) || this.isRegularCtrlOExpandedTurn(turn, boundary)
   }
@@ -9892,8 +13992,17 @@ export class TuiApp {
    * projection and isInsideExpandedFocus; never written into
    * focusExpandedTurns). Fullscreen never derives. */
   private isRegularCtrlOExpandedTurn(turn: number, boundary: number): boolean {
-    if (!this.focusModeEnabled || this.fullscreen !== undefined || !this.toolOutputExpanded) return false
+    if (!isFocusDisplayPreset(this.displayState.preset) || this.fullscreen !== undefined || !this.transcriptDetailExpanded) return false
     return Number.isFinite(boundary) && turn >= boundary
+  }
+
+  /** Whether Thinking has an OPERABLE disclosure owner on THIS surface. Alt+T
+   * owns Thinking on the regular surface; fullscreen also has the mouse
+   * per-card click. Without an owner the block FAILS OPEN (full body) instead of
+   * rendering a compact representation nobody can expand. */
+  private thinkingDisclosureAvailable(): boolean {
+    if (this.fullscreen !== undefined) return true
+    return this.keybindings.keyHint('app.transcript.toggleThinking') !== ''
   }
 
   /** The effective expansion of one Thinking block (the unified disclosure
@@ -9903,11 +14012,33 @@ export class TuiApp {
    * fullscreen click override (see setFullscreen), so a stale per-card
    * state can never surface there. Otherwise the shared bulk preference.
    * Focus ON/OFF is irrelevant: there is exactly one Thinking detail
-   * state for the whole app. */
-  private effectiveThinkingExpanded(message: Extract<TranscriptMessage, { kind: 'thinking' }>): boolean {
+   * state for the whole app. A surface without an operable owner fails
+   * open. */
+  private effectiveThinkingExpanded(
+    message: Extract<TranscriptMessage, { kind: 'thinking' }>,
+    ignoreSearch = false,
+  ): boolean {
+    if (!this.thinkingDisclosureAvailable()) return true
+    // The temporary search reveal wins over a stale explicit override while it
+    // is GRANTED (a new navigation re-opens the card); an explicit collapse
+    // revokes the grant instead of writing user state.
+    if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
     const override = this.expandedOverride.get(message)
     if (override !== undefined) return override
     return this.thinkingExpanded
+  }
+
+  /** Whether a settled surfaced-interaction card (question / Plan review) must
+   * fail open/full on THIS surface. Fullscreen Focus owns the card through the
+   * mouse, so its disclosure is independent of the root; regular Focus has NO
+   * per-card owner independent of the Focus root (Ctrl+O drives BOTH the root
+   * and the tool-detail master), so the card always renders full rather than a
+   * disclosure state the root would drive indirectly. Compact/Full are
+   * unchanged — their own capability already applies. */
+  private surfacedInteractionFailsOpen(message: TranscriptMessage): boolean {
+    return this.fullscreen === undefined
+      && isFocusDisplayPreset(this.displayState.preset)
+      && isSurfacedInteractionTool(message)
   }
 
   /** The effective expansion of one foldable message (plan §9/§33),
@@ -9920,20 +14051,75 @@ export class TuiApp {
    * Ctrl+O-derived or manually revealed — full-reveals its non-Thinking
    * process (no mouse, so no dead compact affordances). Every other
    * context keeps the existing rule. */
-  private effectiveMessageExpanded(message: TranscriptMessage, boundary: number): boolean {
+  private effectiveMessageExpanded(
+    message: TranscriptMessage,
+    boundary: number,
+    userBoundary: number,
+    ignoreSearch = false,
+  ): boolean {
     if (message.kind === 'thinking') {
-      return this.effectiveThinkingExpanded(message)
+      return this.effectiveThinkingExpanded(message, ignoreSearch)
     }
-    // Delivered files are an assistant turn-tail, but their capped/complete
-    // disclosure follows the existing recent-turn Ctrl+O boundary rather than
-    // introducing a second expansion state.
-    if (message.kind === 'assistant' && message.deliverables !== undefined) {
-      return message.turn >= boundary || this.expandedOverride.get(message) === true
+    // The capability decides BEFORE any renderer builds a folded view: a
+    // surface with no operable disclosure action (regular without an effective
+    // expand key) presents every fold in full, so no hidden count, marker or
+    // search geometry is ever produced for a key that cannot operate it.
+    if (!this.messageFoldDisclosureAvailable()) return true
+    // A settled surfaced-interaction card is NOT a Thought-owned secondary:
+    // regular Focus has no card owner independent of the Focus root, so it
+    // fails open/full instead of following the root (fullscreen keeps its
+    // mouse-owned per-card disclosure below).
+    if (this.surfacedInteractionFailsOpen(message)) return true
+    if (isUserMessageDisclosureCandidate(message)) {
+      // Long user disclosure follows its OWN recent-USER-turn boundary where
+      // Ctrl+O owns the expand master (regular AND fullscreen without Focus),
+      // with the per-message override (a fullscreen marker click or a search
+      // reveal) winning when set. Fullscreen Focus owns Ctrl+O as the
+      // Thought-root bulk, so the boundary must NOT apply there: a persisted
+      // `transcriptDetailExpanded` from an earlier surface would otherwise leak an
+      // expansion into a surface whose only expand affordance is the compact
+      // marker.
+      // The temporary search reveal wins over a stale explicit override while
+      // it is GRANTED (a new navigation re-opens the card); an explicit
+      // collapse revokes the grant instead of writing user state.
+      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      const override = this.expandedOverride.get(message)
+      if (override !== undefined) return override
+      if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
+      return message.turn >= userBoundary
+    }
+    // Delivered files are an assistant turn-tail with a per-OWNER capability:
+    // only the regular / fullscreen-Full Ctrl+O master owns the capped state. A
+    // surface whose Ctrl+O owns something else (fullscreen Focus root bulk,
+    // fullscreen Compact Work bulk) — or whose expand key is disabled — has no
+    // operable owner at all, so the tail FAILS OPEN (all files visible) instead
+    // of rendering a collapsed disclosure nobody can operate.
+    if (isDeliveredFilesDisclosureCandidate(message)) {
+      if (!this.deliveredFilesMasterOwned()) return true
+      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      const override = this.expandedOverride.get(message)
+      if (override !== undefined) return override
+      return message.turn >= boundary
+    }
+    // A member of an OPEN Work run (Compact, or nested Work inside an expanded
+    // Focus Thought). Regular has no mouse, so the open run full-reveals its own
+    // process detail — there is never a dead `(ctrl+o to expand)` card whose
+    // key actually collapses the Work span. Fullscreen keeps the mouse-owned
+    // per-card disclosure (plus the temporary search reveal, which never writes
+    // the user override).
+    if ('turn' in message && this.openWorkRunMembers.has(message)) {
+      if (this.fullscreen !== undefined) {
+        return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+      }
+      return true
     }
     if ('turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message)) {
       if (this.fullscreen !== undefined) {
-        // Fullscreen: explicit secondary disclosure only.
+        // Fullscreen: explicit secondary disclosure only (plus the temporary
+        // search reveal, which never writes the user override).
         return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
       }
       // Regular: no mouse, so no compact secondary affordance — ANY
       // expanded Focus root (Ctrl+O-derived OR manually revealed /
@@ -9942,7 +14128,7 @@ export class TuiApp {
       // cannot open.
       return true
     }
-    return this.existingMessageExpandedRule(message, boundary)
+    return this.existingMessageExpandedRule(message, boundary, ignoreSearch)
   }
 
   /** The pre-secondary expansion rule: LOCAL `!`/`!!` shell cards read the
@@ -9951,19 +14137,41 @@ export class TuiApp {
    * boundary or its per-card override. Thinking is NOT in the foldable
    * set here: Ctrl+O owns tool/system/compaction detail, Alt+T owns
    * Thinking detail (plan §2.4/§18). */
-  private existingMessageExpandedRule(message: TranscriptMessage, boundary: number): boolean {
+  private existingMessageExpandedRule(message: TranscriptMessage, boundary: number, ignoreSearch = false): boolean {
     if (isLocalShellCard(message)) {
       // In FULLSCREEN Focus the Ctrl+O master is NOT consulted (Ctrl+O
       // owns the Thought-root bulk there — documented): a local card
       // keeps its folded state unless the MOUSE full-revealed it (the
-      // per-card override still wins).
-      if (this.fullscreen !== undefined && this.focusModeEnabled) {
+      // per-card override still wins) or the temporary search target
+      // reveals it.
+      if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
         return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
       }
-      return this.toolOutputExpanded || this.expandedOverride.get(message) === true
+      return this.transcriptDetailExpanded
+        || this.expandedOverride.get(message) === true
+        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+    }
+    // A COMMAND owns its own standalone disclosure, independent of the
+    // Focus root (post-PR166 plan §11): outside fullscreen Focus the
+    // ordinary transcript-detail master (Ctrl+O) owns the bulk default —
+    // exactly like a LOCAL `!` shell card — with the per-card click override
+    // and the temporary search reveal layering on top. In fullscreen Focus
+    // only the per-card click and the search reveal apply (Ctrl+O owns the
+    // Thought-root bulk there).
+    if (message.kind === 'command') {
+      if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
+        return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+      }
+      return this.transcriptDetailExpanded
+        || this.expandedOverride.get(message) === true
+        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
     }
     return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
-      && (message.turn >= boundary || this.expandedOverride.get(message) === true)
+      && (message.turn >= boundary
+        || this.expandedOverride.get(message) === true
+        || (!ignoreSearch && this.searchForcesMessageExpanded(message)))
   }
 
   /**
@@ -9988,32 +14196,61 @@ export class TuiApp {
   private messageRenderState(
     message: TranscriptMessage,
     boundary: number,
+    userBoundary: number,
   ): { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint } {
-    const expanded = this.effectiveMessageExpanded(message, boundary)
+    const expanded = this.effectiveMessageExpanded(message, boundary, userBoundary)
     const insideFocusSecondary = 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
       && isFocusSecondaryDisclosure(message)
+    // A member of an OPEN Work run (Compact, or nested Work inside an expanded
+    // Focus Thought): regular full-reveals it (no affordance at all),
+    // fullscreen offers the mouse click.
+    const insideOpenWorkRun = message.kind !== 'thinking'
+      && 'turn' in message
+      && this.openWorkRunMembers.has(message)
     // The fold-hint OWNER (plan §12): Thinking is thinking-owned in
     // regular and click-owned in fullscreen; fullscreen Focus SECONDARY
-    // cards are click-owned; every other fold is fold-owned. A regular
-    // Focus non-Thinking secondary is ALWAYS full — no hint. The owner is
+    // cards and fullscreen Compact Work members are click-owned; every other
+    // fold is fold-owned. A regular Focus non-Thinking secondary and a
+    // regular Compact Work member are ALWAYS full — no hint. The owner is
     // SEMANTIC (never a physical key — the rendered copy resolves the
     // EFFECTIVE key through the keymap).
     const expandHint: ExpandHint = message.kind === 'thinking'
-      ? (this.fullscreen !== undefined ? 'click' : 'thinking')
-      : insideFocusSecondary
-        ? (this.fullscreen !== undefined ? 'click' : undefined)
-        : 'fold'
+      ? (this.fullscreen !== undefined ? 'click' : (this.thinkingDisclosureAvailable() ? 'thinking' : undefined))
+      : isUserMessageDisclosureCandidate(message)
+        // Long user disclosure is a turn-foundation fold. The owner is part
+        // of the cache identity so the marker label follows the surface:
+        // regular is the Ctrl+O recent-turn master; fullscreen offers the
+        // compact-marker click AND (without Focus, where Ctrl+O is still the
+        // expand master) the effective key. Inside a fullscreen Focus,
+        // Ctrl+O owns the Thought-root bulk, so the label is click-only —
+        // never a dead key hint.
+        ? this.userFoldHint()
+        : this.surfacedInteractionFailsOpen(message)
+          // Fail-open surface: the card is always full, so it advertises no
+          // fold hint (never a Ctrl+O hint that would actually drive the root).
+          ? undefined
+          : insideFocusSecondary || insideOpenWorkRun
+            ? (this.fullscreen !== undefined ? 'click' : undefined)
+            : this.ordinaryFoldHint()
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
-    // per-card override AND for any REGULAR Focus expanded root (the
-    // surface contract — no mouse, so a capped diff would be unreadable);
-    // fullscreen keeps the per-card override semantics.
+    // per-card override AND for any REGULAR expanded root (the surface
+    // contract — no mouse, so a capped diff would be unreadable); fullscreen
+    // keeps the per-card override semantics.
     const fullReveal = this.expandedOverride.get(message) === true
-      || (this.fullscreen === undefined && insideFocusSecondary)
+      || this.searchForcesMessageExpanded(message)
+      || !this.messageFoldDisclosureAvailable()
+      || this.surfacedInteractionFailsOpen(message)
+      || (this.fullscreen === undefined && (insideFocusSecondary || insideOpenWorkRun))
     return { expanded, fullReveal, expandHint }
   }
 
-  private componentForMessage(message: TranscriptMessage, boundary: number, width = this.transcriptRenderWidth()): Component {
+  private componentForMessage(
+    message: TranscriptMessage,
+    boundary: number,
+    width = this.transcriptRenderWidth(),
+    userBoundary = this.userExpandBoundary(),
+  ): Component {
     // Focus-expanded turns reveal their process TIMELINE (plan §15.1 +
     // the secondary-disclosure supplement): in FULLSCREEN the foldable
     // process cards default COMPACT inside an open Thought and only the
@@ -10021,14 +14258,14 @@ export class TuiApp {
     // full-reveals (no mouse, no dead compact cards). Collapsed Focus
     // turns never reach this method: their process rows are absent from
     // the projection.
-    const state = this.messageRenderState(message, boundary)
+    const state = this.messageRenderState(message, boundary, userBoundary)
 
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
     const entry = this.messageComponents.get(message)
     if (entry === undefined) {
-      const built = this.buildMessage(message, boundary, state, width)
+      const built = this.buildMessage(message, boundary, userBoundary, state, width)
       this.captureComponentState(built, message)
       this.messageComponents.set(message, built)
       return built.component
@@ -10042,15 +14279,41 @@ export class TuiApp {
     // changed → the winner may differ), or the message's own content. The
     // registry revision comparison is the CHEAP gate (plan §23): renderer
     // functions run only inside buildMessage, never for unchanged content.
-    const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
-    if (entry.boundary !== boundary
+    const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.revisionOf()
+    // The Host long-user fold state (the user boundary, expansion, full-reveal
+    // and hint) is read ONLY by the HOST user bubble, and a user message never
+    // reads the PROCESS boundary at all (`effectiveMessageExpanded`'s user
+    // branch uses its own boundary). A plugin-owned kind:'user' presentation
+    // consumes none of it — its snapshot has no expanded field and the Host
+    // draws no marker. Leaving those Host-only inputs in the identity re-ran
+    // extension user renderers on every process/user boundary shift or surface
+    // swap. The renderer-registry revision still handles Host↔plugin ownership
+    // changes.
+    const userCandidate = isUserMessageDisclosureCandidate(message)
+    const pluginOwnsUser = userCandidate && entry.rendererId !== undefined
+    const foldStateChanged = pluginOwnsUser
+      ? false
+      : userCandidate
+        ? entry.userBoundary !== userBoundary
+          || entry.expanded !== state.expanded
+          || entry.fullReveal !== state.fullReveal
+          || entry.expandHint !== state.expandHint
+        : entry.boundary !== boundary
+          || entry.expanded !== state.expanded
+          || entry.fullReveal !== state.fullReveal
+          || entry.expandHint !== state.expandHint
+    if (foldStateChanged
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
-      || entry.expanded !== state.expanded
-      || entry.fullReveal !== state.fullReveal
-      || entry.expandHint !== state.expandHint
       || entry.keymapRev !== this.keybindings.revision()
+      // Only cards whose RENDERED ROWS depend on the search target (a Workflow
+      // search-only context row, a PTC search-forced sub-call body) need the
+      // search revision in their cache identity — a global key would re-run
+      // every plugin renderer on each search jump. Every other card's search
+      // reveal is already covered by `foldStateChanged` (the effective
+      // expansion/full-reveal), and the highlight lives in the mount wrapper.
+      || (entry.searchPresentationRev !== this.searchPresentationRevision && this.searchPresentationSensitive(message))
       || rendererRevisionChanged
       || this.componentStale(entry, message)) {
       // Dispose the OLD component (a thumbnail's loader subscription) so a
@@ -10063,9 +14326,10 @@ export class TuiApp {
           // Best effort: a cached component's dispose must not break a paint.
         }
       }
-      const rebuilt = this.buildMessage(message, boundary, state, width)
+      const rebuilt = this.buildMessage(message, boundary, userBoundary, state, width)
       entry.component = rebuilt.component
       entry.boundary = rebuilt.boundary
+      entry.userBoundary = rebuilt.userBoundary
       entry.builtWidth = rebuilt.builtWidth
       entry.themeRev = rebuilt.themeRev
       entry.iconStyle = rebuilt.iconStyle
@@ -10073,6 +14337,7 @@ export class TuiApp {
       entry.fullReveal = rebuilt.fullReveal
       entry.expandHint = rebuilt.expandHint
       entry.keymapRev = rebuilt.keymapRev
+      entry.searchPresentationRev = rebuilt.searchPresentationRev
       entry.rendererId = rebuilt.rendererId
       entry.rendererRevision = rebuilt.rendererRevision
       this.captureComponentState(entry, message)
@@ -10104,8 +14369,19 @@ export class TuiApp {
       // on a resize.
       return message.kind === 'tool' && (message.name === 'edit' || (message.subCalls?.length ?? 0) > 0)
     }
-    return message.kind === 'system' || message.kind === 'compaction'
+    if (message.kind === 'system') {
+      // The form-aware standalone Context rows (notice summary, relay body,
+      // Session recall) wrap/truncate at RENDER time, so a resize must NOT
+      // rebuild them (plan §31.4). Every other folded system row still bakes
+      // its one-line width.
+      const kind = contextPresentationKind(message)
+      return kind !== 'notice' && kind !== 'relay' && kind !== 'recall'
+    }
+    return message.kind === 'compaction'
       || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
+      // A folded Command card bakes its one-line head + outcome preview at
+      // build time (the expanded outcome body is render-time markdown).
+      || (message.kind === 'command' && !expanded)
   }
 
   /**
@@ -10120,10 +14396,17 @@ export class TuiApp {
   private buildMessage(
     message: TranscriptMessage,
     boundary: number,
+    userBoundary: number,
     state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
     width: number,
   ): MessageComponentEntry {
     const registry = this.renderers
+    // Capture the revision that produced this renderer SELECTION before the
+    // callback runs: a plugin render() may synchronously dispose/register
+    // renderers (re-entrant mutation), and stamping a revision read AFTER the
+    // callback would claim a freshness the component does not have — the next
+    // gate would then skip the reconcile and keep a disposed renderer's view.
+    const rendererRevision = registry?.revisionOf()
     // An open opaque Assistant item is a transient display contract, not part
     // of the semantic renderer snapshot. Host rendering must own this frame so
     // an extension renderer cannot hide the immediate pending row; once the
@@ -10147,6 +14430,7 @@ export class TuiApp {
       // (review finding).
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
+      this.searchSourceRegionsByMessage.delete(message)
     }
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
@@ -10156,6 +14440,7 @@ export class TuiApp {
         ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
         : this.withDeliveredFiles(rendered.component, message, state.expanded),
       boundary,
+      userBoundary,
       builtWidth: hostBuilt && this.bakesFoldedWidth(message, state.expanded) ? width : undefined,
       themeRev: this.themeRevision,
       iconStyle: this.iconStyle,
@@ -10167,8 +14452,9 @@ export class TuiApp {
       // rebuild refreshes every hint-bearing card (review finding).
       keymapRev: this.keybindings.revision(),
       rendererId: rendered?.rendererId,
-      rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
+      rendererRevision,
       subCallExpandedRev: this.subCallExpandedRevision,
+      searchPresentationRev: this.searchPresentationRevision,
     }
   }
 
@@ -10210,12 +14496,20 @@ export class TuiApp {
         break
       case 'summary':
         break
+      case 'command':
+        entry.commandOutcome = message.outcome
+        break
       case 'compaction':
         entry.text = message.text
         entry.items = message.items
         entry.tokens = message.tokens
         entry.running = message.running
         entry.errorText = message.error
+        // The combined manual-compaction owner: the fused command (and its
+        // outcome reference) is part of the card's rendered facts, so a fuse
+        // or settlement must rebuild it.
+        entry.compactionSourceCommand = message.sourceCommand
+        entry.commandOutcome = message.sourceCommand?.outcome
         break
     }
   }
@@ -10251,10 +14545,16 @@ export class TuiApp {
           || entry.workflowDisclosureRev !== this.workflowDisclosureRevision
       case 'summary':
         return false
+      case 'command':
+        // The outcome object reference is replaced on settlement, so
+        // reference comparison is the reliable invalidation evidence.
+        return entry.commandOutcome !== message.outcome
       case 'compaction':
         return entry.text !== message.text || entry.items !== message.items
           || entry.tokens !== message.tokens || entry.running !== message.running
           || entry.errorText !== message.error
+          || entry.compactionSourceCommand !== message.sourceCommand
+          || entry.commandOutcome !== message.sourceCommand?.outcome
     }
   }
 
@@ -10299,7 +14599,7 @@ export class TuiApp {
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader!,
             this.imageTheme!,
-            () => this.requestRender(),
+            () => this.settleThumbnailRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -10311,9 +14611,8 @@ export class TuiApp {
         container.addChild(new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim }))
       } else if (block.type === 'reasoning' || block.type === 'tool-call') {
         // These blocks belong to the existing thinking/tool surfaces, not the
-        // assistant's ordinary markdown body. A finalized tool-result has no
-        // separate assistant surface, so it falls through to the explicit
-        // bounded fallback below.
+        // assistant's ordinary markdown body. Every other finalized block
+        // falls through to the explicit bounded fallback below.
         continue
       } else {
         flushText()
@@ -10370,7 +14669,7 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
-              () => this.requestRender(),
+              () => this.settleThumbnailRender(),
               this.occurrenceCollapsedRef(message, imageIndex),
             )
             this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -10401,7 +14700,7 @@ export class TuiApp {
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader,
             this.imageTheme,
-            () => this.requestRender(),
+            () => this.settleThumbnailRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -10450,6 +14749,31 @@ export class TuiApp {
       // stays aligned inside one block.
       if (message.content !== undefined && message.content.some(block => block.type !== 'text')) {
         return this.renderUserBlocks(message.content, message)
+      }
+      // Long text-only prompts compact at the VISUAL-ROW level: the bubble
+      // renders head + marker + tail while collapsed. `expanded` (the
+      // surface-adaptive disclosure rule) comes from the render-cache
+      // identity, so Ctrl+O / a fullscreen marker click rebuilds this
+      // component from the canonical full text — the text is never mutated.
+      // An EXPANDED long prompt keeps the same compact-capable bubble so the
+      // caller can place the tail collapse control (the bubble only reports
+      // that it is collapse-eligible). A regular surface with NO effective
+      // expand key has no affordance at all (fullscreen keeps the marker
+      // click), so it must render the full prompt rather than strand it.
+      if (this.userDisclosureAffordanceAvailable() && this.messageFoldDisclosureAvailable()) {
+        const hint = expandHint
+        return new UserBubbleComponent(
+          new Text(message.text, 0, 0),
+          `${color.roleUser('❯')} `,
+          color.roleUserBg,
+          {
+            thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS,
+            headRows: USER_MESSAGE_HEAD_ROWS,
+            tailRows: USER_MESSAGE_TAIL_ROWS,
+            expanded,
+            compactMarker: (hiddenRows, available) => this.userCompactMarker(hiddenRows, available, hint),
+          },
+        )
       }
       return new UserBubbleComponent(
         new Text(message.text, 0, 0),
@@ -10501,6 +14825,26 @@ export class TuiApp {
       return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
     }
     if (message.kind === 'system') {
+      // Form-aware surfaced Context: a known notice/relay/recall form owns a
+      // standalone presentation (producer summary, Agent message, Session
+      // recall). Every other injected row — and every non-context system row —
+      // keeps the existing Context-injection / section-marker presentation.
+      if (isSurfacedContext(message)) {
+        const kind = contextPresentationKind(message)
+        const rowOptions = { message, expanded, expandHint: this.expandHint(expandHint), iconStyle: this.iconStyle }
+        if (kind === 'notice') return new NoticeContextRow(rowOptions)
+        if (kind === 'relay') {
+          return new RelayContextRow({
+            ...rowOptions,
+            geometry: {
+              thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS,
+              headRows: USER_MESSAGE_HEAD_ROWS,
+              tailRows: USER_MESSAGE_TAIL_ROWS,
+            },
+          })
+        }
+        if (kind === 'recall') return new RecallContextRow(rowOptions)
+      }
       // Labeled entries are context injections: the row names the producer
       // like the Web ContextInjectionRow (Context injection · label), with a notice
       // form's one-line account on the folded row. Unlabeled entries keep
@@ -10568,12 +14912,26 @@ export class TuiApp {
       // running card shows "Compacting context…" until the summary lands.
       // The title icon follows the icon style (hidden under minimal — the
       // text and the error colour carry the state).
+      // A CORRELATED manual compaction is the combined owner of its `/compact`
+      // command (official CompactionCommandCard parity): the command's name
+      // joins the title and its outcome is the presentation fallback — the
+      // command's error text and settlement message must not disappear into
+      // the hidden row.
+      const command = message.sourceCommand
+      const commandName = command?.name === null || command?.name === undefined ? '' : ` /${command.name}`
+      // The command's error KIND drives the failed state even when the
+      // normalized outcome omitted its text ('' = failed without a message)
+      // — a failed manual /compact must never title `Context compacted`.
+      const commandError = command !== undefined && command.outcome?.kind === 'error'
+        ? command.outcome.text ?? ''
+        : undefined
       const lead = iconLead('compaction', this.iconStyle)
-      const title = message.error !== undefined
-        ? color.error(`${lead}Compaction failed`)
+      const failed = commandError !== undefined ? commandError : message.error
+      const title = failed !== undefined
+        ? color.error(`${lead}Compaction failed${commandName}`)
         : message.running === true
-          ? color.textMuted(`${lead}Compacting context…`)
-          : color.text(`${lead}Context compacted`)
+          ? color.textMuted(`${lead}Compacting context…${commandName}`)
+          : color.text(`${lead}Context compacted${commandName}`)
       const counts = (message.items > 0 || message.tokens > 0)
         ? `Compacted ${message.items} history item${message.items === 1 ? '' : 's'} (~${message.tokens} tokens)`
         : ''
@@ -10583,13 +14941,21 @@ export class TuiApp {
         if (counts !== '') card.addChild(new Text(color.textDim(counts), 0, 0))
         if (message.text !== '') {
           card.addChild(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
-        } else if (message.error !== undefined) {
-          card.addChild(new Text(color.textDim(message.error), 0, 0))
+        } else if (failed !== undefined && failed !== '') {
+          card.addChild(new Text(color.error(failed), 0, 0))
+        }
+        const commandOutcome = command?.outcome?.text
+        if (commandOutcome !== undefined && commandOutcome !== '' && commandOutcome !== failed) {
+          card.addChild(new Text(color.textDim(commandOutcome), 0, 0))
         }
       } else {
-        const summary = counts === '' ? '' : counts
+        // ONE physical preview row: a multiline command outcome folds to its
+        // first line (the full body is the expanded presentation).
+        const outcomeFallback = command?.outcome?.text ?? (failed !== undefined && failed !== '' ? failed : undefined)
+        const outcomePreview = outcomeFallback === undefined ? undefined : firstLine(outcomeFallback)
+        const parts = [counts, outcomePreview].filter(part => part !== '' && part !== undefined)
         card.addChild(new Text(truncateToWidth(
-          color.textDim(`${summary}${summary === '' ? '' : ' '}(${this.expandHint(expandHint)} to expand)`),
+          color.textDim(`${parts.join(' — ')}${parts.length === 0 ? '' : ' '}(${this.expandHint(expandHint)} to expand)`),
           width,
           '…',
         ), 0, 0))
@@ -10600,6 +14966,88 @@ export class TuiApp {
       // The Workflow card owns its Run/Phase disclosure (PR2 plan §7.1) —
       // the generic secondary `expanded` never applies to it.
       return this.renderWorkflowCard(message, width)
+    }
+    if (message.kind === 'command') {
+      // The Command-owned host card (post-PR166 plan §11): a real
+      // `kind: 'command'` node never routes through the generic Tool
+      // renderer. The row keeps the slash-command icon family and the
+      // status-pill vocabulary; a no-text success is the pill alone
+      // (never a synthetic "executed" body). Long outcomes stay operable:
+      // folded shows the ONE-LINE first-line preview, expanded renders the
+      // full body (markdown), and the fold is independent of any Thought
+      // root.
+      const card = new Container()
+      const title = message.name === null ? 'command' : `/${message.name}`
+      // The official args are the VERBATIM raw input INCLUDING the separator
+      // whitespace after the name (`parseCommand` keeps it), so the separator
+      // is never doubled: a verbatim leading space is kept, a spaceless
+      // fragment gets exactly one.
+      const rawArgs = message.args
+      const args = rawArgs === null || rawArgs === '' ? ''
+        : /^[\s]/.test(rawArgs) ? rawArgs : ` ${rawArgs}`
+      const icon = iconPrefix('slash-command', this.iconStyle)
+      const pill = message.outcome === null
+        ? color.textDim('[running]')
+        : message.outcome.kind === 'error'
+          ? color.error('[error]')
+          : color.success('[ok]')
+      const headIdentity = color.textDim(`${icon}${title}${args}`)
+      const statusPart = ` ${pill}`
+      const visibleStatus = truncateToWidth(statusPart, width, '…')
+      const identityBudget = Math.max(0, width - visibleWidth(visibleStatus))
+      const visibleIdentity = identityBudget === 0 ? '' : truncateToWidth(headIdentity, identityBudget, '…')
+      // Header field regions (row 0): the title is the command NAME, the
+      // rendered args the ARGS field (anchors, not raw ordinals — the same
+      // rule as the Tool header). The OUTCOME is an anchor-only source while
+      // expanded (a markdown body has no provable column mapping); folded,
+      // its one-line preview row carries the exact geometry.
+      const outcomeText = message.outcome?.text
+      const outcomePreview = outcomeText === undefined || outcomeText === '' ? undefined : firstLine(outcomeText)
+      {
+        const commandRegions: SearchSourceRegion[] = []
+        const nameStart = visibleWidth(icon)
+        const nameEnd = nameStart + visibleWidth(title)
+        if (nameEnd > nameStart) {
+          commandRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'command-field', field: 'name' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
+        }
+        if (args !== '') {
+          const argsStart = nameEnd
+          const argsEnd = argsStart + visibleWidth(args)
+          commandRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'command-field', field: 'args' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
+        }
+        if (!expanded && outcomePreview !== undefined) {
+          const previewStart = 2
+          const previewEnd = previewStart + visibleWidth(outcomePreview)
+          commandRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'command-field', field: 'outcome' }), anchorRow: 1, rowStart: 1, rowEnd: 2, columns: { startCol: previewStart, endCol: previewEnd }, enumerable: false })
+        }
+        if (commandRegions.length > 0) this.searchSourceRegionsByMessage.set(message, commandRegions)
+        else this.searchSourceRegionsByMessage.delete(message)
+      }
+      if (expanded) {
+        card.addChild(new Text(`${headIdentity}${statusPart}`, 0, 0))
+        const body = outcomeText ?? ''
+        if (body !== '') {
+          const outcomeColor = message.outcome?.kind === 'error' ? color.error : undefined
+          card.addChild(new Markdown(outcomeColor === undefined ? body : outcomeColor(body), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
+        }
+      } else {
+        card.addChild(new Text(`${visibleIdentity}${visibleStatus}`, 0, 0))
+        if (outcomePreview !== undefined) {
+          // A disclosure hint appears ONLY when content was actually cut
+          // (more lines than the preview, or a width truncation) — a fully
+          // visible one-line outcome stays clean. The hint's width is
+          // RESERVED up front, so a width cut still leaves the affordance
+          // visible instead of truncating it away with the preview tail.
+          const truncated = (outcomeText?.includes('\n') === true)
+            || visibleWidth(outcomePreview) > Math.max(0, width - 2)
+          const outcomeColor = message.outcome?.kind === 'error' ? color.error : color.textDim
+          const hint = truncated ? color.textDim(` (${this.expandHint(expandHint)} to expand)`) : ''
+          const previewBudget = hint === '' ? width : Math.max(2, width - visibleWidth(hint))
+          const preview = truncateToWidth(`  ${outcomeColor(outcomePreview)}`, previewBudget, '…')
+          card.addChild(new Text(truncateToWidth(`${preview}${hint}`, width, '…'), 0, 0))
+        }
+      }
+      return card
     }
     // Tool card: the Web row-model header (design title + relativized args
     // summary + status pill), with the result body when expanded. The whole
@@ -10656,6 +15104,27 @@ export class TuiApp {
     const statusPart = ` ${pill}`
     const statsPart = diffStatsLabel === '' ? '' : `  ${color.textDim(diffStatsLabel)}`
     const head = `${headIdentity}${statusPart}${statsPart}`
+    // Header field regions (row 0): the design title is the tool NAME (a
+    // direct projection) and the rendered summary is its ARGS. The rendered
+    // summary is a PRESENTER projection of the raw args (description-preferred,
+    // relativized, …), so it anchors but can never prove a raw args ordinal.
+    // The body/result has no provable mapping either: it anchors the card top.
+    {
+      const toolRegions: SearchSourceRegion[] = []
+      const nameStart = visibleWidth(icon)
+      const nameEnd = nameStart + visibleWidth(header.title)
+      if (nameEnd > nameStart) {
+        // `header.title` is a DESIGN TITLE (`web_search` → `Search`,
+        // unknown → `Tool call`), not the raw name: anchor only.
+        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'name' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
+      }
+      if (header.summary !== '') {
+        const argsStart = nameEnd + visibleWidth(action !== undefined ? ' · ' : ' ')
+        const argsEnd = argsStart + visibleWidth(header.summary)
+        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'args' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
+      }
+      if (toolRegions.length > 0) this.searchSourceRegionsByMessage.set(message, toolRegions)
+    }
     const visibleStatus = truncateToWidth(statusPart, width, '…')
     const identityBudget = Math.max(0, width - visibleWidth(visibleStatus))
     const visibleIdentity = identityBudget === 0 ? '' : truncateToWidth(headIdentity, identityBudget, '…')
@@ -10825,14 +15294,15 @@ export class TuiApp {
     // layout) and consumed by the fullscreen click map.
     if (message.subCalls !== undefined && message.subCalls.length > 0) {
       const hits: Array<{ top: number; height: number; subCallId: string }> = []
+      const regions: SearchSourceRegion[] = []
       let row = 0
       let total = 0
       for (const child of message.subCalls) {
-        const rows = this.renderSubCall(card, child, width, 2, hits, row, expanded, 0)
+        const rows = this.renderSubCall(card, child, width, 2, hits, regions, row, [child.subCallId ?? ''], expanded, 0)
         row += rows
         total += rows
       }
-      this.subCallHitsByMessage.set(message, { hits, total })
+      this.subCallHitsByMessage.set(message, { hits, regions, total })
     }
     return card
   }
@@ -10850,7 +15320,9 @@ export class TuiApp {
     width: number,
     indent: number,
     hits: Array<{ top: number; height: number; subCallId: string }>,
+    regions: SearchSourceRegion[],
     row: number,
+    path: readonly string[],
     rootExpanded: boolean,
     depth: number,
   ): number {
@@ -10873,13 +15345,31 @@ export class TuiApp {
     // bounded preview while the root stays collapsed.
     const bodyExpanded = this.fullscreen === undefined
       ? rootExpanded
-      : this.subCallExpanded.has(child.subCallId ?? '')
+      : this.subCallExpanded.has(child.subCallId ?? '') || this.searchForcesSubCallExpanded(child.subCallId ?? '')
     const disclosure = bodyExpanded ? '▼' : '▶'
     const icon = iconPrefix(toolIconSemantic(child.name), this.iconStyle)
     const head = color.textDim(`${disclosure} ${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
     const pad = ' '.repeat(indent)
     card.addChild(new Text(truncateToWidth(`${pad}${head} ${pill}`, width, '…'), 0, 0))
     hits.push({ top: row, height: 1, subCallId: child.subCallId ?? '' })
+    // Proven regions for this child's fields. Header row: the title is the
+    // tool NAME and the summary its ARGS; the executed `$ command` row below is
+    // a SECOND projection of args and is deliberately NOT a region (the header
+    // summary is the provable primary display). Result rows are one body
+    // region with no column split.
+    const headerRow = row
+    const nameStart = indent + visibleWidth(`${disclosure} ${icon}`)
+    const nameEnd = nameStart + visibleWidth(header.title)
+    if (nameEnd > nameStart) {
+      // `header.title` is a design title, not the raw sub-call name: anchor only.
+      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'name' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
+    }
+    if (header.summary !== '') {
+      const argsStart = nameEnd + 1
+      const argsEnd = argsStart + visibleWidth(header.summary)
+      // Presenter summary of the raw args: anchor only, never enumerate.
+      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'args' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
+    }
     if (bodyExpanded) {
       // bash/pwsh: the executed command row — the header summary prefers
       // the description, so the real command must never be lost.
@@ -10889,6 +15379,11 @@ export class TuiApp {
         rows += 1
       }
       if (child.result !== '') {
+        const resultStart = row + rows
+        const resultLines = child.result.split('\n').length
+        // Result lines are truncated to the width: a dropped match would shift
+        // every later raw ordinal. Anchor the body, never enumerate.
+        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines, enumerable: false })
         for (const line of child.result.split('\n')) {
           card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
           rows += 1
@@ -10897,7 +15392,7 @@ export class TuiApp {
     }
     if (child.subCalls !== undefined) {
       for (const grand of child.subCalls) {
-        rows += this.renderSubCall(card, grand, width, indent + 2, hits, row + rows, rootExpanded, depth + 1)
+        rows += this.renderSubCall(card, grand, width, indent + 2, hits, regions, row + rows, [...path, grand.subCallId ?? ''], rootExpanded, depth + 1)
       }
     }
     return rows
@@ -10911,8 +15406,22 @@ export class TuiApp {
   /** Toggle one PTC sub-call body's disclosure (mouse click on its header
    * row). The state is keyed by the durable subCallId. */
   private toggleSubCallExpanded(subCallId: string): void {
-    if (this.subCallExpanded.has(subCallId)) this.subCallExpanded.delete(subCallId)
-    else this.subCallExpanded.add(subCallId)
+    // Capture the search force BEFORE mutating: a sub-call can be open both
+    // because the user expanded it earlier AND because the search target's
+    // path covers it. An explicit collapse must suppress the search force in
+    // that case too, or the body reopens immediately.
+    const searchForced = this.searchForcesSubCallExpanded(subCallId)
+    if (this.subCallExpanded.has(subCallId)) {
+      this.subCallExpanded.delete(subCallId)
+      if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
+    } else if (searchForced) {
+      // The body is open only because of the search reveal: an explicit click
+      // collapses just that sub-call until the next navigation (the rest of
+      // the reveal path stays).
+      this.searchSuppressedSubCalls.add(subCallId)
+    } else {
+      this.subCallExpanded.add(subCallId)
+    }
     this.subCallExpandedRevision += 1
     this.clearFocusLiveHeightState()
     this.rebuildMessages()
@@ -11082,14 +15591,41 @@ export class TuiApp {
   ): Component {
     const card = new Container()
     const runId = message.runId
+    const contextMember = this.searchContextMember(message)
     const runOpen = this.workflowRunOpen(message)
     const icon = iconPrefix('workflow', this.iconStyle)
     const disclosure = runOpen ? '▼' : '▶'
     const head = `${color.textDim(`${disclosure} ${icon}Workflow ${message.name}`)} ${workflowStatusPill(message.status)}`
     const rows: string[] = []
     const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
+    const regions: SearchSourceRegion[] = []
+    // The visible-column spans of one row's fields (each row bakes its own
+    // prefix glyph, so the spans must be measured from the same prefix).
+    const fieldSpans = (prefix: string, label: string, status: string | undefined): { labelStart: number; labelEnd: number; statusStart: number; statusEnd: number } => {
+      const labelStart = visibleWidth(prefix)
+      const labelEnd = labelStart + visibleWidth(label)
+      if (status === undefined) return { labelStart, labelEnd, statusStart: labelEnd, statusEnd: labelEnd }
+      const statusStart = labelEnd + visibleWidth(' — ')
+      return { labelStart, labelEnd, statusStart, statusEnd: statusStart + visibleWidth(status) }
+    }
+    const pushFieldRegion = (sourceKey: string, row: number, startCol: number, endCol: number): void => {
+      if (endCol > startCol) regions.push({ sourceKey, anchorRow: row, rowStart: row, rowEnd: row + 1, columns: { startCol, endCol } })
+    }
     rows.push(truncateToWidth(head, width, '…'))
     hits.push({ top: 0, height: 1, hit: { kind: 'run', runId } })
+    // The run header row carries the kind word, the run name and the status
+    // pill: distinct visible-column spans so each semantic field maps to its
+    // own occurrence.
+    const runHeadPrefix = `${disclosure} ${icon}`
+    const runKindStart = visibleWidth(runHeadPrefix)
+    const runKindEnd = runKindStart + visibleWidth('Workflow')
+    const runNameStart = runKindEnd + 1
+    const runNameEnd = runNameStart + visibleWidth(message.name)
+    const runStatusStart = runNameEnd + 1
+    const runStatusEnd = runStatusStart + visibleWidth(workflowStatusPill(message.status))
+    pushFieldRegion('workflow-run.kind', 0, runKindStart, runKindEnd)
+    pushFieldRegion('workflow-run.name', 0, runNameStart, runNameEnd)
+    pushFieldRegion('workflow-run.status', 0, runStatusStart, runStatusEnd)
     // The aggregate summary renders in BOTH states (plan §5.6: a compact
     // completed run still shows `126 agents · completed` — the phases and
     // members stay hidden, the aggregate never does).
@@ -11109,17 +15645,25 @@ export class TuiApp {
           '…',
         ))
         hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase', runId, phaseKey: phase.key } })
+        const phasePrefix = `  ${phaseDisclosure} `
+        const phaseSpan = fieldSpans(phasePrefix, phase.label, undefined)
+        pushFieldRegion(`workflow-phase.${phase.key}`, rows.length - 1, phaseSpan.labelStart, phaseSpan.labelEnd)
         if (!phaseOpen) continue
         if (phase.mode === 'inline') {
           // Small phase: every member in durable seq order. Only a RUNNING
           // member is a direct navigation target (plan §9.1/§9.4 — terminal
           // members stay visible but never cold-open from the card).
           for (const member of phase.members) {
+            const prefix = `    ${workflowMemberMark(member.status)} `
             rows.push(truncateToWidth(
-              `    ${workflowMemberMark(member.status)} ${member.label} — ${color.textDim(member.status)}`,
+              `${prefix}${member.label} — ${color.textDim(member.status)}`,
               width,
               '…',
             ))
+            const spans = fieldSpans(prefix, member.label, member.status)
+            const memberBase = `workflow-member.${phase.key}.${member.seq}`
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
             if (member.status === 'running') {
               hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'member', runId, seq: member.seq, childId: String(member.childId) } })
             }
@@ -11132,13 +15676,39 @@ export class TuiApp {
             rows.push(truncateToWidth(color.textDim(`    ${counts}`), width, '…'))
           }
           for (const member of phase.anomalyPreview) {
-            rows.push(truncateToWidth(`    ${workflowMemberMark(member.status)} ${member.label}`, width, '…'))
+            const prefix = `    ${workflowMemberMark(member.status)} `
+            rows.push(truncateToWidth(`${prefix}${member.label}`, width, '…'))
+            // The anomaly-preview row IS the visible row for that member (the
+            // context row is deliberately suppressed for previewed members).
+            // Its status text is not rendered, so only the label region exists.
+            const spans = fieldSpans(prefix, member.label, undefined)
+            pushFieldRegion(`workflow-member.${phase.key}.${member.seq}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
           }
           if (phase.hiddenAnomalyCount > 0) {
             rows.push(truncateToWidth(color.textDim(`    … ${phase.hiddenAnomalyCount} more abnormal`), width, '…'))
           }
           rows.push(truncateToWidth(`    ${color.textDim('›')} View ${phase.members.length} agents`, width, '…'))
           hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase-agents', runId, phaseKey: phase.key } })
+          // Search-only context row (plan §6.6): a member hidden by the large
+          // phase's aggregate still gets ONE visible, highlightable row while
+          // its search target is current. Normal thresholds, `View N agents`
+          // and the Task Browser are untouched; the row disappears when the
+          // target clears.
+          const context = contextMember !== undefined && contextMember.phaseKey === phase.key
+            ? message.members.find(member => member.seq === contextMember.seq)
+            : undefined
+          if (context !== undefined && !phase.anomalyPreview.some(member => member.seq === context.seq)) {
+            const prefix = `    ${color.textDim('↳')} `
+            rows.push(truncateToWidth(
+              `${prefix}${context.label} — ${color.textDim(context.status)}`,
+              width,
+              '…',
+            ))
+            const spans = fieldSpans(prefix, context.label, context.status)
+            const memberBase = `workflow-member.${phase.key}.${context.seq}`
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
+          }
         }
       }
       if (workflowRunViewAllVisible(message.members.length, phases.length)) {
@@ -11148,6 +15718,7 @@ export class TuiApp {
     }
     card.addChild(new Text(rows.join('\n'), 0, 0))
     this.workflowHitsByMessage.set(message, { hits, total: rows.length })
+    this.searchSourceRegionsByMessage.set(message, regions)
     return card
   }
 
@@ -11441,7 +16012,7 @@ export class TuiApp {
                     block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
                     this.imageLoader,
                     this.imageTheme,
-                    () => this.requestRender(),
+                    () => this.settleThumbnailRender(),
                   ))
                 } else {
                   // Known process blocks keep their legacy JSON form;
@@ -11594,7 +16165,7 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
-              () => this.requestRender(),
+              () => this.settleThumbnailRender(),
             ))
           } else {
             // Known process blocks keep their legacy JSON form; file and
@@ -11619,7 +16190,7 @@ export class TuiApp {
   private blockDisplayText(block: import('@deepseek-ai/dsh-llm').ContentBlock): string {
     if (block.type === 'image') return '[image]'
     if (block.type === 'file') return fileAttachmentSummary(block.attachment)
-    if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+    if (block.type === 'reasoning' || block.type === 'tool-call') {
       return JSON.stringify(block, null, 2)
     }
     return finalizedBlockFallbackText(block)
@@ -11640,7 +16211,7 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
-          () => this.requestRender(),
+          () => this.settleThumbnailRender(),
         ))
       }
     }
@@ -11689,12 +16260,25 @@ export class TuiApp {
     // be REBUILT on this render (never waiting for a key, resize, session
     // event or setStatus). O(1) gate; the rebuild itself only re-runs
     // renderers for entries whose identity changed (plan §23).
-    if (this.renderers !== undefined) {
-      const revision = this.renderers.revisionOf()
-      if (revision !== this.lastRendererRevision) {
-        this.lastRendererRevision = revision
-        this.clearFocusLiveHeightState()
-        this.rebuildMessages()
+    //
+    // Re-entrancy safety: a renderer may bump the revision AGAIN inside
+    // render(), and rebuildMessages() ends with requestRender(). Without the
+    // guard the two would recurse synchronously until the stack overflowed, so
+    // the reconcile runs as a bounded iterative loop and a nested request only
+    // schedules the physical frame. A permanent churn exits after the bound
+    // (the production batcher retries on the next microtask).
+    if (this.renderers !== undefined && !this.reconcilingRendererRevision) {
+      this.reconcilingRendererRevision = true
+      try {
+        for (let attempt = 0; attempt < RENDERER_RECONCILE_ATTEMPTS; attempt += 1) {
+          const revision = this.renderers.revisionOf()
+          if (revision === this.lastRendererRevision) break
+          this.lastRendererRevision = revision
+          this.clearFocusLiveHeightState()
+          this.rebuildMessages()
+        }
+      } finally {
+        this.reconcilingRendererRevision = false
       }
     }
     // Live surface geometry (P1-1): the fork consumes the terminal resize
@@ -11742,6 +16326,13 @@ export class TuiApp {
         // components. Rebuild from their raw state before chrome measurement
         // so fullscreen hit-testing and footer budgets see the new geometry.
         this.rebuildQueuePane(width)
+      }
+      if (widthChanged || heightChanged) {
+        // The todo panel is width-baked AND height-sensitive: its compact cap
+        // is a function of terminal ROWS (a short fullscreen shows 3). A
+        // height change re-derives the effective cap and must drop a now
+        // redundant explicit full state (the plan's ghost-state rule).
+        if (this.todoExpanded && !this.hasTodoOverflow()) this.todoExpanded = false
         this.rebuildTodoPanel(width)
       }
       // M5: a material WIDTH change refreshes the command surface (the
@@ -11780,9 +16371,9 @@ export class TuiApp {
       if (host !== undefined) {
         const current = host.state().surface
         // focusedSeat derives from the actual focus state (follow-up P1): the
-        // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
-        // question/approval/fullscreen entry; the requestRender mirror only
-        // publishes it here (plus the stale-frame safety net below). The LIVE
+        // seat tracker is updated by showOverlayOnHost/the OverlayBroker close
+        // reconciliation/question/approval/fullscreen entry; the requestRender
+        // mirror only publishes it here (plus the stale-frame safety net below). The LIVE
         // focusSeat (not the microtask-published copy) is authoritative — a
         // publish that changed nothing must still mirror the real seat.
         this.publishFocusSeat()
@@ -11848,12 +16439,27 @@ export class TuiApp {
       this.setFocusSeat('overlay')
       return
     }
-    const screen = this.activeScreen
-    if (!this.disposed && screen.hasOverlayEntries && screen.getFocusedComponent() !== null) {
+    // The seat reflects the ACTUAL keyboard owner: only a capturing overlay
+    // that currently HOLDS focus reports 'overlay'. A nonCapturing notice
+    // never takes focus, and a blurred/hidden entry has released it, so the
+    // editor owns the seat then.
+    if (this.overlayBroker.hasFocusedOverlay()) {
       this.setFocusSeat('overlay')
       return
     }
     this.setFocusSeat('editor')
+  }
+
+  /**
+   * Restore PHYSICAL keyboard focus to the CURRENT editor-seat occupant (the
+   * overlay broker's dependent-restore seam). The fork's own fallback is the
+   * per-overlay `preFocus` snapshot, which a mid-life editor-seat handoff
+   * leaves pointing at the replaced editor component — so the live seat
+   * owner, not that snapshot, must own the keyboard.
+   */
+  private focusSeatOwner(): void {
+    if (this.disposed) return
+    this.activeScreen.setFocus(this.seatEditor().component)
   }
 
   /** Set the current focus seat and schedule one coalesced snapshot publish
@@ -11879,7 +16485,7 @@ export class TuiApp {
    * count and, when the list is non-empty, the first active item's text.
    * A list that shrank to the compact cap (or below) has no distinct full
    * state: the ghost `todoExpanded` is cleared so the panel never shows a
-   * visually identical "full" list (plan: >5 → ≤5 auto-normalizes).
+   * visually identical "full" list (plan: >cap → ≤cap auto-normalizes).
    * @param todos - the latest todo/write snapshot.
    */
   setTodoSummary(todos: readonly TodoItem[]): void {
@@ -11909,7 +16515,7 @@ export class TuiApp {
     return this.todoPanelVisible
   }
 
-  /** Toggle the todo panel between the compact five rows and the full list
+  /** Toggle the todo panel between the compact rows and the full list
    * (fullscreen click on the panel's area). Fail-closed: without overflow
    * the compact and full lists are visually identical, so the expansion
    * never enters a meaningless state (other callers cannot manufacture
@@ -11926,19 +16532,26 @@ export class TuiApp {
     return this.todoExpanded
   }
 
-  /** Whether the todo list exceeds the compact cap (the full state would
-   * actually differ from the compact list). All todos enter the ordered
-   * render list, so the raw length is the renderable count. */
+  /** Whether the todo list exceeds the effective compact cap (the full
+   * state would actually differ from the compact list). All todos enter the
+   * ordered render list, so the raw length is the renderable count. */
   private hasTodoOverflow(): boolean {
-    return this.todoItems.length > TODO_COMPACT_LIMIT
+    return this.todoItems.length > this.effectiveTodoCompactLimit()
   }
 
-  /** The fullscreen click loop over the todo panel's own rows: with ≤5
-   * items the panel is a two-state summary ↔ list (a second click closes
-   * it — never a visually identical intermediate full state); with >5
-   * items it keeps the three-state summary → compact → full → summary.
-   * The mouse thus opens AND closes the panel without Ctrl+T; the dock
-   * summary row itself opens it (handleFullscreenClick's dock region). */
+  /** The compact cap for the CURRENT terminal height: 3 on a short
+   * (≤ {@link TODO_SHORT_SCREEN_MAX_ROWS} rows) fullscreen, 5 otherwise. */
+  private effectiveTodoCompactLimit(): number {
+    return todoCompactLimit(this.terminal.rows)
+  }
+
+  /** The fullscreen click loop over the todo panel's own rows: with ≤ the
+   * effective compact cap (5 normally, 3 on a short screen) items the panel
+   * is a two-state summary ↔ list (a second click closes it — never a
+   * visually identical intermediate full state); above the cap it keeps the
+   * three-state summary → compact → full → summary. The mouse thus opens
+   * AND closes the panel without Ctrl+T; the dock summary row itself opens
+   * it (handleFullscreenClick's dock region). */
   private handleTodoPanelClick(): void {
     if (this.todoExpanded) {
       // full -> summary
@@ -11947,7 +16560,7 @@ export class TuiApp {
       // compact -> full, only when full actually differs
       this.toggleTodoExpanded()
     } else {
-      // <=5: list -> summary directly
+      // <= the effective compact cap: list -> summary directly
       this.toggleTodoPanel()
     }
   }
@@ -11964,9 +16577,10 @@ export class TuiApp {
 
   /**
    * Rebuild the todo panel text: a border rule + `Todo` title (both indented
-   * one cell) plus up to {@link TODO_COMPACT_LIMIT} rows by default
-   * (in_progress first, then pending, then completed (strikethrough)); the
-   * full list when expanded (fullscreen click on the panel toggles).
+   * one cell) plus up to the current compact cap (5 normally, 3 on a short
+   * screen) rows by default (in_progress first, then pending, then completed
+   * (strikethrough)); the full list when expanded (fullscreen click on the
+   * panel toggles).
    */
   private rebuildTodoPanel(width: number): void {
     if (!this.todoPanelVisible) {
@@ -11981,7 +16595,7 @@ export class TuiApp {
       ...this.todoItems.filter(todo => todo.status === 'pending'),
       ...this.todoItems.filter(todo => todo.status === 'completed'),
     ]
-    const shown = this.todoExpanded ? ordered : ordered.slice(0, TODO_COMPACT_LIMIT)
+    const shown = this.todoExpanded ? ordered : ordered.slice(0, this.effectiveTodoCompactLimit())
     const safeWidth = Math.max(1, Math.floor(width))
     const border = color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)
     // Title: bold, two-cell indent.
@@ -12054,6 +16668,9 @@ export class TuiApp {
     this.clearThinkingExpansionOverrides()
     this.clearFocusLiveHeightState()
     this.thinkingExpanded = !this.thinkingExpanded
+    // An explicit collapse of the Thinking DETAIL revokes the temporary search
+    // reveal of a Thinking target (an expand keeps it redundant).
+    if (!this.thinkingExpanded && this.searchTarget?.message.kind === 'thinking') this.suppressSearchReveal()
     this.rebuildMessages()
     return this.thinkingExpanded
   }
@@ -12088,29 +16705,67 @@ export class TuiApp {
    * (phase precedence lives in the pure derive — the app never re-derives
    * it in the footer). */
   private projectActivity(): void {
-    this.projectStatus({
-      activity: deriveActivityStatus(
-        {
-          working: this.workingActive,
-          compacting: this.compactionPhase === 'summarizing',
-          applyingCompaction: this.compactionPhase === 'applying',
-          approvalOpen: this.activeApproval !== undefined,
-          questionOpen: this.activeQuestions !== undefined,
-        },
-        this.busy,
-        {
-          queuedCount: this.queueItems.length,
-          taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
-          childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
-          ...(this.taskSummaryRich ? {
-            taskTotalCount: this.taskSummary.totalJobs,
-            childAgentTotalCount: this.taskSummary.totalAgents,
-            failedTaskCount: this.taskSummary.failedAttention,
-          } : {}),
-          todoCount: this.todoItems.length,
-        },
-      ),
-    })
+    const activity = deriveActivityStatus(
+      {
+        working: this.workingActive,
+        compacting: this.compactionPhase === 'summarizing',
+        applyingCompaction: this.compactionPhase === 'applying',
+        approvalOpen: this.activeApproval !== undefined,
+        questionOpen: this.activeQuestions !== undefined,
+      },
+      this.busy,
+      {
+        queuedCount: this.queueItems.length,
+        taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
+        childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
+        ...(this.taskSummaryRich ? {
+          taskTotalCount: this.taskSummary.totalJobs,
+          childAgentTotalCount: this.taskSummary.totalAgents,
+          failedTaskCount: this.taskSummary.failedAttention,
+        } : {}),
+        todoCount: this.todoItems.length,
+      },
+    )
+    this.projectStatus({ activity })
+    // Focus timer: observe the authoritative phase HERE, not only from the
+    // renderer. A capturing approval/question modal owns the screen and may
+    // paint the transcript rarely, so a render-driven freeze could miss the
+    // whole wait and over-count it (plan §5.3).
+    this.observeFocusTiming(activity.phase)
+  }
+
+  /**
+   * Seed/advance the live Focus timer for every WINDOWED activity under
+   * `phase` (defaults to the current authoritative status phase). Called
+   * from the phase projection AND from every activity-map publication:
+   * `folder.apply` schedules a delayed repaint while an approval/question
+   * can open synchronously first, so the map may be published only after
+   * the phase is already user-blocked. Recording the phase boundary and
+   * seeding here (at publication) keeps the pre-wait active span.
+   *
+   * Only the windowed turns can be on screen, and `turnActivities()` is
+   * every known turn (O(total)): iterating it on every publication would
+   * reintroduce an unbounded scan into the long-session repaint path. This
+   * walks the bounded windowed message list instead. Returns whether a LIVE
+   * (non-completed) activity was observed: the caller clears the pause
+   * windows only after a pass that actually seeded live timing, never after
+   * a history window full of completed turns.
+   */
+  private observeFocusTiming(phase: RunPhase = this.statusStore.snapshot().activity.phase): boolean {
+    const now = Date.now()
+    this.focusTiming.notePhase(phase, now)
+    const seen = new Set<number>()
+    let observedLive = false
+    for (const message of this.messages) {
+      const turn = 'turn' in message ? message.turn : undefined
+      if (turn === undefined || seen.has(turn)) continue
+      seen.add(turn)
+      const turnActivity = this.turnActivities.get(turn)
+      if (turnActivity === undefined) continue
+      this.focusTiming.observe(turnActivity, phase, now)
+      if (!turnActivity.completed) observedLive = true
+    }
+    return observedLive
   }
 
   /** M0: project the surface section (focusedSeat/fullscreen) from the
@@ -12378,18 +17033,53 @@ export class TuiApp {
    * Replace the pending inbox rows for the queue pane: a border rule, one
    * `❯ text` row per message, and a dim hint. An empty queue renders
    * nothing at all.
-   * @param items - pending followups/steers, in delivery order.
+   * @param items - semantic queued occurrences, in projection order.
+   * @param running - activity of the same pending-input subject; omitted for
+   * legacy callers and keeps the historical steer hint.
    */
-  setQueueItems(items: readonly QueueItem[]): void {
-    this.queueItems = items
+  setQueueItems(items: readonly QueueItem[], running?: boolean): void {
+    this.setPendingInputPresentation({
+      queued: items,
+      steering: this.pendingUserRows,
+      running: running ?? true,
+    })
+  }
+
+  /**
+   * Apply one coherent pending-input presentation: the authoritative queued
+   * occurrences plus client-local queued echoes (queue pane), and the
+   * authoritative `steering` occurrences plus local submission echoes (the
+   * ephemeral conversation-tail lane). A single call keeps the queue and the
+   * lane in the same frame — a separate setter per surface would paint the
+   * exact transient blank/duplicate frame this handoff exists to remove.
+   *
+   * `context` occurrences are deliberately absent: this presentation owns
+   * pending USER input only.
+   */
+  setPendingInputPresentation(presentation: PendingInputPresentation): void {
+    this.queueItems = presentation.queued
+    this.pendingUserRows = presentation.steering
+    this.queueRunning = presentation.running
+    // Prune the presentation-only disclosure state to the LIVE pending keys
+    // (plan §16): a steering row that left the lane (its durable message
+    // materialized, or the occurrence settled) must not accumulate stale
+    // rpc/id state for the life of the session. The identity is the stable
+    // pending key, so a local echo whose authoritative occurrence replaces it
+    // keeps its explicit disclosure state.
+    if (this.pendingUserExpanded.size > 0) {
+      const liveKeys = new Set(presentation.steering.map(pendingUserDisclosureKey))
+      for (const key of [...this.pendingUserExpanded.keys()]) {
+        if (!liveKeys.has(key)) this.pendingUserExpanded.delete(key)
+      }
+    }
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.renderQueuePane()
+    // The lane lives in the transcript tail: rebuild it in the SAME call so
+    // the queue and the lane never diverge across frames.
+    this.rebuildMessages()
     this.syncExtensionState()
   }
-
-  /** Notice rows shown in full before the `+N more` fold (user rows are never folded). */
-  private static readonly MAX_NOTICE_ROWS = 5
 
   /** Rebuild the queue pane text from the current inbox rows and width. */
   private rebuildQueuePane(width: number): void {
@@ -12405,47 +17095,41 @@ export class TuiApp {
     // Panel border rules indent one cell on each side so the boundary never
     // reads as the editor's full-width border.
     const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
-    // User-origin rows are the user's OWN queued input: always fully
-    // visible, never folded. Notice rows (plugin notifications, subagent
-    // reports, injected instructions) are at-a-glance transport only:
-    // beyond MAX_NOTICE_ROWS they collapse into one `+N more` line, so a
-    // backlog of child settlements can never flood the pane — the task
-    // browser remains their browse surface, and each claimed notice drops
-    // the count (and eventually the group) automatically.
-    const userRows = items.filter(item => item.notice !== true)
-    const noticeRows = items.filter(item => item.notice === true)
-    const shownNotices = noticeRows.slice(0, TuiApp.MAX_NOTICE_ROWS)
-    for (const item of userRows) {
+    for (const item of items) {
       const text = item.text.replace(/\s+/g, ' ').trim()
-      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth('❯ ')), '…')
-      // User-origin rows carry the SAME brand-blue ❯ as the transcript
-      // bubbles and the editor prompt — one marker for the user's own
-      // input everywhere (pending here, delivered up there).
-      lines.push(`${color.roleUser('❯')} ${truncated}`)
+      // A client-local echo has no authoritative queue item yet: advertise
+      // that it is still being admitted, never a plain authoritative row.
+      // The suffix is part of the row's width budget, so a narrow pane
+      // truncates the TEXT and keeps the status on the same line — never a
+      // detached wrapped row. On an ultra-narrow pane that cannot hold the
+      // marker + one text cell + the status, the status is dropped rather
+      // than wrapped.
+      const prefixWidth = visibleWidth('❯ ')
+      const fullSuffix = item.local === true ? ' sending…' : ''
+      const suffix = prefixWidth + visibleWidth(fullSuffix) + 1 <= safeWidth ? fullSuffix : ''
+      const available = Math.max(1, safeWidth - prefixWidth - visibleWidth(suffix))
+      const truncated = truncateToWidth(text, available, '…')
+      // Every row is a semantic queued occurrence; the same ❯ marker and
+      // steer/recall hints apply regardless of its backend origin.
+      lines.push(`${color.roleUser('❯')} ${truncated}${color.textDim(suffix)}`)
     }
-    for (const item of shownNotices) {
-      // Notices are NOT steerable: they carry their own waiting-state
-      // marker (the ⏳ under emoji, the ⧗ hourglass under symbols/minimal)
-      // so they never read as user input, and the hint below drops the
-      // steer/edit verbs when nothing else is queued.
-      const text = item.text.replace(/\s+/g, ' ').trim()
-      const lead = iconLead('queue-notice', this.iconStyle)
-      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth(lead)), '…')
-      lines.push(`${color.textDim(lead)}${color.textDim(truncated)}`)
+    // The bulk steer-all/recall-all gestures address only AUTHORITATIVE queued
+    // occurrences; a client-local `sending…` row has no occurrence id yet. A
+    // pane holding ONLY local echoes must not advertise a no-op action (the
+    // `sending…` suffix already communicates the state). A MIXED pane keeps
+    // the hint but scopes it to the accepted rows, so `sending…` rows are
+    // never implied to participate.
+    const hasLocalRows = items.some(item => item.local === true)
+    if (items.some(item => item.local !== true)) {
+      const scope = hasLocalRows ? 'accepted' : 'all'
+      const steerHint = this.queueRunning
+        ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer ${scope}`
+        : 'queued until the current task resumes'
+      const hint = this.viewerMode === undefined
+        ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall ${scope}`
+        : steerHint
+      lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
     }
-    const folded = noticeRows.length - shownNotices.length
-    if (folded > 0) {
-      lines.push(color.textDim(truncateToWidth(
-        `  +${folded} more notices pending · they deliver as the next turn runs`,
-        Math.max(1, safeWidth - 2),
-        '…',
-      )))
-    }
-    const hasSteerable = userRows.length > 0
-    const hint = hasSteerable
-      ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to edit all`
-      : 'notices deliver after the current task · /tasks to view'
-    lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
   }
 
@@ -12456,8 +17140,8 @@ export class TuiApp {
   }
 
   /**
-   * Replace the editor draft wholesale (the Alt+↑ dequeue path pulls every
-   * queued message back into the editor for editing). The text is a
+   * Replace the editor draft wholesale (the TUI-only Alt+↑ recall-all path
+   * pulls every queued message back into the editor for editing). The text is a
    * SERIALIZED user input (queued messages keep their `!` / `!!` wire
    * form), so the host editor decodes it into mode + body. While a
    * CONTINUABLE subagent viewer covers the editor, the write goes to the
@@ -12488,7 +17172,7 @@ export class TuiApp {
   /** The editor's current draft in its WIRE form (mode + body serialized
    * — the symmetric counterpart of {@link setDraft}, which decodes).
    * Callers that read, merge and restore drafts (the runner's restore
-   * paths, the Alt+↑ dequeue, the steer action) therefore never lose the
+   * paths, the Alt+↑ recall-all action, the steer action) therefore never lose the
    * shell mode: a shell-mode draft reads back as `!pwd` and restores as
    * shell mode. In a continuable viewer the VISIBLE editor is the
    * authority — it is exactly what the user sees and submits: a
@@ -12518,6 +17202,7 @@ export class TuiApp {
    *   {@link ComposerSubmitRequest}); the RUNNER resolves its delivery mode.
    */
   submitDraft(request: ComposerSubmitRequest = 'enter'): void {
+    const gesture = request
     // Submission is an explicit intervening action even when the draft is
     // empty or a viewer guard rejects it.
     this.clearExitConfirmation()
@@ -12541,8 +17226,8 @@ export class TuiApp {
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       // A plugin action inside an interactive viewer submits to the
       // SUBAGENT (the semantic target of the visible editor), never the
-      // parent — and the queue verb is meaningless for the child (its
-      // inbox is the only queue). The draft restore on rejection is the
+      // parent — the runner resolves queue or steer delivery from the raw
+      // gesture. The draft restore on rejection is the
       // runner's job (onSubagentSubmit), exactly like the Enter path.
       // Viewer submissions never enter the shared editor history (an ↑
       // recall in the MAIN editor must not resend child-scoped text to
@@ -12557,6 +17242,7 @@ export class TuiApp {
         parentSessionId: target.parentSessionId,
         childSessionId: target.childSessionId,
         text: serialized,
+        gesture,
       })
       return
     }
@@ -12579,11 +17265,11 @@ export class TuiApp {
   }
 
   /**
-   * Headless-test hook: current overlay tracking-graph sizes. The graph
-   * (overlayHandles / overlayDependents / the active question's suspension)
-   * is behaviorally invisible — stale entries only leak memory — so the
-   * headless suite asserts its sizes directly (e.g. the fullscreen teardown
-   * must leave it empty instead of retaining dead handles).
+   * Headless-test hook: current managed-overlay graph sizes. `handles` is the
+   * live logical node count, `dependents` the number of suppression edges and
+   * `suspended` the directly suspended roots under the active question. The
+   * LOGICAL graph survives a fullscreen swap (only the physical projections
+   * are rebound), so it is not cleared by the screen teardown.
    */
   overlayGraphState(): { handles: number; dependents: number; suspended: number } {
     return {
@@ -12591,6 +17277,13 @@ export class TuiApp {
       dependents: this.overlayBroker.graphState().dependents,
       suspended: this.activeQuestions?.suspendedOverlays.size ?? 0,
     }
+  }
+
+  /** Headless-test hook: assert the managed-overlay forest invariants (one
+   * suppressor per node, no cycles, no closed node retained). Throws on a
+   * violation. */
+  assertOverlayForestForTest(): void {
+    this.overlayBroker.assertForest()
   }
 
   /**
@@ -12896,18 +17589,239 @@ export class TuiApp {
   }
 
   /** The fold-hint verb of one collapsible card: 'click' for the
-   * click-expandable owners, else the EFFECTIVE key of the owning action
-   * ('thinking' → the Thinking bulk owner, 'fold' → the expand master; a
-   * user remap updates every `to expand` hint; a disabled action falls
-   * back to a neutral phrase instead of a stale default). */
+   * click-only expandable owners, 'click-fold' for the long-user bubble in
+   * a fullscreen WITHOUT Focus (click AND the expand master), else the
+   * EFFECTIVE key of the owning action ('thinking' → the Thinking bulk
+   * owner, 'fold' → the expand master; a user remap updates every `to
+   * expand` hint; a disabled action falls back to a neutral phrase instead
+   * of a stale default). */
   private expandHint(hint: ExpandHint): string {
     if (hint === 'click') return 'click'
+    if (hint === 'click-fold') {
+      const clickFold = this.keybindings.keyHint('app.transcript.toggleExpand')
+      return clickFold === '' ? 'click' : `click / ${clickFold.toLowerCase()}`
+    }
     if (hint === 'thinking') {
       const thinking = this.keybindings.keyHint('app.transcript.toggleThinking')
       return thinking === '' ? 'the thinking key' : thinking.toLowerCase()
     }
     const expand = this.keybindings.keyHint('app.transcript.toggleExpand')
     return expand === '' ? 'the expand key' : expand.toLowerCase()
+  }
+
+  /** The collapsed long-user bubble's marker row. It names the count as
+   * VISUAL rows (never logical lines) and resolves the expand verb from the
+   * message's fold-hint owner: fullscreen is click-owned (with the effective
+   * key when Ctrl+O is still live there), regular is the Ctrl+O master (the
+   * effective key). Narrow bubbles drop the verb and keep only the count so
+   * the marker never wraps. */
+  private userCompactMarker(hiddenRows: number, availableWidth: number, hint: ExpandHint): string {
+    const full = `── ${hiddenRows} rows compacted · ${this.expandHint(hint)} to expand ──`
+    if (visibleWidth(full) <= availableWidth) return color.textDim(full)
+    return color.textDim(`── ${hiddenRows} rows compacted ──`)
+  }
+
+  /** The long-user fold-hint owner for the CURRENT surface: regular is the
+   * Ctrl+O recent-turn master; fullscreen without Focus offers the compact
+   * marker click AND the effective expand key; fullscreen Focus is click-only
+   * (Ctrl+O owns the Thought-root bulk there). Shared by the durable bubble
+   * and the ephemeral pending lane so their labels never diverge. */
+  private userFoldHint(): ExpandHint {
+    if (this.fullscreen === undefined) return 'fold'
+    if (isFocusDisplayPreset(this.displayState.preset)) return 'click'
+    // Fullscreen Compact: Ctrl+O owns the Work spans, so the long-user fold is
+    // a pure mouse-click affordance there.
+    if (this.displayState.preset === 'compact') return 'click'
+    return 'click-fold'
+  }
+
+  /**
+   * Whether the effective `app.transcript.toggleExpand` action has a usable
+   * key on the REGULAR surface. Fullscreen does not consult this (the mouse is
+   * its disclosure owner); a remap or a disabled action flips it, and every
+   * regular fold that would otherwise render collapsed falls open instead.
+   */
+  private regularExpandKeyAvailable(): boolean {
+    return this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+  }
+
+  /**
+   * Whether the CURRENT surface has an operable disclosure action for the
+   * ordinary transcript folds: fullscreen always does (mouse), regular needs an
+   * effective expand key. This is the ONE neutral capability the Work header,
+   * Context-cluster header, ordinary message folds and long-user folds read.
+   */
+  private transcriptDisclosureActionAvailable(): boolean {
+    return this.fullscreen !== undefined || this.regularExpandKeyAvailable()
+  }
+
+  /**
+   * Whether an ordinary (non-Thinking) message fold can be presented COLLAPSED
+   * at all on this surface. Thinking is deliberately excluded: its owner is
+   * `Alt+T` and is decided by its own disclosure path. A surface with no
+   * operable action presents the fold in full instead of rendering a dead
+   * collapsed header.
+   */
+  private messageFoldDisclosureAvailable(): boolean {
+    return this.transcriptDisclosureActionAvailable()
+  }
+
+  /**
+   * Whether ambient Context clusters are disclosed FLAT (no header) because the
+   * current surface has no operable cluster owner. The clustering itself is
+   * semantic and happens on every preset/surface; only the presentation default
+   * is capability-dependent.
+   */
+  private contextClusterDefaultExpanded(): boolean {
+    return !this.transcriptDisclosureActionAvailable()
+  }
+
+  /**
+   * The fold-hint OWNER of an ordinary (non-Thinking, non-Work-member) foldable
+   * row: `fold` is the shared Ctrl+O transcript-detail master (regular surfaces
+   * and fullscreen Full), `click` is the fullscreen Compact mouse-owned fold,
+   * and `undefined` means the surface presents the row in full (no operable
+   * action at all).
+   */
+  private ordinaryFoldHint(): ExpandHint {
+    if (!this.messageFoldDisclosureAvailable()) return undefined
+    if (this.displayState.preset === 'compact' && this.fullscreen !== undefined) return 'click'
+    return 'fold'
+  }
+
+  /**
+   * The regular transcript-detail master's derived bulk expansion for one turn:
+   * master ON and the turn inside the current `EXPAND_RECENT_TURNS` boundary —
+   * the SAME authority the ordinary folds use. Never applies on fullscreen
+   * (fullscreen Compact owns Work through its own bulk, fullscreen Focus
+   * through the Thought-root bulk).
+   */
+  private regularBulkOwnsTurn(turn: number): boolean {
+    if (this.fullscreen !== undefined || !this.transcriptDetailExpanded) return false
+    return turn >= this.expandBoundary()
+  }
+
+  /** Whether the delivered-files tail's Ctrl+O master is owned on THIS surface:
+   * the regular transcript-detail master, or fullscreen Full's generic master.
+   * Fullscreen Focus (Thought-root bulk) and fullscreen Compact (Work bulk)
+   * own Ctrl+O for something else, so they must never read the regular
+   * master's derived expansion. */
+  private deliveredFilesMasterOwned(): boolean {
+    // Per-OWNER capability: the generic "fullscreen has a mouse" answer does not
+    // cover the delivered-files tail (fullscreen clicks route to
+    // `toggleMessageExpanded`, which ignores a non-foldable assistant card), so
+    // fullscreen Compact/Focus have NO operable owner for it. Only the regular
+    // transcript-detail master and fullscreen Full's generic master own it, and
+    // only while the effective `app.transcript.toggleExpand` key exists.
+    if (!this.regularExpandKeyAvailable()) return false
+    if (this.fullscreen === undefined) return true
+    return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
+  }
+
+  /** The expanded long-user tail control: presentation chrome naming the
+   * collapse affordance of the CURRENT surface. Right-aligned within the
+   * transcript content width; a narrow width truncates instead of wrapping. */
+  private userCollapseControlText(width: number): Text {
+    const label = `▴ Collapse · ${this.expandHint(this.userFoldHint())}`
+    const clipped = visibleWidth(label) <= width ? label : truncateToWidth(label, width, '…')
+    const pad = ' '.repeat(Math.max(0, width - visibleWidth(clipped)))
+    return new Text(color.textDim(pad + clipped), 0, 0)
+  }
+
+  /** The copy-source filter of one selected row: the expanded long-user tail
+   * control is presentation chrome that must never reach the clipboard, and
+   * its visual row copies as the blank separator it replaced (fork seam
+   * X057). Paint, search, word/line selection and the mouse hit map are
+   * untouched — only the copy source is filtered. The decision comes from the
+   * LAST-PAINTED snapshot (the same epoch that produced the ScrollView's
+   * `scrollContentLines`), never the live `messageRows`: a rebuild that has
+   * not repainted yet must not reinterpret a painted row — otherwise the
+   * painted tail chrome would leak, or a painted real row the newer
+   * projection calls chrome would be wrongly blanked. */
+  private selectionLineText(context: { row: number; line: string; scrollView?: ScrollView }): string | undefined {
+    if (context.scrollView === undefined || context.scrollView !== this.fullscreenScroll) return undefined
+    return this.fullscreenPaintSnapshot?.copyBlankRows.has(context.row) === true ? '' : undefined
+  }
+
+  /** The effective disclosure state of one ephemeral pending-user row: the
+   * explicit per-row override wins, otherwise the surface rule — fullscreen
+   * Focus is compact-by-default (Ctrl+O owns the Thought roots there), every
+   * other surface follows the Ctrl+O master exactly like a recent durable
+   * user prompt. */
+  private pendingUserExpandedState(row: PendingUserRow): boolean {
+    const override = this.pendingUserExpanded.get(pendingUserDisclosureKey(row))
+    if (override !== undefined) return override
+    if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
+    return this.transcriptDetailExpanded
+  }
+
+  /** Build the ephemeral pending-user component for this surface. A text-only
+   * pending row joins the SAME visual-row compaction as a durable text-only
+   * user bubble when this surface has a disclosure affordance; otherwise it
+   * renders in full (never a dead marker). */
+  private pendingUserComponentFor(row: PendingUserRow): PendingUserComponent {
+    if (row.foldableText !== true || !this.userDisclosureAffordanceAvailable() || !this.messageFoldDisclosureAvailable()) {
+      return new PendingUserComponent(row, this.queueRunning)
+    }
+    const hint = this.userFoldHint()
+    return new PendingUserComponent(row, this.queueRunning, {
+      thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS,
+      headRows: USER_MESSAGE_HEAD_ROWS,
+      tailRows: USER_MESSAGE_TAIL_ROWS,
+      expanded: this.pendingUserExpandedState(row),
+      compactMarker: (hiddenRows, available) => this.userCompactMarker(hiddenRows, available, hint),
+    })
+  }
+
+  /**
+   * Whether the CURRENT search reveal's latched affordance is still usable.
+   * Separate from {@link userDisclosureAffordanceAvailable} because the grant
+   * kind matters: a `key` grant must not silently become a fullscreen click
+   * reveal after the key is disabled.
+   */
+  private userRevealAffordanceAvailable(): boolean {
+    if (!this.messageFoldDisclosureAvailable()) return false
+    if (this.searchRevealAffordance === 'fullscreen') {
+      return this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+    }
+    if (this.searchRevealAffordance === 'key') {
+      return this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+    }
+    return false
+  }
+
+  /** Whether the long-user fold has a usable expand affordance on THIS
+   * surface. Fullscreen always does (the compact-marker click); regular needs
+   * the effective `app.transcript.toggleExpand` key — compacting without one
+   * would strand a full prompt collapsed with no way to open it. The
+   * message-fold capability is checked FIRST, so a surface that presents the
+   * fold in full (regular Compact) has no long-user affordance at all. */
+  private userDisclosureAffordanceAvailable(): boolean {
+    // The message-fold capability is the ONE authority: a surface without an
+    // operable expand action presents every fold in full, so no long-user
+    // disclosure exists there however many physical keys happen to be bound.
+    // Without this the search grant would mint a disclosure owner that the
+    // surface never had.
+    if (!this.messageFoldDisclosureAvailable()) return false
+    return this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+  }
+
+  /** Whether one long-user candidate ACTUALLY compacts at the current
+   * transcript width (the same visual-row threshold the bubble renderer
+   * applies). Shared by the search-reveal admission (never force an expansion
+   * that has no visible effect) and the Ctrl+O user-collapse predicate (a
+   * short — or resized-short — bubble must not consume the press as a no-op). */
+  private userMessageCompactsAtCurrentWidth(message: Extract<TranscriptMessage, { kind: 'user' }>): boolean {
+    const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
+    return new Text(message.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
+  }
+
+  /** Whether one pending-user row ACTUALLY compacts at the current transcript
+   * width (the same visual-row threshold the pending bubble renderer applies),
+   * so a stale override on a short row never consumes the Ctrl+O press. */
+  private pendingUserCompactsAtCurrentWidth(row: PendingUserRow): boolean {
+    const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
+    return new Text(row.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
   }
 
   /**
@@ -13134,7 +18048,7 @@ export class TuiApp {
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
       const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
     const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
       list.setMaxRows(Math.max(1, geometry.maxHeight - 2))
@@ -13405,7 +18319,7 @@ export class TuiApp {
       const geometryOf = (): ResponsiveOverlayGeometry => {
         const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
         const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-        return { width, maxHeight, key: `${width}:${maxHeight}` }
+        return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
       }
       const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
         // The externally-filtered composite renders the search Input +
@@ -13512,10 +18426,15 @@ export class TuiApp {
    * `/tasks` Full Task Center). Unlike the generic {@link openPicker}, rows carry a
    * status word + start timestamp so the panel can render status dots,
    * right-aligned status/elapsed columns, live counts, and a 1s elapsed
-   * tick. Selection calls `onSelect` with the row value and closes; Esc
-   * calls `onCancel`.
+   * tick. Selection calls `onSelect` with the row value and then acts on its
+   * disposition: `'close'` dismisses the browser, `'keep-open'` keeps it
+   * mounted underneath a child detail overlay (the Job View). Esc calls
+   * `onCancel`.
    * @param items - task rows (see TaskPanelItem).
-   * @param onSelect - confirmed row value.
+   * @param onSelect - confirmed row value → navigation disposition. A child
+   *   detail overlay opened by the callback (e.g. the Job View) hides the
+   *   browser through the overlay stack; `'keep-open'` preserves the exact
+   *   browser instance/state for the detail's Esc.
    * @param onCancel - dismissed without a choice.
    * @param options - header/search/sizing configuration.
    * @returns a handle to close the browser or replace its rows (e.g. when
@@ -13523,16 +18442,16 @@ export class TuiApp {
    */
   openTaskBrowser(
     items: readonly TaskPanelItem[],
-    onSelect: (value: string) => void,
+    onSelect: (value: string) => 'close' | 'keep-open',
     onCancel: () => void,
-    options: TaskBrowserOptions = {},
+    options: TaskBrowserOptions,
   ): TaskBrowserHandle {
     // A finally-disposed surface must not mint the panel's 1s elapsed
     // tick: the inert overlay handle would never dispose the panel, so
     // the unref'd interval would keep firing into the dead panel.
     if (this.disposed) {
       return { close: () => {}, setItems: () => {}, setRefreshState: () => {}, getViewState: () => ({
-        mode: options.mode ?? 'full',
+        mode: options.mode,
         openedFrom: options.openedFrom ?? 'command',
         scope: options.scope ?? (options.mode === 'quick' ? 'active' : 'all'),
         typeFilter: options.typeFilter ?? null,
@@ -13552,7 +18471,6 @@ export class TuiApp {
         enableSearch: options.enableSearch,
         initialQuery: options.initialQuery,
         initialSearchMode: options.initialSearchMode,
-        onAction: options.onAction,
         onStop: options.onStop,
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
@@ -13573,8 +18491,13 @@ export class TuiApp {
         groupLabels: options.groupLabels,
       },
       (value) => {
-        close()
-        onSelect(value)
+        // Run the selection FIRST: a child-detail selection opens its
+        // overlay (which hides this browser through the stacking graph)
+        // and only then reports its disposition. Closing before the
+        // callback would destroy the parent state that `keep-open`
+        // exists to preserve.
+        const disposition = onSelect(value)
+        if (disposition === 'close') close()
       },
       () => {
         close()
@@ -13610,7 +18533,7 @@ export class TuiApp {
       const availHeight = Math.max(1, this.terminal.rows - marginInset)
       const width = resolveSize(overlayWidth, this.terminal.columns, availWidth)
       const maxHeight = resolveSize(overlayMaxHeight, this.terminal.rows, availHeight)
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
     const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
       panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
@@ -13648,6 +18571,76 @@ export class TuiApp {
   }
 
   /**
+   * Mount the `/model` picker as a root-owned responsive capturing overlay.
+   * A narrow seam: the component owns every picker state (the single model list
+   * with its inline per-model effort); the host owns only the responsive frame,
+   * the row-budget grant and the OverlayBroker registration/ownership. Returns
+   * a closer.
+   *
+   * There is exactly ONE `/model` picker slot: mounting a new picker SUPERSEDES
+   * the previous one (close + dispose it) so a repeated `/model` can never leave
+   * an older loading/completed panel hidden beneath the new one waiting to
+   * reappear.
+   */
+  openModelPicker(component: Component & RowBudgetAware): () => void {
+    if (this.modelPickerComponent !== undefined) this.closeModelPicker()
+    this.modelPickerComponent = component
+    this.mountModelPickerOverlay(component)
+    // The closer targets the CURRENT handle: a fullscreen screen swap
+    // remounts the SAME component behind a fresh handle, and the user's
+    // close must still reach it.
+    return () => this.closeModelPicker()
+  }
+
+  /** Mount the `/model` picker frame around its (retained) component. The
+   *  overlay is REMOUNTABLE: a fullscreen screen swap rebinds it without
+   *  disposing the component, so query/view/selection/effort cursor are
+   *  preserved (plan §9.3/§19.6). */
+  private mountModelPickerOverlay(component: Component & RowBudgetAware): void {
+    const frame = this.createModelPickerFrame(component)
+    this.modelPickerFrame = frame
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: 72, maxHeight: 28 },
+      { remountable: true },
+    )
+    this.modelPickerOverlay = handle
+    this.overlayRemounts.set(handle, () => {
+      if (this.modelPickerComponent !== component || this.modelPickerOverlay !== handle) return
+      const next = this.createModelPickerFrame(component)
+      this.modelPickerFrame = next
+      this.rebindOverlayRaw(handle, next, { width: 72, maxHeight: 28 })
+    })
+  }
+
+  private createModelPickerFrame(component: Component & RowBudgetAware): ResponsiveOverlayFrame {
+    const configuredWidth = 72
+    const configuredMaxHeight = 28
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    return new ResponsiveOverlayFrame(component, geometryOf, geometry => {
+      component.setMaxRows?.(Math.max(1, geometry.maxHeight - 2))
+    })
+  }
+
+  /** Close the /model picker for good: drop the handle and dispose the
+   *  retained component explicitly (a remountable overlay opts out of
+   *  disposeOnHide, so the final close owns the component lifecycle). */
+  private closeModelPicker(): void {
+    const overlay = this.modelPickerOverlay
+    const component = this.modelPickerComponent
+    this.modelPickerOverlay = undefined
+    this.modelPickerFrame = undefined
+    this.modelPickerComponent = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
+    overlay?.hide()
+    component?.dispose?.()
+  }
+
+  /**
    * Open the settings overlay as a SettingsList. The runner supplies the
    * items and reacts to changes/cancellation. Returns a CLOSER so an
    * action-style list (e.g. /subagents' View transcript / Interrupt) can
@@ -13673,6 +18666,10 @@ export class TuiApp {
       navigate?: (targetId: string) => void,
     ) => void,
     onCancel: () => void,
+    /** Fired once when the overlay is torn down by ANY hide path (Esc, the
+     *  returned closer, a fullscreen screen swap) — the teardown-aware hook
+     *  a caller needs to stop touching a surface that no longer exists. */
+    onHidden?: () => void,
   ): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
     // so the cancel callback closes the handle captured after mounting.
@@ -13702,11 +18699,11 @@ export class TuiApp {
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
       const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
     const frame = new ResponsiveOverlayFrame(settings, geometryOf, geometry => {
       settings.setMaxRows(Math.max(1, geometry.maxHeight - 2))
-    })
+    }, onHidden)
     handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     return () => handle?.hide()
   }
@@ -13840,17 +18837,30 @@ export class TuiApp {
   }
 
   /**
-   * Open the live job-output viewer: a titled text panel refreshed by a
-   * timer while open (the caller returns the accumulated output each tick;
-   * a terminal job's final read is idempotent). Esc closes, `s` fires
-   * onStop. Returns a closer (also invoked on Esc).
+   * Open the live output viewer: a titled text panel with a fixed bottom
+   * action hint, refreshed by a timer while open (the caller returns the
+   * accumulated output each tick; a terminal job's final read is
+   * idempotent). Esc closes; the `tasks.stop` semantic key fires `onStop`
+   * while `canStop()` is live (a settled job stops advertising/handling
+   * Stop). Returns a closer (also invoked on Esc).
+   *
+   * Height contract: the body absorbs the row budget and shrinks (to zero)
+   * before the bottom hint, so `Esc back/close` survives a long body or a
+   * short terminal — down to a TWO-row terminal (top border + hint). A
+   * ONE-row terminal is below the bordered-overlay floor and can only paint
+   * the frame's top border (see the OutputViewerPanel notes).
    * @param options - title, initial body, refresh callback, stop/close hooks.
+   *   `closeHint: 'back'` renders `Esc back` for a viewer that returns to a
+   *   parent overlay (Job View); the default `'close'` is for standalone
+   *   notices (e.g. the authorization notice).
    */
   openOutputViewer(options: {
     title: string
     initial: string
     refresh: () => string
     onStop?: () => void
+    canStop?: () => boolean
+    closeHint?: 'back' | 'close'
     onClose?: () => void
     intervalMs?: number
   }): () => void {
@@ -13858,7 +18868,23 @@ export class TuiApp {
     // inert overlay handle would never dispose the panel, so the unref'd
     // interval would keep calling options.refresh() forever.
     if (this.disposed) return () => {}
-    const panel = new OutputViewerPanel(options.title, options.initial)
+    // ONE live capability source for both the hint and the key handler: a
+    // job that settles (or leaves the registry) while the viewer is open
+    // stops offering Stop on the next tick and its key becomes a no-op.
+    const stopAvailable = (): boolean => options.onStop !== undefined && (options.canStop?.() ?? true)
+    const hintOf = (): { hint: string; fallback: string } => {
+      const close = options.closeHint === 'back' ? 'Esc back' : 'Esc close'
+      const closeHint = color.textDim(close)
+      // The close/back verb is the primary action; Stop degrades away when
+      // the combined hint cannot fit the viewer's content width.
+      if (!stopAvailable()) return { hint: closeHint, fallback: closeHint }
+      // The stop label comes from the SAME app keybinding definition the
+      // handler matches (tasks.stop) — never a hard-coded 's'.
+      const key = this.keybindings.keyHint('tasks.stop')
+      return { hint: color.textDim(`${key} stop · ${close}`), fallback: closeHint }
+    }
+    const initialHint = hintOf()
+    const panel = new OutputViewerPanel(options.title, options.initial, initialHint.hint, initialHint.fallback)
     let closed = false
     const close = (): void => {
       if (closed) return
@@ -13873,12 +18899,32 @@ export class TuiApp {
     panel.handleInput = (data: string): void => {
       if (matchesKey(data, 'escape')) {
         close()
-      } else if (matchesKey(data, 's')) {
-        options.onStop?.()
+        return
       }
+      // The tasks.* actions are CAPTURING-scope component actions: the host
+      // keymap excludes them, so the semantic match goes through the
+      // component keymap (the same seam TaskBrowserPanel uses).
+      if (componentKeymap.matches(data, 'tasks.stop') && stopAvailable()) options.onStop?.()
     }
-    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: 88, maxHeight: 24 })
-    panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000)
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, OUTPUT_VIEWER_WIDTH))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, OUTPUT_VIEWER_MAX_HEIGHT))
+      // Raw terminal dims keep the key resize-sensitive once the viewer's
+      // caps are reached (the shared last-painted-geometry mouse fence).
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    // The responsive shell mirrors the fork's clamped overlay budget into
+    // the panel, so the body row budget (and the bottom hint) match the
+    // physically granted box on resize and short terminals. The -2 drops
+    // the frame's own top/bottom border rows (the panel budgets its
+    // CONTENT, exactly like the picker/task-browser shells).
+    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry =>
+      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)))
+    const handle = this.showOverlayOnHost(frame, {
+      width: OUTPUT_VIEWER_WIDTH,
+      maxHeight: OUTPUT_VIEWER_MAX_HEIGHT,
+    })
+    panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000, hintOf)
     return close
   }
 
@@ -14101,6 +19147,7 @@ export class TuiApp {
     if (this.activeSaveLocation !== undefined) {
       this.settleSaveLocation(this.activeSaveLocation, { kind: 'cancelled' })
     }
+    this.clearFullscreenPointerGestures()
     this.renderApprovalDialog(pending)
     this.activeApproval = pending
     // M6: a capturing surface owns the input now — any pending leader
@@ -14111,6 +19158,34 @@ export class TuiApp {
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
   private renderApprovalDialog(pending: PendingApproval): void {
+    const frame = this.createApprovalFrame(pending)
+    pending.responsiveFrame = frame
+    // The approval is REMOUNTABLE like every other managed overlay: a
+    // fullscreen swap rebinds the SAME logical node (with a fresh surface), so
+    // the overlays it suppresses stay suppressed and never get revealed/
+    // focused/re-hidden (no fabricated focus transition).
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: '100%', maxHeight: '100%' },
+      { remountable: true },
+    )
+    pending.handle = handle
+    this.overlayRemounts.set(handle, () => {
+      if (this.activeApproval !== pending) return
+      const previous = pending.responsiveFrame
+      const next = this.createApprovalFrame(pending)
+      pending.responsiveFrame = next
+      this.rebindOverlayRaw(handle, next, { width: '100%', maxHeight: '100%' })
+      // The old frame's raw projection was detached with the old screen and
+      // the overlay opted out of disposeOnHide: dispose it explicitly so a
+      // repeated swap never leaks approval frames/surfaces.
+      previous?.dispose()
+    })
+  }
+
+  /** Build the responsive approval frame (surface + geometry) without mounting
+   * it, so a fullscreen rebind can re-create it for the same logical node. */
+  private createApprovalFrame(pending: PendingApproval): ResponsiveOverlayFrame {
     const geometryOf = (): ApprovalOverlayGeometry => approvalOverlayGeometry(
       this.terminal.columns,
       this.terminal.rows,
@@ -14120,16 +19195,24 @@ export class TuiApp {
       geometryOf,
       (request, geometry) => this.buildApprovalDialog(request, geometry),
     )
-    const frame = new ResponsiveOverlayFrame(surface, () => {
+    const frame: ResponsiveOverlayFrame = new ResponsiveOverlayFrame(surface, () => {
       const geometry = geometryOf()
       return {
         width: geometry.width,
         maxHeight: geometry.maxHeight,
-        key: `${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
+        // Raw terminal dims keep the key resize-sensitive once the approval
+        // geometry caps are reached (last-painted-geometry mouse fence).
+        key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
       }
-    })
-    pending.responsiveFrame = frame
-    pending.handle = this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' })
+    }, undefined, () => this.approvalFrames.delete(frame))
+    this.approvalFrames.add(frame)
+    return frame
+  }
+
+  /** Headless-test hook: the number of live approval frames (a fullscreen
+   * swap must replace, not accumulate, them). */
+  ownedApprovalFramesForTest(): number {
+    return this.approvalFrames.size
   }
 
   /** Build approval content for the current geometry without mounting it. */
@@ -14184,7 +19267,68 @@ export class TuiApp {
     return dialog
   }
 
-  /** Route a key while a prompt is showing; every key is consumed. */
+  /**
+   * Allow direct and leader-bound triggers from the explicit modal-safe
+   * inspection whitelist before Question / Approval consume their ordinary
+   * input. Component-owned fixed response keys win over configurable
+   * inspection remaps; no generic Host shortcut ladder runs behind the modal.
+   */
+  private handleModalInspectionAction(data: string): TuiInputListenerResult | undefined {
+    if (this.activeQuestions === undefined && this.activeApproval === undefined) return undefined
+    const leader = this.keybindings.leaderMachine()
+    if (this.activeQuestions?.flow.ownsFixedKey(data) === true
+      || (this.activeApproval !== undefined && this.approvalOwnsFixedKey(data))) {
+      // A modal response key wins over both a leader prefix and a leader
+      // completion, then continues through the component's normal handler.
+      this.keybindings.cancelLeader()
+      return undefined
+    }
+    for (const action of MODAL_INSPECTION_ACTIONS) {
+      if (!this.keybindings.matches(data, action)) continue
+      // A direct inspection key is its own gesture; never leave a half-armed
+      // leader sequence behind it.
+      this.keybindings.cancelLeader()
+      this.clearExitConfirmation()
+      if (!this.dispatchResolvedAction(action, data)) return undefined
+      return { consume: true }
+    }
+    if (leader !== undefined) {
+      this.modalInspectionLeader = true
+      let outcome: ReturnType<typeof leader.feed>
+      try {
+        outcome = leader.feed(data)
+      } finally {
+        this.modalInspectionLeader = false
+      }
+      if (outcome.kind === 'consumed' || outcome.kind === 'cancelled-consume') {
+        this.clearExitConfirmation()
+        return { consume: true }
+      }
+      if (outcome.kind === 'activated') {
+        if (outcome.consumed) {
+          this.clearExitConfirmation()
+          return { consume: true }
+        }
+        // A safe inspection dispatch can decline, matching the direct-key
+        // contract; let the current modal handle the completion key.
+        this.clearExitConfirmation()
+      } else if (outcome.kind === 'cancelled-pass') {
+        this.clearExitConfirmation()
+      }
+    }
+    return undefined
+  }
+
+  /** Approval's fixed response keys must beat a conflicting inspection remap. */
+  private approvalOwnsFixedKey(data: string): boolean {
+    return matchesKey(data, 'y')
+      || matchesKey(data, 'n')
+      || matchesKey(data, 'escape')
+      || matchesKey(data, 'ctrl+c')
+  }
+
+  /** Route a key while a prompt is showing; every key except the explicit
+   * inspection-safe whitelist is consumed. */
   private handleApprovalKey(data: string): TuiInputListenerResult {
     const pending = this.activeApproval
     if (pending === undefined) return undefined
@@ -14205,13 +19349,23 @@ export class TuiApp {
     if (pending.settled === true) return
     pending.settled = true
     if (this.activeApproval === pending) {
+      this.keybindings.cancelLeader()
+      this.clearFullscreenPointerGestures()
       this.activeApproval = undefined
-      pending.handle?.hide()
-      pending.responsiveFrame = undefined
+      // Fallback: if nothing is restored beneath the approval, input returns
+      // to the editor.
       this.activeScreen.setFocus(this.seatEditor().component)
-      // The approval dialog is gone: the seat is the editor again (or the
-      // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
-      this.setFocusSeat('editor')
+      // Closing the approval restores every overlay it hid (Quick, Settings,
+      // any capturing overlay). pi-tui focuses a restored capturing overlay
+      // on setHidden(false), overriding the editor fallback above, and the
+      // broker's tracked close re-derives the final seat from that live
+      // surface (the shared close contract — no approval-specific publish).
+      if (pending.handle !== undefined) this.overlayRemounts.delete(pending.handle)
+      pending.handle?.hide()
+      // A remountable overlay opts out of disposeOnHide: the final close owns
+      // the frame/surface lifecycle explicitly.
+      pending.responsiveFrame?.dispose()
+      pending.responsiveFrame = undefined
       this.projectActivity()
     } else {
       const queued = this.approvalQueue.indexOf(pending)
@@ -14290,6 +19444,7 @@ export class TuiApp {
     // M6: a question owns the seat now — any pending leader sequence is
     // cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
+    this.clearFullscreenPointerGestures()
     // A Host question is authoritative over a Client-local Save Location
     // prompt: presenting a question settles the prompt as cancelled (the
     // caller's owned workflow classifies it and notifies nothing).
@@ -14300,15 +19455,10 @@ export class TuiApp {
     // the suspension bookkeeping branch on it.
     this.activeQuestions = state
     this.projectActivity()
-    // A question is a logical capturing modal: every visible overlay is
-    // suspended (hidden, state intact) until the flow settles — the same
-    // stacking rule showOverlayOnHost applies to a new overlay.
-    for (const handle of this.overlayBroker.handles()) {
-      if (!handle.isHidden()) {
-        handle.setHidden(true)
-        state.suspendedOverlays.add(handle)
-      }
-    }
+    // A question is a logical capturing modal: the broker directly suspends
+    // every visible logical ROOT (hidden, topology intact) until the flow
+    // settles. Child topology, focus intent and z-order stay in the broker.
+    this.overlayBroker.suspendVisibleRoots(state)
     const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
     state.frame = frame
     // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
@@ -14350,7 +19500,8 @@ export class TuiApp {
     }
   }
 
-  /** Route a key while a question flow is showing; every key is consumed. */
+  /** Route a key while a question flow is showing; the Host inspection
+   * exception is handled immediately before this all-key modal owner. */
   private handleQuestionKey(data: string): TuiInputListenerResult {
     const state = this.activeQuestions
     if (state === undefined) return undefined
@@ -14362,7 +19513,9 @@ export class TuiApp {
   /** Resolve the question flow with its answers, or reject on cancel/abort. */
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state || state.settled === true) return
+    this.keybindings.cancelLeader()
     state.settled = true
+    this.clearFullscreenPointerGestures()
     if (state.onAbort !== undefined && state.signal !== undefined) {
       state.signal.removeEventListener('abort', state.onAbort)
     }
@@ -14400,18 +19553,12 @@ export class TuiApp {
     this.mountSeatChild()
     const screen = this.fullscreen ?? this.tui
     // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
-    // default or the plugin editor's component) — never a hardcoded host
-    // editor.
+    // default or the plugin editor's component) as the fallback — a restored
+    // capturing overlay re-claims the keyboard through the broker restore.
     screen.setFocus(this.seatEditor().component)
-    for (const handle of state.suspendedOverlays) {
-      if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
-    }
-    state.suspendedOverlays.clear()
-    // The flow released the seat: re-derive it from the live focus AFTER
-    // the overlays were restored (a restored capturing overlay owns the
-    // seat again) (follow-up P1).
-    this.setFocusSeat('editor')
-    this.publishFocusSeat()
+    // The broker restores the directly suspended roots with their OWN focus
+    // intent; the previously focused one reclaims the keyboard.
+    this.overlayBroker.resumeSuspendedRoots(state)
     this.projectActivity()
     screen.requestRender()
     this.settle(state, answers)
@@ -14502,14 +19649,9 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     this.activeSaveLocation = state
     this.projectActivity()
-    // The prompt is a logical capturing modal: every visible overlay is
-    // suspended (hidden, state intact) until it settles.
-    for (const handle of this.overlayBroker.handles()) {
-      if (!handle.isHidden()) {
-        handle.setHidden(true)
-        state.suspendedOverlays.add(handle)
-      }
-    }
+    // The prompt is a logical capturing modal: the broker directly suspends
+    // every visible logical ROOT (topology intact) until it settles.
+    this.overlayBroker.suspendVisibleRoots(state)
     const frame = new SaveLocationFrame(state.prompt)
     state.frame = frame
     // The prompt only PROJECTS into the seat — the previous occupant (the
@@ -14570,12 +19712,7 @@ export class TuiApp {
     this.mountSeatChild()
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(this.seatEditor().component)
-    for (const handle of state.suspendedOverlays) {
-      if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
-    }
-    state.suspendedOverlays.clear()
-    this.setFocusSeat('editor')
-    this.publishFocusSeat()
+    this.overlayBroker.resumeSuspendedRoots(state)
     this.projectActivity()
     screen.requestRender()
     state.resolve(result)

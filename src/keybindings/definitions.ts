@@ -151,7 +151,7 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'app.transcript.toggleExpand': {
     id: 'app.transcript.toggleExpand',
     defaultKeys: ['ctrl+o'],
-    description: 'Expand/collapse recent tool output and thinking',
+    description: 'Expand/collapse recent transcript detail',
     category: 'Transcript',
     scope: 'global',
     configurable: true,
@@ -159,7 +159,9 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'app.transcript.toggleThinking': {
     id: 'app.transcript.toggleThinking',
     defaultKeys: ['alt+t'],
-    description: 'Hide/show thinking blocks',
+    // Disclosure, not visibility (post-F6 plan §5.3): Thinking blocks stay
+    // visible; Alt+T owns their bulk detail level.
+    description: 'Expand/collapse thinking detail',
     category: 'Transcript',
     scope: 'global',
     configurable: true,
@@ -391,7 +393,15 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'tasks.type.next': {
     id: 'tasks.type.next',
     defaultKeys: ['tab'],
-    description: 'Cycle the task type filter',
+    description: 'Cycle the task type filter forward',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.type.previous': {
+    id: 'tasks.type.previous',
+    defaultKeys: ['shift+tab'],
+    description: 'Cycle the task type filter backward',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,
@@ -412,34 +422,10 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'tasks',
     configurable: false,
   },
-  'tasks.running.next': {
-    id: 'tasks.running.next',
-    defaultKeys: ['n'],
-    description: 'Select the next running task',
-    category: 'Tasks',
-    scope: 'tasks',
-    configurable: false,
-  },
-  'tasks.running.previous': {
-    id: 'tasks.running.previous',
-    defaultKeys: ['shift+n'],
-    description: 'Select the previous running task',
-    category: 'Tasks',
-    scope: 'tasks',
-    configurable: false,
-  },
   'tasks.stop': {
     id: 'tasks.stop',
     defaultKeys: ['s', 'shift+s'],
     description: 'Stop the selected task after confirmation',
-    category: 'Tasks',
-    scope: 'tasks',
-    configurable: false,
-  },
-  'tasks.view.full': {
-    id: 'tasks.view.full',
-    defaultKeys: ['t'],
-    description: 'Open the full Task Center',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,

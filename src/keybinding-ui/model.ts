@@ -91,7 +91,7 @@ const LABELS: Readonly<Partial<Record<AppKeybindingId, string>>> = {
   'app.input.steer': 'Steer running turn',
   'app.input.submitAccelerated': 'Submit (opposite busy behavior)',
   'app.input.queue': 'Queue draft (deprecated)',
-  'app.input.dequeue': 'Pull queued draft back',
+  'app.input.dequeue': 'Recall all queued input',
   'app.agent.interrupt': 'Interrupt active turn',
   'app.exit.request': 'Quit the TUI',
   'app.transcript.search': 'Search transcript',

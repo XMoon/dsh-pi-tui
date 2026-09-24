@@ -55,7 +55,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 3000, stepMs = 10
 
 /** A session id with a deterministic createdAt so sort order is stable. */
 function row(id: string, createdAt: number): import('../src/sessions.ts').SessionPickerRow {
-  return { id, createdAt, cwd: '/ws/project-a', live: false }
+  return { id, updatedAt: createdAt, createdAt, cwd: '/ws/project-a', live: false }
 }
 
 test('the picker projection loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
@@ -88,8 +88,8 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
   const sessionReader = {
     list: async () =>
       [...rows]
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .map(({ id, createdAt, cwd, origin }) => ({ id, createdAt, cwd, origin, live: false })),
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map(({ id, updatedAt, createdAt, cwd, origin }) => ({ id, updatedAt, createdAt, cwd, origin, live: false })),
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async (batch: readonly { id: string }[]) => {
       batchLog.push(batch.length)
@@ -98,7 +98,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
       // WHICH ids were requested, not the map contents.
       return new Map(batch.map(({ id }) => [id, { title: `title-of-${id}`, preset: 'standard' }]))
     },
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   }
 
   const defs: { name: string; handler?: unknown }[] = []
@@ -121,7 +121,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return state.agent },
+        get liveAgent() { return state.agent },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -133,11 +133,10 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     agents: {} as never,
     sessionReader: sessionReader as never,
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
@@ -165,9 +164,15 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     pendingPreset: undefined,
     effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'locked' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

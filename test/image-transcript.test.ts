@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { ImageLoader } from '../src/image/loader.ts'
@@ -52,8 +53,11 @@ function toolResultEvent(blocks: unknown[]): never {
     data: {
       turn: 0,
       step: 0,
-      callId: 'call-1',
-      message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: blocks }] },
+      message: createToolResultMessage({
+        callId: ToolCallId('call-1'),
+        content: blocks as readonly ContentBlock[],
+        isError: false,
+      }),
     },
   } as never
 }
@@ -177,7 +181,7 @@ test('the TUI renders a user message with an image (fallback line, then inline-r
 
 test('a tool-result image renders inside the tool card (generic tool)', async () => {
   const { vt, app } = startAppWithLoader()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
@@ -196,7 +200,7 @@ test('a tool-result image renders inside the tool card (generic tool)', async ()
 
 test('a read_image tool card renders its image blocks as thumbnails', async () => {
   const { vt, app } = startAppWithLoader()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'read_image', arguments: [] } } as never,

@@ -62,12 +62,9 @@ function successfulPresentToolEvents(turn = 1): SessionEvent[] {
       step: 0,
       message: {
         id: MessageId(`present-result-${turn}`),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: callId,
-          content: [{ type: 'text', text: 'Presented out/report.md' }],
-        }],
+        role: 'tool',
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'Presented out/report.md' }],
         source: { kind: 'tool', callId },
       },
     }, 2),
@@ -213,7 +210,7 @@ test('an empty closing assistant stays visible when it owns deliverables', async
     text: '',
     deliverables: [{ path: 'a.txt', description: 'empty-answer delivery' }],
   })
-  assert.deepEqual(folder.search('a.txt'), [{ id: 0, turn: 1 }])
+  assert.deepEqual(folder.search('a.txt').map(match => ({ id: match.id, turn: match.turn })), [{ id: 0, turn: 1 }])
 
   const vt = new VirtualTerminal(80, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -251,8 +248,8 @@ test('searches delivery paths and final descriptions, including duplicate update
 
   const pathMatches = folder.search('client-server-migration')
   const descriptionMatches = folder.search('closure ledger')
-  assert.deepEqual(pathMatches, [{ id: 0, turn: 1 }])
-  assert.deepEqual(descriptionMatches, [{ id: 0, turn: 1 }])
+  assert.deepEqual(pathMatches.map(match => ({ id: match.id, turn: match.turn })), [{ id: 0, turn: 1 }])
+  assert.deepEqual(descriptionMatches.map(match => ({ id: match.id, turn: match.turn })), [{ id: 0, turn: 1 }])
   assert.equal(folder.search('old note').length, 0)
   assert.equal(folder.resolveSearchMatch(pathMatches[0]!)?.kind, 'assistant')
 })
@@ -319,7 +316,10 @@ test('turn-end delivery attachment invalidates the live assistant component', as
   assert.ok(after.includes('Delivered files · 1'), after)
   assert.ok(after.includes('out/report.md'), after)
   assert.ok(after.includes('Final report'), after)
-  assert.deepEqual(folder.search('report'), [{ id: 0, turn: 1 }])
+  assert.deepEqual(folder.search('report').map(match => ({ id: match.id, turn: match.turn })), [
+    { id: 0, turn: 1 },
+    { id: 0, turn: 1 },
+  ], 'the path and the description each carry one occurrence')
 })
 
 test('Focus keeps the delivery tail on the final assistant message', async () => {
@@ -347,7 +347,7 @@ test('Focus keeps the delivery tail on the final assistant message', async () =>
   assert.ok(folded.includes('four.txt'), folded)
   assert.ok(!folded.includes('five.txt'), folded)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const expanded = await viewport(vt)
   assert.ok(expanded.includes('five.txt'), expanded)
   assert.ok(!expanded.includes('… +1'), expanded)
@@ -376,7 +376,7 @@ test('delivery tails reflow without visual overflow at supported widths', async 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workspaceRoot: '/workspace' })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'assistant',
     turn: 1,

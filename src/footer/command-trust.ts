@@ -67,11 +67,11 @@ export function parseFooterCommandConfig(input: unknown): FooterCommandConfig | 
 
 /**
  * Resolve the TRUSTED command config: the footerCommand value must be
- * present in the USER layer of the dsh-pi-tui settings descriptor. A
+ * present in the USER layer of the tui-app settings descriptor. A
  * merged/project-supplied value is refused (undefined = command mode
  * disabled, native fallback, diagnostic warning).
  * @param descriptors - the settings provider's describe() output.
- * @param namespace - the dsh-pi-tui settings namespace value.
+ * @param namespace - the tui-app settings/profile Config namespace value.
  * @returns the validated config, or undefined when untrusted/invalid.
  */
 export function resolveTrustedFooterCommand(

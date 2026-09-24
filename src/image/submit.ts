@@ -12,7 +12,7 @@
  * @module @xmoon76/dsh-pi-tui/image/submit
  */
 
-import { createUserMessage, type ContentBlock, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContentBlock, type MessageSource, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { admitDraftImages, type AttachmentsLike, type ImageAttachmentRefLike } from './admission.ts'
 import { assertModelSupportsImages, type LlmLike } from './capability.ts'
 import { ImageAdmissionError } from './errors.ts'
@@ -155,6 +155,11 @@ export function pruneUnreferencedDrafts(text: string, store: DraftImageStore): v
  * @param text - the editor draft text.
  * @param store - the live draft store.
  * @param deps - the service surface.
+ * @param options - the optional request identity: an ordinary human prompt
+ *   participating in the local-submission echo flow persists the id minted
+ *   before its first asynchronous await as the message source `rpcId`, so the
+ *   local echo and the authoritative occurrence share one correlation key.
+ *   Injected context and non-prompt workflows omit it.
  * @returns the frozen user message.
  * @throws ImageAdmissionError/FileInputError when the deployment has no
  *   attachment service but the live draft references an attachment;
@@ -164,7 +169,9 @@ export async function prepareUserMessage(
   text: string,
   store: DraftImageStoreLike,
   deps: PrepareInputDeps,
+  options: { readonly requestId?: string } = {},
 ): Promise<UserMessage> {
+  const source = userSource(options.requestId)
   // Host `@`-mention canonicalization must run before strict local
   // attachment-placeholder expansion. Canonical placeholders contain no `@`.
   deps.signal?.throwIfAborted()
@@ -182,7 +189,7 @@ export async function prepareUserMessage(
   if (!hasImage && !hasFile) {
     return createUserMessage({
       content: [{ type: 'text', text: canonical }],
-      source: { kind: 'user' },
+      source,
     })
   }
   if (deps.attachments === undefined) {
@@ -210,8 +217,21 @@ export async function prepareUserMessage(
   deps.signal?.throwIfAborted()
   return createUserMessage({
     content: [...buildAttachmentContentBlocks(segments, imageRefs, fileRefs)],
-    source: { kind: 'user' },
+    source,
   })
+}
+
+/**
+ * The Direct user-message source. `MessageSourceMap` is documented
+ * merge-extensible; this Direct adaptation of the official `user-rpc` source
+ * carries the plain correlation id so a local submission echo can be retired
+ * by an authoritative occurrence. The cast keeps the extra field out of the
+ * base `@deepseek-ai/dsh-llm` shape, which does not yet declare `rpcId`.
+ */
+function userSource(requestId: string | undefined): MessageSource {
+  return (requestId === undefined
+    ? { kind: 'user' }
+    : { kind: 'user', rpcId: requestId }) as MessageSource
 }
 
 function buildAttachmentContentBlocks(

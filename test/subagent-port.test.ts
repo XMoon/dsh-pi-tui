@@ -18,6 +18,7 @@ import type { SubagentPromptContext } from '../src/runtime/subagent-port.ts'
 const request = {
   parentSessionId: 'session-parent',
   childSessionId: 'session-child',
+  delivery: 'queue' as const,
   content: [{ type: 'text' as const, text: 'continue the plan' }],
 }
 
@@ -33,6 +34,7 @@ interface RecordedCall {
   parentSessionId: string
   childSessionId: string
   mode: string
+  delivery: string
   content: readonly SubagentPromptContentPart[]
 }
 
@@ -44,6 +46,7 @@ function service(calls: RecordedCall[]): SubagentPromptService {
         parentSessionId: payload.parentSessionId,
         childSessionId: payload.childSessionId,
         mode: payload.mode,
+        delivery: payload.delivery,
         content: payload.content,
       })
       return { messageId: `inbox-${payload.childSessionId}-1` }
@@ -72,9 +75,18 @@ test('delivers through ctx.subagents.prompt with the official request shape and 
   assert.equal(calls[0].parentSessionId, 'session-parent')
   assert.equal(calls[0].childSessionId, 'session-child')
   assert.equal(calls[0].mode, 'continuable')
+  assert.equal(calls[0].delivery, 'queue')
   assert.deepEqual(calls[0].content, request.content)
   assert.match(calls[0].requestId, /^[0-9a-f-]{36}$/u, 'the adapter mints a UUID identity before the call')
   assert.deepEqual(gets, ['subagents'], 'the adapter reads the ctx.subagents service')
+})
+
+test('forwards the resolved steer delivery to the official service', async () => {
+  const calls: RecordedCall[] = []
+  const port = new DirectSubagentPort(host(service(calls)))
+  const outcome = await port.prompt({ ...request, delivery: 'steer' }, context())
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(calls[0]!.delivery, 'steer')
 })
 
 test('applies the caller canonicalization before delivery', async () => {
@@ -88,6 +100,35 @@ test('applies the caller canonicalization before delivery', async () => {
   const first = calls[0].content[0]
   assert.equal(first.type, 'text')
   if (first.type === 'text') assert.equal(first.text, 'check /abs/src/foo.ts')
+})
+
+test('serializes same-child prompts across delayed canonicalization', async () => {
+  const calls: RecordedCall[] = []
+  let releaseCanonical!: () => void
+  const canonicalGate = new Promise<void>(resolve => { releaseCanonical = resolve })
+  const canonicalized: string[] = []
+  const port = new DirectSubagentPort(host(service(calls)))
+  const canonicalizeText = async (text: string): Promise<string> => {
+    canonicalized.push(text)
+    if (text === 'A') await canonicalGate
+    return text
+  }
+
+  const first = port.prompt({ ...request, content: [{ type: 'text', text: 'A' }] }, context({ canonicalizeText }))
+  for (let index = 0; index < 8 && canonicalized.length === 0; index += 1) await Promise.resolve()
+  assert.deepEqual(canonicalized, ['A'], 'the first prompt must reach canonicalization before the second')
+
+  const second = port.prompt({ ...request, content: [{ type: 'text', text: 'B' }] }, context({ canonicalizeText }))
+  for (let index = 0; index < 8; index += 1) await Promise.resolve()
+  assert.deepEqual(canonicalized, ['A'], 'the second prompt must wait for the first canonicalization')
+  assert.equal(calls.length, 0, 'neither prompt can deliver ahead of the delayed first turn')
+
+  releaseCanonical()
+  assert.deepEqual((await Promise.all([first, second])).map(outcome => outcome.kind), ['ok', 'ok'])
+  assert.deepEqual(calls.map(call => call.content[0]), [
+    { type: 'text', text: 'A' },
+    { type: 'text', text: 'B' },
+  ])
 })
 
 test('rejects unavailable when the ctx.subagents service is absent', async () => {
@@ -124,4 +165,87 @@ test('reads the service lazily per call (session switches are observed at send t
   const second = await port.prompt(request, context())
   assert.deepEqual(second, { kind: 'rejected', reason: { kind: 'unavailable' } })
   assert.equal(gets.length, 2, 'ctx.get runs per call, never at construction')
+})
+
+test('interrupt classifies the uppercase UNAUTHORIZED authority code', async () => {
+  const failing = {
+    ...service([]),
+    interrupt: () => {
+      const error = new Error('parent rejected') as Error & { code?: string }
+      error.code = 'UNAUTHORIZED'
+      throw error
+    },
+  }
+  const outcome = await new DirectSubagentPort(host(failing)).interrupt({
+    parentSessionId: 'session-parent',
+    childSessionId: 'session-child',
+    mode: 'continuable',
+  })
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'unauthorized', message: 'parent rejected' } })
+})
+
+test('interrupt routes the explicit parent and child to the Direct authority shape', async () => {
+  const calls: Array<{ childSessionId: string; authority: unknown }> = []
+  const port = new DirectSubagentPort(host({
+    ...service([]),
+    interrupt: (childSessionId: string, authority: unknown) => calls.push({ childSessionId, authority }),
+  }))
+  assert.deepEqual(await port.interrupt({
+    parentSessionId: 'session-parent',
+    childSessionId: 'session-child',
+    mode: 'continuable',
+  }), { kind: 'committed' })
+  assert.deepEqual(calls, [{
+    childSessionId: 'session-child',
+    authority: { kind: 'user', parentSessionId: 'session-parent' },
+  }])
+})
+
+test('interrupt classifies an absent service and a known authority refusal', async () => {
+  const absent = await new DirectSubagentPort(host(undefined)).interrupt({
+    parentSessionId: 'session-parent', childSessionId: 'session-child', mode: 'continuable',
+  })
+  assert.equal(absent.kind, 'rejected')
+  if (absent.kind === 'rejected') assert.equal(absent.reason.kind, 'unavailable')
+
+  const failing = {
+    ...service([]),
+    interrupt: () => {
+      const error = new Error('parent rejected') as Error & { code?: string }
+      error.code = 'subagent/unauthorized'
+      throw error
+    },
+  }
+  const refused = await new DirectSubagentPort(host(failing)).interrupt({
+    parentSessionId: 'session-parent', childSessionId: 'session-child', mode: 'continuable',
+  })
+  assert.equal(refused.kind, 'rejected')
+  if (refused.kind === 'rejected') assert.equal(refused.reason.kind, 'unauthorized')
+})
+
+test('interrupt settles an unidentified failure as indeterminate, never a false stop', async () => {
+  const failing = {
+    ...service([]),
+    interrupt: () => { throw new Error('carrier lost') },
+  }
+  const outcome = await new DirectSubagentPort(host(failing)).interrupt({
+    parentSessionId: 'session-parent', childSessionId: 'session-child', mode: 'continuable',
+  })
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'carrier lost' })
+})
+
+test('interrupt settles a missing addressed child as a rejected unavailable, not indeterminate', async () => {
+  const failing = {
+    ...service([]),
+    interrupt: () => {
+      const error = new Error('child is gone') as Error & { code?: string }
+      error.code = 'subagent/not-found'
+      throw error
+    },
+  }
+  const outcome = await new DirectSubagentPort(host(failing)).interrupt({
+    parentSessionId: 'session-parent', childSessionId: 'session-child', mode: 'continuable',
+  })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') assert.equal(outcome.reason.kind, 'unavailable')
 })

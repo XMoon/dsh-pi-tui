@@ -211,5 +211,5 @@ placement" optimization is possible later.
   `clearSessionOverrides` re-expands (session-scoped state).
 - `test/image-transcript.test.ts` — the fold's flat text interleaves
   `🖼️ shot.png` between the text runs.
-- `test/queue-notices.test.ts`, `test/folding.test.ts` — the updated marker
-  in queue rows and the markdown export.
+- `test/queue-notices.test.ts`, `test/folding.test.ts` — the attachment marker
+  in semantic queue rows and the markdown export.

@@ -1,4 +1,4 @@
-# Surface decisions: plain-exit, queue notices, credential targets
+# Surface decisions: plain-exit, semantic pending-input queue pane, credential targets
 
 Small user-visible behaviors that each needed a decision; kept in one doc
 so a contributor can find the rationale without reading every file.
@@ -51,30 +51,172 @@ busy-Enter steer gate, so `exit` never births a session and always quits
 regardless of the delivery preference. `/exit` remains the command form;
 any other prompt (including `exit!` or `Exit`) still goes to the model.
 
-## Background-subagent settlement notices never appear in the queue pane
+## The queue pane follows semantic pending-input placement
 
-The queue pane is the mirror of the agent's inbox and therefore a
-USER-INPUT surface (kimi's queue pane lists only queued prompts). dsh
-pushes two kinds of background-subagent notices into the parent's inbox:
+The queue pane consumes the same `PendingInputReader` projection as the shared
+runner. It renders every item with `placement === 'queued'`, in projection
+order, using only the occurrence id and content. `steering` and `context`
+placements remain outside queue gestures. The steer-all hint is shown only
+while the active subject reports `running`; idle rows remain visible and say
+that they are waiting for the current task to resume. On the main surface,
+Alt+Up is a TUI-only recall-all extension: it removes queued occurrences through
+`SessionWriter.updateQueue({ kind: 'remove' })` and stages their content in the
+editor, rather than performing the official in-place `edit` operation. Direct
+inbox collection names and message metadata are adapter-internal; the TUI has
+no source-specific notice filter, settlement classifier, or failure-notify side
+channel. If a future surface needs to hide a class of messages, that policy
+must be represented by a semantic projection available to every backend.
 
-- continuable children: `source.kind === 'subagent-settled'` (the
-  continuation manager's settlement notice);
-- one-shot background subagent jobs: `tool-jobs` completion notices whose
-  summary starts with `subagent `.
+## Pending user input never disappears between the editor and the transcript
 
-Both are the runtime's account of a child ending, not steerable input, so
-the queue mirror drops them (`isSubagentSettlementNotice`). The task
-browser is their surface: terminal job rows (one-shot), inactive child rows
-(continuable), `/subagents` for transcripts. A FAILED settlement
-additionally surfaces once as a transient error notify
-(`subagentNoticeIsFailure`, classified on the producers' deterministic
-wording — "finished and" is the only success phrasing for
-`subagent-settled`; `[status: failed|killed]` for tool-jobs). The dsh-side
-delivery is unchanged: the parent model still receives the notice; only the
-TUI's queue mirror filters it. Bash-job notices stay in the queue.
+The D2.1 follow-up completes the official Client's split between the queue pane
+and the conversation tail, and bridges the window where a submission has been
+accepted but has no authoritative representation yet:
 
-Classification helpers: `src/index.ts` (`isSubagentSettlementNotice`,
-`subagentNoticeIsFailure`), pinned by `test/queue-notices.test.ts`.
+- **Queue pane** — authoritative `placement === 'queued'` rows plus a
+  client-local queued echo (marked `sending…`) until the authoritative
+  occurrence with the same `rpcId` arrives. A local-only row is not addressable
+  by `updateQueue` (it has no authoritative occurrence id). The `sending…`
+  marker is part of the row width budget; an ultra-narrow pane that cannot hold
+  the marker plus one text cell drops the marker rather than wrapping it onto a
+  detached row.
+- **Conversation tail** — an ephemeral steering lane rendered with the same
+  user-bubble visual language: authoritative `placement === 'steering'` rows
+  and client-local steering/transcript echoes. It is never inserted into
+  `TranscriptFolder`, never durable, never searchable, and never in the queue
+  pane. It appears while the turn/tool surface (Working, tool cards,
+  `job_output`) stays active, and it REMAINS visible after that turn is
+  interrupted. Its status line is derived from the subject's activity: an
+  AUTHORITATIVE steering occurrence reads `steering…` while running and
+  `waiting for next turn…` once its turn is interrupted (the Host keeps it
+  parked until the next wake); a client-local steering echo has no Host
+  occurrence yet and always keeps `steering…`. The parked row stays visible and
+  only the label changes — the occurrence keeps its identity, and a later
+  ordinary prompt is what wakes the Agent and consumes it.
+- **Context** — `placement === 'context'` has no pending user surface; it
+  presents through its normal conversation/context surface once materialized.
+- **Identity, never text** — each human submission mints a request id before its
+  first async preparation await and persists it as the Direct user-message
+  source `rpcId`. Local echoes and authoritative occurrences correlate by that
+  id; a local echo is suppressed only while an authoritative counterpart is
+  visible, and is retired on the durable `user/message` (or a known terminal
+  exit). Because the Host claims a pending occurrence before its asynchronous
+  pre-step emits the durable message, the echo is re-presented in that window
+  rather than deleted — the accepted content stays continuously visible. Two
+  same-text submissions stay two distinct pending rows.
+- **One atomic update** — the runner publishes queued rows, steering rows and
+  activity in a single `setPendingInputPresentation` call, so a handoff never
+  paints an intermediate blank/duplicate frame.
+- **Gesture-captured delivery** — a Ctrl+S/steer draft resolves its delivery
+  mode at the gesture boundary and uses that SAME mode for both the local echo
+  placement and the written prompt, so an agent status flip while the gesture
+  waits on the submit FIFO can never make the pending surface disagree with the
+  actual delivery.
+- **Own pending input is forced visible (runner-owned)** — only a client-LOCAL
+  submission echo bound for the transcript lane (steering/transcript) is own
+  input. When a NEW such identity appears, the runner returns the subject's
+  VIRTUAL transcript window to latest (a reader may have paged into history)
+  and scrolls to the tail, so the local echo — and later its durable
+  replacement — are actually in the projection and on screen. An authoritative
+  steering occurrence produced by another client/background producer is NOT
+  own input and never steals the viewport; the authoritative rpc-correlated
+  replacement of an existing local echo does not jump a second time (the
+  ownership key set is derived from the local ledger, per subject). Keys are
+  tracked per subject, so entering/leaving the child viewer neither re-fires
+  nor forgets the parent's own input. `TuiApp.setPendingInputPresentation`
+  itself is a pure presentation update and never moves the viewport.
+- **Local-only queue rows carry no bulk hint** — the steer-all/recall-all
+  gestures address only authoritative queued occurrences, so a queue pane
+  holding only client-local `sending…` rows hides the hint rather than
+  advertising a no-op action; a MIXED pane scopes the hint to the accepted rows
+  (`… to steer accepted`) so `sending…` rows are never implied to participate.
+  The `sending…` suffix already communicates the state.
+
+Per-occurrence QueueDock controls: the TUI intentionally does NOT expose a
+per-occurrence queue action UI. `Alt+Up` is recall-all over authoritative
+occurrences and `Ctrl+S` is FIFO steer-all; there is no row selection,
+single-row edit/remove/steer, row action button/keybinding, per-row busy state,
+edit overlay, selection clamp, or edit-target-disappearance lifecycle. D2.2
+still keeps the queue-action SEMANTIC (`SessionWriter.updateQueue` `edit` /
+`remove` / `steer`) fully aligned for both Direct and Remote adapters with
+adapter tests and same-Host proof. The migration preserves DSH capabilities and
+expresses them with a TUI-native surface; it is not a React/Web affordance
+clone, so adapter-level `edit` without an edit UI is expected, not a gap.
+
+### Remote presentation keeps exactly one optimistic identity
+
+D2.2 makes the client-local optimistic-echo source a seam
+(`src/submission-presentation.ts`): production Direct reads the existing
+`PendingSubmissions` ledger; the experimental Remote path reads the official
+`SessionSnapshot.pendingSubmissions`. The single join
+(`src/pending-presentation.ts`) correlates authoritative occurrences with local
+echoes by request/rpc identity only and routes `queued` to the queue pane and
+`steering`/`transcript` to the conversation-tail lane; `context` has no pending
+user surface. The Remote path therefore never runs a second optimistic ledger
+beside the official one, and a steer echo can never render as a queued row.
+
+## D2.3 model / preset / new presentation decisions
+
+These are TUI product decisions expressed through the official DSH Host/Client
+semantics converged in D2.3; they are not a Web-affordance clone.
+
+- **`/model` is projection-authoritative.** The current Session value is the
+  durable Session model selection (`modelSelection` projection `next`, then
+  `lastUsed`), falling back to the Host catalog default only while the Session
+  has no selection. The picker renders one Host-generation directory read
+  (`session.modelCatalog` semantics) with isolated provider-failure rows. A
+  chosen model puts the picker itself into an in-place `Selecting…` state while
+  the semantic write settles (a duplicate apply is never a second commit); a
+  `rejected`/`cancelled` write walks back to the model list so the picker stays
+  usable, while a `committed`/`indeterminate` settle dismisses it. The footer
+  model label shows the in-flight selection as `(selecting…)` while the
+  authoritative current value stays visible; an `indeterminate` settle never
+  paints the requested model and is never retried (the display reconciles from
+  the Session projection). `/model` and `/preset` capture their semantic SUBJECT
+  once — the Session generation PLUS the exact session identity (including
+  `undefined` for a sessionless surface) — and re-fence it after every await and
+  before any UI mutation, so a same-generation Session-identity drift is
+  `superseded`, not a stale repaint or notice.
+- **`/preset` is honest about blankness.** With no Session it stages a
+  run-local pending preset for the next fresh Session and never creates one.
+  On a blank current Session it dispatches the official blank-Session select
+  (`agentPresets.select`), then refreshes the same Session's command/skill
+  catalog. Blankness is read from the official turn-boundary projection (the
+  same authority the Host re-checks), never from the TUI transcript; an unknown
+  blank state opens the picker and lets the Host be the final authority. A
+  started Session keeps its recorded preset visible and refuses
+  the switch with the Host's `agent-preset/locked` wording — never a false
+  switched display. A deployment with `modeSelectionEnabled: false` hides the
+  `/preset` affordance from the slash candidates and `/help` (a presentation
+  filter only); the handler stays registered and still refuses the selection
+  surface, so a typed invocation fails closed identically, and an
+  unavailable/unknown roster keeps the affordance rather than infer a policy.
+  Failure settlement: `rejected` keeps the prior
+  preset and shows the reason; `indeterminate` claims neither the old nor the
+  requested preset and is never retried.
+- **`/new` rides guaranteed-fresh create.** The TUI owns this transition, so
+  an explicit preset intent is carried by the create operation itself
+  (creation-time atomicity); the TUI never emulates `create()` then
+  `agentPresets.select()`. The old Session stays current and its draft/command
+  context stays usable until the create commits; a pre-publication refusal
+  leaves it untouched, and an ambiguous/post-publication failure is never
+  reported as "the Session was never created" and is never blind-retried.
+- **Sessionless `/model` is a global-default intent.** It is persisted as the
+  Host global default (never smuggled into `session.create`); the pick AWAITS
+  that write so it reports a truthful settlement (a `rejected`/`cancelled`/
+  `unsupported` outcome keeps the picker usable, an `indeterminate` one
+  dismisses with the reconcile notice), and an optimistic intent is explicitly
+  not a committed save. The sessionless footer marker is DERIVED from the one
+  default-intent tracker: `(selecting…)` while the write is in flight, an
+  explicit `(unconfirmed)` once it settles `indeterminate`, and cleared only
+  when an authoritative Host read reconciles it (the persisted default either
+  carries the choice — committed — or proves it did not land; a restored older
+  still-pending intent shows `(selecting…)` again). EVERY in-flight default
+  write (and its fenced correction) is awaited before a fresh create, so the
+  create consumes the settled Host default. A FAILED latest intent is walked
+  back in the UI and is NOT seeded into the created Session (v2 §0.8.4): the
+  fresh Session runs the actual persisted Host default, never a fabricated
+  choice, and the failure cannot leak into a later create.
 
 ## /login and /logout resolve credential targets, not just DEEPSEEK_API_KEY
 
@@ -142,23 +284,28 @@ The child viewer's interactivity is keyed SOLELY to the catalog mode carried
 through the whole chain (`SubagentListEntry.mode` → `TaskBrowserRow.mode` →
 `SubagentViewerTarget.mode`), never guessed from running/inactive state, and
 never re-derived inside the viewer. A `continuable` viewer's editor is LIVE:
-Enter delivers the text as the child's NEXT distinct FIFO turn through the
-OFFICIAL `ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
-mode: 'continuable', content }, signal)` control API (DSH 0.1.2-alpha.4) —
-user provenance, no interrupt, no steer; parent authority is validated by
-the Host itself. Decisions a future change must not silently reverse:
+Enter and the accelerated steer gesture resolve queue/steer delivery against
+the child's running state and `busyEnter` policy, then call the OFFICIAL
+`ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
+mode: 'continuable', delivery, content }, signal)` control API
+(DSH 0.1.2-alpha.4) —
+user provenance, with queue or steer delivery; parent authority is validated by
+the Host itself. An empty accelerated submit is the separate child-scoped
+`queued`-occurrence steer-all and never calls this prompt API. Decisions a
+future change must not silently reverse:
 
 - **The viewer editor is a PLAIN text editor.** Everything typed — including
   lines that start with `/` — is delivered to the child as text; slash
   commands are NOT executed against the parent, and the child gets no
-  command-execution wire. Parent-only actions (Ctrl+S steer, Ctrl+Enter
-  queue, Alt+↑ dequeue, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
+  command-execution wire. The accelerated Ctrl+S gesture is intercepted and
+  submitted to the child; parent-only actions (Ctrl+Enter explicit queue,
+  Alt+↑ recall-all, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
   search, keyboard exit bindings (same-key confirmation; Ctrl+C clears the
   draft first, default Ctrl+D is editor-owned when content is present, custom
   keys preserve it), ↓ task browser, Ctrl+G external editor, Ctrl+V image
   intake) are consumed by the host BEFORE the ladder reaches the editor, so
   the viewer can never act on the parent session.
-- **The write path is exactly one**: the runner's `onSubagentSubmit` →
+- **Non-empty viewer prompt writes have exactly one path**: the runner's `onSubagentSubmit` →
   `submitSubagentPrompt` (src/subagent-viewer-submit.ts) → the official
   `ctx.subagents.prompt`. Never `ctx.subagents.sendMessage(...)` (that is
   the Agent-authored Steer path — a human prompt must queue as its own
@@ -170,6 +317,14 @@ the Host itself. Decisions a future change must not silently reverse:
   (`subagent/parent-unavailable`, `subagent/not-resumable`,
   `subagent/unauthorized`, `subagent/delivery-unavailable`,
   `gateway/cancelled`, …).
+- **Child queue occurrence access is separately fenced.** Reader and queue
+  mutation calls may use only the exact live Agent mounted by the current
+  interactive direct-child continuable viewer, with the pinned direct parent
+  and registry identity still matching. This queue-only resolver never grants
+  ordinary child prompt authority; non-empty prompts remain parent-authorized
+  through `SubagentPort`. The current TUI viewer exposes the child queue rows
+  and Ctrl+S steer-all subset; selectable edit/remove controls remain a later
+  UI slice, and Alt+Up recall-all stays disabled in viewers.
 - **Viewer submissions never enter the shared editor history.** An ↑ recall
   in the MAIN editor must not resend a child-scoped follow-up to the
   parent. The fork editor's own per-editor recall is untouched.
@@ -269,6 +424,49 @@ read the DURABLE descendant catalog, not the live-child list:
   runner's execution path, so an idle continuable has no driver to stop
   and the UI never advertises (or fires) a dead stop.
 
+## Communication policy and Focus surface
+
+Communication policy is two independent user preferences, neither of them a
+display preset: `ProgressUpdatesState` (`off` | `milestones` | `frequent`,
+default `milestones`) owns the user-facing mid-turn update cadence, and
+`ResponseStyleState` (`default` | `concise` | `explanatory`, default
+`default`) owns the density/explanation depth of visible assistant text.
+`DisplayState` owns what the surface can make visible. Missing or invalid
+settings resolve to the defaults through the parsers (the single authority).
+The `/settings` rows change the shared runtime states synchronously, then save
+through the existing serialized whole-document ConfigPort write, preserving raw
+extension fields. A failed save is reported without undoing the live choice.
+
+Each composed root TUI agent registers `tui:progress-updates` at order 80 and
+`tui:response-style` at 81, followed by `tui:focus-mode` at 90 and tool
+guidance at 100+. The providers read live state on every assembly; changing
+either axis does not recompose the agent, re-register sections, or change the
+other axis. Plain `composeAgent` callers that omit both states retain their
+existing composition. `default` returns an empty response-style section, not a
+disabled base prompt, Focus policy, tool policy, or safety behavior.
+
+Milestones reports only at closed phase boundaries, material direction
+changes, or required user input — never because a partial finding was just
+established while the same investigation continues. Frequent deliberately
+allows active updates during longer work (semantic guidance, never a
+tool-call counter or timer). Off actively suppresses progress narration.
+Concise and Explanatory steer the visible answer only; they own no cadence,
+tool-narration, or Focus-visibility semantics. Focus owns hidden intermediate
+text, self-contained questions/approvals, independent background work,
+truthful pending-work statements, and the user-needed final visible message.
+While Focus is active the progress provider reads both live states and returns
+an empty effective section — the saved cadence is never mutated and leaving
+Focus restores it on the next assembly; the response style stays active. The
+Focus prompt states the surface fact (progress-only intermediate messages
+cannot reach the user) without owning cadence or style preferences.
+
+Locality is split: preference state and selection are Client-local; persistence
+uses `ConfigPort.tuiSettings`, while Direct composition installs the structural
+`SystemPromptLike` sections in the Host's agent scope. A future wire backend
+must round-trip the preferences as settings data and install the policy
+Host-side; callbacks and the mutable state objects never cross the wire. This
+adds no Remote RPC or production backend and does not change display defaults.
+
 ## Focus fullscreen disclosure
 
 The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
@@ -315,7 +513,19 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   (reasoning-delta), Message (assistant text), Tool (tool/call — ANY
   name, known or custom). Injected context (skill-invocation,
   skill-catalog, system reminders) and lifecycle events (workflow,
-  subagent/descriptor, llm/retry) never occupy a slot or count as tools.
+  llm/retry) never count as tools; a `subagent/descriptor` is not a
+  transcript row at all (child identity metadata, post-PR166).
+  (2026-09-22 presentation-convergence addendum v2: the COLLAPSED
+  presentation vocabulary is `Think:` + `Action:` and both headers say
+  `N actions`. Tool stays the STRICT underlying semantic — a `llm/retry` row
+  never counts as a tool — but that lifecycle row DOES own the collapsed
+  `Action:` slot and DOES count as its own action subtype (`retry`). A
+  `subagent/descriptor` does NOT: it is the child session's identity metadata
+  (a continuable child logs it before its first `turn/start`), so it is never
+  an Action nor an action subtype. A workflow row remains neither. The
+  Message/Tool aggregation facts above are the turn-level inputs, not the
+  collapsed slot vocabulary — see the collapsed Action slot
+  decision below.)
 - **Message candidate/confirmed**: streaming text-delta feeds the
   candidate immediately; a later tool/call, step/start or output confirms
   it as an intermediate message; at turn/end the candidate that IS the
@@ -342,15 +552,22 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   visibility pair is deleted.
 - **Focus separates turn foundation from process chronology
   (projection-only)**: a LEADING injected-context prefix that wakes a
-  turn is persistent input context and renders before the Thought —
-  expanded and collapsed. Only the leading prefix counts; mid-turn
-  injected context stays process content at its real position. Collapsed
-  Focus summarizes inputs: opening injected context + ALL human user rows
-  precede the Thought, even when a user row was a same-turn steer.
+  turn is the expanded Thought foundation and renders before the Thought.
+  Human user/steer rows and CAUSAL surfaced context are persistent
+  boundaries in collapsed Focus, where they remain visible in raw relative
+  order. A MID-TURN `form:'notice'` (a background job or subagent settling
+  while the Agent already works) is process feedback, not causal input: it is
+  hidden inside the collapsed Thought and restored at its exact raw position
+  when the Thought opens (2026-09-21 addendum; the decision reads the
+  semantic `form` and raw position, never a source kind). A notice inside the
+  opening foundation and a mid-turn relay stay visible.
   Expanded Focus preserves process chronology after the foundation: later
-  steers and mid-turn injected context return to their real positions.
+  steers and surfaced context return to their real positions and remain
+  unmarked as owner-only process content. Searching a hidden mid-turn notice
+  surfaces it through a presentation-only temporary reveal (`projectFocus`
+  `forcedVisible`) without opening the Thought or writing a manual owner.
   The durable `steer`/source facts are never rewritten, and injected
-  context still does not occupy Think/Tool/Message slots and never counts
+  context still does not occupy Think/Action/Message slots and never counts
   as a tool.
 - **The foundation is identified by a source-derived `context` marker,
   never by bare `kind: 'system'`**: the fold writes `context: true` only
@@ -362,6 +579,292 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   marker was added to the system row (a plan deviation from
   "projection-only": the marker is not a durable field and no new session
   event, and the icon stays a display field, never a semantic signal).
+
+## Compact Work spans and form-aware Context (2026-09-20 PR3/F4)
+
+- **Compact is a real preset now.** `/display compact`, the `display-preset`
+  settings row value, and a persisted `displayPreset: 'compact'` all resolve to
+  Compact without a Full fallback. Focus stays the only preset with the
+  model-facing behavioral policy; Compact keeps `focusBehavior: false`.
+- **Work folds contiguous Process runs, never whole turns.** A maximal run of
+  Process-classified rows becomes one presentation-only span whose owner is its
+  first member `TranscriptMessage` (the stable disclosure identity). Every
+  Conversation/Attention/surfaced-Context/turn boundary ends the run, so
+  Assistant intermediate narration stays visible in chronology and the final
+  answer keeps its existing ownership.
+- **Collapsed Work = Header + Think + Action, never Message.** The Think row is
+  the latest reasoning tail (one visual row, following the tail while
+  streaming); the Action row is the latest meaningful non-Thinking Process
+  evidence (one visual row — see the collapsed Action slot decision below).
+  Counts describe the span, not the turn; no fact renders a placeholder
+  row; span-local duration is omitted rather than faked from whole-turn timing.
+  Expanding the span re-uses the ordinary message renderers for its members.
+- **The Work header keeps the plain triangle** (`▸`/`▾`, the
+  `section-collapsed`/`section-expanded` semantics in every icon style) — the
+  Focus root keeps its whale identity. The Context CLUSTER header composes the
+  same disclosure marker with the Context identity icon (`context-generic`:
+  `📎` emoji / `⋅` symbols / hidden minimal), so it reads
+  `▸ 📎 Context · N injections` under emoji and `▸ Context · N injections` under
+  minimal with no dangling separator (`iconLead` supplies each separator only
+  when its glyph exists). Activity is plain `▸`/`▾` + its name — the 2026-09-22
+  v2 addendum retired the Activity identity icon entirely (see the Activity
+  decision below). Both disclosures are click-owned in fullscreen.
+- **Post-F6 (2026-09-21 PR B; 2026-09-22 v2 addendum): the visible container
+  is `Activity`, with NO identity icon and span-local wall timing.** The
+  user-visible name is `Activity`; the internal owner kind stays `work`
+  (`TranscriptWorkSpan`), no internal rename. Activity is a frequent
+  structural/disclosure container, not a high-priority semantic event, so the
+  2026-09-22 presentation-convergence addendum removed the entire
+  style-resolved identity mark (`🧰` emoji / `✦` symbols / empty minimal, and
+  the `IconSemantic 'work'` registry entry with it): the disclosure marker +
+  the name identify it in every style (`▸ Activity` / `▾ Activity`), and the
+  Context cluster keeps its own identity icon. The collapsed header follows
+  the Focus information hierarchy `<identity> <duration> · <stats>` (duration
+  directly beside the identity, never `· 18s`), the `· thinking` marker is
+  gone (thinking presence is not a lifecycle state; the Think slot owns the
+  content), and the degradation ladder drops the LAST stat first and keeps
+  duration with the identity to the end. The header duration is the span's
+  OWN wall clock: the fold records a presentation-only `TranscriptTiming`
+  sidecar (`SessionEvent.time` only) on thinking/tool/retry rows (a command row
+  and a subagent descriptor are never span members, so they carry no Activity
+  timing);
+  `summarizeWorkSpan` aggregates earliest-start/latest-end/any-running in its
+  existing single walk, running spans re-read `now()` per
+  render (the shared repaint heartbeat — no per-card timers), missing
+  evidence omits the duration (never `0s`), and read grouping never crosses
+  a turn boundary so no Activity span ever inherits another turn's count or
+  timing (a group's action cardinality and wall span stay on the turn that
+  renders the card). The shared Think/Action/Preparing slot geometry lives
+  in `src/compact-process-preview.ts` (one authority for Focus and
+  Activity); the Think slot shows the LATEST logical line of the bounded
+  reasoning tail in both states (running follows the right edge, settled
+  head-truncates).
+- **Collapsed Action slot + `actions` header stats (2026-09-22
+  presentation-convergence addendum v2): the collapsed process presentation
+  uses `Think:` + `Action:`; Focus additionally keeps `Message:` +
+  `Error:`, and BOTH headers say `N actions · subtype ×count`.** `Action` is
+  the latest meaningful non-Thinking TURN-OWNED Process evidence: genuine Tool,
+  Preparing, Retry, and explicit
+  incomplete-result diagnostics, selected purely by canonical chronology
+  (never a per-type priority) among the rows the collapsed surface actually
+  hides — Focus derives it from the same transcript rows `projectFocus`
+  hides under the collapsed Thought root (never a second `TurnActivity`
+  chronology store), Activity derives it in `summarizeWorkSpan`'s single
+  member walk. Post-turn replay evidence — a row that materialized after the
+  `turn/end` of the turn that OWNS it (only turn-carrying producers can be
+  late for a turn) — stays transcript/search evidence but is excluded from the
+  Action aggregate/winner, Work membership and read grouping; an idle
+  slash command is outside-turn feedback and is never misread as replay. The
+  fence and its provenance rule are owned by
+  `docs/transcript-display-disclosure.md`.
+  The slot is presentation-only: Tool remains a strict
+  underlying semantic (a `Retry` row is never a Tool, and neither is a
+  command row — a turn-less `control` node — nor a subagent descriptor,
+  which is not a transcript row at all; a genuine `tool/call name=subagent`
+  IS a Tool literally named `subagent`, and is the delegation Action). The
+  shared `CompactActionStats` cardinality: a genuine tool contributes its
+  `callCount`, a retry occurrence contributes one action of
+  its own subtype (`retry`); an
+  orphan result contributes `0 actions` and renders the honest `Unpaired …
+  result` diagnostic instead of pretending a missing call existed; a live
+  Preparing run temporarily owns the slot but never increments stats (the
+  formal call counts once when it materializes). Active surfaced
+  interactions (`ask_user_question` / `exit_plan_mode`) remain externally
+  owned, never duplicate themselves in Action and never count. Focus and
+  Activity share ONE classifier, ONE latest-candidate rule, ONE Action
+  formatter and ONE subtype-stat formatter (`compact-process-preview.ts` —
+  count-desc/name-asc, max 3 named subtypes, `+N` counts remaining SUBTYPES),
+  and their component caches key on bounded Action + ActionStats signatures
+  so a synthetic Action repaints even when the turn's tool state is
+  unchanged. Focus stats are TURN-level (projected once from the turn group,
+  unaffected by search reveals); Activity stats are SPAN-level (its own
+  members). Focus keeps its turn-level `tok` segment; Activity
+  intentionally NEVER shows tokens — a span has no trustworthy per-span
+  usage authority, and unknown is omitted, never allocated or estimated.
+  Singleton stats stay visible (`1 action · read ×1`) — no count-sensitive
+  presentation branches. Expanded views keep their canonical full-detail
+  rows; `Action` exists only in collapsed summary presentation and is never
+  a disclosure owner or a search source. A COMMAND row is deliberately never
+  an Action and never an Activity member: a command lifecycle is session-level
+  standalone evidence — DSH appends `command/run`/`command/done` as direct
+  log-only events with **no turn wrapping them**, and the settled result renders
+  outside model history — so its card stays a standalone transcript row
+  (visible, never folded into a turn's Activity, never claimed by the collapsed
+  `Action:`). Since the post-PR166 convergence this is structural: commands
+  are a real `kind: 'command'` transcript node with NO `turn` field and the
+  `control` semantic class, paired by `commandId` (`command/run` creates the
+  running row, `command/done` settles the same row), with an explicit
+  `sourceEventSeq`/`sourceCommandId` manual-compaction correlation joining a
+  correlated `/compact` command into its compaction card (one visible owner,
+  the card's search corpus keeps the command fields searchable). A
+  `subagent/descriptor` materializes NO transcript row at all: it is the CHILD
+  session's identity record (a continuable child logs it before its first
+  `turn/start`; upstream asserts `descriptorIndex < turnStartIndex`), held by
+  the viewer/catalog state, so it can neither form an Activity nor feed
+  ActionStats. The parent's own genuine `tool/call name=subagent` is the
+  delegation evidence and the Action.
+- **One transcript left edge for container chrome (2026-09-22 v2 addendum
+  §28; body-indent supplement).**
+  The Focus root, Activity, the pending Activity card and the ambient Context
+  cluster render their header/body chrome at the transcript content column
+  with NO decorative two-cell outer indent, so a collapsed container header
+  and its expanded canonical member rows align on one boundary (no
+  collapsed/expanded left-edge inversion). `containerPath` stays semantic
+  ancestry for disclosure/mouse/search/viewport resolution and NEVER controls
+  visual indentation. Genuine internal structure keeps its indentation:
+  Thinking bodies, Tool payload/result insets, PTC child/grandchild trees,
+  assistant/user wrapped continuations and `Message:` continuation rows. The
+  standalone Context cards (notice / relay / recall) apply the same principle
+  one level down, at the card: the header stays at the left edge while the
+  card's own body is indented 2 cells — the structural contract, its width
+  rule and the overflow-safe drop below 3 columns are owned by
+  `docs/transcript-display-disclosure.md` (`Card-internal header→body
+  layout`).
+- **`Ctrl+O` is the ONE regular transcript-detail owner; a disclosure
+  CAPABILITY decides what may be collapsed.** On the regular surface the shared
+  master (and, when it exists, the effective `app.transcript.toggleExpand` key)
+  owns regular Compact Work, Context clusters, ordinary folds and long/pending
+  user folds; fullscreen Compact keeps the Work-span bulk and the mouse-owned
+  per-card click. When the key is unavailable every one of those folds fails
+  open and advertises no hint (the capability is applied where the renderer
+  builds the disclosure, so no hidden count/marker is produced). A hidden
+  Work/cluster member revealed by search is opened through the ONE container
+  reveal path (`searchRevealOwnerFor`) and promoted on an ordinary dismiss.
+  The master's DERIVED bulk expansion follows the same `EXPAND_RECENT_TURNS`
+  boundary as every ordinary fold (it never computes a separate recent-Work
+  window); a non-recent container therefore stays collapsed until the user
+  reaches it through search reveal, exactly like a non-recent ordinary fold.
+- **Ambient clustering is semantic on every preset and surface; only its
+  presentation default is capability-dependent.** With an operable disclosure
+  action the regular surface collapses the cluster behind the same
+  `▸ 📎 Context · N injections` header as fullscreen (a keyboard master on
+  regular, a click on fullscreen); with no operable action it presents the
+  members flat. The cluster owner, search path, viewport identity and
+  raw-adjacency rule stay cluster-based either way.
+- **Nested Focus Work is a real container.** Expanded Focus emits each canonical
+  Work span as `[focus-root, work]`: fullscreen defaults it collapsed with a
+  mouse-owned header, regular Focus opens it whenever the owning Thought is
+  expanded, and search may reveal it temporarily. The generic blank-row rule
+  collapses the NEAREST shared container (nested Work beats the outer Thought);
+  an explicit root collapse returns that turn's Work owners to the Compact
+  default, while a temporary hiding never clears manual Work state.
+- **Surfaced Context is form-aware.** The fold retains the producer-declared
+  `MessageSource.form` as presentation-only provenance; `notice`, `relay` and
+  `recall` become standalone rows (producer summary at normal brightness /
+  Agent message with sender and body / Session recall with labels), while
+  unknown or absent forms stay a standalone generic Context injection. A relay
+  is presented like a message but never reclassified to `user` or `Conversation`.
+- **Only raw-adjacent same-turn ambient rows cluster.** Ambient =
+  `instructions`/`catalog`/`snapshot`; grouping runs on raw chronology BEFORE
+  any Process hiding, so a hidden Tool can never merge two Context rows. The
+  cluster summary uses structured labels/forms only and its duplicate
+  compression is display-only.
+- **Clustering applies to every preset**, and the opening ambient burst (the
+  initial user plus immediately following surfaced Context) stays above the
+  Focus Thought in both Focus states while a mid-turn burst keeps its
+  chronological position.
+- **Performance contract**: a stable Work span's live reasoning/tool updates use
+  the existing content-refresh path; a boundary change or member add/remove is a
+  legitimate structural reprojection; notice/relay rows are render-time
+  width-aware (no baked one-line truncation); there is no second renderer,
+  search index, or viewport owner.
+- **Scope**: PR5/F5 converged Focus-expanded and Full onto the canonical
+  structure; PR6/F6 converged disclosure ownership (regular-surface owners,
+  nested Work disclosure, search reveal path). Compact is not the default (F7);
+  the post-F6 Compact UX/identity review decides whether Work gains an identity
+  icon or Compact gains progress-update narration guidance.
+
+## F4 hardening (2026-09-21 PR4)
+
+PR4 adds no preset, semantic class or disclosure owner; it hardens the shipped
+F4 behavior and documents the guarantees in
+`docs/transcript-display-disclosure.md`:
+
+- **Malformed / legacy Context never crashes or invents identity.** The fold
+  reads the source kind through the single Context parser, so a restored log with
+  a `null`/missing/non-object `source` folds as standalone generic Context
+  instead of throwing; unknown/future `form` stays generic (never ambient);
+  invalid `summary`/`sender`/label values are never fabricated; malformed
+  `changes`/`references` arrays degrade to the kind fallback; a legacy
+  `session-reference` stays recall.
+- **Large-history grouping stays linear.** The active search reveal owner is
+  memoized per projection (keyed on target, preset, surface and window
+  identities) instead of being re-resolved per row/span, and the parser's
+  distinct-label dedup uses a Set. A projection resolves the reveal owner a
+  small constant number of times regardless of history size.
+- **Streaming/Preparing ownership and search/surface transitions hold** under the
+  deterministic race matrices. The live Preparing ownership consumes the SAME
+  Work-member boundary authority as the projection, so a settled
+  surfaced-interaction card (question / Plan review) closes the trailing run and
+  a following live call starts a new pending Work instead of jumping back before
+  it (Compact collapsed/expanded and expanded Focus alike). A page/window change
+  prunes the Compact Work/cluster owners the new window no longer projects (so an
+  A→B→A round-trip cannot resurrect a dropped expansion), and a window never
+  invents an off-window member.
+- **Width/grapheme robustness** holds for every F4 row family across ASCII, CJK,
+  emoji, combining marks, ZWJ emoji and ANSI text.
+- **Settled surfaced-interaction cards (question / Plan review) are surfaced
+  evidence, not Process.** The authoritative set is exactly
+  `ask_user_question` + `exit_plan_mode`; source/tool identity only
+  (`kind:'tool'`, a name in the set, not running) — never the title, the result
+  wording, a rich card, or a past approval; no fifth semantic class. Compact
+  makes them Work boundaries (standalone, never counted/previewed); collapsed
+  Focus hoists them out of the Thought (raw relative order, never across the
+  committed-answer fence and never reordered against user/steer rows); expanded
+  Focus restores their raw position; Full is unchanged. Their own disclosure is
+  independent of the Focus root: fullscreen Focus keeps the mouse-owned
+  per-card disclosure (collapsed by default; a click toggles only the card) and
+  the card is EXEMPT from the root-collapse secondary reset, while regular Focus
+  has no per-card owner independent of the root (Ctrl+O drives both the root and
+  the tool-detail master) and therefore fails open/full with no fold hint. A
+  RUNNING interaction remains owned by its panel (QuestionFlow / plan-mode
+  approval) with no duplicate surfaced card. The turn's tool count / tool-type
+  stats / collapsed Action slot exclude them, running or settled (the
+  presentation-convergence addendum v2 §43 active-interaction exception).
+  Every other tool (todo/goal/subagent/workflow/schedule/cordis/bash/edit/…)
+  stays ordinary Process.
+
+## F5 projection convergence (2026-09-21 PR5)
+
+PR5 extracts the ONE preset-neutral semantic segmentation and makes Compact,
+Full and expanded Focus materialize it instead of each re-deriving boundaries:
+
+- **`transcript-projection.ts` is the canonical authority.**
+  `projectTranscriptStructure(raw window)` returns `Message | Work span |
+  Context cluster` and reads no preset, surface, Ctrl+O, mouse, search,
+  disclosure, viewport or width state. `isTranscriptWorkMember()` is the single
+  Work member predicate (the live Preparing ownership consumes it too), and
+  `clusterAdjacentAmbientContext()` remains the single raw-adjacency cluster
+  authority. The projector is O(n) and references the original
+  `TranscriptMessage` objects for owner/member identity.
+- **Compact is a materialization adapter.** `projectCompact()` no longer owns any
+  segmentation; it only decides collapsed/expanded Work and cluster
+  header/flat output. PR4 Compact behavior, owner/member identity and the
+  settled-interaction boundary are unchanged.
+- **Full materializes the structure flat.** Work expands to its members with no
+  Work chrome, the shared cluster presentation obeys the surface capability, and
+  the message chronology equals the raw window. Full no longer runs an
+  independent `applyContextClusters(raw messages)` semantic path.
+- **Expanded Focus consumes the structure for its process tail.** It computes
+  the canonical segmentation over the UNFILTERED tail (the held-back final never
+  changes raw adjacency), materializes each Work span as a nested
+  `[focus-root, work]` container (F6), and keeps the Focus-specific lead
+  foundation, committed-answer fence, projected ancestry and final holdback. Its
+  cluster presentation obeys the surface capability exactly like Full. Collapsed
+  Focus keeps its hoist policy and substitutes the canonical cluster identity in
+  Focus-projected order.
+- **`displayPolicyFor()` is the runtime authority** for materialization:
+  `isFocusDisplayPreset()` delegates to `focusBehavior`, and `projectedBlocks()`
+  selects the Compact / Focus / Full materializer from `turnLayer`,
+  `processLayer` and `focusBehavior`, so the policy table and the runtime cannot
+  drift.
+- **Search reveals a canonical container PATH.** Every preset resolves the
+  hiding containers through the same neutral ancestry (Focus root via
+  `searchTargetTurn()`, nested Work, Context cluster); a flat/fail-open
+  container mints no node, a temporary navigation never writes manual state, and
+  an ordinary dismiss promotes the necessary nodes atomically. The stable
+  ancestry is memoized; the mutable open/hidden state is evaluated per call. No
+  new viewport map or wire field is added.
 
 ## The composer submission policy is the WEB policy
 
@@ -607,7 +1110,7 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   - Ctrl+O is the Focus detail master: it toggles a DERIVED reveal of the
     recent `EXPAND_RECENT_TURNS` Focus Thoughts. The derived state is
     NEVER written into `focusExpandedTurns`, so switching to fullscreen
-    drops it (deterministic: `toolOutputExpanded` and `focusExpandedTurns`
+    drops it (deterministic: `transcriptDetailExpanded` and `focusExpandedTurns`
     stay orthogonal).
   - ANY expanded Focus root — Ctrl+O-derived OR manually revealed
     (search / viewer restore) — full-reveals its non-Thinking process:
@@ -678,6 +1181,31 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   (no fork divergence): the label is split into a fixed presentation
   prefix (lineage + marker) and the marqueeable title.
 
+## Single-row presentation boundaries are explicit
+
+Any renderer that budgets one returned `string` as one terminal row must
+normalize caller-provided CR/LF before width measurement, marquee windowing,
+hit-map construction, or truncation. Raw domain/runtime text remains unchanged;
+the normalization belongs only to the presentation boundary.
+
+A surface that intentionally supports multiline content must instead use a
+multiline-aware renderer (for example `wrapTextWithAnsi` / `Text`) and budget
+the resulting physical rows explicitly. `visibleWidth`, `truncateToWidth`,
+`Frame`, and the overlay compositor are not newline sanitizers; fixing the
+problem at those layers would hide already-wrong measurement and hit-map
+assumptions.
+
+The current containment applies this rule to `TaskBrowserPanel`,
+`SearchablePicker`, and `SelectedMarquee`. During the planned interaction-panel
+refactor, row cardinality must become an explicit presentation contract
+(single-row vs multiline) rather than an accidental property of arbitrary
+strings. The refactor must audit the remaining sibling surfaces, including
+vendored `SettingsList` / `SelectList` consumers, extension header/dock/footer
+single-row slots, history cwd rows, and attachment/file-name fallbacks.
+
+Do not move this normalization into runtime/domain models: search, persistence,
+replay, exports, and semantic projections must keep the original text.
+
 ## Local shell display policy
 
 - The capture layer (bounded-output byte/line/disk caps) is the memory
@@ -732,10 +1260,156 @@ Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
 Task Center in All scope. Both surfaces consume the same durable preorder and
 runtime projection. Scope, type, search, selection, and disclosure are
 presentation state, so promoting Quick to Full never reorders or deduplicates
-rows and Esc can restore the prior context. Active scope retains every ancestor
+rows and Esc can restore the prior context. Their keyboard ownership is
+deliberately asymmetric: Quick is navigation-only (arrows, `←`/`→` tree,
+`Tab` type, `Enter` open, `Esc` close) and consumes every other key as a no-op,
+so no printable can arm a hidden search/stop/action state and `Esc` is always
+exactly one layer; the full Task Center owns search, scope, stop, refresh,
+paging and reverse (`Shift+Tab`) type cycling. The only keyboard path from
+Quick to Full is the `Open Task Center` pseudo-row plus `Enter`. Active scope
+retains every ancestor
 needed to explain an active descendant but does not promote that descendant to a
 root. Terminal job failures are acknowledged only when a visible Task Center
 row is opened; until then the footer keeps a failure marker and the ↓ affordance.
 The stop action is a confirmed, capability-gated dispatch: continuable running
 children use their durable direct parent authority, while running jobs use the
 public job kill API. The browser never reads job output.
+
+## Long user messages collapse at the presentation layer only
+
+A text-only durable user message whose render-time visual row count exceeds
+10 collapses to head (4 rows) + one marker + tail (3 rows). The decision and
+the slice both run on the wrapped rows the CURRENT width produces, so a
+resize re-decides and CJK/emoji/single-overlong-line wrapping is counted by
+real screen space rather than string length. The canonical
+`TranscriptMessage.text` is never rewritten: the fold lives entirely in
+`UserBubbleComponent` and every non-presentation consumer (search corpus,
+export, persistence, replay) keeps the full text.
+
+Disclosure reuses the existing per-message `expandedOverride`, never a second
+user-specific state map, and user messages are NOT added to
+`isFocusSecondaryDisclosure` (a user message is a turn foundation, not process
+detail). A regular surface with NO effective `app.transcript.toggleExpand` key
+does not fold at all — compacting without an affordance would strand the prompt
+collapsed — while fullscreen keeps folding because the marker click always
+works. The owner of the expand affordance is surface-adaptive and is part of
+the component cache identity:
+
+- regular: the Ctrl+O recent-USER-turn boundary (its own threshold, computed
+  from user turns only — never the Thinking/System/Tool process boundary,
+  which can be sparse and would otherwise expand every prompt in a pure chat;
+  or a per-message search reveal);
+- fullscreen without Focus: the compact-marker click and the Ctrl+O master
+  (`click / <key> to expand`);
+- fullscreen inside a Focus: the compact-marker click and a search reveal —
+  the recent-turn boundary is deliberately NOT consulted there, because a
+  persisted `transcriptDetailExpanded` from an earlier surface must not leak an
+  expansion into a surface whose marker says `click to expand`. Ctrl+O there
+  belongs to the Thought-root bulk, so the marker never advertises a dead key.
+
+A persisted Ctrl+O master keeps recent prompts expanded when the user moves
+into fullscreen without Focus, exactly like the ephemeral pending lane: the
+master is a cross-surface preference that also drives tool/system detail, so it
+is deliberately NOT reset on the transition. Disabling the toggleExpand key
+removes only the KEYBOARD affordance — in fullscreen the surface is never
+stranded: every expanded prompt still shows the tail `▴ Collapse · click`
+control and every folded one still shows the `click to expand` marker, so the
+mouse round-trip works with no key. In regular the expanded prompt simply
+renders full (no label), and Ctrl+O is the collapse owner.
+
+The collapsed state exposes the compact marker; in FULLSCREEN the EXPANDED
+state exposes a tail collapse control at the message tail — reusing the
+trailing separator row when one follows, or one dedicated presentation row for
+the final block. The direction is explicit in the shared disclosure metadata
+(`expand` vs `collapse`) and in the fullscreen hit identity, so a stale press
+can never transfer an expand target to a collapse target (or to a replacement
+pending row). The tail label is `▴ Collapse · click / <key>` without Focus and
+`▴ Collapse · click` inside a Focus (Ctrl+O owns the Thought-root bulk there, so
+the card never advertises a dead key). The tail control is deliberately
+FULLSCREEN-ONLY: regular draws into the terminal main screen, where no
+app-owned copy pipeline exists, so a visible label there would be picked up by
+the terminal's native selection — and regular has no mouse disclosure anyway, so
+its only job would be a keyboard hint not worth polluting scrollback copy. In
+fullscreen the tail row is presentation chrome: the fork's copy-source seam
+(X057) copies it as the blank separator it replaced, while paint, search,
+word/line selection and the mouse hit map keep reading the rendered line. The
+excluded rows are derived at the PAINT boundary (`copyBlankRows` on the
+last-painted snapshot), so the copy filter shares the same frame epoch as the
+scroll content the user actually saw — a rebuild that has not repainted yet can
+never leak the chrome or blank the wrong row.
+
+Ctrl+O keeps its existing ownership: in regular/fullscreen-non-Focus it turns
+the recent-turn master off and clears the true long-user overrides when either
+the master is on or a VISIBLE user bubble/pending row is explicitly expanded;
+in fullscreen Focus it also clears the long-user overrides (with the
+root-collapse pass, or alone when no Thought root is expanded). Every
+disclosure mutation runs through one viewport transaction: a reader who was
+following the live tail keeps following it, and a historical reader is restored
+to the SAME semantic row (durable message identity, or the pending row's stable
+key) at the same viewport offset — never a raw absolute scrollTop that would
+land on different content after a 150→8 row shrink. The Focus root Collapse All
+keeps its own `anchor-turn` contract and never routes through the generic user
+anchor.
+
+The ephemeral pending steering/transcript lane joins the SAME visual-row
+disclosure when its row is text-only (`foldableText`); an unknown or
+mixed-content row fails open to the full presentation, so a pending row never
+folds only to materialize as a full mixed-content durable bubble. Pending
+disclosure state is presentation-only, keyed by the stable `rpc:<id>` /
+`id:<id>` identity (a local echo and its authoritative replacement share it)
+and pruned to the live pending keys on every presentation update; it never
+enters the transcript, persistence, or the session. The status line
+(`steering…` / `sending…` / `waiting for next turn…`) always stays visible and
+is never folded into the compact middle.
+
+The override cleanup filters `kind === 'user'` only, so
+thinking/tool/system/compaction overrides and the Thought-root storage rule
+are untouched. Both the search reveal and the Ctrl+O collapse predicate only
+treat a message as folded when the HOST bubble owns its current presentation
+(an extension message renderer that takes over `kind: 'user'` receives no
+`expanded` state and renders no compact marker, so the Host never writes or
+counts disclosure state for it) AND it ACTUALLY compacts at the current width
+— so neither a plugin-owned nor a short prompt accumulates an invisible no-op
+override that would eat a Ctrl+O press. A plugin-owned user entry is likewise
+exempt from the Host long-user cache fields (boundary / expanded / hint): a
+user-boundary shift or a surface swap never re-runs its extension renderer
+(the renderer-registry revision still handles Host↔plugin ownership changes).
+A regular surface with no expand key
+never folds at all, so
+entering fullscreen from it drops every long-user override — a stale reveal
+from that surface must not hide the Focus marker. That clear is deliberately
+GLOBAL for the transition (overrides carry no source tag and no parallel
+state may be added), so an earlier fullscreen expansion does not survive a
+trip through such a non-folding regular surface: re-entry re-derives folded.
+A regular surface WITH the key keeps its reveal across the swap. A search
+reveal is not a permanent pin: the next explicit Ctrl+O collapse hides it
+again, and a later search jump reveals it afresh.
+
+Only the marker row and the tail control row are click targets; every other
+row of the bubble has an inert hit identity so ordinary user text keeps
+selection/copy semantics. A search hit inside the collapsed middle expands the
+message on jump, including outside Focus mode, because the search corpus is the
+full text.
+
+**Known limitation (deferred):** the search match carries no intra-message
+offset, so the jump expands the message but does not reposition the viewport
+onto the exact matched row. For a bulk paste large enough that the hit sits
+far from the message's tail after expansion, the user may still need to scroll
+within the revealed message. Landing the viewport on the matched row needs a
+match-position contract across the search index and the runner jump path, and
+is tracked as a follow-up rather than part of this change.
+
+## Fullscreen jump-to-latest is a Host semantic action behind a viewport affordance
+
+`TuiAltScreen` owns only the viewport affordance: it draws a bottom-centered
+`↓ Latest` label whenever the primary follow-end view has left its end, plus
+`shouldShowScrollToEndIndicator` (the Host's virtual-history window is not at
+the live tail, so a history window keeps the label even when its local view
+follows its end) and `onScrollToEndIndicator` (the Host consumes the click;
+the fork's local `scrollToBottom` remains the fallback when no Host claims
+it). The Host wires the label text from the effective `app.transcript.jumpLatest`
+keybinding, the show predicate from `transcriptWindow.mode`, and the click to
+the existing `onTranscriptJumpLatest` semantic action — so a history click
+returns to the GLOBAL latest window instead of stopping at the current history
+window's bottom. The history location gutter now says only where the window
+is; the floating label says how to get back. This vendor seam extends X028.

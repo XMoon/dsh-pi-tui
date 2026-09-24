@@ -18,6 +18,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import { parseReleaseTag } from './release-context.mjs'
+import { requiredGuidance } from './lib/dsh-compat.mjs'
 
 const [, , input, output = 'release-notes.md'] = process.argv
 
@@ -81,7 +82,7 @@ function extractSection(file) {
     }
   }
 
-  const content = compactListContinuations(
+  const content = compactSoftWraps(
     lines
       .slice(start + 1, end)
       .join('\n')
@@ -93,12 +94,6 @@ function extractSection(file) {
   }
   if (!/^### /mu.test(content)) {
     throw new Error(`Version ${version} in ${file} must contain changelog categories`)
-  }
-  if (version === '0.4.5') {
-    const limitation = file.endsWith('CHANGELOG.md') ? '已知限制' : 'Known limitation'
-    if (!content.includes(limitation)) {
-      throw new Error(`Version ${version} in ${file} must document its known limitation`)
-    }
   }
   const comparePrefix = channel === 'next' ? 'next-v' : 'v'
   const tagPattern = `${comparePrefix}\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?`
@@ -117,23 +112,30 @@ function extractSection(file) {
 }
 
 /**
- * Fold a list item's wrapped continuation lines into single lines.
+ * Fold soft-wrapped continuation lines into single lines.
  *
- * The changelogs write each bullet as a wrapped paragraph (a `- ` line
- * followed by 2-space-indented continuation lines). GitHub's file viewer
+ * The changelogs write every bullet and every prose paragraph as a wrapped
+ * block (a first line followed by continuation lines). GitHub's file viewer
  * folds those soft breaks, but its Release-body renderer turns them into
  * hard `<br>` breaks, so an extracted release body shows arbitrary line
  * breaks mid-sentence. Folding the continuations makes the Release body
- * render as one paragraph per bullet, matching the changelog file view.
- * Blank lines, headings, code fences and their contents are left alone.
+ * render as one paragraph per block, matching the changelog file view.
+ *
+ * Only the changelog's own basic shapes are recognized: blank lines,
+ * headings, fenced code (backtick or tilde, up to three spaces of indent),
+ * blockquotes, lists, reference definitions and thematic breaks. A bullet's
+ * 2-space-indented continuation, a prose paragraph's own continuation and a
+ * blockquote's marked continuation are folded; every other line is emitted as
+ * written. A deliberate hard break (two trailing spaces or a trailing
+ * backslash) survives.
  */
-function compactListContinuations(content) {
+function compactSoftWraps(content) {
   const lines = content.split('\n')
   const out = []
   let inCodeFence = false
 
   for (const line of lines) {
-    if (/^```/.test(line)) {
+    if (/^ {0,3}(?:```|~~~)/.test(line)) {
       inCodeFence = !inCodeFence
       out.push(line)
       continue
@@ -142,14 +144,36 @@ function compactListContinuations(content) {
       out.push(line)
       continue
     }
-    if (/^ {2}\S/.test(line) && /^\s*[-*]\s+\S/.test(out[out.length - 1] ?? '')) {
-      out[out.length - 1] = `${out[out.length - 1].trimEnd()} ${line.trimStart()}`
+
+    const previous = out[out.length - 1] ?? ''
+    // A blockquote's marked continuation joins its own marker line; a bullet's
+    // continuation is indented; a prose paragraph continues at column 0.
+    const quoteContinuation = /^ {0,3}>/.test(line) && /^ {0,3}>/.test(previous)
+    const quoteText = quoteContinuation ? line.replace(/^ {0,3}>[ \t]*/, '') : ''
+    const isContinuation = quoteContinuation
+      ? quoteText !== ''
+      : /^ {2}\S/.test(line)
+        ? /^\s*[-*]\s+\S/.test(previous)
+        : !startsBlock(line) && !startsBlock(previous)
+    if (isContinuation && !/(?: {2,}|\\)$/.test(previous)) {
+      const addition = quoteContinuation ? quoteText : line.trimStart()
+      out[out.length - 1] = `${previous.trimEnd()} ${addition}`
       continue
     }
     out.push(line)
   }
 
   return out.join('\n')
+}
+
+/** True when a line opens a Markdown block rather than continuing one. */
+function startsBlock(line) {
+  return (
+    line.trim() === '' ||
+    /^ {0,3}(?:#{1,6}(?:\s|$)|```|~~~|>|\[[^\]]+\]:)/.test(line) ||
+    /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/.test(line) ||
+    /^ {0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$/.test(line)
+  )
 }
 
 const zh = extractSection('CHANGELOG.md')
@@ -174,37 +198,13 @@ function containsExactGuidance(content, command) {
   return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)
 }
 
-// The DSH install pin each 0.4 release documents: 0.4.0-alpha.1 shipped on
-// the alpha.3 family, the alpha train documented its latest validated alpha
-// family while the peer floor stayed at the previous alpha. The 0.4.0 and
-// 0.4.1 stable releases continue to use the published rc.1 family because the
-// 0.1.2 stable family is not published yet. The 0.4.3-alpha.2 prerelease
-// targets the published npm `0.1.3-alpha.2` family, while the 0.4.5 and 0.4.6
-// stable releases recommend the published `0.1.5-rc.2` family (the peer floor
-// remains `0.1.5-rc.1`). Released changelog sections are immutable, so the
-// requirement follows the version being released.
-const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3'
-  : version === '0.4.3-alpha.2' ? '0.1.3-alpha.2'
-  : version === '0.4.3-alpha.3' ? '0.1.5-rc.1'
-  : '0.1.2-alpha.5'
-const dshStablePin = version === '0.4.0' || version === '0.4.1'
-  ? '0.1.2-rc.1'
-  : version === '0.4.5' || version === '0.4.6' ? '0.1.5-rc.2'
-  : '0.1.2'
+// The install guidance each 0.4 release body must carry is derived from the
+// shared matrix (src/dsh-compat-matrix.json) through scripts/lib/dsh-compat.mjs:
+// the shipped DSH floor, this exact TUI version, and the compatible pair for
+// every fallback row the rule selects. A matrix that does not describe the
+// release is a release bug to fix there, never a reason to inherit an older pin.
 if (version.startsWith('0.4.')) {
-  // Release bodies must remain reproducible after a later stable/preview
-  // publish moves the npm dist-tags. README keeps the moving channel tags for
-  // ordinary installs; changelog/release-note guidance pins this release.
-  const tuiPin = `@xmoon76/dsh-pi-tui@${version}`
-  const dshGuidance = version === '0.4.5' || version === '0.4.6'
-    ? 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2'
-    : `@deepseek-ai/dsh@${channel === 'next' ? dshAlphaPin : dshStablePin}`
-  const requiredGuidance = [
-    dshGuidance,
-    tuiPin,
-    '@xmoon76/dsh-pi-tui@0.3',
-  ]
-  for (const command of requiredGuidance) {
+  for (const command of requiredGuidance(version)) {
     if (!containsExactGuidance(zh.content, command) || !containsExactGuidance(en.content, command)) {
       throw new Error(`Version ${version} must document ${command} in both changelogs`)
     }

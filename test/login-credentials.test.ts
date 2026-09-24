@@ -83,13 +83,14 @@ function fakeCredentials(options: { failSet?: boolean } = {}) {
   }
 }
 
-/** A fake settings service serving the llm-pi-ai section, recording writes. */
+/** A fake SettingsForms surface serving the llm-pi-ai form descriptor,
+ * recording writes. */
 function fakeSettings() {
   const mutations: { ns: string; ops: unknown[] }[] = []
   return {
     mutations,
     service: {
-      get: (ns: string): unknown => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined),
+      describe: () => [{ ns: 'llm-pi-ai', value: LLM_PI_AI_SECTION, user: LLM_PI_AI_SECTION, revision: 2 }],
       mutate: async (ns: string, ops: unknown[]): Promise<void> => { mutations.push({ ns, ops }) },
     },
   }
@@ -115,8 +116,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -128,11 +128,10 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -154,8 +153,14 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

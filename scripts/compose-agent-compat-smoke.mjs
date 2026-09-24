@@ -82,6 +82,9 @@ const current = await composeAgent(ctx, (setupCtx, setupAgent) => {
   void typedAgent
 })
 await current.setup(agentCtx, agent)
+
+const styled = await composeAgent(ctx, ref, undefined, { preset: 'full' }, undefined, { mode: 'milestones' }, { style: 'concise' })
+await styled.setup(agentCtx)
 // @ts-expect-error The explicit-Agent production setup requires its Agent.
 await current.setup(agentCtx)
 `)
@@ -120,6 +123,46 @@ let receivedAgent
 const current = await composeAgent(noRoster, (_ctx, agent) => { receivedAgent = agent })
 await current.setup(recordingContext([]), suppliedAgent)
 if (receivedAgent !== suppliedAgent) throw new Error('explicit installer received the wrong Agent')
+
+const recordingSystemPrompt = sections => ({
+  get: () => ({ section: section => { sections.set(section.name, section); return () => {} } }),
+})
+
+// Both communication states, live changes, section order.
+const sections = new Map()
+const progress = { mode: 'frequent' }
+const response = { style: 'explanatory' }
+const styled = await composeAgent(noRoster, () => {}, undefined, { preset: 'full' }, undefined, progress, response)
+await styled.setup(recordingSystemPrompt(sections), suppliedAgent)
+if (!sections.get('tui:progress-updates').text().includes('# Progress updates: Frequent')) {
+  throw new Error('first assembly did not see the supplied progress cadence')
+}
+if (!sections.get('tui:response-style').text().includes('# Response style: Explanatory')) {
+  throw new Error('first assembly did not see the supplied response style')
+}
+if (!(sections.get('tui:progress-updates').order < sections.get('tui:response-style').order)) {
+  throw new Error('communication section order drifted')
+}
+progress.mode = 'off'
+response.style = 'default'
+if (!sections.get('tui:progress-updates').text().includes('# Progress updates: Off')) {
+  throw new Error('live progress switch did not reach the provider')
+}
+if (sections.get('tui:response-style').text() !== '') {
+  throw new Error('live response-style switch did not reach the provider')
+}
+
+// Focus keeps both sections registered: the progress provider empties
+// while the response style stays active.
+const focusedSections = new Map()
+const focused = await composeAgent(noRoster, () => {}, undefined, { preset: 'focus' }, undefined, progress, { style: 'concise' })
+await focused.setup(recordingSystemPrompt(focusedSections), suppliedAgent)
+if (focusedSections.get('tui:progress-updates').text() !== '' || !focusedSections.get('tui:focus-mode').text().includes('# Focus mode')) {
+  throw new Error('Focus must empty the effective progress section and keep its own section')
+}
+if (!focusedSections.get('tui:response-style').text().includes('# Response style: Concise')) {
+  throw new Error('Focus must keep the response style active')
+}
 
 console.log('compose-agent-compat-smoke: passed')
 `)

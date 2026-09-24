@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import {
@@ -64,6 +64,9 @@ function typedGenericBlock(type: string, payload: string): ContentBlock {
   return { type, payload } as never
 }
 
+/** Legacy V3 vocabulary: `tool-result` is no longer a ContentBlock, so an
+ * assistant body carrying one must use the explicit bounded fallback — real
+ * tool results are first-class tool-role messages owned by the Tool Card. */
 function assistantToolResultBlock(): ContentBlock {
   return {
     type: 'tool-result',
@@ -221,9 +224,12 @@ test('assistant finalized tool-result content uses an explicit fallback everywhe
 
 test('rewind recognizes file-only turns and generalizes the warning label', () => {
   const candidates = collectRewindCandidates([
-    turnEvent('turn/start', 1, 1),
-    userEvent([fileBlock()], 2),
-    turnEvent('turn/end', 3, 1),
+    turnEvent('turn/start', 0, 0),
+    userEvent([{ type: 'text', text: 'previous' }], 1),
+    turnEvent('turn/end', 2, 0),
+    turnEvent('turn/start', 3, 1),
+    userEvent([fileBlock()], 4),
+    turnEvent('turn/end', 5, 1),
   ])
   assert.equal(candidates.length, 1)
   assert.equal(candidates[0]?.editorText, '')
@@ -267,14 +273,11 @@ test('result and markdown projections retain files and bound unknown blocks', ()
       data: {
         turn: 0,
         step: 0,
-        callId: 'call-c1',
-        message: {
-          content: [{
-            type: 'tool-result',
-            toolCallId: 'call-c1',
-            content: [{ type: 'text', text: 'tool before' }, fileBlock(), { type: 'text', text: 'tool after' }],
-          }],
-        },
+        message: createToolResultMessage({
+          callId: ToolCallId('call-c1'),
+          content: [{ type: 'text', text: 'tool before' }, fileBlock(), { type: 'text', text: 'tool after' }],
+          isError: false,
+        }),
       },
     } as never],
   } as never)
@@ -360,7 +363,7 @@ test('generic tool-result content presents file and unknown blocks in order', as
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool',
     turn: 0,

@@ -15,6 +15,7 @@ import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color, taskStatusColor } from './theme.ts'
 import { SelectedMarquee } from './marquee.ts'
+import { singlePhysicalLine } from './presentation-lines.ts'
 import {
   isTaskItemActive,
   isTaskItemFailure,
@@ -49,23 +50,20 @@ export interface TaskBrowserViewState {
 
 /** Options for {@link TaskBrowserPanel}. */
 export interface TaskPanelOptions {
-  /** Header title. The panel adds scope/type/count chips in explicit mode. */
+  /** Quick (navigation-only) or Full (management) surface. */
+  mode: 'quick' | 'full'
+  /** Header title. The panel adds scope/type/count chips. */
   header?: string
   /** Rendered when the (filtered) list is empty. */
   noMatchText?: string
-  /** Whether the `/` search action is available. */
+  /** Whether the `/` search action is available (Full mode). */
   enableSearch?: boolean
-  /** Pre-fill the search input. A non-empty value enters search mode. */
+  /** Pre-fill the search input. A non-empty value enters search mode.
+   * Ignored in Quick mode, which owns no search state. */
   initialQuery?: string
-  /** Preserve whether the search editor was active across Quick/Full. */
+  /** Preserve whether the search editor was active across Quick/Full.
+   * Ignored (forced off) in Quick mode, which owns no search state. */
   initialSearchMode?: boolean
-  /**
-   * Legacy row-level action: `i` on a selected row while search is closed
-   * (mode-less direct callers only). The signature is deliberately UNCHANGED
-   * so a strictly-typed old embedder keeps compiling. The production Task
-   * Center never passes this — it uses {@link onStop}.
-   */
-  onAction?: (value: string, action: 'interrupt') => void
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
   /**
@@ -79,8 +77,6 @@ export interface TaskPanelOptions {
   onRefresh?: () => void
   /** Quick Tasks → full Task Center. */
   onViewFull?: (state: TaskBrowserViewState) => void
-  /** Production mode enables explicit navigation/search behavior. */
-  mode?: 'quick' | 'full'
   openedFrom?: 'quick' | 'command'
   initialScope?: TaskScope
   initialTypeFilter?: string | null
@@ -93,7 +89,7 @@ export interface TaskPanelOptions {
   loading?: boolean
   /** Cached rows are still usable, but the latest refresh failed. */
   refreshError?: string
-  /** Use the long group names in the Task Center; legacy callers keep theirs. */
+  /** Use the long group names in the Task Center. */
   groupLabels?: boolean
   /** Test hook: the selected-row marquee's clock. */
   marqueeNow?: () => number
@@ -132,10 +128,11 @@ function stateGlyph(item: TaskPanelItem): string {
 /**
  * The shared Quick/Full Task Center list.
  *
- * When `mode` is omitted the component keeps its historical direct-call
- * behavior (search-on-open and `i` callback) for embedders that have not yet
- * migrated. The application always supplies `mode`, so user-facing behavior
- * uses explicit search mode and confirmed `S` stop actions.
+ * `mode` selects the keyboard surface: `quick` is navigation-only (arrows,
+ * `←`/`→` tree, `Tab` type, `Enter` open, `Esc` close) and consumes every
+ * other key as a no-op; `full` owns search, scope, stop, refresh, paging and
+ * reverse (`Shift+Tab`) type cycling. There is exactly one input contract —
+ * no mode-less compatibility path.
  */
 export class TaskBrowserPanel implements Component, Focusable {
   private items: TaskPanelItem[] = []
@@ -147,7 +144,6 @@ export class TaskBrowserPanel implements Component, Focusable {
   private scope: TaskScope
   private readonly mode: 'quick' | 'full'
   private readonly openedFrom: 'quick' | 'command'
-  private readonly explicitMode: boolean
   private searchMode: boolean
   private selectionTouched = false
   private readonly expandedIds: Set<string>
@@ -181,7 +177,6 @@ export class TaskBrowserPanel implements Component, Focusable {
   private mousePressedValue: string | undefined
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
-  private readonly onAction: ((value: string, action: 'interrupt') => void) | undefined
   private readonly onStop: ((value: string) => void) | undefined
   private readonly onViewportExpose: ((ids: readonly string[]) => void) | undefined
   private readonly exposedAttention = new Set<string>()
@@ -217,37 +212,43 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.options = options
     this.onSelect = onSelect
     this.onCancel = onCancel
-    this.onAction = options.onAction
     this.onStop = options.onStop
     this.onViewportExpose = options.onViewportExpose
     this.onRefresh = options.onRefresh
     this.onViewFull = options.onViewFull
     this.requestRender = requestRender
-    this.mode = options.mode ?? 'full'
+    this.mode = options.mode
     this.openedFrom = options.openedFrom ?? 'command'
-    this.explicitMode = options.mode !== undefined
     this.searchEnabled = options.enableSearch ?? false
-    this.scope = options.initialScope ?? (this.explicitMode && this.mode === 'quick' ? 'active' : this.explicitMode ? 'all' : 'all')
+    this.scope = options.initialScope ?? (this.mode === 'quick' ? 'active' : 'all')
     this.activeType = options.initialTypeFilter ?? null
     this.expandedIds = new Set(options.initialExpandedIds ?? [])
     this.collapsedIds = new Set(options.initialCollapsedIds ?? [])
     this.loading = options.loading ?? false
     this.refreshError = options.refreshError
     this.preferredValue = options.initialPreferredValue ?? options.initialSelectedId
-    this.searchMode = options.initialSearchMode ?? (!this.explicitMode || (options.initialQuery ?? '') !== '')
+    // Quick Tasks owns no search state: it is a navigation-only surface, and
+    // a query restored from the full view would filter its rows AND hide the
+    // "Open Task Center" pseudo-row (appended only while the query is empty)
+    // with no keyboard way to clear it — a dead end that also removes the
+    // only keyboard path back to Full. Force Quick's query and search mode
+    // off whatever a caller passes; Full keeps the shared search state.
+    this.searchMode = this.mode === 'quick'
+      ? false
+      : (options.initialSearchMode ?? (options.initialQuery ?? '') !== '')
     this.marquee = new SelectedMarquee({
       requestRender: () => this.requestRender(),
       now: options.marqueeNow,
     })
     this.searchInput.onEscape = () => {
-      if (this.explicitMode && this.searchMode) {
+      if (this.searchMode) {
         this.exitSearchMode()
       } else {
         this.onCancel()
       }
     }
     this.searchInput.onSubmit = () => this.openSelected()
-    const initial = options.initialQuery ?? ''
+    const initial = this.mode === 'quick' ? '' : (options.initialQuery ?? '')
     if (initial !== '') this.searchInput.setValue(initial)
     this.rebuildTypeCycle()
     // A restored type filter that no row satisfies produces a dead view;
@@ -274,8 +275,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   /** Derive the item window from the current chrome and row budget. */
   private recomputeVisibleBudget(): void {
-    const searchOn = this.explicitMode ? this.searchMode : this.searchEnabled
-    const prefix = (this.options.header === undefined ? 0 : 2) + (searchOn ? 2 : 0)
+    const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchMode ? 2 : 0)
     const trailing = 2 // blank separator + navigation hint
     const refreshLine = this.refreshError !== undefined ? 1 : 0
     const group = this.filtered.some(item => item.group !== undefined) ? 1 : 0
@@ -348,7 +348,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   /**
    * Report attention rows that entered the open viewport for the first
    * time (deduped per row identity). Runs on every render — scrolling,
-   * paging, running-jump and row replacements all re-render — so a
+   * paging and row replacements all re-render — so a
    * failure "scrolled into view" after the panel opened is acknowledged
    * exactly once (the runtime's acknowledge is idempotent anyway).
    */
@@ -452,10 +452,19 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.ensureVisible()
   }
 
-  private cycleType(): void {
+  private cycleType(direction: 1 | -1): void {
     if (this.typeOrder.length === 0) return
     const index = this.activeType === null ? -1 : this.typeOrder.indexOf(this.activeType)
-    this.activeType = index === -1 || index + 1 >= this.typeOrder.length ? (index === -1 ? this.typeOrder[0]! : null) : this.typeOrder[index + 1]!
+    if (index === -1) {
+      // All (null): forward enters the first type, backward the last, so
+      // the cycle is symmetric without a second code path.
+      this.activeType = direction > 0
+        ? this.typeOrder[0]!
+        : this.typeOrder[this.typeOrder.length - 1]!
+    } else {
+      const next = index + direction
+      this.activeType = next < 0 || next >= this.typeOrder.length ? null : this.typeOrder[next]!
+    }
     this.selectionTouched = true
     this.reproject(true)
   }
@@ -511,7 +520,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private canStop(item: TaskPanelItem | undefined): boolean {
     if (item === undefined || item.kind === 'view-full') return false
-    return item.canStop ?? item.interruptible ?? false
+    return item.canStop ?? false
   }
 
   private openSelected(): void {
@@ -577,24 +586,27 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
   }
 
-  private runningMove(direction: 1 | -1): void {
-    const running = this.filtered.filter(item => item.kind !== 'view-full' && isTaskItemActive(item))
-    if (running.length === 0) return
-    const current = this.selectedItem()
-    const currentIndex = current === undefined ? -1 : running.findIndex(item => item.value === current.value)
-    const next = currentIndex === -1
-      ? (direction > 0 ? running[0]! : running[running.length - 1]!)
-      : running[(currentIndex + direction + running.length) % running.length]!
-    const index = this.filtered.findIndex(item => item.value === next.value)
-    if (index === -1) return
-    this.pendingStopValue = undefined
-    this.selectionTouched = true
-    this.selected = index
-    this.ensureVisible()
-  }
-
   /** Input ownership is forwarded by FocusForwardingFrame. */
   handleInput(data: string): void {
+    // Quick Tasks is a navigation-only surface: ONLY the whitelist below
+    // produces behavior. Every other key is consumed here as a no-op so it
+    // can neither fall into the Full state machine (stop confirmation,
+    // search, scope/type/refresh actions) nor leak to the editor. This is
+    // the input-ownership fix for the probabilistic "Esc cannot close
+    // Quick" bug — Quick has no nested keyboard state left to unwind, so
+    // Esc is always exactly one layer.
+    if (this.mode === 'quick') {
+      if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.move(-1); return }
+      if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.move(1); return }
+      if (componentKeymap.matches(data, 'tasks.tree.expand')) { this.treeExpand(); return }
+      if (componentKeymap.matches(data, 'tasks.tree.collapse')) { this.treeCollapse(); return }
+      if (componentKeymap.matches(data, 'tasks.type.next')) { this.cycleType(1); return }
+      if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
+      // In Quick the escape action means "close", never "leave search".
+      if (componentKeymap.matches(data, 'tasks.search.exit')) { this.onCancel(); return }
+      return
+    }
+
     if (this.pendingStopValue !== undefined) {
       if (matchesKey(data, 'escape')) {
         this.pendingStopValue = undefined
@@ -614,7 +626,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       return
     }
 
-    if (this.explicitMode && this.searchMode) {
+    if (this.searchMode) {
       if (componentKeymap.matches(data, 'tasks.search.exit')) {
         this.exitSearchMode()
         return
@@ -624,7 +636,8 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
       if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
       if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
-      if (componentKeymap.matches(data, 'tasks.type.next')) { this.cycleType(); return }
+      if (componentKeymap.matches(data, 'tasks.type.next')) { this.cycleType(1); return }
+      if (componentKeymap.matches(data, 'tasks.type.previous')) { this.cycleType(-1); return }
       // In search mode arrows/editing remain with Input. In particular S, A,
       // R, N and every other printable character are query text, never an
       // action with side effects.
@@ -634,80 +647,42 @@ export class TaskBrowserPanel implements Component, Focusable {
       return
     }
 
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.search.enter')) {
+    if (componentKeymap.matches(data, 'tasks.search.enter')) {
       this.enterSearchMode()
       return
     }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.scope.toggle')) {
+    if (componentKeymap.matches(data, 'tasks.scope.toggle')) {
       this.toggleScope()
       return
     }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.tree.expand')) {
+    if (componentKeymap.matches(data, 'tasks.tree.expand')) {
       this.treeExpand()
       return
     }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.tree.collapse')) {
+    if (componentKeymap.matches(data, 'tasks.tree.collapse')) {
       this.treeCollapse()
       return
     }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.running.next')) {
-      this.runningMove(1)
-      return
-    }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.running.previous')) {
-      this.runningMove(-1)
-      return
-    }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.stop')) {
+    if (componentKeymap.matches(data, 'tasks.stop')) {
       this.requestStop()
       return
     }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.view.full') && this.mode === 'quick') {
-      this.onViewFull?.(this.getViewState())
-      return
-    }
-    if (this.explicitMode && componentKeymap.matches(data, 'tasks.refresh')) {
+    if (componentKeymap.matches(data, 'tasks.refresh')) {
       this.onRefresh?.()
       return
     }
     if (componentKeymap.matches(data, 'tasks.type.next')) {
-      this.cycleType()
+      this.cycleType(1)
       return
     }
-
-    const isNavUp = componentKeymap.matches(data, 'tasks.cursorUp') || (!this.searchEnabled && data === 'k')
-    const isNavDown = componentKeymap.matches(data, 'tasks.cursorDown') || (!this.searchEnabled && data === 'j')
-    const isPageUp = componentKeymap.matches(data, 'tasks.pageUp')
-    const isPageDown = componentKeymap.matches(data, 'tasks.pageDown')
-
-    // Compatibility only: old direct embedders used i. The application passes
-    // `mode`, so production has no printable interrupt binding at all.
-    if (!this.explicitMode && this.onAction !== undefined && matchesKey(data, 'i')) {
-      // Preserve the historical direct-call behavior only for an empty
-      // query. Once the legacy search contains text, i is ordinary query
-      // input; production explicit mode has no i path at all.
-      if (this.getFilter() === '') {
-        const item = this.selectedItem()
-        if (item?.interruptible === true) this.onAction(item.value, 'interrupt')
-      } else {
-        this.selectionTouched = true
-        this.searchInput.handleInput(data)
-        this.reproject(true)
-      }
+    if (componentKeymap.matches(data, 'tasks.type.previous')) {
+      this.cycleType(-1)
       return
     }
-
-    if (!this.explicitMode && this.searchEnabled && !isNavUp && !isNavDown && !isPageUp && !isPageDown
-      && !componentKeymap.matches(data, 'tasks.open') && !componentKeymap.matches(data, 'tasks.search.exit')) {
-      this.selectionTouched = true
-      this.searchInput.handleInput(data)
-      this.reproject(true)
-      return
-    }
-    if (isNavUp) { this.move(-1); return }
-    if (isNavDown) { this.move(1); return }
-    if (isPageUp) { this.page(-1); return }
-    if (isPageDown) { this.page(1); return }
+    if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.move(-1); return }
+    if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.move(1); return }
+    if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
+    if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
     if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
     if (componentKeymap.matches(data, 'tasks.search.exit')) this.onCancel()
   }
@@ -859,19 +834,33 @@ export class TaskBrowserPanel implements Component, Focusable {
       lines.push(line)
       hits.push(hit)
     }
-    const explicit = this.explicitMode
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
     const hintLine = color.textMuted(`  ${this.hint()}`)
-    const searchOn = explicit ? this.searchMode : this.searchEnabled
+    const searchOn = this.searchMode
+    // The retry verb is a Full-only action: Quick consumes R as a no-op, so
+    // its stale/error banner shows the message without advertising a key
+    // that cannot work there.
+    const retrySuffix = this.mode === 'quick' ? '' : ' · R retry'
+    // The banner is one physical row: a transport/refresh error message
+    // (Error.message) may carry CR/LF AND arbitrary length, so it is
+    // projected and width-truncated before it enters the row budget (a
+    // direct embedding without a clipping frame must never wrap it into
+    // extra terminal rows). The raw `refreshError` state stays untouched.
+    const refreshErrorText = this.refreshError === undefined ? undefined : singlePhysicalLine(this.refreshError)
+    const refreshErrorLine = refreshErrorText === undefined ? undefined
+      : truncateToWidth(`${refreshErrorText}${retrySuffix}`, safeWidth, '…')
     // Hoisted chrome texts: the short-grant degradation rebuilds from
-    // them without the unconditionally-kept blank spacers.
+    // them without the unconditionally-kept blank spacers. The header
+    // embeds caller/durable text (e.g. the Workflow scoped Task Center's
+    // run name and phase label), so it is projected before truncation —
+    // one returned row is one physical row.
     const headerText = this.options.header === undefined ? undefined
-      : truncateToWidth(explicit ? this.headerText() : this.legacyHeaderText(), safeWidth, '…')
+      : truncateToWidth(singlePhysicalLine(this.headerText()), safeWidth, '…')
     const searchEmpty = this.getFilter() === ''
     const searchRowText = !searchOn ? '' : (() => {
       const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
       const stripped = searchLine.startsWith('> ') ? searchLine.slice(2) : searchLine
-      return searchEmpty ? (explicit ? ' / search…' : ' search…') : ` ${stripped}`
+      return searchEmpty ? ' / search…' : ` ${stripped}`
     })()
 
     if (headerText !== undefined) {
@@ -881,7 +870,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     if (this.loading && this.items.length === 0) {
       push(color.textDim('Loading tasks…'), { kind: 'inert' })
-      if (this.refreshError !== undefined) push(color.textMuted(`${this.refreshError} · R retry`), { kind: 'inert' })
+      if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
       push(hintLine, { kind: 'inert' })
       this.lastRenderedStart = 0
@@ -902,8 +891,14 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     const rows = this.filtered
     if (rows.length === 0) {
-      push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'), { kind: 'inert' })
-      if (this.refreshError !== undefined) push(color.textMuted(`${this.refreshError} · R retry`), { kind: 'inert' })
+      // Caller-provided no-match text: projected AND width-truncated —
+      // the same single-row contract as the refresh-error banner (a long
+      // dynamic message must never wrap into extra terminal rows).
+      const noMatchText = this.refreshError === undefined
+        ? truncateToWidth(singlePhysicalLine(this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
+        : 'Could not load tasks'
+      push(color.textDim(noMatchText), { kind: 'inert' })
+      if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
       push(hintLine, { kind: 'inert' })
       this.lastRenderedStart = 0
@@ -975,7 +970,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         outHits.push({ kind: 'inert' })
       }
       if (this.refreshError !== undefined) {
-        out.push(color.textMuted(`  ${this.refreshError} · R retry`))
+        out.push(color.textMuted(truncateToWidth(`  ${refreshErrorText}${retrySuffix}`, safeWidth, '…')))
         outHits.push({ kind: 'inert' })
       }
       out.push('')
@@ -1190,20 +1185,6 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
 
-  private legacyHeaderText(): string {
-    const chip = this.activeType === null ? '' : `  [${this.activeType}]`
-    const rows = this.filtered.filter(item => item.kind !== 'view-full')
-    const running = rows.filter(isTaskItemActive).length
-    const done = rows.filter(item => item.status === 'completed').length
-    const failed = rows.filter(item => isTaskItemFailure(item.status)).length
-    const counts = [
-      running > 0 ? `${running} running` : '',
-      done > 0 ? `${done} done` : '',
-      failed > 0 ? `${failed} failed` : '',
-    ].filter(part => part !== '').join(' · ')
-    return `${this.options.header ?? ''}${chip}${counts === '' ? '' : `  ${counts}`}`
-  }
-
   private headerText(): string {
     const real = this.items.filter(item => item.kind !== 'view-full')
     const visible = this.filtered.filter(item => item.kind !== 'view-full').length
@@ -1221,7 +1202,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   private renderRow(item: TaskPanelItem, selected: boolean, width: number): string[] {
-    const dot = taskStatusColor(item.status)(this.explicitMode ? stateGlyph(item) : DOT)
+    const dot = taskStatusColor(item.status)(stateGlyph(item))
     const attention = item.attention === true ? color.error('!') : ''
     const pointer = selected ? color.primary(POINTER) : ' '
     const leftPrefix = `${pointer} ${attention}${dot} `
@@ -1237,7 +1218,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     const leftWidth = visibleWidth(leftPrefix)
     const available = Math.max(1, width - leftWidth)
     const labelBudget = Math.max(0, available - treeWidth - suffixWidth - tailWidth - 1)
-    const label = this.marquee.render({ key: item.value, text: item.label, maxWidth: labelBudget, selected })
+    // Single-row contract: the main task row owns exactly one physical
+    // row, so its label is projected BEFORE measurement/truncation. The
+    // raw `item.label` (runtime truth) stays untouched.
+    const rowLabel = singlePhysicalLine(item.label)
+    const label = this.marquee.render({ key: item.value, text: rowLabel, maxWidth: labelBudget, selected })
     const tone = item.ancestorContext === true ? color.textDim : selected ? color.textStrong : color.text
     const left = leftPrefix + tree + tone(label) + (selected ? color.textStrong(suffix) : color.text(suffix))
     const tailPart = tailWidth <= width - visibleWidth(left) ? tail : (labelBudget === 0 ? truncateToWidth(tail, Math.max(1, width - visibleWidth(left)), '…') : '')
@@ -1265,7 +1250,13 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (item.detail !== undefined && item.detail !== '') lines.push(`detail    ${item.detail}`)
     }
     if (this.pendingStopValue === item.value) lines.push(`Stop ${item.label}?  Y confirm · Esc cancel`)
-    return lines
+    // Single-row contract: every semantic line detailLines returns is
+    // budgeted as one physical terminal row (the wide side pane and the
+    // compact inline detail both truncate these). Dynamic text (label,
+    // parentLabel, detail, …) is projected HERE, once, so no embedded
+    // CR/LF can leak past the row budget or the hit map. The item's raw
+    // fields are never rewritten.
+    return lines.map(singlePhysicalLine)
   }
 
   private renderInlineDetail(item: TaskPanelItem, width: number): string[] {
@@ -1275,11 +1266,10 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private hint(): string {
     if (this.pendingStopValue !== undefined) return 'Y confirm stop · Esc cancel'
-    if (!this.explicitMode) {
-      const search = this.searchEnabled ? 'type to filter · ' : ''
-      const type = this.typeOrder.length > 1 ? 'tab type · ' : ''
-      const interrupt = this.filtered.some(item => item.interruptible === true) ? 'i interrupt · ' : ''
-      return `${search}${type}${interrupt}↑↓ navigate · enter open · esc close`
+    if (this.mode === 'quick') {
+      // Navigation-only: advertise EXACTLY the whitelist. Every other key
+      // is a consumed no-op, so the hint must not promise one.
+      return '↑↓ select · ←→ tree · Tab type · Enter open · Esc close'
     }
     if (this.searchMode) {
       // Search mode owns every printable key as query text — A/S/N/R and
@@ -1287,14 +1277,13 @@ export class TaskBrowserPanel implements Component, Focusable {
       // actions. Advertise only what search mode actually does, with the
       // ESCAPE verb FIRST: the hint is one line and a default 80-column
       // terminal truncates the tail — esc back is the most important
-      // verb, so it must never be the piece that gets cut off.
-      return 'type filter · esc back · ←→ edit · ↑↓ navigate · pgup/pgdn page · tab type · enter open'
+      // verb, so it must never be the piece that gets cut off. Shift+Tab
+      // is advertised because it now cycles types in reverse here too.
+      return 'type to filter · Esc back · ←→ edit · ↑↓ select · Tab/⇧Tab type · Enter open'
     }
-    const parts: string[] = []
+    const parts = ['↑↓ select', '←→ tree', 'Enter open', 'Esc close', 'S stop']
     if (this.searchEnabled) parts.push('/ search')
-    parts.push('A active/all', 'Tab type', '←→ tree', 'N next running', 'S stop', 'Enter open', 'R refresh')
-    if (this.mode === 'quick') parts.push('T Task Center')
-    parts.push('Esc back')
+    parts.push('A scope', 'Tab type')
     return parts.join(' · ')
   }
 }

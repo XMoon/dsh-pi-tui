@@ -12,6 +12,7 @@ import test from 'node:test'
 import { CAPABILITIES, DIRECT_IMPLEMENTED_CAPABILITIES } from '../src/runtime/capability.ts'
 import { createDirectBackend } from '../src/runtime/backend.ts'
 import type { SubagentPort } from '../src/runtime/subagent-port.ts'
+import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
 test('the capability vocabulary covers the migration domains', () => {
   assert.deepEqual(CAPABILITIES, [
@@ -24,30 +25,35 @@ test('the capability vocabulary covers the migration domains', () => {
     'config',
     'host-file',
     'session-archive',
+    'host-command',
   ])
 })
 
 test('the Direct backend is the current production surface and serves EXACTLY the implemented capabilities', () => {
   const subagent: SubagentPort = {
     prompt: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
+    interrupt: async () => ({ kind: 'committed' }),
   }
   const sessionReader = {
     list: async () => [],
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
+  }
+  const pendingInputReader: PendingInputReader = {
+    snapshot: () => ({ running: false, items: [] }),
   }
   const sessionWriter = {
-    followup: () => {},
-    steer: async () => 'ok' as const,
-    dequeue: () => {},
-    cancel: () => {},
-    rename: () => true,
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+    rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
     refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
   }
   const sessionLifecycle = {
     create: async () => ({}) as never,
-    resume: async () => ({}) as never,
+    open: async () => ({}) as never,
+    fork: async () => ({}) as never,
   }
   const interaction = {
     registerQuestionProvider: () => true,
@@ -57,23 +63,22 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const catalog = {
     models: {
       available: () => true,
+      loadDirectory: async () => ({ default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] }),
       listProviders: () => [],
       listModels: async () => [],
-      resolveModelInfo: async () => ({}),
       defaultSelection: () => undefined,
-      saveDefaultSelection: async () => {},
+      saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
       sessionSelection: () => undefined,
-      selectSessionModel: async (_sessionId: string, selection: { provider: string; model: string }) => selection,
-      currentSelection: () => undefined,
-      saveSelection: async () => {},
+      selectSessionModel: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { provider: '', model: '' } } }),
       discoverModels: async () => [],
       listConfigurableProviders: () => [],
     },
     presets: {
       available: () => false,
-      list: async () => [],
+      roster: async () => ({ presets: [], modeSelectionEnabled: false }),
       resolve: async () => ({}),
       defaultId: () => undefined,
+      selectSessionPreset: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { preset: '' } } }),
     },
     skills: {
       standing: async () => ({ catalog: { skills: [], complete: true } }),
@@ -144,10 +149,14 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const sessionArchive = {
     open: async () => ({ kind: 'unavailable' as const }),
   }
-  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive)
+  const hostCommand = {
+    execute: async () => ({ kind: 'committed' as const, matched: false as const }),
+  }
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
+  assert.equal(backend.pendingInputReader, pendingInputReader)
   assert.equal(backend.sessionWriter, sessionWriter)
   assert.equal(backend.sessionLifecycle, sessionLifecycle)
   assert.equal(backend.interaction, interaction)
@@ -155,6 +164,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.config, config)
   assert.equal(backend.hostFile, hostFile)
   assert.equal(backend.sessionArchive, sessionArchive)
+  assert.equal(backend.hostCommand, hostCommand)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {

@@ -4,44 +4,46 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { apply as applyRunner, type Config } from '../src/index.ts'
+import { apply as applyRunner, Config as TuiConfigSchema } from '../src/index.ts'
+
+/** The effective merged view a real SettingsForms describe() would project
+ * for the tui-app entry mounted with the given plain config input (schema
+ * defaults + the passed overrides). */
+function effectiveConfigView(input: Record<string, unknown>): Record<string, unknown> {
+  const resolved = TuiConfigSchema(input as never) as unknown as Record<string, { get(): unknown }>
+  return Object.fromEntries(
+    Object.entries(resolved)
+      .filter(([field]) => field !== 'sessionId' && field !== 'startupStatusOutput')
+      .map(([field, ref]) => [field, ref.get()])
+      .filter(([, value]) => value !== undefined),
+  )
+}
 import { foldPendingModelSelection } from '../src/model-selection.ts'
 import { StatsFolder } from '../src/stats.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
+import {
+  disposeContext,
+  event,
+  fakeSession,
+  installVirtualProcessTerminal,
+  makeHarness,
+  mountRunner,
+  sessionEvents,
+  settle,
+  type FakeSession,
+  type RunnerHarness,
+} from './support/runner-harness.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
-
-/** Build a minimal event envelope for tests. The type parameter is widened
- * to any string so legacy v1 `assistant/chunk` events (absent from master's
- * SessionEventMap) can be constructed; known types keep their typed data
- * surface, widened with `Record<string, unknown>` so Session v2 fields the
- * installed dsh-session may lag (e.g. `assistant/message.stream`) can be
- * supplied. */
-function event<K extends string>(
-  type: K,
-  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
-  seq: number,
-  surfaceOp?: 'append',
-): SessionEvent {
-  return {
-    type,
-    seq: SessionSeq(seq),
-    time: 1_700_000_000_000 + seq * 1000,
-    data,
-    ...(surfaceOp === undefined ? {} : { surfaceOp }),
-  } as SessionEvent
-}
 
 /** One Session v2 live assistant-stream frame (the transient plane
  * replaces durable `assistant/chunk` events). The shape is the EXACT
@@ -104,6 +106,14 @@ function modelEvent(type: 'model/selection' | 'request/header', data: unknown, s
   } as unknown as SessionEvent
 }
 
+function resequence(events: readonly SessionEvent[]): SessionEvent[] {
+  return events.map((entry, index) => ({
+    ...entry,
+    seq: SessionSeq(index),
+    time: 1_700_000_000_000 + index * 1000,
+  }))
+}
+
 function modelHistory(provider: string, model: string, reasoningEffort: string): SessionEvent[] {
   const header = {
     config: { provider, model, reasoningEffort },
@@ -120,340 +130,6 @@ function durableSelectionOf(session: FakeSession): { provider?: string; model?: 
   return (event as unknown as { data?: { provider?: string; model?: string; reasoningEffort?: string } } | undefined)?.data
 }
 
-function sessionEvents(text: string): SessionEvent[] {
-  return [
-    event('turn/start', { turn: 0 }, 0),
-    event('step/start', { turn: 0, step: 0 }, 1),
-    event('assistant/chunk', {
-      turn: 0,
-      step: 0,
-      chunk: { type: 'text-delta', index: 0, text },
-    }, 2),
-    event('assistant/message', {
-      turn: 0,
-      step: 0,
-      message: {
-        id: MessageId('runner-bootstrap-message'),
-        role: 'assistant',
-        content: [{ type: 'text', text }],
-        source: { kind: 'model', provider: 'p', model: 'm' },
-      },
-      usage: { inputTokens: 10, outputTokens: 2 },
-      stream: [],
-    }, 3, 'append'),
-    event('step/end', { turn: 0, step: 0 }, 4),
-    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
-  ]
-}
-
-/** A FakeSession literal before the current log accessors are attached. */
-interface FakeSessionInit {
-  id: string
-  header: {
-    id: string
-    cwd: string
-    createdAt: number
-    version: number
-    isSeeded?: boolean
-    parentSession?: string
-  }
-  events: SessionEvent[]
-  requestHeader?: () => unknown
-  append?: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => unknown
-}
-
-/** The current Session shape: the backing log is PRIVATE — production code
- * sees only `seq` / `eventAt` / `snapshotEvents`, so a mock can never again
- * mask old `Session.events` API drift (compatibility-plan B4). */
-interface FakeSession {
-  id: string
-  header: {
-    id: string
-    cwd: string
-    createdAt: number
-    version: number
-    isSeeded?: boolean
-    parentSession?: string
-  }
-  readonly seq: number
-  eventAt(seq: number): SessionEvent | undefined
-  snapshotEvents(): readonly SessionEvent[]
-  requestHeader?(): unknown
-  append?(type: string, data: unknown, options?: { surfaceOp?: 'append' }): unknown
-}
-
-/** Build the current Session mock over a private backing log. */
-function fakeSession(init: FakeSessionInit): FakeSession {
-  const events = [...init.events]
-  return {
-    id: init.id,
-    header: init.header,
-    get seq() { return events.length },
-    eventAt: (seq: number) => events[seq],
-    snapshotEvents: () => Object.freeze([...events]),
-    requestHeader: init.requestHeader ?? (() => {
-      const found = events.findLast(candidate => (candidate as unknown as { type?: unknown }).type === 'request/header')
-      return (found as unknown as { data?: { header?: unknown } } | undefined)?.data?.header
-    }),
-    append: init.append ?? ((type: string, data: unknown, options?: { surfaceOp?: 'append' }) => {
-      const appended = {
-        type,
-        seq: events.length,
-        time: Date.now(),
-        data,
-        ...(options?.surfaceOp === undefined ? {} : { surfaceOp: options.surfaceOp }),
-      } as unknown as SessionEvent
-      events.push(appended)
-      return appended
-    }),
-  }
-}
-
-interface RunnerHarness {
-  readonly persistence: unknown
-  readonly sessionQuery: unknown
-  readonly agents: unknown
-  readonly sessions: unknown
-  readonly defaultModel: unknown
-  readonly llm: unknown
-  readonly createOptions: { provider?: string; model?: string }[]
-  readonly createInheritedEventCounts: (number | undefined)[]
-  readonly createSignals: (AbortSignal | undefined)[]
-  readonly resumeSignals: (AbortSignal | undefined)[]
-  readonly createdSessions: FakeSession[]
-  readonly commands: unknown
-  readonly subagents?: unknown
-  /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
-   * `flush:<id>` / `dispose:<id>`) in call order — the Direct
-   * owned-session retirement assertions. */
-  readonly retirementEvents: string[]
-}
-
-function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>, retirementEvents?: string[]): Agent {
-  // A small structural Agent context is sufficient for the Direct setup
-  // callbacks.
-  const agentContext = {
-    get: () => undefined,
-    on: () => () => {},
-  }
-  // cancel is idempotent and BREAKS a pending whenIdle (the real Agent
-  // contract): a cancelled agent's whenIdle settles immediately, which is
-  // exactly what the exit pre-cancel relies on to unblock a transition
-  // stuck in its pre-commit quiesce.
-  let cancelled = false
-  let releaseIdle: (() => void) | undefined
-  const agent = {
-    session,
-    ctx: agentContext,
-    options: { provider: 'p', model: 'm' },
-    status: 'idle',
-    inbox: { nextTurn: [], nextStep: [] },
-    whenIdle: async () => {
-      retirementEvents?.push(`idle:${session.id}`)
-      if (cancelled) return
-      await new Promise<void>(resolve => {
-        releaseIdle = resolve
-        const gate = whenIdleGate?.()
-        if (gate !== undefined) void gate.then(resolve, resolve)
-        else resolve()
-      })
-    },
-    cancel: () => {
-      retirementEvents?.push(`cancel:${session.id}`)
-      cancelled = true
-      releaseIdle?.()
-    },
-  } as unknown as Agent
-  return agent
-}
-
-/** Build Direct services whose in-memory registry behaves like the real Host. */
-function makeHarness(
-  home: string,
-  initial?: FakeSession | readonly FakeSession[],
-  initialDefault: { provider: string; model: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
-  saveDefault?: (next: { provider: string; model: string; reasoningEffort?: string }) => Promise<unknown>,
-  createGate?: () => Promise<unknown>,
-  /** A subagents service, or a factory receiving the harness retirement
-   * events array (so a drain fake records into the SAME assertion log). */
-  subagents?: unknown | ((events: string[]) => unknown),
-  whenIdleGate?: (sessionId: string) => Promise<void>,
-  resumeGate?: (sessionId: string) => Promise<void>,
-  resumeError?: Error,
-): RunnerHarness {
-  const persisted = new Map<string, FakeSession>()
-  const live = new Map<string, Agent>()
-  const retirementEvents: string[] = []
-  const createOptions: { provider?: string; model?: string }[] = []
-  const createInheritedEventCounts: (number | undefined)[] = []
-  const createSignals: (AbortSignal | undefined)[] = []
-  const resumeSignals: (AbortSignal | undefined)[] = []
-  const createdSessions: FakeSession[] = []
-  for (const session of initial === undefined ? [] : Array.isArray(initial) ? initial : [initial]) {
-    persisted.set(session.id, session)
-  }
-
-  const makeHandle = (session: FakeSession): { agent: Agent; dispose: () => Promise<void> } => {
-    const agent = fakeAgent(session, whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id), retirementEvents)
-    live.set(session.id, agent)
-    return {
-      agent,
-      dispose: async () => {
-        retirementEvents.push(`dispose:${session.id}`)
-        live.delete(session.id)
-      },
-    }
-  }
-
-  const persistence = {
-    list: async () => [...persisted.values()].map(session => session.header),
-    inspect: async (id: unknown) => {
-      const session = persisted.get(String(id))
-      if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
-      return { meta: session.header, events: [...session.snapshotEvents()] }
-    },
-  }
-  // The semantic session-query seam (master contract): the reader's list /
-  // recorded-preset / export paths read ONLY this service now — the raw
-  // persistence fallback is removed legacy.
-  const sessionQuery = {
-    listSessions: async () => [...persisted.values()].map(session => ({
-      header: session.header,
-      live: live.has(session.id),
-    })),
-    observeSession: async (id: unknown) => {
-      const session = persisted.get(String(id))
-      if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
-      return { header: session.header, events: [...session.snapshotEvents()], [Symbol.dispose]: () => {} }
-    },
-  }
-  const agents = {
-    resume: async ({ resumeSessionId, setup, signal }: { resumeSessionId: unknown; setup?: (agentCtx: unknown, agent: Agent) => unknown; signal?: AbortSignal }) => {
-      resumeSignals.push(signal)
-      if (resumeError !== undefined) throw resumeError
-      const session = persisted.get(String(resumeSessionId))
-      if (session === undefined) throw new Error(`unknown test session ${String(resumeSessionId)}`)
-      const handle = makeHandle(session)
-      await setup?.(handle.agent.ctx, handle.agent)
-      await resumeGate?.(String(resumeSessionId))
-      return handle
-    },
-    create: async ({ sessionId, agentOptions, setup, seed, inheritedEventCount, signal }: {
-      sessionId: unknown
-      agentOptions?: { provider?: string; model?: string }
-      setup?: (agentCtx: unknown, agent: Agent) => unknown
-      seed?: readonly SessionEvent[]
-      inheritedEventCount?: number
-      signal?: AbortSignal
-    }) => {
-      createOptions.push({ ...agentOptions })
-      createInheritedEventCounts.push(inheritedEventCount)
-      createSignals.push(signal)
-      if (createGate !== undefined) await createGate()
-      const id = String(sessionId)
-      const session: FakeSession = fakeSession({
-        id,
-        header: { id, cwd: home, createdAt: Date.now(), version: SESSION_FORMAT_VERSION },
-        events: seed === undefined ? sessionEvents('created answer') : [...seed],
-      })
-      createdSessions.push(session)
-      persisted.set(id, session)
-      const handle = makeHandle(session)
-      await setup?.(handle.agent.ctx, handle.agent)
-      return handle
-    },
-    get: (id: string) => live.get(id),
-  }
-  const sessions = {
-    flush: async (session?: unknown) => {
-      retirementEvents.push(`flush:${(session as { id?: string } | undefined)?.id ?? '?'}`)
-    },
-    get: (id: string) => live.get(id)?.session,
-  }
-  let defaultSelection = { ...initialDefault }
-  const defaultModel = {
-    currentSelection: () => ({ ...defaultSelection }),
-    saveSelection: saveDefault ?? (async (next: { provider: string; model: string; reasoningEffort?: string }) => {
-      defaultSelection = { ...next }
-    }),
-  }
-  const llm = {
-    listProviders: () => [{ id: 'p', name: 'provider p' }],
-    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
-    resolveModelInfo: async () => ({}),
-    discoverModels: async () => [],
-    listConfigurableProviders: () => [],
-  }
-  const definitions = new Map<string, { name: string; description: string; handler: (...args: never[]) => unknown }>()
-  const commands = {
-    register: (definition: { name: string; description: string; handler: (...args: never[]) => unknown }) => {
-      definitions.set(definition.name, definition)
-      return () => {
-        if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
-      }
-    },
-    list: () => [...definitions.values()].map(({ name, description }) => ({ name, description })),
-    execute: async () => ({ result: { kind: 'success' } }),
-    handler: (name: string) => definitions.get(name)?.handler,
-  }
-  const subagentsService = typeof subagents === 'function'
-    ? (subagents as (events: string[]) => unknown)(retirementEvents)
-    : subagents
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents }
-}
-
-async function settle(): Promise<void> {
-  for (let index = 0; index < 40; index += 1) await Promise.resolve()
-}
-
-/** Dispose every fiber created by the real Cordis context. */
-async function disposeContext(ctx: Context): Promise<void> {
-  for (const runtime of [...ctx.registry.values()]) {
-    for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
-  }
-}
-
-/** Route production ProcessTerminal instances into a deterministic xterm. */
-function installVirtualProcessTerminal(vt: VirtualTerminal): () => void {
-  const prototype = ProcessTerminal.prototype as object
-  const names = [
-    'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
-    'columns', 'rows', 'kittyProtocolActive', 'modifyOtherKeysActive',
-  ]
-  const originals = new Map<string, PropertyDescriptor | undefined>()
-  const virtual = vt as unknown as Record<string, unknown>
-  const methods = new Set([
-    'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
-  ])
-  for (const name of names) {
-    originals.set(name, Object.getOwnPropertyDescriptor(prototype, name))
-    if (methods.has(name)) {
-      Object.defineProperty(prototype, name, {
-        configurable: true,
-        value: (...args: unknown[]) => {
-          const method = virtual[name]
-          if (typeof method !== 'function') throw new Error(`virtual terminal method missing: ${name}`)
-          return (method as (...args: unknown[]) => unknown).apply(vt, args)
-        },
-      })
-    } else {
-      Object.defineProperty(prototype, name, {
-        configurable: true,
-        get: () => name === 'modifyOtherKeysActive' ? false : virtual[name],
-      })
-    }
-  }
-  return () => {
-    for (const name of names) {
-      const descriptor = originals.get(name)
-      if (descriptor === undefined) delete (prototype as Record<string, unknown>)[name]
-      else Object.defineProperty(prototype, name, descriptor)
-    }
-  }
-}
-
 interface RunnerProbe {
   transcriptApplyCount: number
   statsApplyCount: number
@@ -468,6 +144,8 @@ interface RunnerProbe {
   scrollToBottomCount: number
   capturedModels: string[]
   capturedWelcomeModels: string[]
+  /** Every `app.notify(message, kind)` this run surfaced. */
+  notices: string[]
   apps: TuiApp[]
   restore: () => void
 }
@@ -488,6 +166,7 @@ function installProbe(): RunnerProbe {
     scrollToBottomCount: 0,
     capturedModels: [],
     capturedWelcomeModels: [],
+    notices: [],
     apps: [],
     restore: () => {},
   }
@@ -501,6 +180,7 @@ function installProbe(): RunnerProbe {
   const originalShowApprovalPrompt = TuiApp.prototype.showApprovalPrompt
   const originalSetStatus = TuiApp.prototype.setStatus
   const originalSetWelcomeCard = TuiApp.prototype.setWelcomeCard
+  const originalNotify = TuiApp.prototype.notify
   const originalStart = TuiApp.prototype.start
   const originalScrollToBottom = TuiApp.prototype.scrollToBottom
   TranscriptFolder.prototype.apply = function (events) {
@@ -519,11 +199,11 @@ function installProbe(): RunnerProbe {
     probe.statsHydrateCount += 1
     return originalStatsHydrate.call(this, events)
   }
-  TuiApp.prototype.setTranscript = function (messages, activities, window, streamingToolPreviews) {
+  TuiApp.prototype.setTranscript = function (messages, activities, window, streamingToolPreviews, searchPresentation) {
     probe.capturedMessages = messages
     probe.capturedActivities = activities
     probe.capturedStreamingToolPreviews = streamingToolPreviews
-    return originalSetTranscript.call(this, messages, activities, window, streamingToolPreviews)
+    return originalSetTranscript.call(this, messages, activities, window, streamingToolPreviews, searchPresentation)
   }
   TuiApp.prototype.setViewerFooter = function (footer) {
     probe.capturedViewerUsage = footer?.usage
@@ -553,6 +233,10 @@ function installProbe(): RunnerProbe {
     probe.scrollToBottomCount += 1
     return originalScrollToBottom.call(this, options)
   }
+  TuiApp.prototype.notify = function (...args: Parameters<typeof originalNotify>) {
+    probe.notices.push(`${args[1] ?? 'info'}:${String(args[0])}`)
+    return originalNotify.apply(this, args)
+  }
   probe.restore = () => {
     TranscriptFolder.prototype.apply = originalTranscriptApply
     StatsFolder.prototype.apply = originalStatsApply
@@ -564,35 +248,11 @@ function installProbe(): RunnerProbe {
     TuiApp.prototype.showApprovalPrompt = originalShowApprovalPrompt
     TuiApp.prototype.setStatus = originalSetStatus
     TuiApp.prototype.setWelcomeCard = originalSetWelcomeCard
+    TuiApp.prototype.notify = originalNotify
     TuiApp.prototype.start = originalStart
     TuiApp.prototype.scrollToBottom = originalScrollToBottom
   }
   return probe
-}
-
-async function mountRunner(
-  ctx: Context,
-  home: string,
-  harness: RunnerHarness,
-  startup: { sessionId?: string; presetId?: string },
-  config: Config,
-  appExit: () => void = () => {},
-) {
-  ctx.provide('appExit', appExit)
-  ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
-  ctx.provide('sessionPersistence', harness.persistence as never)
-  ctx.provide('sessionQuery', harness.sessionQuery as never)
-  ctx.provide('agents', harness.agents as never)
-  ctx.provide('sessions', harness.sessions as never)
-  ctx.provide('agentDefaultModel', harness.defaultModel as never)
-  ctx.provide('llm', harness.llm as never)
-  ctx.provide('commands', harness.commands as never)
-  if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
-  ctx.provide('loader', { await: async () => {} } as never)
-  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, config))
-  await fiber
-  await settle()
-  return fiber
 }
 
 /** Drive the /model picker to the SECOND listed model (m2) and apply it. */
@@ -605,8 +265,6 @@ async function pickSecondModel(app: TuiApp, harness: RunnerHarness): Promise<voi
     const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
     tui.handleTerminalInput(data)
   }
-  input('\r') // provider -> model list
-  await settle()
   input('\x1b[B') // choose m2 instead of the first listed model
   input('\r')
   await settle()
@@ -700,8 +358,6 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
     tui.handleTerminalInput(data)
   }
-  await settle()
-  input('\r') // provider -> model list
   await settle()
   input('\x1b[B') // choose m2 instead of the first listed model
   input('\r')
@@ -996,7 +652,7 @@ test('/new without an explicit default intent observes the persisted default, ne
     '/new without an explicit default intent must not freeze a durable choice into the fresh Session')
 })
 
-test('/fork applies the source current selection after its historical inherited prefix', async (t) => {
+test('/fork inherits the Host-chosen completed prefix including the trailing source switch', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-selection-')
   const previousHome = process.env.DSH_HOME
@@ -1013,16 +669,17 @@ test('/fork applies the source current selection after its historical inherited 
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
 
   const currentSelection = { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' }
-  const sourceEvents = [
+  const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' }, 0),
     modelEvent('request/header', {
       header: { config: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } },
     }, 1),
     ...sessionEvents('source answer'),
-    // This is the source's current switch, after the completed turn, so the
-    // fork seed deliberately excludes it and retains only historical A.
+    // The source's current switch stands after the completed turn with no
+    // queued-input boundary behind it, so the alpha.2 latest-completed-prefix
+    // cut INCLUDES it: the child inherits the pending switch as Host state.
     modelEvent('model/selection', currentSelection, 6),
-  ]
+  ])
   const source: FakeSession = fakeSession({
     id: 'fork-selection-source',
     header: { id: 'fork-selection-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -1038,24 +695,731 @@ test('/fork applies the source current selection after its historical inherited 
 
   assert.equal(harness.createdSessions.length, 1, 'fork creates one child')
   const child = harness.createdSessions[0]!
-  const inheritedPrefix = sourceEvents.slice(0, 8)
+  const inheritedPrefix = sourceEvents
   assert.deepEqual(harness.createInheritedEventCounts, [inheritedPrefix.length],
-    'inheritedEventCount ends exactly at the historical prefix')
+    'the alpha.2 latest-completed-prefix cut extends through the trailing stable selection')
   assert.deepEqual(child.snapshotEvents().slice(0, inheritedPrefix.length), inheritedPrefix,
-    'the child keeps the exact historical A prefix')
+    'the child keeps the exact inherited prefix')
   assert.deepEqual(source.snapshotEvents(), sourceEvents, 'fork does not mutate the source log')
   const childBoundary = child.snapshotEvents()[inheritedPrefix.length]
-  assert.equal((childBoundary as unknown as { type?: unknown } | undefined)?.type, 'model/selection',
-    'the current selection starts in the child-owned suffix')
-  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, currentSelection)
+  assert.equal((childBoundary as unknown as { type?: unknown } | undefined)?.type, 'session/end-seed',
+    'the child-owned end-seed marker (not a runner write) sits at the inherited cut')
   const childSelections = child.snapshotEvents().filter(event => (event as unknown as { type?: unknown }).type === 'model/selection')
   assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, currentSelection,
-    'the child-owned suffix records the source current B/max selection')
+    'the child inherits the source current switch that stands inside the completed prefix')
+  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).lastUsed, {
+    provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
+  }, 'the child effective selection remains the consumed historical A selection')
   assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection,
-    'the child effective next selection is B/max')
+    'the inherited trailing switch stays a pending intent, Host-owned')
 })
 
-test('/rewind forwards the source selection through the real picker callback', async (t) => {
+test('/fork leaves the source Session attached until the executor appends command/done', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-settlement-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'fork-settlement-source',
+    header: { id: 'fork-settlement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 1, '/fork must fork one child through the command plane')
+  // The official executor appends `command/done` to the SOURCE Session only
+  // after the handler settles; appending to a detached Session never reaches
+  // the persistence writer. The source owner must therefore still be live at
+  // that append — retiring it inside the handler (which detaches the Session)
+  // is the regression this asserts.
+  const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'])
+  assert.equal(sourceSettlements.at(-1)?.ownerLive, true,
+    'the source owner must stay attached through the command/done append')
+  const eventTypes = source.snapshotEvents().map(event => (event as unknown as { type?: unknown }).type)
+  assert.ok(eventTypes.includes('command/run') && eventTypes.includes('command/done'),
+    `the source log must keep the run/done pairing: ${JSON.stringify(eventTypes)}`)
+
+  // The retirement still happens — just after settlement, never lost.
+  await settle()
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'the source owner must still be disposed after the command settled')
+})
+
+test('/fork teardown awaits the command settlement and retires the source exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-teardown-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseCreate!: () => void
+  let signalCreateStarted!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  let releaseSettlement!: () => void
+  let signalSettlementReached!: () => void
+  const settlementReached = new Promise<void>(resolve => { signalSettlementReached = resolve })
+  const source = fakeSession({
+    id: 'fork-teardown-source',
+    header: { id: 'fork-teardown-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source, undefined, undefined, async () => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  })
+  // Hold the executor's post-handler `command/done` append open, so the test can
+  // observe whether teardown respects the in-flight command settlement.
+  ;(harness.commands as { settlementGate?: () => Promise<void> }).settlementGate = async () => {
+    signalSettlementReached()
+    await new Promise<void>(resolve => { releaseSettlement = resolve })
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await createStarted
+
+  // Tear the surface down WHILE the `/fork` command is inside `agents.create`,
+  // then let the fork settle but keep `command/done` open.
+  const disposal = fiber.dispose()
+  await settle()
+  releaseCreate()
+  await settlementReached
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 0,
+    'teardown must not retire the source while its own command is still settling')
+
+  releaseSettlement()
+  await disposal
+  await settle()
+
+  const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'],
+    'the executor must still settle the source command')
+  assert.equal(sourceSettlements.at(-1)?.ownerLive, true,
+    'teardown must not detach the source Session before its own command/done')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 1,
+    'teardown must retire the source owner exactly once')
+})
+
+test('a rewind-picker fork awaits source retirement before its handoff completes', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-retirement-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseDrain!: () => void
+  let signalDrainReached!: () => void
+  const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  const source = fakeSession({
+    id: 'rewind-retirement-source',
+    header: { id: 'rewind-retirement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('rewind-retirement-one'),
+        role: 'user',
+        content: [{ type: 'text', text: 'first' }],
+        source: { kind: 'user' },
+      } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      event('user/message', {
+        id: MessageId('rewind-retirement-two'),
+        role: 'user',
+        content: [{ type: 'text', text: 'second' }],
+        source: { kind: 'user' },
+      } as never, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  // Gate the retirement's drain phase: the source owner must not be observable
+  // as retired (nor the handoff reported complete) until teardown finishes. The
+  // gate is ONE-SHOT — the teardown retirement's own drain call must pass
+  // through, or the disposer would block forever.
+  let drainCalls = 0
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' }, undefined, undefined, () => ({
+    drainContinuableDescendants: async () => {
+      drainCalls += 1
+      if (drainCalls !== 1) return
+      signalDrainReached()
+      await new Promise<void>(resolve => { releaseDrain = resolve })
+    },
+    listDescendants: async () => [],
+  }))
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  const reachedDrain = await Promise.race([
+    drainReached.then(() => true),
+    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 3_000) }),
+  ])
+  try {
+    assert.equal(reachedDrain, true, 'the picker fork must reach the source-retirement drain phase')
+    // Give a DETACHED handoff every chance to finish: if the picker path did not
+    // await the retirement, `forkSession` would resolve here and report success.
+    await settle()
+    // A DSH command defers its source retirement; the picker path must NOT: the
+    // handoff cannot report success (nor dispose the source) while the old owner
+    // is still retiring — otherwise an immediate /resume could observe a live,
+    // lease-held source.
+    assert.ok(!probe.notices.some(notice => notice.includes('rewound to turn')),
+      `the rewind handoff must wait for source retirement: ${probe.notices.join(', ')}`)
+    assert.equal(harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length, 0,
+      'the source must not be disposed while its retirement is still draining')
+  } finally {
+    // Always release the gate so a failing assertion still leaves a clean
+    // teardown (the disposer awaits this retirement).
+    releaseDrain?.()
+    await settle()
+  }
+  assert.ok(probe.notices.some(notice => notice.includes('rewound to turn')),
+    `the picker fork must still report success: ${probe.notices.join(', ')}`)
+  assert.equal(harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length, 1,
+    'the source owner must be retired exactly once')
+})
+
+test('/fork settles when the source disposal fails (contained, never a hang)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-dispose-fail-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'fork-dispose-fail-source',
+    header: { id: 'fork-dispose-fail-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  // A failing `dispose()` leaks the handle (the write lease stays held), which
+  // `retireDirectOwnedSession` CONTAINS and records. The admission pin must
+  // still settle, or the command workflow (which awaits the retirement) would
+  // hang forever.
+  harness.disposeFailures.add(source.id)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  assert.equal(harness.createdSessions.length, 1, 'the fork must settle even when the source disposal fails')
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'the source disposal must be attempted (and its failure contained)')
+  const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'],
+    'the source command must still settle after a contained dispose failure')
+})
+
+test('/fork does not release the submit FIFO before the source retirement completes', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-fifo-retire-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const header = (id: string) => ({ id, cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION })
+  const source = fakeSession({ id: 'fifo-retire-source', header: header('fifo-retire-source'), events: sessionEvents('source answer') })
+  const other = fakeSession({ id: 'fifo-retire-other', header: header('fifo-retire-other'), events: sessionEvents('other answer') })
+  let releaseDrain!: () => void
+  let signalDrainReached!: () => void
+  const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  let drainCalls = 0
+  const harness = makeHarness(home, [source, other], undefined, undefined, undefined, () => ({
+    drainContinuableDescendants: async () => {
+      drainCalls += 1
+      if (drainCalls !== 1) return
+      signalDrainReached()
+      await new Promise<void>(resolve => { releaseDrain = resolve })
+    },
+    listDescendants: async () => [],
+  }))
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  const reached = await Promise.race([
+    drainReached.then(() => true),
+    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 3_000) }),
+  ])
+  try {
+    assert.equal(reached, true, 'the /fork source retirement must reach its drain phase')
+    const runsWhileGated = harness.commandSettlements.filter(entry => entry.phase === 'run').length
+    // Durability is already satisfied: command/done landed before the drain gate.
+    assert.deepEqual(harness.commandSettlements.filter(entry => entry.sessionId === source.id).map(entry => entry.phase), ['run', 'done'],
+      'command/done must land before the source retirement completes')
+    // The command must NOT have released the submit FIFO yet: a queued second
+    // submission must stay pending until the retirement finishes.
+    app.setDraft(`/resume ${other.id}`)
+    ;(app as unknown as { submitDraft(): void }).submitDraft()
+    await settle()
+    assert.equal(harness.commandSettlements.filter(entry => entry.phase === 'run').length, runsWhileGated,
+      'the submit FIFO must stay held until the source retirement completes')
+  } finally {
+    releaseDrain?.()
+    await settle()
+  }
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'the source must be disposed once the held retirement completes')
+})
+
+test('/fork dispatches at admission without waiting for a busy source', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-busy-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseCreate!: () => void
+  let signalCreateStarted!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const source = fakeSession({
+    id: 'fork-busy-source',
+    header: { id: 'fork-busy-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('busy source answer'),
+  })
+  let sourceBusy = false
+  let releaseSourceIdle!: () => void
+  const sourceIdleGate = async (sessionId: string): Promise<void> => {
+    if (sessionId === source.id && sourceBusy) {
+      await new Promise<void>(resolve => { releaseSourceIdle = resolve })
+    }
+  }
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' }, undefined, createGate, undefined, sourceIdleGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  await settle()
+  await new Promise(resolve => setTimeout(resolve, 70))
+  const idleBeforeFork = harness.retirementEvents.filter(event => event === `idle:${source.id}`).length
+  sourceBusy = true
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  assert.equal(harness.retirementEvents.filter(event => event === `idle:${source.id}`).length, idleBeforeFork,
+    'fork dispatch must not wait for the source Agent to become idle')
+  releaseCreate()
+  sourceBusy = false
+  releaseSourceIdle?.()
+  await forkPromise
+  await settle()
+  assert.equal(harness.createdSessions.length, 1)
+})
+
+test('/fork navigation supersession parks a Direct child for later claim', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-superseded-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseCreate!: () => void
+  let signalCreateStarted!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const source = fakeSession({
+    id: 'fork-superseded-source',
+    header: { id: 'fork-superseded-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const target = fakeSession({
+    id: 'fork-superseded-target',
+    header: { id: 'fork-superseded-target', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  const resume = resumeHandler as (invocation: { rawInput: string }) => unknown
+  await resume({ rawInput: target.id })
+  await settle()
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'a newer navigation must commit without waiting for the pending Host fork')
+
+  releaseCreate()
+  await forkPromise
+  await settle()
+  const child = harness.createdSessions[0]
+  assert.ok(child, 'the pending fork must still publish its child')
+  assert.equal(harness.createdSessions.length, 1)
+
+  const resumesBeforeClaim = harness.resumeSignals.length
+  await resume({ rawInput: child.id })
+  await settle()
+  assert.equal(harness.resumeSignals.length, resumesBeforeClaim,
+    'opening a parked child must claim its existing Direct owner, not resume a second writer')
+  const mountedFiber = fiber
+  assert.ok(mountedFiber)
+  await mountedFiber.dispose()
+  fiber = undefined
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${child.id}`).length, 1,
+    'claiming a parked child must leave exactly one teardown owner')
+})
+
+test('/fork retires an unclaimed parked Direct owner during teardown', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-parked-teardown-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let signalCreateStarted!: () => void
+  let releaseCreate!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const source = fakeSession({
+    id: 'fork-parked-teardown-source',
+    header: { id: 'fork-parked-teardown-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const target = fakeSession({
+    id: 'fork-parked-teardown-target',
+    header: { id: 'fork-parked-teardown-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  const mountedFiber = fiber
+  assert.ok(mountedFiber)
+  const teardown = mountedFiber.dispose()
+  releaseCreate()
+  await Promise.all([forkPromise, teardown])
+  fiber = undefined
+  await settle()
+
+  const child = harness.createdSessions[0]
+  assert.ok(child, 'the superseded fork must publish before teardown drains its parked owner')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${child.id}`).length, 1,
+    'an unclaimed parked Direct owner must be disposed exactly once during teardown')
+})
+
+test('/fork suppresses a delayed failure after navigation supersession', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-failure-stale-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let signalCreateStarted!: () => void
+  let releaseFailure!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const failure = new Promise<never>((_, reject) => { releaseFailure = () => reject(new Error('delayed fork failure')) })
+  const createGate = async (): Promise<never> => {
+    signalCreateStarted()
+    return failure
+  }
+  const source = fakeSession({
+    id: 'fork-failure-source',
+    header: { id: 'fork-failure-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const target = fakeSession({
+    id: 'fork-failure-target',
+    header: { id: 'fork-failure-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  releaseFailure()
+  await forkPromise
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 0, 'a failed fork must not publish a child')
+  assert.ok(!probe.notices.some(notice => notice.includes('delayed fork failure')),
+    `a stale fork failure must not notify the newer session: ${probe.notices.join(', ')}`)
+})
+
+test('/rewind rejects an A to B to A stale picker selection', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-aba-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const userMessage = (id: string, text: string, seq: number): SessionEvent => event('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  } as never, seq)
+  const source = fakeSession({
+    id: 'rewind-aba-source',
+    header: { id: 'rewind-aba-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      userMessage('rewind-aba-one', 'first', 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      userMessage('rewind-aba-two', 'second', 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const target = fakeSession({
+    id: 'rewind-aba-target',
+    header: { id: 'rewind-aba-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: source.id })
+  await settle()
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 0, 'A → B → A must not revive the old A picker row into a fork')
+  assert.ok(probe.notices.some(notice => notice.includes('rewind cancelled')),
+    `the stale A picker selection must be cancelled: ${probe.notices.join(', ')}`)
+})
+
+test('/rewind stale callback cannot invalidate an admitted A fork', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-stale-admitted-fork-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let signalCreateStarted!: () => void
+  let releaseCreate!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const userMessage = (id: string, text: string, seq: number): SessionEvent => event('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  } as never, seq)
+  const source = fakeSession({
+    id: 'rewind-stale-admitted-source',
+    header: { id: 'rewind-stale-admitted-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      userMessage('rewind-stale-admitted-one', 'first', 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      userMessage('rewind-stale-admitted-two', 'second', 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const target = fakeSession({
+    id: 'rewind-stale-admitted-target',
+    header: { id: 'rewind-stale-admitted-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: source.id })
+  await settle()
+
+  const sourceDisposesBeforeFork = harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length
+  const forkPromise = forkHandler()
+  await createStarted
+  // This is the old picker callback, now stale. It must return before
+  // consuming the epoch admitted by the legitimate /fork above.
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  await settle()
+  releaseCreate()
+  await forkPromise
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 1, 'the admitted /fork must still publish one child')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, sourceDisposesBeforeFork + 1,
+    'the admitted /fork must adopt and retire A rather than parking its child')
+})
+
+test('/rewind forwards the Host-owned fork anchor through the real picker callback', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-rewind-selection-')
   const previousHome = process.env.DSH_HOME
@@ -1091,17 +1455,17 @@ test('/rewind forwards the source selection through the real picker callback', a
     seq: event.seq + firstTurn.length,
     time: event.time + firstTurn.length * 1000,
   })) as unknown as SessionEvent[]
-  const sourceEvents = [
+  const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' }, 0),
     modelEvent('request/header', {
       header: { config: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } },
     }, 1),
     ...firstTurn,
     ...secondTurn,
-    // The current switch is after the selected rewind cursor. It must be
-    // written after the inherited historical prefix in the child.
+    // The current switch stands after the selected rewind cursor, so the
+    // exact predecessor-turn cut must exclude it from the child.
     modelEvent('model/selection', currentSelection, firstTurn.length + secondTurn.length + 2),
-  ]
+  ])
   const source: FakeSession = fakeSession({
     id: 'rewind-selection-source',
     header: { id: 'rewind-selection-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -1125,12 +1489,69 @@ test('/rewind forwards the source selection through the real picker callback', a
   assert.deepEqual(child.snapshotEvents().slice(0, inheritedPrefix.length), inheritedPrefix,
     'rewind keeps the exact historical prefix')
   assert.deepEqual(source.snapshotEvents(), sourceEvents, 'rewind does not mutate the source log')
-  assert.deepEqual((child.snapshotEvents()[inheritedPrefix.length] as unknown as { data?: unknown } | undefined)?.data, currentSelection,
-    'the real rewind call site writes B/max in the child suffix')
-  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection)
+  assert.equal((child.snapshotEvents()[inheritedPrefix.length] as unknown as { type?: unknown } | undefined)?.type,
+    'session/end-seed',
+    'the child-owned end-seed marker — never the source current-selection event — sits at the exact cut')
+  const childSelections = child.snapshotEvents().filter(event => (event as unknown as { type?: unknown }).type === 'model/selection')
+  assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, {
+    provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
+  }, 'rewind preserves the historical A selection')
 })
 
-test('/fork treats a reasoning-effort change as a new selection', async (t) => {
+test('/rewind surfaces a current Host fork rejection', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-rejection-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const userMessage = (id: string, text: string, seq: number): SessionEvent => event('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  } as never, seq)
+  const source = fakeSession({
+    id: 'rewind-rejection-source',
+    header: { id: 'rewind-rejection-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: resequence([
+      event('turn/start', { turn: 0 }, 0),
+      userMessage('rewind-rejection-one', 'first prompt', 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      userMessage('rewind-rejection-two', 'second prompt', 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ]),
+  })
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' }, undefined, async () => {
+    throw new Error('fork refused by Host')
+  })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 0, 'a rejected Host fork must not publish a child')
+  assert.ok(probe.notices.some(notice => notice.includes('fork refused by Host')),
+    `the current rewind failure must remain visible: ${probe.notices.join(', ')}`)
+})
+
+test('/fork inherits the source-only reasoning-effort change standing inside the completed prefix', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-selection-effort-')
   const previousHome = process.env.DSH_HOME
@@ -1147,14 +1568,14 @@ test('/fork treats a reasoning-effort change as a new selection', async (t) => {
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
 
   const currentSelection = { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' }
-  const sourceEvents = [
+  const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-b', model: 'model-b', reasoningEffort: 'high' }, 0),
     modelEvent('request/header', {
       header: { config: { provider: 'provider-b', model: 'model-b', reasoningEffort: 'high' } },
     }, 1),
     ...sessionEvents('source answer'),
     modelEvent('model/selection', currentSelection, 6),
-  ]
+  ])
   const source: FakeSession = fakeSession({
     id: 'fork-selection-effort-source',
     header: { id: 'fork-selection-effort-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -1169,11 +1590,15 @@ test('/fork treats a reasoning-effort change as a new selection', async (t) => {
   await settle()
 
   const child = harness.createdSessions[0]!
-  assert.deepEqual(harness.createInheritedEventCounts, [8])
-  const childBoundary = child.snapshotEvents()[8]
-  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, currentSelection,
-    'same provider/model with a changed effort writes the new child selection')
-  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection)
+  assert.deepEqual(harness.createInheritedEventCounts, [9],
+    'the alpha.2 completed prefix extends through the trailing source-only effort change')
+  assert.equal((child.snapshotEvents()[9] as unknown as { type?: unknown } | undefined)?.type, 'session/end-seed',
+    'the child-owned end-seed marker sits at the inherited cut')
+  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).lastUsed, {
+    provider: 'provider-b', model: 'model-b', reasoningEffort: 'high',
+  }, 'the child preserves the historical reasoning effort as the consumed selection')
+  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection,
+    'the source-only effort change stays a pending intent inside the child prefix')
 })
 
 test('/fork avoids a duplicate selection when the inherited prefix already matches', async (t) => {
@@ -1196,11 +1621,11 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
   const source: FakeSession = fakeSession({
     id: 'fork-selection-same-source',
     header: { id: 'fork-selection-same-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: [
+    events: resequence([
       modelEvent('model/selection', selection, 0),
       modelEvent('request/header', { header: { config: selection } }, 1),
       ...sessionEvents('source answer'),
-    ],
+    ]),
   })
   const harness = makeHarness(home, source, { provider: 'global', model: 'fallback', reasoningEffort: 'low' })
   context = new Context()
@@ -1215,7 +1640,7 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
     'matching inherited state must not append a redundant child selection')
 })
 
-test('a sessionless /model choice seeds the first Session while its default save is still pending', async (t) => {
+test('a sessionless /model choice waits for its default save before the first create', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-runner-race-bridge-')
   const previousHome = process.env.DSH_HOME
@@ -1239,21 +1664,28 @@ test('a sessionless /model choice seeds the first Session while its default save
   assert.ok(app, 'the production runner must create a TuiApp')
   await pickSecondModel(app, harness)
   assert.equal(harness.createOptions.length, 0, '/model must not create a Session')
+  // v2 §0.3.2: while the sessionless default write is pending the footer shows
+  // the AUTHORITATIVE persisted default plus the pending selection.
+  assert.match(probe.capturedModels.at(-1) ?? '', /p\/m → p\/m2 \(selecting…\)/,
+    `the footer must show base → pending while the default save is in flight: ${JSON.stringify(probe.capturedModels)}`)
+  assert.doesNotMatch(probe.capturedModels.at(-1) ?? '', /p\/m2 → p\/m2/,
+    'the footer must never paint the optimistic intent as both base and pending')
   app.setDraft('first deferred prompt')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
   await settle()
-  assert.deepEqual(harness.createOptions[0], { provider: 'p', model: 'm2' },
-    'deferred create must read the pending sessionless choice')
-  assert.deepEqual(durableSelectionOf(harness.createdSessions[0]!), {
-    provider: 'p', model: 'm2',
-  }, 'the pending default intent must bridge the race and seed the first Session durably')
+  assert.equal(harness.createOptions.length, 0,
+    'the first create must coordinate with the still-pending sessionless default save instead of racing it')
   releaseSave()
   await settle()
+  assert.deepEqual(harness.createOptions[0], { provider: 'p', model: 'm2' },
+    'the settled Host default is what the fresh create consumes')
+  assert.equal(durableSelectionOf(harness.createdSessions[0]!), undefined,
+    'a committed default save leaves the blank Session observing the Host default dynamically')
 })
 
-test('a newer sessionless /model during the awaited first create seeds the newest pending choice', async (t) => {
+test('a FAILED sessionless default save is never seeded into the first create (v2 §0.8.4)', async (t) => {
   const life = testLifecycle(t)
-  const home = life.tempDir('dsh-pi-tui-runner-create-race-')
+  const home = life.tempDir('dsh-pi-tui-runner-failed-default-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   life.defer(() => {
@@ -1266,49 +1698,28 @@ test('a newer sessionless /model during the awaited first create seeds the newes
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  let releaseCreate!: () => void
-  const createGate = new Promise<void>((resolve) => { releaseCreate = resolve })
-  let releaseSave!: () => void
-  const saveGate = new Promise<void>((resolve) => { releaseSave = resolve })
-  const harness = makeHarness(home, undefined, { provider: 'p', model: 'm' }, async () => saveGate, async () => createGate)
+  const harness = makeHarness(home, undefined, { provider: 'p', model: 'm' }, async () => {
+    throw new Error('settings write failed')
+  })
   context = new Context()
   fiber = await mountRunner(context, home, harness, {}, {})
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
-  const modelHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('model')
-  assert.ok(modelHandler, 'the real runner must register /model')
-  const input = (data: string): void => {
-    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
-    tui.handleTerminalInput(data)
-  }
-  // /model → m1 (its save hangs on the gate).
-  await modelHandler()
+  await pickSecondModel(app, harness)
   await settle()
-  input('\r') // provider -> model list
-  await settle()
-  input('\r') // select m1
-  await settle()
-  // Submit: the first create hangs on the gate.
+  // An ambiguous (thrown) default write keeps an explicit unresolved footer
+  // marker until a Host read/reconnect establishes truth (v2 §0.3.2).
+  assert.match(probe.capturedModels.at(-1) ?? '', /\(unconfirmed\)/,
+    `the footer must show the unresolved marker: ${JSON.stringify(probe.capturedModels)}`)
   app.setDraft('first deferred prompt')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
   await settle()
-  // A NEWER /model → m2 while the create is still awaiting.
-  input('\r') // back to the provider list
-  await settle()
-  input('\r') // provider -> model list
-  await settle()
-  input('\x1b[B') // choose m2 instead of the first listed model
-  input('\r')
-  await settle()
-  // Release the create: the seed must use the NEWEST pending choice (m2).
-  releaseCreate()
-  await settle()
-  assert.deepEqual(durableSelectionOf(harness.createdSessions[0]!), {
-    provider: 'p', model: 'm2',
-  }, 'the first Session must seed the newest pending sessionless choice, not the captured one')
-  releaseSave()
-  await settle()
+  assert.deepEqual(harness.createOptions[0], { provider: 'p', model: 'm' },
+    'a failed default save must fall back to the persisted Host default, never a fabricated choice')
+  assert.equal(durableSelectionOf(harness.createdSessions[0]!), undefined,
+    'a FAILED latest intent must NOT be seeded into the created Session')
 })
+
 
 test('/model refreshes the Welcome card and footer from the authoritative Session selection', async (t) => {
   const life = testLifecycle(t)
@@ -1524,21 +1935,15 @@ test('startup applies the persisted wheel step BEFORE the first fullscreen mount
   })
   const harness = makeHarness(home, resumed)
   context = new Context()
-  // A settings service carrying the persisted wheel step AND fullscreen
-  // 'on': the runner must hand the step to the app BEFORE the first
-  // alt-screen mount (the fork reads it at construction).
-  const doc: Record<string, unknown> = {
-    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'on',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    focusMode: 'off', wheelScrollLines: '8',
-  }
-  context.provide('settings', {
-    register: () => ({
-      get: () => ({ ...doc }),
-      replace: async (next: Record<string, unknown>) => { Object.assign(doc, next) },
-    }),
-  } as never)
-  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  // The persisted wheel step AND fullscreen 'on' ride the plugin's
+  // profile-owned Config references: the runner must hand the step to the
+  // app BEFORE the first alt-screen mount (the fork reads it at
+  // construction). No settings service is needed for reads.
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, {
+    sessionId: resumed.id,
+    fullscreen: 'on',
+    wheelScrollLines: '8',
+  })
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   await vt.waitForRender()
@@ -1551,6 +1956,167 @@ test('startup applies the persisted wheel step BEFORE the first fullscreen mount
     'the FIRST fullscreen mount must already use the persisted wheel step (apply before setFullscreen)')
 })
 
+
+test('startup restores a persisted Compact preset unchanged and /display compact applies it', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-display-compact-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const resumed: FakeSession = fakeSession({
+    id: 'display-compact-session',
+    header: { id: 'display-compact-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('display compact'),
+  })
+  const userFooterItems = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
+  // The persisted document rides the plugin's profile-owned Config
+  // references; the Settings surface records path-scoped writes.
+  const mutations: Array<{ ns: string; ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }> = []
+  const settings = {
+    describe: () => [{
+      ns: 'tui-app',
+      value: effectiveConfigView({
+        fullscreen: 'off',
+        displayPreset: 'compact',
+        footerCustomItems: [{ id: 'project-item' }],
+        keybindings: { tab: 'custom' },
+      }),
+      user: { footerCustomItems: userFooterItems },
+      revision: 1,
+    }],
+    mutate: async (ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      mutations.push({ ns, ops })
+    },
+  }
+  const context = new Context()
+  const harness = makeHarness(home, resumed)
+  context.provide('settings', settings as never)
+  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, {
+    sessionId: resumed.id,
+    fullscreen: 'off',
+    displayPreset: 'compact',
+    footerCustomItems: [{ id: 'project-item' }],
+    keybindings: { tab: 'custom' },
+  })
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app !== undefined, 'the production runner must create a TuiApp')
+  assert.equal(app.displayPreset(), 'compact', 'a persisted Compact must restore as Compact, never fall back to Full')
+  // The boot completes exactly the one-shot legacy-migration marker (no
+  // legacy document exists anywhere): NO preference field is pinned and the
+  // USER footer definitions are not copied over the project-layer value.
+  assert.deepEqual(mutations, [
+    { ns: 'tui-app', ops: [{ op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 }] },
+  ], 'a canonical preset must not trigger a preference write')
+
+  const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
+  assert.ok(displayHandler !== undefined, 'the production runner must register /display')
+  const compactResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'compact' })
+  assert.deepEqual(compactResult, { kind: 'success', text: 'Display: compact.' })
+  await settle()
+  assert.equal(app.displayPreset(), 'compact', 'Compact stays the live preset')
+  assert.equal(mutations.length, 1, 'an unchanged value emits no write (no pinning; only the boot marker)')
+  const focusResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'focus' })
+  assert.deepEqual(focusResult, { kind: 'success', text: 'Display: focus.' })
+  await settle()
+  assert.equal(mutations.length, 2, 'a changed value persists through one more path-scoped mutation')
+  assert.deepEqual(mutations[1]!.ops, [
+    { op: 'set', path: ['displayPreset'], value: 'focus' },
+  ], 'only the changed field is written; the user footer items are not re-pinned')
+  await fiber.dispose()
+  await disposeContext(context)
+})
+
+test('startup canonicalizes an invalid display preset, preserves raw fields, and retries after a failed write', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-display-migration-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const resumed: FakeSession = fakeSession({
+    id: 'display-migration-session',
+    header: { id: 'display-migration-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('display migration'),
+  })
+  const userFooterItems = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
+  // The invalid canonical value rides the plugin Config references on every
+  // boot; the Settings surface records (and can refuse) the canonicalizing
+  // path-scoped writes.
+  const written: Array<{ op: string; path: readonly string[]; value?: unknown }> = []
+  let failFirstWrite = true
+  const settings = {
+    describe: () => [{
+      ns: 'tui-app',
+      value: effectiveConfigView({
+        fullscreen: 'off',
+        displayPreset: 'garbage',
+        footerCustomItems: [{ id: 'project-item' }],
+        keybindings: { tab: 'custom' },
+      }),
+      user: { footerCustomItems: userFooterItems },
+      revision: 1,
+    }],
+    mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      for (const op of ops) written.push({ ...op })
+      if (failFirstWrite) {
+        failFirstWrite = false
+        throw new Error('display migration write failed')
+      }
+    },
+  }
+  const mount = async (): Promise<{ context: Context; fiber: { dispose: () => Promise<unknown> }; app: TuiApp; harness: RunnerHarness }> => {
+    const context = new Context()
+    const harness = makeHarness(home, resumed)
+    context.provide('settings', settings as never)
+    const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, {
+      sessionId: resumed.id,
+      fullscreen: 'off',
+      displayPreset: 'garbage',
+      footerCustomItems: [{ id: 'project-item' }],
+      keybindings: { tab: 'custom' },
+    })
+    await settle()
+    const app = probe.apps.at(-1)
+    assert.ok(app !== undefined, 'the production runner must create a TuiApp')
+    return { context, fiber, app, harness }
+  }
+
+  const first = await mount()
+  assert.equal(first.app.displayPreset(), 'full', 'an invalid canonical value resolves to Full before the first frame')
+  // The boot writes: the one-shot marker completion, then the canonicalizing
+  // displayPreset set — raw fields are never re-pinned.
+  assert.deepEqual(written, [
+    { op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 },
+    { op: 'set', path: ['displayPreset'], value: 'full' },
+  ])
+  await first.fiber.dispose()
+  await disposeContext(first.context)
+
+  const second = await mount()
+  assert.equal(second.app.displayPreset(), 'full')
+  // The retry boot: the marker batch is now a no-op (the fake never commits
+  // the reference), so the canonicalizing write retries alone.
+  assert.deepEqual(written.at(-1), { op: 'set', path: ['displayPreset'], value: 'full' },
+    'a later boot must retry the failed canonicalization')
+  await second.fiber.dispose()
+  await disposeContext(second.context)
+})
 
 test('live repaint preserves manual scrolling in the latest window', async (t) => {
   const life = testLifecycle(t)
@@ -1774,7 +2340,13 @@ test('an inactive child completion during observeSession is replayed by the view
   await tasksHandler()
   await settle()
   await vt.waitForRender()
+  // A subagent row opens the child TRANSCRIPT (a session/viewer surface):
+  // the disposition is 'close', so the Task Center must be gone — unlike a
+  // Job status detail, which stays mounted underneath (see the jobs-only
+  // test below).
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be open before the selection')
   input('\r')
+  assert.equal(app.overlayGraphState().handles, 0, 'a subagent transcript must replace the browser')
   await observationStartedPromise
 
   const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
@@ -1892,7 +2464,13 @@ test('an inactive child cold-resume replays its opening prefix and running activ
   await tasksHandler()
   await settle()
   await vt.waitForRender()
+  // A subagent row opens the child TRANSCRIPT (a session/viewer surface):
+  // the disposition is 'close', so the Task Center must be gone — unlike a
+  // Job status detail, which stays mounted underneath (see the jobs-only
+  // test below).
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be open before the selection')
   input('\r')
+  assert.equal(app.overlayGraphState().handles, 0, 'a subagent transcript must replace the browser')
   await observationStartedPromise
 
   const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
@@ -2515,6 +3093,61 @@ test('the Preparing status stays on screen through the catalog ready barrier', a
   await new Promise(resolve => setTimeout(resolve, 200))
 })
 
+test('an emitted skills/change reaches the runner catalog refresh for the current owner', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-skills-change-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const resumed: FakeSession = fakeSession({
+    id: 'skills-change-session',
+    header: { id: 'skills-change-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('skills change answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  let snapshots = 0
+  const scopes: unknown[] = []
+  context.provide('skills', {
+    snapshot: async (options: { readonly scope?: object }) => {
+      snapshots += 1
+      scopes.push(options?.scope)
+      return { skills: [], complete: true }
+    },
+  } as never)
+  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  life.defer(() => fiber.dispose())
+  await settle()
+  const before = snapshots
+  const emitSkillsChange = (): void =>
+    (context as unknown as { emit(name: string, payload: unknown): void }).emit('skills/change', {})
+  // A BURST of invalidations: the runner's `skills/change` listener must reach
+  // the CoalescingRefreshGate and drive a catalog refresh for the CURRENT
+  // owner (re-reading the skill catalog), while coalescing the burst.
+  emitSkillsChange()
+  emitSkillsChange()
+  emitSkillsChange()
+  const deadline = Date.now() + 3000
+  while (snapshots === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(snapshots > before,
+    'an emitted skills/change must drive a catalog refresh (skill re-read) for the current owner')
+  await new Promise(resolve => setTimeout(resolve, 250))
+  assert.ok(snapshots - before <= 2,
+    `a burst of skills/change must coalesce to at most two reads (observed ${snapshots - before})`)
+  // The refresh must read in the CURRENT LIVE AGENT scope, never the standing
+  // or global scope: the Agent object carries `session`; a standing key does
+  // not, and the global target passes `undefined`.
+  assert.ok(scopes.length > 0, 'the invalidation refresh must read the skill catalog with a scope')
+  assert.ok(
+    scopes.every(scope => typeof scope === 'object' && scope !== null && 'session' in scope),
+    'every skills/change refresh must read the skill catalog in the LIVE AGENT scope (not standing/global)',
+  )
+})
+
 test('a fresh start with a FAILING preset resolution stays silent (no Preparing status)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fresh-preset-fail-')
@@ -2556,6 +3189,50 @@ test('a fresh start with a FAILING preset resolution stays silent (no Preparing 
   assert.ok(app, 'the production runner must still create a TuiApp')
 })
 
+test('an invalid --preset on a healthy resumed session never degrades the resume', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-resume-invalid-preset-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'resume-invalid-preset',
+    header: { id: 'resume-invalid-preset', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  context.provide('agentPresets', {
+    defaultId: 'standard',
+    resolve: async (id?: string) => {
+      if (id === 'broken') throw new Error('agent-presets: preset "broken" not found (available: standard)')
+      return { id: id ?? 'standard', trust: 'system' }
+    },
+    // The composition the resumed Agent mounts on (the recorded/default preset).
+    mount: async () => {},
+    recompose: async () => ({ id: 'standard' }),
+    composedPreset: () => undefined,
+    // The started resumed session refuses the launch override.
+    select: async () => { throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' }) },
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id, presetId: 'broken' }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the healthy resume must still mount')
+  assert.ok(!probe.notices.some(notice => notice.includes('unavailable; started with the default')),
+    `an invalid --preset must not degrade a healthy resume: ${JSON.stringify(probe.notices)}`)
+  assert.ok(!probe.notices.some(notice => notice.includes('not applied on resume')),
+    `the started-session locked override is expected, not a degradation notice: ${JSON.stringify(probe.notices)}`)
+})
+
 // --- Direct owned-session retirement (exit / HMR / transition) ---
 
 /** A subagents fake recording drainContinuableDescendants calls. */
@@ -2588,14 +3265,33 @@ test('fiber unload retires the Direct owned session: cancel → idle → drain �
     header: { id: 'retire-hmr-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('resumed answer'),
   })
-  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async () => {
+      events.push(`drain:${resumed.id}`)
+      // Direct retirement can emit one final session event after the surface
+      // has been disposed but before the Cordis listener is detached. The
+      // runner must ignore it rather than applying it to dead folders/app.
+      context!.emit('session/event', resumed as never, event('turn/start', { turn: 99 }, 99))
+      context!.emit('llm/adapters-updated')
+      context!.emit('settings/document-updated', 'llm-pi-ai' as never, 99 as never)
+    },
+  }))
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
+  const transcriptAppliesBeforeRetirement = probe.transcriptApplyCount
+  const statsAppliesBeforeRetirement = probe.statsApplyCount
+  const welcomeCardsBeforeRetirement = probe.capturedWelcomeModels.length
   // HMR unload: dispose the runner fiber directly (no interactive exit).
   await fiber.dispose()
   fiber = undefined
+  assert.equal(probe.transcriptApplyCount, transcriptAppliesBeforeRetirement,
+    'a retirement-time session event must not apply to the disposed transcript')
+  assert.equal(probe.statsApplyCount, statsAppliesBeforeRetirement,
+    'a retirement-time session event must not apply to the disposed stats folder')
+  assert.equal(probe.capturedWelcomeModels.length, welcomeCardsBeforeRetirement,
+    'retirement-time provider/settings events must not repaint the disposed welcome card')
   // The retirement order is the fixed Direct order; the drain of the
   // continuable descendants happens BEFORE the parent handle dispose.
   const events = harness.retirementEvents
@@ -2788,6 +3484,77 @@ test('exit during an in-flight transition does not deadlock and retires the curr
   const oldDispose = events.filter(event => event === 'dispose:retire-during-switch-old')
   assert.equal(oldDispose.length, 1, 'the still-current old owner must be retired exactly once')
   assert.equal(harness.createdSessions.length, 0, 'the aborted create must not publish a child')
+})
+
+test('a late non-cooperative child create skips disposed-surface commit work and is retired', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-late-commit-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-late-commit-old',
+    header: { id: 'retire-late-commit-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  let releaseCreate!: () => void
+  const createRelease = new Promise<void>(resolve => { releaseCreate = resolve })
+  let createStarted!: () => void
+  const createStartedPromise = new Promise<void>(resolve => { createStarted = resolve })
+  const harness = makeHarness(
+    home,
+    resumed,
+    { provider: 'p', model: 'm' },
+    undefined,
+    async () => {
+      createStarted()
+      await createRelease
+    },
+    retirementSubagents,
+  )
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const welcomeCardsBeforeDispose = probe.capturedWelcomeModels.length
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await createStartedPromise
+
+  // The fake Direct create deliberately ignores lifecycle cancellation. The
+  // fiber disposer still runs surface cleanup first, then waits behind the
+  // transition gate for the child owner to settle.
+  const disposal = fiber.dispose()
+  try {
+    await settle()
+    assert.equal(app.isDisposed(), true, 'surface disposal must finish before the late child resolves')
+    releaseCreate()
+    await transition
+    await disposal
+    fiber = undefined
+  } finally {
+    releaseCreate()
+  }
+
+  assert.equal(probe.capturedWelcomeModels.length, welcomeCardsBeforeDispose,
+    'a late transition commit must not repaint the disposed welcome card')
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the non-cooperative create still produces a child owner')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === 'dispose:retire-late-commit-old').length, 1,
+    'the old owner must be retired exactly once')
+  assert.equal(events.filter(event => event === `dispose:${child.id}`).length, 1,
+    'the late committed child owner must be retired exactly once')
 })
 
 test('an interactive exit retires the owned session through the appExit disposal', async (t) => {
@@ -2992,7 +3759,7 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
   context.provide('commands', harness.commands as never)
   context.provide('subagents', harness.subagents as never)
   context.provide('loader', { await: async () => {} } as never)
-  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, { sessionId: resumed.id }))
+  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: resumed.id } as never)))
   await fiber
   await whenIdleStartedPromise
   await disposeContext(context)
@@ -3227,4 +3994,657 @@ test('a retirement descendant-drain failure warns with the failing phases (not t
     `the warning must name the failing phase: ${JSON.stringify(stderrWrites)}`)
   assert.ok(!stderrWrites.some(write => write.includes('the latest events may not be persisted')),
     'a non-flush failure must not claim a durability loss')
+})
+
+test('the interactive child viewer projects its own authoritative steering and never leaks the parent subject', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-child-steering-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent = fakeSession({
+    id: 'parent-child-steering',
+    header: { id: 'parent-child-steering', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child = fakeSession({
+    id: 'child-child-steering',
+    header: {
+      id: 'child-child-steering',
+      cwd: home,
+      createdAt: 1_700_000_000_001,
+      version: SESSION_FORMAT_VERSION,
+      parentSession: 'parent-child-steering',
+    },
+    events: sessionEvents('child answer'),
+  })
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child',
+      id: child.id,
+      label: 'child steer',
+      mode: 'continuable',
+      activity: 'running',
+      hasChildren: false,
+      parentId: parent.id,
+      depth: 1,
+    }],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childHandle.dispose())
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+
+  // Both subjects hold an authoritative user steering occurrence in their inbox.
+  const parentAgent = liveAgentOf(harness, parent.id) as unknown as { inbox: { nextStep: unknown[] } }
+  const childAgent = liveAgentOf(harness, child.id) as unknown as { status: string; inbox: { nextStep: unknown[] } }
+  parentAgent.inbox.nextStep.push({
+    id: 'parent-step-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'PARENT-STEER' }],
+    source: { kind: 'user', rpcId: 'parent-rpc' },
+  })
+  childAgent.status = 'running'
+  childAgent.inbox.nextStep.push({
+    id: 'child-step-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'CHILD-STEER' }],
+    source: { kind: 'user', rpcId: 'child-rpc' },
+  })
+  context.emit('session/event', parent as never, event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [] }, 40))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(app.pendingInputForTest().steering.some(row => row.text === 'PARENT-STEER'),
+    'the main subject shows its authoritative steering before the viewer opens')
+
+  // Enter the interactive continuable child viewer.
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must be mounted')
+
+  context.emit('session/event', child as never, event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [] }, 41))
+  await settle()
+  await vt.waitForRender()
+  const viewed = app.pendingInputForTest()
+  assert.ok(viewed.steering.some(row => row.text === 'CHILD-STEER' && row.rpcId === 'child-rpc'),
+    `the child authoritative steering must be visible: ${JSON.stringify(viewed.steering)}`)
+  assert.ok(!viewed.steering.some(row => row.text === 'PARENT-STEER'),
+    'the parent pending row must not leak into the child viewer')
+
+  // Leaving the viewer re-projects the MAIN subject: the child row must not leak.
+  const mountedGeneration = app.getViewerGeneration()
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.ok(app.getViewerGeneration() > mountedGeneration, 'Esc must close the viewer')
+  const restored = app.pendingInputForTest()
+  assert.ok(!restored.steering.some(row => row.text === 'CHILD-STEER'),
+    'the closed child pending row must not leak to the parent surface')
+  assert.ok(restored.steering.some(row => row.text === 'PARENT-STEER'),
+    'the parent subject is re-projected after the viewer closes')
+})
+
+/** A mutable jobs-registry fake for the Task Center runner paths. */
+function makeJobsFake(
+  initial: readonly { id: string; kind: string; label: string; status: string; startedAt: number }[],
+) {
+  type Entry = { id: string; kind: string; label: string; status: string; startedAt: number }
+  let entries: Entry[] = initial.map(entry => ({ ...entry }))
+  let listFailure: Error | undefined
+  const listeners: Array<(event: { type: string }) => void> = []
+  const subscribeFilters: unknown[] = []
+  let subscribeDisposals = 0
+  const registry = {
+    list: (caller?: unknown): Entry[] => {
+      // DSH 0.1.7 JobRegistry ownership: the caller, when present, is the
+      // owning SessionId — never an Agent object.
+      if (caller !== undefined && typeof caller !== 'string') {
+        throw new Error(`jobs.list must receive a SessionId, got ${String(caller)}`)
+      }
+      if (listFailure !== undefined) throw listFailure
+      return entries.map(entry => ({ ...entry }))
+    },
+    get: (id: string, caller?: unknown): Entry => {
+      if (caller !== undefined && typeof caller !== 'string') {
+        throw new Error(`jobs.get must receive a SessionId, got ${String(caller)}`)
+      }
+      const entry = entries.find(candidate => candidate.id === id)
+      // A vanished job is the registry's own "not found" contract.
+      if (entry === undefined) throw new Error(`unknown job ${id}`)
+      return { ...entry }
+    },
+    kill: (id: string, caller?: unknown): string => {
+      if (caller !== undefined && typeof caller !== 'string') {
+        throw new Error(`jobs.kill must receive a SessionId, got ${String(caller)}`)
+      }
+      return 'accepted'
+    },
+    // DSH 0.1.7 JobRegistry unified event seam: the runner subscribes
+    // through `events.subscribe(filter, listener)`; the disposer removes
+    // the listener so disposal semantics are observable. Emissions carry
+    // the official JobEvent type vocabulary so the listener's event-type
+    // filtering is exercised exactly as the registry delivers it.
+    events: {
+      subscribe: (filter: unknown, listener: (event: { type: string }) => void): (() => void) => {
+        subscribeFilters.push(filter)
+        listeners.push(listener)
+        return () => {
+          subscribeDisposals += 1
+          const index = listeners.indexOf(listener)
+          if (index !== -1) listeners.splice(index, 1)
+        }
+      },
+    },
+    setEntries: (next: readonly Entry[]): void => { entries = next.map(entry => ({ ...entry })) },
+    setListFailure: (error: Error | undefined): void => { listFailure = error },
+    emit: (type = 'settled'): void => { for (const listener of [...listeners]) listener({ type }) },
+    /** C1 contract probes: exactly-once subscribe/dispose observability. */
+    subscribeCount: (): number => subscribeFilters.length,
+    disposalCount: (): number => subscribeDisposals,
+    activeListenerCount: (): number => listeners.length,
+    filterAt: (index: number): unknown => subscribeFilters[index],
+  }
+  return registry
+}
+
+test('a Job detail opened from /tasks keeps its parent mounted and live-refreshes it (jobs-only)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-disposition-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-disposition-parent',
+    header: { id: 'task-disposition-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  // NO subagents service: this is the jobs-only path (the fallback browser).
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be the only overlay')
+
+  input('\r') // open the selected running job's status detail
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2, 'the Job detail must keep the parent browser mounted')
+
+  // The job settles WHILE the parent is hidden. In a jobs-only session the
+  // only channel is jobs.events.subscribe → refreshTasks, which must repaint the
+  // open (hidden) browser, not just the dock badge.
+  jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
+  jobs.emit()
+  await settle()
+  await vt.waitForRender()
+
+  input('\x1b') // Esc closes ONLY the Job detail
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  assert.ok(view().includes('completed'),
+    `the restored parent must show the live-refreshed job status:\n${view()}`)
+
+  // A vanished job must leave the parent usable: the registry lookup throws,
+  // so openJobView opens nothing and reports keep-open.
+  jobs.setEntries([])
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1,
+    'a vanished job must not dismiss the parent browser')
+})
+
+test('the runner-level Job event subscription is exactly-once and disposed with the surface (C1)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-jobs-events-lifecycle-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'jobs-events-lifecycle-parent',
+    header: { id: 'jobs-events-lifecycle-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  assert.ok(probe.apps.at(-1), 'the production runner must create a TuiApp')
+  await settle()
+
+  // The runner subscribes exactly once through the unified event seam, with
+  // the composition scope filter — never process-global observation.
+  assert.equal(jobs.subscribeCount(), 1,
+    'the runner must subscribe exactly once through jobs.events')
+  assert.deepEqual(jobs.filterAt(0), { owners: 'scope' },
+    'the runner-level filter must be the composition scope, not { owners: \'all\' }')
+
+  // A live emission still reaches the refresh channel.
+  jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
+  jobs.emit()
+  await settle()
+
+  // Surface teardown releases the subscription exactly once, and a later
+  // emission has no listener left to fire a post-disposal refresh.
+  const mountedFiber = fiber
+  assert.ok(mountedFiber)
+  await mountedFiber.dispose()
+  fiber = undefined
+  await settle()
+  assert.equal(jobs.disposalCount(), 1, 'the subscription must be disposed exactly once')
+  assert.equal(jobs.activeListenerCount(), 0, 'no listener may survive the surface teardown')
+  jobs.emit()
+  await settle()
+  assert.equal(jobs.disposalCount(), 1, 'a post-disposal emission must not re-subscribe')
+  assert.equal(jobs.subscribeCount(), 1, 'a post-disposal emission must not create a new subscription')
+})
+
+test('job events route by semantics: output ignored, progress/stopping runtime-only, membership full (rc.1)', async (t) => {
+  // rc.1 JobEvent semantic routing: `output` (one ring append per streamed
+  // chunk) is pure stream noise; `progress`/`stopping` change only JobView
+  // runtime facts; only the membership vocabulary (registered/settled/
+  // removed) may move the subagent catalog, whose refresh (listDescendants)
+  // can read persistence — so routing matches the TaskBrowserRuntime's own
+  // catalog/runtime split.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-jobs-event-routing-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+
+  const parent: FakeSession = fakeSession({
+    id: 'jobs-output-filter-parent',
+    header: { id: 'jobs-output-filter-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  let descendantReads = 0
+  const subagents = {
+    listDescendants: async () => {
+      descendantReads += 1
+      return []
+    },
+  }
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  harness.jobs = jobs
+
+  // refreshTasks lands in app.setTasks; count calls through the prototype
+  // to observe exactly which emissions reached the refreshes.
+  const setTasksCalls: number[] = []
+  const originalSetTasks = TuiApp.prototype.setTasks
+  TuiApp.prototype.setTasks = function (tasks: unknown) {
+    setTasksCalls.push((tasks as { id: string }[]).length)
+    return originalSetTasks.call(this, tasks as never)
+  }
+  life.defer(() => { TuiApp.prototype.setTasks = originalSetTasks })
+
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  assert.ok(probe.apps.at(-1), 'the production runner must create a TuiApp')
+  await settle()
+  // The initial seed refresh (+ the subagents-backed catalog refresh).
+  const setTasksBaseline = setTasksCalls.length
+  const descendantBaseline = descendantReads
+  assert.ok(descendantBaseline > 0, 'the mount must have performed the initial catalog refresh')
+
+  // A burst of output events (one per streamed chunk) must reach NEITHER
+  // refresh channel: no task repaint, no catalog read.
+  for (let chunk = 0; chunk < 5; chunk += 1) jobs.emit('output')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(setTasksCalls.length, setTasksBaseline, 'output events must not repaint the Task rows')
+  assert.equal(descendantReads, descendantBaseline, 'output events must not trigger the subagent catalog refresh')
+
+  // `progress` (a producer's live progress line) and `stopping` (a kill
+  // acknowledged) change only JobView runtime facts: the Task rows repaint
+  // from the runtime-only refresh while the CATALOG (listDescendants —
+  // which may read persistence) stays untouched.
+  for (const type of ['progress', 'stopping'] as const) {
+    const taskBaseline = setTasksCalls.length
+    const catalogBaseline = descendantReads
+    jobs.emit(type)
+    await settle()
+    await vt.waitForRender()
+    assert.ok(setTasksCalls.length > taskBaseline, `a ${type} event must repaint the Task rows`)
+    assert.equal(descendantReads, catalogBaseline, `a ${type} event must NOT trigger the subagent catalog refresh`)
+  }
+
+  // Lifecycle vocabulary still refreshes normally: the roster changed and
+  // a settlement implies membership may have moved.
+  jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
+  for (const type of ['settled', 'registered', 'removed'] as const) {
+    const taskBaseline = setTasksCalls.length
+    const catalogBaseline = descendantReads
+    jobs.emit(type)
+    await settle()
+    await vt.waitForRender()
+    assert.ok(setTasksCalls.length > taskBaseline, `a ${type} event must repaint the Task rows`)
+    assert.ok(descendantReads > catalogBaseline, `a ${type} event must trigger the subagent catalog refresh`)
+  }
+})
+
+test('a failed jobs read never blanks the retained Task Browser parent', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-read-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-read-failure-parent',
+    header: { id: 'task-read-failure-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be the only overlay')
+  assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+
+  input('\r') // Job detail; the parent stays mounted but hidden
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2)
+
+  // The close-time refresh hits a transient registry failure: that must NOT
+  // be interpreted as an authoritative empty catalog.
+  jobs.setListFailure(new Error('registry unavailable'))
+  input('\x1b') // close the Job detail → onClose → refreshTasks()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  assert.ok(view().includes('build'),
+    `the retained parent must keep its rows across a failed registry read:\n${view()}`)
+})
+
+test('a failed jobs read never blanks a coordinator-backed Task Browser', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-runtime-read-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-runtime-read-failure-parent',
+    header: { id: 'task-runtime-read-failure-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  // A subagents service makes this the COORDINATOR-backed runtime path (the
+  // TaskBrowserRuntime.readJobs hook), not the jobs-only fallback browser.
+  const subagents = { listDescendants: async () => [] }
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+
+  // A runtime refresh (jobs change → refreshAgents → TaskBrowserRuntime.apply)
+  // whose registry read fails must keep the retained Job rows.
+  jobs.setListFailure(new Error('registry unavailable'))
+  jobs.emit()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'),
+    `the coordinator-backed browser must keep its rows across a failed registry read:\n${view()}`)
+})
+
+test('a session switch never inherits the previous session cached Job rows', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-cache-switch-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'cache-switch-a',
+    header: { id: 'cache-switch-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer a'),
+  })
+  const sessionB: FakeSession = fakeSession({
+    id: 'cache-switch-b',
+    header: { id: 'cache-switch-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer b'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const subagents = { listDescendants: async () => [] }
+  const harness = makeHarness(home, [sessionA, sessionB], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register the /resume alias')
+  const resume = resumeHandler as (invocation: { rawInput: string }) => unknown
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'), `session A must show its job:\n${view()}`)
+
+  // Switch sessions while the registry read fails: the cached A rows belong to
+  // A's session identity and must not be committed into B.
+  jobs.setListFailure(new Error('registry unavailable'))
+  await resume({ rawInput: sessionB.id })
+  await settle()
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!view().includes('build'),
+    `session B must not inherit session A cached Job rows:\n${view()}`)
+})
+
+test('switching sessions tears down the Job status viewer with its Task Browser', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-job-viewer-switch-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'job-viewer-switch-a',
+    header: { id: 'job-viewer-switch-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer a'),
+  })
+  const sessionB: FakeSession = fakeSession({
+    id: 'job-viewer-switch-b',
+    header: { id: 'job-viewer-switch-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer b'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [sessionA, sessionB], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register the /resume alias')
+  const resume = resumeHandler as (invocation: { rawInput: string }) => unknown
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+
+  input('\r') // open the Job status detail (a child overlay of the browser)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2, 'browser + Job detail')
+  assert.ok(view().includes('Esc back'), `the Job detail shows Esc back:\n${view()}`)
+
+  await resume({ rawInput: sessionB.id })
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'the whole Task Center stack is torn down')
+  assert.ok(!view().includes('Esc back'), `the old Job View must not survive the switch:\n${view()}`)
+  assert.ok(!view().includes('build'), `the old browser must not survive the switch:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'editor', 'the new-session editor owns the keyboard')
 })

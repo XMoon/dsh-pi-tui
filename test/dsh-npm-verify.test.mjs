@@ -9,6 +9,7 @@ import {
   npmVerificationEnvironment,
   pinNpmDshDependencies,
 } from '../scripts/dsh-npm-verify.mjs'
+import { resolveDshVersion } from '../scripts/dsh-client-family-compat.mjs'
 
 test('npm verification pins the public registry and isolated user config', () => {
   const environment = npmVerificationEnvironment('/tmp/dsh-npm-verify-test.npmrc', {
@@ -48,6 +49,38 @@ test('an explicit npm DSH override rewrites only DSH development packages', (t) 
   assert.equal(packageJson.peerDependencies['@deepseek-ai/dsh-agent'], '>=0.1.5-rc.1')
 })
 
+test('npm dependency pinning rewrites only DSH development packages and writes no override', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-exact-family-test-')
+  writeFileSync(join(workspace, 'package.json'), JSON.stringify({
+    devDependencies: {
+      '@deepseek-ai/dsh-agent': '0.1.5-rc.1',
+      typescript: '5.0.0',
+    },
+  }))
+  const originalWorkspace = 'packages:\n  - packages/*\n'
+  writeFileSync(join(workspace, 'pnpm-workspace.yaml'), originalWorkspace)
+
+  pinNpmDshDependencies(workspace, '0.1.6-rc.2')
+
+  const packageJson = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
+  assert.equal(packageJson.devDependencies['@deepseek-ai/dsh-agent'], '0.1.6-rc.2')
+  assert.equal(packageJson.pnpm, undefined)
+  // The exact-family pin is the shared distribution primitive's job, not this
+  // top-level rewrite: no second `overrides:` writer may exist.
+  assert.equal(readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8'), originalWorkspace)
+})
+
+test('client-family compatibility follows package.json and accepts only explicit alternate targets', () => {
+  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const declaredVersion = packageJson.devDependencies['@deepseek-ai/dsh-agent']
+  assert.equal(resolveDshVersion([]), declaredVersion)
+  assert.equal(resolveDshVersion(['--', '--dsh-version', '0.1.5-rc.2']), '0.1.5-rc.2')
+
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  assert.doesNotMatch(workflow, /0\.1\.5-rc\.[12]/u)
+})
+
 test('CI npm install branches pin the public registry and isolated config', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
   const npmInstallBlocks = workflow.match(/printf 'registry=https:\/\/registry\.npmjs\.org\/\\n' > "\$RUNNER_TEMP\/dsh-npmrc"[\s\S]*?pnpm install --frozen-lockfile/gu) ?? []
@@ -74,6 +107,8 @@ test('CI source preparation and publication have explicit time and registry boun
   assert.match(workflow, /echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
   assert.doesNotMatch(workflow, /NPM_CONFIG_(?:REGISTRY|USERCONFIG):/u)
   assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
+  assert.match(workflow, /client-family-compat:[\s\S]*?compat:dsh:client-family/u)
+  assert.match(workflow, /publish:[\s\S]*?needs\.client-family-compat\.result == 'success'/u)
 })
 
 test('official preset assembly follows the selected Source/npm distribution lane', () => {

@@ -11,6 +11,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
+import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 
 // ── Inline version helpers (startup must stay a ZERO-DEPENDENCY island) ────
 //
@@ -87,10 +88,9 @@ export const name = 'tui-startup'
 /** Services required before the flags can be resolved. */
 export const inject = ['cmdlineArgs']
 
-/** Incompatible dsh harness ranges and the guidance each deserves. Add a
- * new entry here whenever a future bundle release stops supporting an
- * older (or newer) harness line; entries are checked in ORDER and the
- * first whose range covers the installed dsh version wins.
+/** Incompatible dsh harness ranges and the guidance each deserves. Entries
+ * are checked in ORDER and the first whose range covers the installed dsh
+ * version wins.
  *
  * Range semantics: `min` is inclusive, `max` is EXCLUSIVE. An entry with
  * only `max` covers everything below it (the common "too old" case); an
@@ -101,10 +101,11 @@ export const inject = ['cmdlineArgs']
  * it is shown as the fallback version label (`>= <since>`) when the
  * bundle's own version cannot be read, so the message stays truthful.
  *
- * The 0.4.5 line has a minimum of the published npm release dsh-v0.1.5-rc.1
- * and is also compatible with dsh-v0.1.5-rc.2. The recovery guidance names
- * the recommended published upgrade target and allows its native install
- * scripts.
+ * The 0.4.8 line has a minimum of the published npm release
+ * dsh-v0.1.7-rc.1. The recovery guidance names the recommended published
+ * upgrade target and allows its native install scripts. The already-published
+ * 0.4.7-alpha.2 line keeps its own alpha.2 contract and remains the compatible
+ * fallback for a dsh-v0.1.6-alpha.2 runtime.
  */
 export interface HarnessCompatEntry {
   /** Inclusive lower bound of the incompatible range; absent = unbounded below. */
@@ -113,7 +114,7 @@ export interface HarnessCompatEntry {
   max?: string
   /** The bundle release line that first required this constraint. */
   since: string
-  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.5-rc.1 or later`. */
+  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.7-alpha.2 or later`. */
   requires: string
   /** The target DSH version to install when the current runtime is too old. */
   upgradeDsh?: string
@@ -126,31 +127,61 @@ export interface HarnessCompatEntry {
   guidance?: string
 }
 
-/** The compatibility table. Entries are ordered from oldest to newest so
- * `harnessCompatEntryFor()` can return the first matching historical range. */
-const CURRENT_DSH_REQUIREMENT = {
-  since: '0.4.5',
-  requires: 'DeepSeek Harness 0.1.5-rc.1 or later',
-  upgradeDsh: '0.1.5-rc.2',
-  upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2',
-  guidance: 'This 0.4.5 release is validated with the published DeepSeek Harness 0.1.5-rc.1 distribution and is also compatible with 0.1.5-rc.2; see docs/dsh-compatibility.md.',
-} as const
+/** One row of the shared compatibility matrix (src/dsh-compat-matrix.json):
+ * the DSH versions from `dshFrom` up to the next row's `dshFrom`, and the TUI
+ * line released for them. `tui` is absent when no released TUI supports the
+ * range (the runtime notice then offers the upgrade only). */
+interface CompatMatrixRow {
+  dshFrom: string
+  tui?: string
+  /** The published DSH versions the row covers, oldest first. */
+  versions: readonly string[]
+}
 
+interface CompatMatrix {
+  current: {
+    since: string
+    requires: string
+    upgradeDsh: string
+    upgradeCommand: string
+    guidance: string
+  }
+  floor: { below: string }
+  matrix: readonly CompatMatrixRow[]
+}
+
+/** The shared matrix. The bundler inlines this JSON, so the startup island
+ * gains neither a runtime file read nor a dependency. */
+const COMPAT = compatMatrix as unknown as CompatMatrix
+
+/** The floor this checkout imposes and the recovery guidance every
+ * incompatible range shows. */
+const CURRENT_DSH_REQUIREMENT: HarnessCompatEntry = {
+  since: COMPAT.current.since,
+  requires: COMPAT.current.requires,
+  upgradeDsh: COMPAT.current.upgradeDsh,
+  upgradeCommand: COMPAT.current.upgradeCommand,
+  guidance: COMPAT.current.guidance,
+}
+
+/** The compatibility table, derived from the shared matrix and ordered from
+ * oldest to newest so `harnessCompatEntryFor()` can return the first matching
+ * range. The oldest entry is the catch-all floor; each matrix row contributes
+ * a range that ends at the NEXT row's lower bound (the last row is the current
+ * supported line and produces no incompatible entry).
+ *
+ * Two boundaries are worth keeping in mind: cross-core prereleases do not
+ * satisfy an older TUI package's semver peer range, and the official
+ * dsh-v0.1.5-alpha.1/.2 tags predate the setup contract required by the next
+ * supported TUI line, so they carry no fallback. */
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
-  // These boundaries follow the published DSH tags. Cross-core prereleases do
-  // not satisfy the older TUI package's semver peer range.
-  { ...CURRENT_DSH_REQUIREMENT, max: '0.1.0-rc.8' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.0-rc.8', max: '0.1.1-rc.1', fallbackTui: '0.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.1-rc.1', max: '0.1.2-alpha.1', fallbackTui: '0.3' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.1', max: '0.1.2-alpha.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.2', max: '0.1.2-alpha.4', fallbackTui: '0.4.0-alpha.1' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.4', max: '0.1.2-rc.1', fallbackTui: '0.4.0-alpha.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-rc.1', max: '0.1.3-alpha.1', fallbackTui: '0.4.1' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.3-alpha.1', max: '0.1.3-alpha.2' },
-  // The last official runtime for this fallback is dsh-v0.1.3-alpha.2;
-  // the next official tags, dsh-v0.1.5-alpha.1/.2, require the new setup contract.
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-alpha.1', fallbackTui: '0.4.3-alpha.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.5-alpha.1', max: '0.1.5-rc.1' },
+  { ...CURRENT_DSH_REQUIREMENT, max: COMPAT.floor.below },
+  ...COMPAT.matrix.slice(0, -1).map((row, index) => ({
+    ...CURRENT_DSH_REQUIREMENT,
+    min: row.dshFrom,
+    max: COMPAT.matrix[index + 1].dshFrom,
+    ...(row.tui === undefined ? {} : { fallbackTui: row.tui }),
+  })),
 ]
 
 /** The compat entry covering the installed dsh version, or undefined when
@@ -211,6 +242,30 @@ export interface TuiStartupValues {
   sessionId?: string
   /** `--preset`, the agent preset a fresh session starts on. */
   presetId?: string
+  /**
+   * Mark the TUI required surface as mounted. `src/index.ts` calls this once
+   * its synchronous initialization succeeded and its async startup root is
+   * established. The readiness handshake registered by this row exits nonzero
+   * when the launcher commits readiness without it: 0.1.6 app-boot treats a
+   * failed `tui-app` row as an OPTIONAL plugin failure, so without this the
+   * explicitly requested TUI could report a successful startup that never
+   * mounted. Optional so structural test providers can omit it.
+   */
+  markSurfaceMounted?(): void
+}
+
+/**
+ * The actionable error for a committed startup whose TUI surface never
+ * mounted. The launcher proved the tree booted, but `--profile pi-tui` asked
+ * for this surface, so the outcome is an error rather than an optional plugin
+ * warning.
+ */
+function surfaceNotMountedMessage(): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked with --profile pi-tui, but the required TUI surface did not mount.`,
+    'The tui-app row failed to import/apply or stayed pending on a dependency (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    'This installation cannot run the terminal UI; reinstall the profile or fix its composition, then re-run: dsh --profile pi-tui',
+  ].join('\n')
 }
 
 /** This app's command: its flags, its description, and its help text. */
@@ -254,10 +309,25 @@ export function apply(ctx: Context): void {
         process.stderr.write(`\n${message}\n\n`)
       }
     }
+    // TUI-owned startup strictness. 0.1.6 app-boot fails fast only for the
+    // launcher's OWN required entry ids; every other inactive or failed entry
+    // is an OPTIONAL warning and healthy siblings continue. The user
+    // explicitly invoked `--profile pi-tui`, so the TUI owns the strictness
+    // for its OWN required surface: when readiness commits without the runner
+    // having mounted, print the actionable error and exit nonzero. `--help`
+    // never reaches this action, and a fatal launcher boot never calls
+    // `onReady`, so this cannot mask a real boot failure.
+    let surfaceMounted = false
+    ctx.get('appReady')?.onReady(() => {
+      if (surfaceMounted) return
+      process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
+      ctx.get('appExit')?.(1)
+    })
     const options = program.opts<{ session?: string; preset?: string }>()
     ctx.provide(TUI_STARTUP_SERVICE, {
       ...(options.session !== undefined ? { sessionId: options.session } : {}),
       ...(options.preset !== undefined ? { presetId: options.preset } : {}),
+      markSurfaceMounted: () => { surfaceMounted = true },
     } satisfies TuiStartupValues)
   })
   parseCmdline(ctx, program)

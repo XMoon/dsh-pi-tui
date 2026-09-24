@@ -1,115 +1,248 @@
 /**
- * The session LIFECYCLE domain port (M1.5, contract-reviewed) — the
- * semantic contract between the TUI and session creation/resumption,
- * implemented by `src/runtime/direct/` (Direct) today and by a Remote
- * adapter in a later milestone. The contract is deliberately
- * transport-neutral:
+ * The session LIFECYCLE domain port: the transport-neutral semantic boundary
+ * for ordinary create/open and Host-owned fork operations.
  *
- * - Requests carry SERIALIZABLE data (session id, provider/model, preset id,
- *   seed, meta) plus the explicitly client-local lifecycle signal — never
- *   callbacks. The signal is never serialized; a Remote adapter maps the
- *   serializable request data to the official DSH API.
- * - The result is a lightweight `SessionHandle` (session identity plus an
- *   optional Direct-only agent escape) — never the in-process
- *   `AgentHandle` object.
- * - The Direct adapter resolves the preset composition (which builds the
- *   agent-setup callback) INTERNALLY; the runner keeps its preflight
- *   compose and passes the preset id through the request.
+ * D2.3 removed the ordinary `provider`/`model` inputs. D2.4 removes the
+ * TUI-owned fork seed, child identity, lineage metadata and model/preset/cwd
+ * inheritance from the cross-backend contract. `fork()` carries only the
+ * source Session and an optional exact event cut; Host semantics own the
+ * boundary (alpha.2: an explicit `atSeq` cuts at exactly that event, an
+ * omitted one selects the latest completed prefix), child identity, lineage,
+ * workspace and composition.
  *
- * The DSH AgentHandle / SessionHandle owns the persistence writer
- * lifetime (its `dispose()` is the structured teardown; the kernel-flock
- * SessionWriteLease is the only cross-process writer authority). The TUI
- * runner owns only surface transition coordination (the transition gate,
- * the operation barrier, generation/stale fences) around the port calls.
+ * Open is the official Client semantic `select/open this Session` — not
+ * `resume a Host Agent`. The Direct adapter still calls `agents.resume()`
+ * internally so the in-process TUI has a live Agent; the Remote adapter maps
+ * the same operation to an explicit official `ClientSessions.retain()` and
+ * hands back a client-owned `SessionHandle`. DSH 0.1.6-alpha.2 retired the
+ * Client's own current-selection slot, so the Remote visible owner lives in
+ * the TUI (and only in this handle), while `binding()` stays borrow-only.
  *
- * Fork and rewind are NOT separate port methods: they ride the
- * dependency-injected seams in src/session-fork.ts (ForkAgentHost) and
- * src/rewind.ts, and the runner wires their `agents` surface through this
- * port's create/resume.
+ * Create carries only ordinary semantic intent. Its lifecycle signal is
+ * client-local and never serialized. Fork intentionally has no signal: the
+ * official Host operation is not cancelled by navigation supersession; only
+ * the visible navigation commit is supersedable.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-lifecycle-port
  */
 
-/** Create one fresh session (the /new and first-session paths). All fields
- * are serializable wire data — no callbacks, no Host types. The fields
- * are what a Remote adapter serializes; `signal` is the ONE client-local
- * control field (cancellation) that Remote adapters MUST NOT serialize —
- * they map it to their own client-side cancellation instead. */
+import type { OperationOwnership, WriteError } from './write-outcome.ts'
+
+/** Create one ordinary fresh Session (the /new and first-session paths).
+ * The Host owns the durable header shape; these are the only ordinary semantic
+ * inputs the TUI supplies. `signal` is client-local and never serialized. */
 export interface CreateSessionRequest {
-  /** The pre-generated session identity (the TUI owns the id). */
+  /** The pre-generated identity for an ordinary fresh Session. */
   sessionId: string
-  /** Durable session metadata (cwd, parent session, the `isSeeded` fork
-   * marker, ...). */
-  meta: Record<string, unknown>
-  provider?: string
-  model?: string
-  /** The agent preset id the session runs on (undefined = deployment
-   * default); the Direct adapter composes the setup from it. */
+  /** Optional ordinary workspace directory. */
+  cwd?: string
+  /** Semantic preset intent; the Direct adapter resolves its setup. */
   agentPreset?: string
-  /** The seed events (fork/rewind); a Remote backend maps them to its own
-   * seed contract. */
-  seed?: readonly unknown[]
-  /** Exact fork-inherited prefix length when `meta.isSeeded` is set
-   * (the seeded-session contract). */
-  inheritedEventCount?: number
-  /** CLIENT-LOCAL control field (never serialized): creation-only
-   * cancellation; the handle detaches on publication. */
+  /** Client-local creation cancellation; never serialized. */
   signal?: AbortSignal
 }
 
-/** Resume a persisted session (the ordinary open path). */
-export interface ResumeSessionRequest {
-  resumeSessionId: string
-  provider?: string
-  model?: string
-  /** The recorded preset id (resolved from the session log); the Direct
-   * adapter composes the setup from it. */
-  agentPreset?: string
-  /** CLIENT-LOCAL control field (never serialized): resume-creation-only
-    * cancellation; it detaches when the handle is published. A future Remote
-    * adapter maps it to client/connection cancellation instead of serializing
-    * the AbortSignal. */
+/** Official Host-owned fork intent. The Host chooses the child identity,
+ * boundary (alpha.2: an explicit `atSeq` is the exact inclusive event cut; an
+ * omitted one selects the latest completed prefix), inherited prefix, repair,
+ * lineage, workspace and model / preset restoration. There is deliberately no
+ * signal, seed, child id or caller-owned metadata. */
+export interface ForkSessionRequest {
+  readonly sourceSessionId: string
+  /** Canonical non-negative safe event sequence from the TUI event model.
+   * Must name an existing canonical event; the Host rejects anything else as
+   * `session/fork-unavailable` (never floors or ceils it). */
+  readonly atSeq?: number
+}
+
+/** Host fork settlement, independent from local navigation ownership. */
+export type ForkOutcome =
+  | { readonly kind: 'forked'; readonly handle: SessionHandle }
+  | { readonly kind: 'rejected'; readonly error: WriteError }
+  | {
+      readonly kind: 'published-with-error'
+      readonly sessionId: string
+      readonly error: WriteError
+      /** Direct-only owner returned when publication succeeded before a later
+       * workspace/reconcile step failed; the runner must retain it. */
+      readonly handle?: SessionHandle
+    }
+  | { readonly kind: 'indeterminate'; readonly error: WriteError }
+  /** A CLIENT-LOCAL pre-dispatch refusal: nothing reached the Host, so there is
+   * no Host settlement to report. Distinct from `rejected`, which is a PROVEN
+   * Host/business refusal such as `session/fork-unavailable` (no legal fork
+   * boundary — no completed prefix, or an explicit `atSeq` naming no canonical
+   * event). Semantic `cancelled` stays removed
+   * (v3 §7.2); this is the pre-dispatch state that removal left unnamed. */
+  | { readonly kind: 'unavailable'; readonly message: string }
+
+/** A fork settlement paired with whether the caller still owns its visible
+ * navigation surface. A superseded successful fork is still a real child. */
+export interface ForkResult {
+  readonly ownership: OperationOwnership
+  readonly outcome: ForkOutcome
+}
+
+/** Open a persisted session (the ordinary Client semantic:
+ * `select/open this Session`, NOT `resume a Host Agent`). The Direct adapter
+ * resolves the persisted preset and activation fallback internally. */
+export interface OpenSessionRequest {
+  /** The persisted Session identity to open. */
+  sessionId: string
+  /** Client-local open cancellation; never serialized. */
   signal?: AbortSignal
+}
+
+/** A Remote-only Client Session generation owner: one official
+ * `SessionReference` held for an exact binding generation. `bindingIdentity`
+ * is an identity token for exact-generation comparison only — never a lookup
+ * key and never a `ready` gate. `release()` must run exactly once. */
+export interface ClientSessionOwner {
+  readonly bindingIdentity: object
+  release(): void
 }
 
 /** The lightweight outcome of a lifecycle operation — the cross-backend
- * session identity. Direct backends additionally carry the ownership
- * escape: the live agent AND the real `AgentHandle` (whose `dispose()` is
- * the ownership capability — see docs/concurrency.md). Remote backends
- * leave `direct` undefined — the client runtime owns the session there.
- * The contract itself never types the Host objects. */
+ * session identity. A backend additionally carries its ownership escape:
+ * Direct the live Agent and real AgentHandle, Remote the exact Client
+ * generation reference. Both are optional and mutually exclusive. */
 export interface SessionHandle {
   readonly session: { readonly id: string }
-  /** DIRECT-ONLY ownership escape. The runner (Direct mode) extracts the
-   * live agent and the handle to drive its transition/retirement
-   * machinery; a Remote backend leaves it undefined. */
+  /** Direct-only ownership escape. The runner disposes the real owner handle
+   * on retirement; a Remote backend leaves it undefined. */
   readonly direct?: {
-    /** The live in-process agent object. */
     readonly agent: unknown
-    /** The real DSH `AgentHandle` (with `dispose()` — the ownership
-     * capability). MUST be preserved: the runner disposes it on
-     * retirement, and a lost handle previously pinned the old lease
-     * (removed legacy — the P1 regression class, fixed in M1.5
-     * revision 2). */
     readonly ownerHandle: unknown
   }
+  /** Remote-only ownership escape. A composing Remote caller must release
+   * exactly this Client generation on retirement; the Direct runner does not
+   * take it over, and a Direct backend leaves it undefined. */
+  readonly client?: ClientSessionOwner
 }
 
 /** The session LIFECYCLE domain port. */
 export interface SessionLifecycle {
-  create(request: CreateSessionRequest): Promise<SessionHandle>
-  resume(request: ResumeSessionRequest): Promise<SessionHandle>
+  create(request: CreateSessionRequest): Promise<CreateResult>
+  open(request: OpenSessionRequest): Promise<OpenResult>
+  fork(request: ForkSessionRequest): Promise<ForkResult>
+}
+
+/**
+ * The CREATE settlement (v2 §0.3.4/§0.7.3): a lifecycle-specific outcome, NOT a
+ * plain `WriteOutcome<void>`. `published-with-error` preserves the identity the
+ * Host published even though a later step failed; `indeterminate` keeps the
+ * requested id as CORRELATION ONLY (`requestedSessionId` is never publication
+ * evidence).
+ */
+export type CreateOutcome =
+  | { readonly kind: 'created'; readonly handle: SessionHandle }
+  | { readonly kind: 'rejected'; readonly error: WriteError }
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'published-with-error'; readonly sessionId: string; readonly error: WriteError }
+  | { readonly kind: 'indeterminate'; readonly error: WriteError; readonly requestedSessionId?: string }
+
+/** The OPEN settlement (v2 §0.3.5/§0.7.4): Client-local selection, never an
+ *  indeterminate Host write. */
+export type OpenOutcome =
+  | { readonly kind: 'opened'; readonly handle: SessionHandle }
+  | { readonly kind: 'unavailable'; readonly message: string }
+  | { readonly kind: 'cancelled' }
+
+/** A lifecycle settlement paired with its local ownership (v2 §0.2.1). The
+ *  axes are independent: `created + superseded` and `rejected + superseded`
+ *  are both real and legal. */
+export interface CreateResult {
+  readonly ownership: OperationOwnership
+  readonly outcome: CreateOutcome
+}
+
+/** A lifecycle open result paired with its local ownership. */
+export interface OpenResult {
+  readonly ownership: OperationOwnership
+  readonly outcome: OpenOutcome
+}
+
+/** Every settlement a lifecycle error can carry (machine-readable, never a
+ *  bare message). */
+export type LifecycleSettlement = CreateOutcome['kind'] | OpenOutcome['kind'] | ForkOutcome['kind'] | 'superseded'
+
+/** A lifecycle outcome that must ABORT the caller's transition, carrying the
+ *  two independent axes so a Remote caller never has to parse a string. */
+export class LifecycleError extends Error {
+  readonly settlement: LifecycleSettlement
+  readonly ownership: OperationOwnership
+  readonly publishedSessionId: string | undefined
+  /** CORRELATION ONLY for an indeterminate create — never publication proof. */
+  readonly requestedSessionId: string | undefined
+
+  constructor(
+    settlement: LifecycleSettlement,
+    ownership: OperationOwnership,
+    message: string,
+    publishedSessionId?: string,
+    requestedSessionId?: string,
+  ) {
+    super(message)
+    this.name = 'LifecycleError'
+    this.settlement = settlement
+    this.ownership = ownership
+    this.publishedSessionId = publishedSessionId
+    this.requestedSessionId = requestedSessionId
+  }
+}
+
+/** Unwrap a CREATE result for the runner's transition: a `created` result that
+ *  still owns the surface yields the handle; everything else aborts with a
+ *  machine-readable `LifecycleError` (a superseded create is NOT committed to
+ *  the local surface, though its identity stays available). */
+export function requireCreated(result: CreateResult): SessionHandle {
+  const { ownership, outcome } = result
+  switch (outcome.kind) {
+    case 'created':
+      if (ownership === 'superseded') {
+        throw new LifecycleError('superseded', ownership,
+          `Session "${outcome.handle.session.id}" was created, but the local surface was superseded — do not retry creation`,
+          outcome.handle.session.id)
+      }
+      return outcome.handle
+    case 'published-with-error':
+      // The published identity is an AUTHORITATIVE fact, not a maybe.
+      throw new LifecycleError(outcome.kind, ownership,
+        `Session "${outcome.sessionId}" was published, but workspace attach/reconcile failed: ${outcome.error.message} (${outcome.error.code}) — do not retry creation`,
+        outcome.sessionId)
+    case 'indeterminate':
+      throw new LifecycleError(outcome.kind, ownership,
+        `the create is indeterminate — do not retry: ${outcome.error.message} (${outcome.error.code})`,
+        undefined, outcome.requestedSessionId)
+    case 'rejected':
+      throw new LifecycleError(outcome.kind, ownership, `${outcome.error.message} (${outcome.error.code})`, undefined)
+    case 'cancelled':
+      throw new LifecycleError('cancelled', ownership, 'the Session creation was cancelled before dispatch', undefined)
+  }
+}
+
+/** Unwrap an OPEN result for the runner's transition. */
+export function requireOpened(result: OpenResult): SessionHandle {
+  const { ownership, outcome } = result
+  switch (outcome.kind) {
+    case 'opened':
+      if (ownership === 'superseded') {
+        throw new LifecycleError('superseded', ownership,
+          'the Session was opened but the local surface was superseded', outcome.handle.session.id)
+      }
+      return outcome.handle
+    case 'unavailable':
+      throw new LifecycleError('unavailable', ownership, outcome.message, undefined)
+    case 'cancelled':
+      throw new LifecycleError('cancelled', ownership, 'the Session open was cancelled before selection', undefined)
+  }
 }
 
 /** Extract the Direct ownership handle (the real AgentHandle with
- * `dispose()`) from a lifecycle result. Accepts BOTH the SessionHandle
- * (via `direct.ownerHandle`) and a legacy AgentHandle (which IS the
- * handle) so the runner's transition code never stores the SessionHandle
- * where it expects the AgentHandle — a lost handle would make
- * `dispose()` at retirement throw and pin the old lease (removed legacy
- * — the P1 regression class). Remote handles lack `direct` and yield
- * undefined. */
+ * `dispose()`) from a lifecycle result. Accepts both the converged
+ * SessionHandle and a legacy AgentHandle so transition code cannot lose the
+ * ownership capability. Remote handles lack `direct` and yield undefined. */
 export function ownerHandleOf(next: unknown): unknown {
   const handle = next as { dispose?: unknown; direct?: { ownerHandle?: unknown } }
   if (handle.direct?.ownerHandle !== undefined) return handle.direct.ownerHandle
@@ -119,9 +252,18 @@ export function ownerHandleOf(next: unknown): unknown {
 
 /** Extract the live in-process agent from a lifecycle result (the Direct
  * SessionHandle via `direct.agent`, or a legacy AgentHandle's `agent`).
- * Remote handles yield undefined — the client runtime owns the session
- * there. */
+ * Remote handles yield undefined. */
 export function directAgentOf(next: unknown): unknown {
   const handle = next as { agent?: unknown; direct?: { agent?: unknown } }
   return handle.direct?.agent ?? handle.agent
+}
+
+/** Extract the Remote Client generation owner from a lifecycle result. A
+ * Direct handle yields undefined. A composing Remote caller must release it
+ * exactly once on retirement — including when a superseded transition discards
+ * the handle. The Direct runner does not consume it yet (Remote remains
+ * non-composed). */
+export function clientOwnerOf(next: unknown): ClientSessionOwner | undefined {
+  const handle = next as { client?: ClientSessionOwner }
+  return handle.client
 }

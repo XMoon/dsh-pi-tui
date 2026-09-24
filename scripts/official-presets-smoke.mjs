@@ -130,7 +130,9 @@ async function main() {
       name: 'dsh-official-presets-harness',
       private: true,
       type: 'module',
-      dependencies: { '@deepseek-ai/dsh': targetDshVersion },
+      dependencies: {
+        '@deepseek-ai/dsh': targetDshVersion,
+      },
     }, null, 2) + '\n', 'utf8')
     const pnpm = run(PNPM_COMMAND, ['--version'], { cwd: harnessDir, env })
     if (pnpm.status !== 0) throw new Error(`pnpm is unavailable:\n${commandOutput(pnpm)}`)

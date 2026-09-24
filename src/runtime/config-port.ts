@@ -10,7 +10,7 @@
  * settings/credentials/authorization service objects (no
  * `settings.get(namespace)` / `settings.mutate(namespace, arbitraryPatch)`
  * god API — the Direct adapter owns the Host schema knowledge, e.g. the
- * `llm-pi-ai` / `permission` / `agent-presets` namespaces). Host schema
+ * `llm-pi-ai` / `permission` / `agent-preset-registry` namespaces). Host schema
  * knowledge is NOT the consumer's business: a command handler never names
  * a settings namespace or path — and the DTOs that cross the port carry
  * SEMANTIC facts only (`CredentialProviderOption.canProvisionProfile`),
@@ -31,18 +31,20 @@ import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
- * focusMode/wheelScrollLines). The old
- * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
+ * displayPreset/wheelScrollLines). `displayPreset` is the canonical display
+ * authority (the DSH 0.1.7 profile-owned `tui-app` Config references are the
+ * runtime backend; `focusMode` retired to a legacy-migration input only).
+ * The old `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. `footerLayout` is the
  * M2 versioned custom layout (nested settings object), absent when not
- * configured. The user keybinding overrides (`keybindings`) ride along
- * as an unknown-key pass-through of the schemastery-registered document
- * — the field is RAW EXTENSION DATA, deliberately not a semantic DTO:
- * the keybinding shape is owned by src/keybindings/config.ts (the only
- * validator), and the settings document is the storage the Direct
- * adapter passes through verbatim. A future Remote adapter MUST preserve
- * this raw field verbatim too (get/replace round-trip), never reinterpret
- * it — add a Remote-shaped contract test when the wire backend lands. */
+ * configured. The user keybinding overrides (`keybindings`) ride as a
+ * whole-value RAW field of the profile-owned plugin Config — the field is
+ * deliberately not a semantic DTO: the keybinding shape is owned by
+ * src/keybindings/config.ts (the only validator), and the settings
+ * document is the storage the Direct adapter passes through verbatim.
+ * A future Remote adapter MUST preserve this raw field verbatim too
+ * (get/replace round-trip), never reinterpret it — add a Remote-shaped
+ * contract test when the wire backend lands. */
 export interface TuiSettingsDoc {
   theme: string
   iconStyle: string
@@ -67,7 +69,13 @@ export interface TuiSettingsDoc {
   busyEnter: string
   localShellSandbox: string
   homeEndKeys: string
-  focusMode: string
+  /** Mid-turn progress-update cadence ('off' | 'milestones' | 'frequent');
+   * absent/invalid values resolve to milestones. */
+  progressUpdates?: string
+  /** Visible-answer density guidance ('default' | 'concise' |
+   * 'explanatory'); absent/invalid values resolve to default. */
+  responseStyle?: string
+  displayPreset?: string
   /** Completion-notification mode: 'unfocused' (default) | 'always' |
    * 'off' — when the main agent's settlement notifies the terminal. */
   notificationMode: string
@@ -384,8 +392,8 @@ export interface SubagentModelSelectionConfig {
 }
 
 /** The saved agent-preset default sub-domain (`/preset default`): the
- * persisted default (settings `agent-presets.default`), falling back to
- * the roster's own default. */
+ * persisted default (settings `agent-preset-registry.selectedDefault`),
+ * falling back to the roster's own default. */
 export interface PresetDefaultConfig {
   /** Whether the settings service (the persistence surface) is present. */
   available(): boolean

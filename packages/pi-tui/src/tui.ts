@@ -299,6 +299,32 @@ export interface OverlayOptions {
 	 * Set true when this overlay's entry is the component's sole owner.
 	 */
 	disposeOnHide?: boolean;
+	/**
+	 * Whether this capturing overlay takes keyboard focus when it is FIRST
+	 * mounted (default true). `false` is for the host's internal fullscreen
+	 * REBIND (dsh-pi-tui divergence X056): the entry is re-created for an
+	 * existing logical node and the host restores the real keyboard owner
+	 * afterwards, so an automatic focus here would emit a spurious
+	 * onFocus/onBlur pair on every screen swap. The entry keeps its normal
+	 * capturing policy for later show/focus.
+	 */
+	initialFocus?: boolean;
+	/**
+	 * Let the primary viewport keep receiving scroll/navigation input while
+	 * THIS capturing overlay holds keyboard focus (dsh-pi-tui divergence
+	 * X058). The overlay still owns the keyboard (unlike `nonCapturing`) and
+	 * still owns the pointer INSIDE its own rectangle — an event the overlay
+	 * handles is never also applied to the background. Only the primary
+	 * viewport's SCROLL/navigation additionally stays live when the overlay
+	 * does not consume the event: wheel / Alt+wheel anywhere, PageUp/PageDown,
+	 * scrollbar hit-testing/dragging, and background text selection outside the
+	 * overlay rectangle. Keyboard keys the overlay's focused component can
+	 * consume (Home/End, Ctrl+U/Ctrl+D, Up/Down, typing) still win.
+	 *
+	 * Default false: an ordinary capturing overlay keeps upstream's full
+	 * viewport block. Ignored for `nonCapturing` overlays.
+	 */
+	viewportPassthrough?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -316,17 +342,42 @@ export interface OverlayBounds {
 }
 
 /**
+ * Options for an INTERNAL order-preserving overlay restore (dsh-pi-tui
+ * divergence X056). The host temporarily suppresses a set of overlays (a
+ * Question / Save Location modal, or a screen swap) and later restores them.
+ * Upstream `setHidden(false)` / `focus()` promote the overlay's visual order
+ * AND take keyboard focus as side effects; an internal restore must reproduce
+ * the pre-suppression stacking and keyboard ownership instead (e.g. a
+ * nonCapturing HUD that legitimately sat above the focused capturing overlay,
+ * or a deliberately `blur`red overlay that must not fire a spurious
+ * onFocus/onBlur).
+ *
+ * - `preserveOrder: true` — perform the visibility change WITHOUT the
+ *   `focusOrder` promotion.
+ * - `preserveFocus: true` — perform the visibility change WITHOUT taking
+ *   keyboard focus (`setHidden(false)` only; `focus()` always focuses).
+ */
+export interface OverlayOrderPreservingOptions {
+	preserveOrder?: boolean;
+	preserveFocus?: boolean;
+}
+
+/**
  * Handle returned by showOverlay for controlling the overlay
  */
 export interface OverlayHandle {
 	/** Permanently remove the overlay (cannot be shown again) */
 	hide(): void;
 	/** Temporarily hide or show the overlay */
-	setHidden(hidden: boolean): void;
+	setHidden(hidden: boolean, options?: OverlayOrderPreservingOptions): void;
 	/** Check if overlay is temporarily hidden */
 	isHidden(): boolean;
-	/** Focus this overlay and bring it to the visual front */
-	focus(): void;
+	/**
+	 * Focus this overlay and bring it to the visual front. With
+	 * `preserveOrder: true` the overlay takes the keyboard WITHOUT being
+	 * promoted to the front (internal restore).
+	 */
+	focus(options?: OverlayOrderPreservingOptions): void;
 	/** Release focus to the next visible capturing overlay or previous target, or to an explicit target when provided */
 	unfocus(options?: OverlayUnfocusOptions): void;
 	/** Check if this overlay currently has focus */
@@ -671,6 +722,17 @@ export abstract class TuiBase extends Container implements TUI {
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
+	/** X056: monotonic stamp identifying the NEWEST focus transition. A focus
+	 * callback runs synchronously and may start another transition; the outer
+	 * one bails out when superseded. */
+	private focusRevision = 0;
+	/** X056: the last component whose focus intent was explicitly released
+	 * (unfocus) or whose lifecycle ended (hide / hidden / hideOverlay), keyed by
+	 * its release stamp. A pending transition to a target released DURING the
+	 * transition must re-derive instead of installing it. A WeakMap keeps every
+	 * released target (an onBlur may release several) without retaining them. */
+	private focusIntentSeq = 0;
+	private readonly focusReleaseSeq = new WeakMap<Component, number>();
 	private overlayStack: OverlayStackEntry[] = [];
 	/** The last-painted overlay layouts (protected: TuiAltScreen's
 	 * gesture-liveness check reads the CURRENT painted placement of a
@@ -790,6 +852,12 @@ export abstract class TuiBase extends Container implements TUI {
 		component: Component | null;
 		overlayFocusRestore: OverlayFocusRestorePolicy;
 	}): void {
+		// X056: a focus callback runs synchronously and may start a NEWER focus
+		// transition (an onBlur that re-requests focus, an onFocus that mounts
+		// another overlay). The outer transition must not overwrite whatever the
+		// newer one established, so it stamps itself and bails out when superseded.
+		const revision = ++this.focusRevision;
+		const intentSeq = this.focusIntentSeq;
 		const previousFocus = this.focusedComponent;
 		let nextFocus = component;
 		const previousFocusedOverlay = previousFocus
@@ -797,12 +865,19 @@ export abstract class TuiBase extends Container implements TUI {
 			: undefined;
 		const nextFocusIsOverlay = nextFocus ? this.overlayStack.some((entry) => entry.component === nextFocus) : false;
 		const restoreState = this.getVisibleOverlayFocusRestore();
+		// The restore bookkeeping is PENDING until this transition completes: a
+		// synchronous callback may supersede it, and the newer transaction owns
+		// the final state.
+		let pendingRestore: OverlayFocusRestoreState | undefined;
+		let pendingClear = false;
 		if (nextFocus && !nextFocusIsOverlay) {
 			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
 				if (restoreState.resume.status === "focus-target" || !this.isComponentMounted(restoreState.blockedBy)) {
-					nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
+					const resolved = this.resolveBlockedOverlayFocusResume(restoreState);
+					nextFocus = resolved.component;
+					if (resolved.clear) pendingClear = true;
 				} else {
-					this.overlayFocusRestore = {
+					pendingRestore = {
 						status: "blocked",
 						overlay: restoreState.overlay,
 						blockedBy: nextFocus,
@@ -815,7 +890,7 @@ export abstract class TuiBase extends Container implements TUI {
 				restoreState.overlay === previousFocusedOverlay &&
 				!this.isOverlayFocusAncestor(previousFocusedOverlay, nextFocus)
 			) {
-				this.overlayFocusRestore = {
+				pendingRestore = {
 					status: "blocked",
 					overlay: previousFocusedOverlay,
 					blockedBy: nextFocus,
@@ -824,21 +899,39 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 		} else if (nextFocus === null) {
 			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
-				nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
+				const resolved = this.resolveBlockedOverlayFocusResume(restoreState);
+				nextFocus = resolved.component;
+				if (resolved.clear) pendingClear = true;
 			} else if (overlayFocusRestore === "clear") {
-				this.clearOverlayFocusRestore();
+				pendingClear = true;
 			}
 		}
 
 		if (isFocusable(this.focusedComponent)) {
 			this.focusedComponent.focused = false;
+			// An onBlur callback may have started a newer transition.
+			if (revision !== this.focusRevision) return;
+		}
+		// The pending target's OWN focus intent/lifecycle may have been changed
+		// by that onBlur (blur/hide/close on it) without starting a new
+		// transition: never install a released/hidden/removed target.
+		if (nextFocus !== null) {
+			const releasedSeq = this.focusReleaseSeq.get(nextFocus);
+			if (releasedSeq !== undefined && releasedSeq > intentSeq) {
+				nextFocus = this.getTopmostVisibleOverlay(nextFocus)?.component ?? null;
+			}
 		}
 
 		this.focusedComponent = nextFocus;
 
 		if (isFocusable(nextFocus)) {
 			nextFocus.focused = true;
+			// An onFocus callback may have started a newer transition.
+			if (revision !== this.focusRevision) return;
 		}
+
+		if (pendingClear) this.clearOverlayFocusRestore();
+		if (pendingRestore !== undefined) this.overlayFocusRestore = pendingRestore;
 
 		const focusedOverlay = nextFocus
 			? this.overlayStack.find((entry) => entry.component === nextFocus && this.isOverlayVisible(entry))
@@ -858,10 +951,17 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 	}
 
-	private resolveBlockedOverlayFocusResume(restoreState: BlockedOverlayFocusRestoreState): Component | null {
-		if (restoreState.resume.status === "restore-overlay") return restoreState.overlay.component;
-		this.clearOverlayFocusRestore();
-		return restoreState.resume.target;
+	/** Resolve a blocked overlay restore into its target focus. When the blocked
+	 * state is CONSUMED (focus-target resume) the caller must clear it — but
+	 * only once its own transition completes, because a synchronous focus
+	 * callback may supersede it (X056). */
+	private resolveBlockedOverlayFocusResume(
+		restoreState: BlockedOverlayFocusRestoreState,
+	): { component: Component | null; clear: boolean } {
+		if (restoreState.resume.status === "restore-overlay") {
+			return { component: restoreState.overlay.component, clear: false };
+		}
+		return { component: restoreState.resume.target, clear: true };
 	}
 
 	private getVisibleOverlayFocusRestore(): OverlayFocusRestoreState {
@@ -921,8 +1021,8 @@ export abstract class TuiBase extends Container implements TUI {
 			focusOrder: ++this.focusOrderCounter,
 		};
 		this.overlayStack.push(entry);
-		// Only focus if overlay is actually visible
-		if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
+		// Only focus if overlay is actually visible (and not an X056 rebind)
+		if (options?.initialFocus !== false && !options?.nonCapturing && this.isOverlayVisible(entry)) {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
@@ -933,6 +1033,8 @@ export abstract class TuiBase extends Container implements TUI {
 			hide: () => {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
+					// X056: a pending transition to this component must not install it.
+					this.focusReleaseSeq.set(component, ++this.focusIntentSeq);
 					this.clearOverlayFocusRestoreFor(entry);
 					this.retargetOverlayPreFocus(entry);
 					this.overlayStack.splice(index, 1);
@@ -951,7 +1053,11 @@ export abstract class TuiBase extends Container implements TUI {
 					this.requestRender();
 				}
 			},
-			setHidden: (hidden: boolean) => {
+			setHidden: (hidden: boolean, setHiddenOptions?: OverlayOrderPreservingOptions) => {
+				// X056: record the release BEFORE the idempotent early-return — an
+				// already-hidden pending target released from a callback must not
+				// be installed by the outer transition either.
+				if (hidden) this.focusReleaseSeq.set(component, ++this.focusIntentSeq);
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
 				// Update focus when hiding/showing
@@ -965,20 +1071,27 @@ export abstract class TuiBase extends Container implements TUI {
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
 					if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
-						entry.focusOrder = ++this.focusOrderCounter;
-						this.setFocus(component);
+						// X056: an internal restore must not promote the visual
+						// order nor take keyboard focus.
+						if (setHiddenOptions?.preserveOrder !== true) entry.focusOrder = ++this.focusOrderCounter;
+						if (setHiddenOptions?.preserveFocus !== true) this.setFocus(component);
 					}
 				}
 				this.requestRender();
 			},
 			isHidden: () => entry.hidden,
-			focus: () => {
+			focus: (focusOptions?: OverlayOrderPreservingOptions) => {
 				if (!this.overlayStack.includes(entry) || !this.isOverlayVisible(entry)) return;
-				entry.focusOrder = ++this.focusOrderCounter;
+				// X056: an internal restore must not promote the visual order.
+				if (focusOptions?.preserveOrder !== true) entry.focusOrder = ++this.focusOrderCounter;
 				this.setFocus(component);
 				this.requestRender();
 			},
 			unfocus: (unfocusOptions) => {
+				// X056: record the release even when this component is not yet
+				// focused — it may be the PENDING target of an in-flight
+				// transition that must re-derive instead of installing it.
+				this.focusReleaseSeq.set(component, ++this.focusIntentSeq);
 				const isFocused = this.focusedComponent === component;
 				const restoreState = this.overlayFocusRestore;
 				const hasPendingRestore = restoreState.status !== "inactive" && restoreState.overlay === entry;
@@ -1021,6 +1134,8 @@ export abstract class TuiBase extends Container implements TUI {
 	hideOverlay(): void {
 		const overlay = this.overlayStack[this.overlayStack.length - 1];
 		if (!overlay) return;
+		// X056: a pending transition to this component must not install it.
+		this.focusReleaseSeq.set(overlay.component, ++this.focusIntentSeq);
 		this.clearOverlayFocusRestoreFor(overlay);
 		this.retargetOverlayPreFocus(overlay);
 		this.overlayStack.pop();
@@ -1045,6 +1160,46 @@ export abstract class TuiBase extends Container implements TUI {
 	protected isOverlayFocused(): boolean {
 		return this.overlayStack.some(
 			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
+		);
+	}
+
+	/**
+	 * Whether a visible overlay currently BLOCKS the primary viewport's
+	 * scroll/navigation input and pointer gestures. An overlay opted into
+	 * `viewportPassthrough` (dsh-pi-tui divergence X058) does not block; every
+	 * other visible overlay, including `nonCapturing` ones, keeps the upstream
+	 * block so this predicate is exactly `hasOverlay()` minus opted-in entries.
+	 */
+	protected hasBlockingOverlay(): boolean {
+		return this.overlayStack.some(
+			(entry) => this.isOverlayVisible(entry) && !this.overlayViewportPassthroughEntry(entry),
+		);
+	}
+
+	/**
+	 * Whether one overlay entry qualifies for the X058 viewport passthrough:
+	 * it must be a CAPTURING overlay that explicitly opted in. `nonCapturing`
+	 * never qualifies — the option is documented as ignored for it, and a
+	 * nonCapturing notice must keep the upstream viewport/scrollbar block.
+	 */
+	private overlayViewportPassthroughEntry(entry: OverlayStackEntry): boolean {
+		return entry.options?.nonCapturing !== true && entry.options?.viewportPassthrough === true;
+	}
+
+	/**
+	 * Whether the primary viewport currently PASSTHROUGHS scroll/navigation
+	 * input while an overlay owns the keyboard (dsh-pi-tui divergence X058):
+	 * the FOCUSED visible overlay opted in, and no other visible overlay blocks
+	 * the viewport. Stacking an ordinary modal above stops the passthrough
+	 * immediately; hiding it restores it.
+	 */
+	protected overlayViewportPassthrough(): boolean {
+		const focused = this.overlayStack.find(
+			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
+		);
+		if (focused === undefined || !this.overlayViewportPassthroughEntry(focused)) return false;
+		return !this.overlayStack.some(
+			(entry) => entry !== focused && this.isOverlayVisible(entry) && !this.overlayViewportPassthroughEntry(entry),
 		);
 	}
 
@@ -1105,9 +1260,10 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	/** Find the visual-frontmost visible capturing overlay, if any */
-	private getTopmostVisibleOverlay(): OverlayStackEntry | undefined {
+	private getTopmostVisibleOverlay(exclude?: Component): OverlayStackEntry | undefined {
 		let topmost: OverlayStackEntry | undefined;
 		for (const overlay of this.overlayStack) {
+			if (overlay.component === exclude) continue;
 			if (overlay.options?.nonCapturing || !this.isOverlayVisible(overlay)) continue;
 			if (!topmost || overlay.focusOrder > topmost.focusOrder) {
 				topmost = overlay;

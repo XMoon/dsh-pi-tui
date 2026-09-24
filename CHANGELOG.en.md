@@ -7,6 +7,372 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-24
+
+### Installation and version pairing
+
+This stable release moves the DSH compatibility target to the published
+`0.1.7-rc.1` (peer floor `>=0.1.7-rc.1`): TUI preferences move into the
+profile-owned plugin configuration, agent presets switch to the official
+declarative registry, and background jobs, the sandbox shell, the task center,
+and the remote read surfaces adopt the rc.1 runtime contracts. Installing DSH
+requires explicitly allowing its native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.8
+dsh --profile pi-tui
+```
+
+To keep an older DSH runtime, install the TUI line paired with it:
+`@deepseek-ai/dsh@0.1.6-alpha.2` uses `@xmoon76/dsh-pi-tui@0.4.7-alpha.2`, and
+`@deepseek-ai/dsh@0.1.5-rc.2` uses `@xmoon76/dsh-pi-tui@0.4.6`; the older DSH
+`0.1.1-rc.1`/`rc.2` uses `@xmoon76/dsh-pi-tui@0.3`.
+
+### Added
+
+- **Compatible with DeepSeek Harness `0.1.7-rc.1`: settings move to profile-owned plugin configuration and agent presets switch to the official declarative registry.** TUI preferences (theme, footer, display preset, notifications, key bindings, …) now live in the `tui-app` plugin's profile configuration; `/settings` changes apply immediately and persist per field. Existing preferences in the legacy `settings.yaml` migrate automatically on first start (including the Focus-preference convergence into display presets); the migration only reads the legacy file, is retryable, and never overwrites values changed after migration. The agent preset roster is now the official `standard` / `ptc` / `minimal` / `cordis` declarations (default selection and "set as default" are adjudicated by the Host), and the guessed alias mapping for the legacy `code` default is gone. The minimum runtime is now `dsh 0.1.7-rc.1`: background jobs, the sandbox shell, the task center, and the remote read surfaces adopt the rc.1 official runtime contracts (session-owned jobs, the shell execute/result lifecycle, official projections and job rosters for the task center) with existing interactive behavior unchanged.
+
+- **Two independent communication settings: Progress updates and Response style.** `/settings` now separates the mid-turn update cadence (Milestones default / Frequent / Off) from the visible answer's density (Default / Concise / Explanatory); the next model step picks up the change without restarting the agent. Preferences are saved across sessions, never affect each other or the display preset, and Focus only suppresses the effective progress section (the saved cadence is untouched) while the response style stays active in Focus.
+
+- **Long user messages collapse.** A text-only prompt longer than 10 terminal
+  visual rows renders its first 4 rows, one
+  `── N rows compacted · … to expand ──` marker, and its last 3 rows; `Ctrl+O`
+  expands and collapses the long prompts within the most recent 3 USER turns, and
+  fullscreen can expand a single message by clicking that marker row or a search
+  hit. In fullscreen an expanded prompt gains a tail `▴ Collapse · …` control
+  that collapses it with a plain click, and long input in the `steering…` lane
+  folds by the same visual-row rule with its status line always visible. The
+  decision uses the wrapped visual rows at the current width (CJK and emoji count
+  their real cells) and is recomputed after a resize. Disclosure keeps the
+  viewport — follow-latest keeps following and historical browsing stays on the
+  same semantic row — and the tail control is fullscreen-only and never copied
+  into the clipboard. Known limitation: a search jump expands the matched message
+  but does not scroll onto the exact matched row.
+- **A fullscreen `↓ Latest` hint.** Once the fullscreen transcript leaves the live
+  tail (manual scroll-up or a browsed history window), the bottom shows a
+  clickable `↓ Latest · <key>`; it takes the same path as `Ctrl+End` straight back
+  to the GLOBAL latest and disappears again at the tail.
+- **`/model` is now an immediate, searchable palette.** The panel opens at once
+  with `Loading models…` and fills in place when the directory read settles;
+  provider is a group only, one search covers provider/model names and ids, and
+  `Enter` on a reasoning model focuses the inline effort on the same row
+  (`←`/`→` pick, `Enter` commits, `Esc` returns). DSH session and global-default
+  model semantics are unchanged.
+- **`/settings` "Subagent allowed models" uses the same searchable grouped
+  list.** `Enter` toggles an allowed route directly; the official whole-section
+  write, last-route guard, serialized writes, and failure rollback are unchanged.
+- **The Job detail overlay has its own bottom action hint.** A running job shows
+  `S stop · Esc back`; once the job settles the Stop hint disappears and its key
+  becomes a no-op, while `Esc back` stays visible under a long body, a short
+  terminal, or a narrow width.
+- **Accepted but not yet landed input stays visible and reads the official
+  durable inbox projection.** A submitted steering or queued prompt shows a
+  client-local echo in the queue pane or the conversation tail until its
+  authoritative transcript lands; the echo is correlated with the authoritative
+  message by request id, never by text, and recovers after a reconnect or
+  restart. A writer held by another DSH instance or context now surfaces
+  actionable quit-and-retry guidance instead of an internal diagnostic.
+
+### Changed
+
+- **Compact and Focus now share one collapsed `Think:` + `Action:` vocabulary, and both headers count `actions`.** The collapsed card no longer understands only genuine tool calls: the `Action:` slot shows the latest non-Thinking TURN-OWNED Process evidence in chronology — a genuine tool call, a live Preparing call, an LLM retry, or an unpaired tool-result diagnostic (honestly rendered as `Unpaired … result`, never disguised as a successful call). The header follows with `N actions · subtype ×count` (e.g. `7 actions · read ×3 · bash ×2 · +1`, where `+1` counts the remaining action SUBTYPES): a genuine tool contributes its `callCount` (a merged read group is still two calls), a retry occurrence contributes one, an orphan result and Preparing contribute nothing, and `ask_user_question` / `exit_plan_mode` stay owned by their interaction panel — neither occupying the Action slot nor counting. Focus and Activity share one classifier, selection rule, formatter and subtype ordering; singleton stats such as `1 action · read ×1` are never special-cased away. Tool stays the strict underlying semantic: a retry does not become a tool.
+- **A `subagent/descriptor` no longer produces a transcript card at all.** It is the CHILD session's identity record (version / mode / provider / label), and a continuable child logs it BEFORE its first `turn/start` (upstream asserts `descriptorIndex < turnStartIndex`), so it belongs to no model turn. The child viewer keeps showing the child's label/mode/activity from its own authoritative state while the transcript body carries no synthetic `Subagent` identity card; the parent's own genuine `tool/call name=subagent` remains the delegation evidence and carries the Action. Old-window `N tool calls` counts no longer include descriptor rows.
+- **A slash command is a real standalone transcript node with its own disclosure.** A command's lifecycle is session-level: DSH appends `command/run`/`command/done` as direct log-only events with **no model turn opened for them**, and the settled result renders outside model history (`/compact [running]` → `/compact [ok]`). The command card is an INDEPENDENT row: it is never an Activity member (it splits the surrounding Process run), never enters the `N actions`/`N tool calls` stats, and is never swallowed by the collapsed Focus `Action:` slot or Thought — so the common "agent finished, user runs `/compact` while idle" case keeps its feedback visible. Its fold stays independent of the Focus root, a long outcome stays operable (folded one-line preview, expanded full body), command-only sessions stay visible and searchable, and Ctrl+F reveals pre-turn/inter-turn/tail commands through the anchored window. A manual `/compact` fuses with its compaction card through the official `sourceCommandId`/`sourceEventSeq` relationship only (never name/text/adjacency matching): the compaction card becomes the single visible owner while the command's name/args/outcome stay searchable through it.
+- **The Activity card loses its identity icon, and container chrome loses its outer indent.** The user-visible name stays `Activity` (the internal owner kind is unchanged) but its identity no longer varies by icon style: `▸ Activity` / `▾ Activity` (the `🧰` / `✦` glyphs and their icon semantic are removed), identified by the disclosure marker and the name alone. Focus, Activity, the pending Activity card and the Context cluster drop their decorative two-cell outer indent, so a collapsed container header and its expanded canonical rows share one transcript left edge (no more "collapsed indented, expanded flush" inversion). Genuine INTERNAL indentation stays: Thinking bodies, Tool payload/result insets, PTC child/grandchild trees, assistant/user wrapped continuations, and the standalone Context cards' (notice / relay / recall) own body — their header sits flush while the summary/payload, the relay body and its long-message marker are indented 2 cells, matching the Tool card's payload inset. That indent is applied after the body wraps at the reduced content budget, so a narrow terminal never overflows just to keep the lead.
+- **The Activity header now shows the process span's OWN wall-clock duration.** The timing is a presentation-only sidecar sourced entirely from session event times (thinking, tool call/result, plus point evidence from retries), aggregated inside the existing single summary walk; running cards tick with the existing repaint heartbeat (no per-card timers), missing evidence omits the duration (never a fake `0s`), a consecutive-read group that spans turns drops its timing so an Activity span never crosses a turn boundary, and the Preparing → durable tool-call handoff keeps the earliest authoritative start so elapsed seconds no longer reset from `3s` to `0s`. Token usage stays on the Focus header (a turn-level fact); Activity aggregates a Process span, has no trustworthy per-span usage attribution, and therefore NEVER displays, estimates or allocates tokens.
+- **Compact's Action slot now shows PTC active sub-calls like Focus.** For example `Code · Bash ×2 running`; width degradation preserves the running state before sacrificing root description text, and nested child start/settle refreshes the collapsed Activity card immediately.
+- **Transcript-detail vocabulary convergence.** The `/settings` "Tool output" row becomes "Transcript detail" (Bulk expansion for recent collapsible transcript content); the Ctrl+O description becomes "Expand/collapse recent transcript detail" and Alt+T becomes "Expand/collapse thinking detail" (disclosure, not visibility); the Display description now reads "…Compact folds contiguous process into Activity spans"; `/help` uses the same wording with effective key labels.
+- **The Advanced API gains `advanced.host.setTranscriptDetailExpanded()`.** The previous `setToolsExpanded()` remains as a deprecated alias driving the same runtime state (never a second field).
+- **Fullscreen scrolling is smoother in large sessions and under Focus/Compact.** Pure scroll/repaint frames no longer remeasure the whole transcript geometry and rebuild per-row click identities every frame: the snapshot is rebuilt only when content, disclosure, image loading or terminal size actually changes (geometry epoch). Scroll frame time drops by roughly 37% on ~1500-block sessions, 27% under expanded Focus and 16% under Compact; click and copy hit semantics are unchanged (a press/release pair whose cell shifted between frames is still rejected).
+
+- **Transcript disclosure, search and viewport now converge on one owner and reveal model.** Every hidden region has one operable owner on the current surface: the regular surface uses the shared `Ctrl+O` master for Work, Context clusters, ordinary folds, long/pending-user folds and the assistant delivered-files tail; when that key is unavailable (remapped away or disabled) those folds all fail open and no un-openable header or `(ctrl+o to expand)` hint is rendered. Delivered files have their own per-owner capability: fullscreen Compact/Focus, or any surface without the key, simply shows every file. Thinking stays Alt+T-owned and equally fails open (no compact card, no dead hint) on a regular surface without an effective Alt+T key. Expanded Focus now presents each contiguous Process run as an independently collapsible nested `Work` container (collapsed by default on fullscreen, openable by mouse or temporary search reveal; regular Focus keeps it fully revealed while its Thought is expanded), and an explicit Thought collapse returns that turn's nested Work to Compact depth. A mouse click on an internal blank row now collapses the NEAREST shared container (nested Work beats the outer Thought, a cluster-internal blank collapses the cluster, a boundary/global blank is inert). Search reveal is now a container path: navigation temporarily opens every hidden ancestor without writing manual state, an ordinary dismiss promotes those owners atomically, and an explicit collapse revokes the temporary reveal; search only reveals a genuinely hidden match (a fail-open or already-visible row mints no owner). Disclosure transitions still reuse the existing semantic viewport transactions (no second viewport model).
+- **Conversation display now has one canonical Full/Focus/Compact preset state.** `/display` is the primary control and `/focus` remains compatible.
+- **The Compact display preset is now available.** `/display compact`, the `display-preset` setting, and a persisted `displayPreset: compact` all activate Compact for real: the conversation and Assistant intermediate output stay visible in chronology, contiguous reasoning/tool process folds into `Activity` spans with Header + Think + Action previews (click or `Ctrl+O` to expand the raw process rows, with `Ctrl+O` as the bulk owner), injected `notice` / `relay` / `recall` context becomes standalone presentation (producer summary, Agent message, Session recall), and adjacent ambient injections (instructions/catalog/snapshot) collapse into an expandable Context cluster. Compact remains opt-in; the default is unchanged.
+- **The Context cluster header now shows both the disclosure state and the Context identity.** The collapse/expand marker (`▸`/`▾`) is followed by the Context identity icon: `▸ 📎 Context · N injections` under emoji, `▸ ⋅ Context · N injections` under symbols, and `▸ Context · N injections` under minimal (the decorative icon disappears with no dangling space). The `Activity` header follows the marker-only rule instead (no Context-style identity icon).
+- **Collapsed Focus absorbs mid-turn process notices into the Thought.** A `notice` that arrives while the Agent is already working (a background job finishing, a subagent settling) no longer occupies its own row: it is folded into the collapsed Thought and fully restored in raw chronology when Focus is expanded. A notice in the turn's opening foundation stays visible (it explains why the Agent resumed) and a mid-turn `relay` stays independently visible. A hidden mid-turn notice remains reachable through full-text search, which reveals it temporarily and restores the collapsed view on dismiss without creating new manual expansion state.
+- **Rebuilding the presentation when search opens no longer scales quadratically with history size.** In a large session, the search-reveal re-projection now resolves the reveal owner once per projection epoch, with a benefit that grows with the history length.
+- **Settled `ask_user_question` and `exit_plan_mode` (Plan review) cards are now surfaced as human-interaction evidence instead of being folded into Process.** Both are identified by tool identity only — the authoritative set is exactly these two, no new semantic class, and the set is never widened because a card looks rich or once required an approval: under Compact they become `Work` boundaries and render standalone (never counted toward the span tool count or the Tool preview); collapsed Focus hoists them out of the Thought like a user/steer or surfaced-context row (raw relative order, never across the committed-answer/steer ordering fence); expanded Focus restores their exact raw position; Full is unchanged. Their own expand/collapse is independent of the Focus root (collapsing the root does not reset them) and reuses the existing tool-card interaction (fullscreen click; the regular surface fails open per the existing capability). A still-running question or plan review is untouched — its panel keeps sole ownership and no duplicate settled-style card appears — and partially answered, skipped, cancelled or errored question cards stay independently readable. Every other tool (todo/goal/subagent/workflow/schedule/cordis/bash/edit/…) stays ordinary Process.
+- **Question / Approval keep response ownership while read-only context inspection remains available.** While a response modal is open, fold, Thinking disclosure, fullscreen jump-latest, Todo presentation, and proven fullscreen presentation hits remain usable through direct or leader-bound inspection triggers; fixed Question / Approval response keys take precedence over conflicting global inspection remaps, while submit, session changes, and lifecycle actions remain protected.
+- **Full-text search in long sessions is much faster.** Typing and stepping
+  with `Enter`/`Shift+Enter` now rebuild the transcript tree at most ONCE per
+  operation and no longer re-measure or re-render the entire window for every
+  character; a same-window jump is near-instant and a cross-window jump performs
+  exactly one necessary re-projection.
+- **Rendered search matches are reused per live card.** When a card's rendered
+  lines are unchanged, repeated navigation reuses its complete match results;
+  changing the query rescans only the cached corpus, and changed card content
+  rebuilds that corpus automatically without changing semantic `N/M` identity.
+- **Anchor-only results navigate near usable rendered hits when possible.** In
+  fullscreen, source-local or card-level rendered candidates are brought into
+  view; a range that is already fully visible is left alone instead of being
+  snapped back to a fixed position. Approximate navigation never upgrades a
+  result to strong highlight and falls back to the honest source anchor when no
+  rendered candidate exists.
+- **The current search result is more prominent and follows the theme.** A
+  provable current occurrence uses an explicit themed foreground/background
+  block instead of relying on the terminal's inverse attribute; a
+  source-anchored-only hit instead washes a weaker background over its owning
+  card/source row, while every other hit stays weakly underlined — prominence
+  never disguises an occurrence as "proven".
+- **The transcript stays browsable and interactive while the search box is
+  open.** In fullscreen you can keep scrolling with the wheel / `PageUp` /
+  `PageDown`, drag the scrollbar, select and copy text, and expand/collapse
+  cards with the mouse while the search box keeps keyboard focus
+  (`Home`/`End`, `Ctrl+U`/`Ctrl+D` and typing still belong to the box); the
+  editor, submit and other modals stay blocked by the search box.
+
+- **Quick Tasks is now navigation-only.** The Footer `↓` Quick Tasks view
+  responds only to the arrows, `Tab`, `Enter`, and `Esc`; every other key is a
+  no-op (`S`/`/`/`T` no longer arm a stop, enter search, or switch views), `N` /
+  `Shift+N` and Quick's `T` shortcut into the full view became the bottom "Open
+  Task Center" row plus `Enter`, and the full Task Center gains `Shift+Tab`
+  reverse type cycling.
+- **Interrupted parked steering is presented accurately with its recovery path.**
+  After the active turn is interrupted, a steering row still parked in the inbox
+  reads `waiting for next turn…` and is consumed by the official next-wake
+  semantics on the next ordinary prompt; an empty Ctrl+S then explains the
+  recovery instead of silently no-opping.
+- **The Focus header shows the real run state.** An open turn reads `Working`,
+  `Waiting for approval · 12s`, or `Waiting for input · 12s`, and settles on
+  `Turn complete`; time spent waiting on the user no longer counts toward the run
+  duration.
+- **The Focus compact Tool row uses the tool identity plus the official
+  description.** A foreground Bash call shows `Bash · <description>` and a
+  background card shows `<tool name> · <content description>`; an unknown custom
+  tool keeps its raw name, and the full command stays in the expanded tool card.
+- **A short fullscreen opens the Todo panel with 3 rows.** On terminals with at
+  most 16 rows the compact Todo panel shows 3 items (5 otherwise), re-derived
+  from the current height on resize.
+- **Fullscreen drag selection and `/copy` share one clipboard policy.** Both
+  attempt the terminal OSC 52 leg and the native helper leg independently, and a
+  helper success no longer suppresses OSC 52; this fixes remote setups (e.g.
+  ORCA/xterm.js) where a selection was copied to the remote host's clipboard.
+- **File edit/write diff cards follow the official bounded contextual diff.**
+  Shared context lines are no longer misreported as additions or deletions and
+  sparse edits in large files stay exact; only a fragment past the official
+  bounded edit search (256 edits) degrades to a coarse replacement, with the
+  folded `+N/-M` totals derived from the same source as the expanded body.
+- **A Task Center Job detail returns one level, and capturing-overlay focus
+  restoration is unified.** Opening a Job **status detail** from Quick Tasks or
+  the full Task Center returns with `Esc` to the same Task Center instance
+  (selected row, scroll, filter, search, and disclosure preserved) before a
+  second `Esc` returns to the editor; a subagent job that resolves to a child
+  session still opens that transcript directly. After a close, a restored
+  **capturing** overlay regains keyboard focus and the focused seat, a
+  nonCapturing notice does not take focus or suppress its siblings, and a
+  Question / Save Location settle or a fullscreen swap is an internal restore
+  that keeps the current logical hierarchy, visibility and focus intent, and
+  front order.
+- **`/fork` and `/rewind` now use the official DSH Host fork semantics.** The
+  Host owns the completed-turn cut, child identity, lineage, workspace, and
+  model/preset composition; Direct and Remote follow the same semantics. A
+  running `/fork` fixes its cut at fork admission instead of waiting for the old
+  turn to finish, and if navigation is superseded, the published child remains
+  available from the session list. The official Host fork cannot represent an
+  empty-prefix child, so rewind is no longer offered for the first user turn.
+- **Workspace membership is now shared with the Web surface.** The TUI profile
+  mounts the official workspace service, and `/fork` of a session that belongs to
+  a workspace puts the child in that same workspace, where Web lists it.
+
+### Fixed
+
+- **The collapsed Think preview no longer freezes on the first line.** In both the running and settled states the Think slot reads the latest logical line of the bounded reasoning tail: while streaming the window follows the right edge (the latest token stays visible), and when settled it head-truncates the latest line (previously a multiline reasoning body always rendered its first line, so the UI looked stuck while reasoning continued). Focus and Compact share one preview implementation via the new compact-process-preview authority module.
+- **Restoring an old session no longer crashes when an injected-context source is missing or malformed.** A log row whose context source is empty or not an object degrades safely to a standalone generic Context row; unknown or future context forms are never mistaken for ambient injections and never fabricate a summary or sender.
+- **Ctrl+F full-text search now works per occurrence, not per card.** The `N/M`
+  counter and `↑`/`↓` step through every occurrence inside one card. Every
+  visible match is marked weakly; the current occurrence uses the strongest
+  style ONLY when its semantic occurrence can be proven to map to a rendered
+  occurrence, otherwise it is anchored to the owning source region without a
+  strong highlight (never a wrong one). Fullscreen follows the same rule
+  instead of jumping to the window bottom.
+- **Closing search keeps the current position and representable disclosure.** Closing with
+  `Esc` or the search toggle no longer returns to the window that was visible before
+  search; a card, Thought, PTC path, or Workflow Run/Phase temporarily opened to show
+  the current result remains open when it has an existing user disclosure owner.
+  Search highlights, search-only rows, reveals without a durable owner, and content the
+  user explicitly collapsed during search are still cleared. `Ctrl+End` still returns
+  explicitly to the latest content.
+- **A session switch no longer leaves the previous search's current hit
+  behind.** A new session never inherits the old session's search highlight or
+  temporary reveal.
+
+- **A failed TUI startup is no longer silently treated as an optional plugin
+  failure.** When startup commits but the `tui-app` row never mounted, the bundle
+  prints an actionable error and **exits nonzero**, never a warning-plus-success
+  with a lingering process.
+- **Preset-selection visibility follows the deployment policy.** With
+  `modeSelectionEnabled` set to `false`, `/preset` no longer appears in the slash
+  candidates or `/help` while typing it still fails closed under the official
+  policy; an unavailable roster keeps the current presentation.
+- **Fullscreen historical scroll position is no longer pulled back to the tail.**
+  When the queue pane, other chrome, or a terminal resize changes the viewport
+  height, a view that had scrolled away from the live tail keeps its position;
+  only an explicit scroll to the end resumes following.
+
+### Compatibility
+
+- **PTC/workflow runtime aligned with the official composition.** The `ptc`
+  preset receives its PTC runtime from the official `ptc-runtime` row, the TUI no
+  longer inserts the retired `code-runtime-worker-thread` row, and the host-plane
+  workflow row is aligned to the official `workflow-ptc`. This release's DSH peer
+  floor is `>=0.1.7-rc.1`; a runtime below it gets its paired TUI line and the
+  exact npm upgrade target from the startup notice.
+
+> **Known limitation:** The production default backend remains Direct; remote attach is not supported.
+
+## [0.4.7-alpha.2] - 2026-09-18
+
+### Installation and version pairing
+
+This release moves the `next` npm line's DSH compatibility target to
+`0.1.6-alpha.2` (peer floor `>=0.1.6-alpha.2`). Its native install scripts must
+be explicitly allowed:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.7-alpha.2
+dsh --profile pi-tui
+```
+
+To keep an older DSH runtime, install the TUI line paired with it:
+`@deepseek-ai/dsh@0.1.6-alpha.1` uses `@xmoon76/dsh-pi-tui@0.4.7-alpha.1`, and
+`@deepseek-ai/dsh@0.1.5-rc.2` uses `@xmoon76/dsh-pi-tui@0.4.6`.
+
+### Changed
+
+- **The DSH compatibility target moves to `0.1.6-alpha.2`.** Client Session lifetime now uses the official explicit reference ownership (`retain` / `release`), so the runtime peer floor rises to `>=0.1.6-alpha.2`. A Harness still on `0.1.6-alpha.1` gets an actionable startup upgrade notice (and may keep using the published `0.4.7-alpha.1` TUI line).
+- **Pending input now reads the official durable inbox projection.** Queued/steering rows no longer depend on a transient in-session queue snapshot and recover after a reconnect or restart; a writer held by another DSH instance or context now surfaces actionable quit-and-retry guidance instead of an internal diagnostic.
+- **`/fork` and `/rewind` now use the official DSH Host fork semantics.** The Host owns the completed-turn cut, child identity, lineage, workspace, and model/preset composition; Direct and Remote follow the same semantics.
+- **A running `/fork` fixes its cut at fork admission.** It no longer waits for the old turn to finish; if navigation is superseded, the published child remains available from the session list.
+- **Workspace membership is now shared with the Web surface.** The TUI profile mounts the official workspace service, and `/fork` of a session that belongs to a workspace puts the child in that same workspace, where Web lists it.
+- **Rewind is no longer offered for the first user turn.** The official Host fork cannot represent an empty-prefix child.
+- **Long user messages now collapse in both directions.** In fullscreen, an expanded prompt gains a tail `▴ Collapse · …` control that collapses it with a plain click (no longer `Ctrl+O` alone); long input in the `steering…` lane folds by the same visual-row rule with its status line always visible. Disclosure keeps the viewport — follow-latest keeps following and historical browsing stays on the same semantic row. The tail control is fullscreen-only, is never copied into the clipboard, and regular keeps `Ctrl+O` as its collapse owner without injecting terminal-native-selectable chrome into the scrollback.
+
+## [0.4.7-alpha.1] - 2026-09-17
+
+### Installation and version pairing
+
+This release moves the `next` npm line's DSH compatibility target to
+`0.1.6-alpha.1` (peer floor `>=0.1.6-alpha.1`). Its native install scripts must
+be explicitly allowed:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.7-alpha.1
+dsh --profile pi-tui
+```
+
+To stay on the older DSH `0.1.5-rc.1`/`0.1.5-rc.2`, keep the stable
+`@xmoon76/dsh-pi-tui@0.4.6`; for the older DSH `0.1.1-rc.1`/`rc.2` use
+`@xmoon76/dsh-pi-tui@0.3`.
+
+### Added
+
+- **Long user messages collapse by default.** A text-only prompt longer than 10
+  terminal visual rows renders its first 4 rows, one
+  `── N rows compacted · … to expand ──` marker, and its last 3 rows, so a
+  trailing instruction stays visible; `Ctrl+O` expands and collapses the long
+  prompts within the most recent 3 USER turns, and fullscreen can expand a single
+  message by clicking that marker row or a search hit. The decision uses the
+  wrapped visual rows at the current width (CJK and emoji count their real cells)
+  and is recomputed after a resize. Known limitation: a search jump expands the
+  matched message but does not scroll onto the exact matched row.
+- **A fullscreen `↓ Latest` hint.** Once the fullscreen transcript leaves the live
+  tail (manual scroll-up or a browsed history window), the bottom shows a
+  clickable `↓ Latest · <key>`; it takes the same path as `Ctrl+End` straight back
+  to the GLOBAL latest and disappears again at the tail.
+- **`/model` is now an immediate, searchable palette.** The panel opens at once
+  with `Loading models…` and fills in place when the directory read settles;
+  provider is a group only, one search covers provider/model names and ids, and
+  `Enter` on a reasoning model focuses the inline effort on the same row
+  (`←`/`→` pick, `Enter` commits, `Esc` returns). DSH session and global-default
+  model semantics are unchanged.
+- **`/settings` "Subagent allowed models" uses the same searchable grouped
+  list.** `Enter` toggles an allowed route directly; the official whole-section
+  write, last-route guard, serialized writes, and failure rollback are unchanged.
+- **The Job detail overlay has its own bottom action hint.** A running job shows
+  `S stop · Esc back`; once the job settles the Stop hint disappears and its key
+  becomes a no-op, while `Esc back` stays visible under a long body, a short
+  terminal, or a narrow width.
+- **Accepted but not yet landed input stays visible.** A submitted steering or
+  queued prompt shows a client-local echo in the queue pane or the conversation
+  tail until its authoritative transcript lands; the echo is correlated with the
+  authoritative message by request id, never by text.
+
+### Improved
+
+- **Quick Tasks is now navigation-only.** The Footer `↓` Quick Tasks view
+  responds only to the arrows, `Tab`, `Enter`, and `Esc`; every other key is a
+  no-op (`S`/`/`/`T` no longer arm a stop, enter search, or switch views), `N` /
+  `Shift+N` and Quick's `T` shortcut into the full view became the bottom "Open
+  Task Center" row plus `Enter`, and the full Task Center gains `Shift+Tab`
+  reverse type cycling.
+- **Interrupted parked steering is presented accurately with its recovery path.**
+  After the active turn is interrupted, a steering row still parked in the inbox
+  reads `waiting for next turn…` and is consumed by the official next-wake
+  semantics on the next ordinary prompt; an empty Ctrl+S then explains the
+  recovery instead of silently no-opping.
+- **The Focus header shows the real run state.** An open turn reads `Working`,
+  `Waiting for approval · 12s`, or `Waiting for input · 12s`, and settles on
+  `Turn complete`; time spent waiting on the user no longer counts toward the run
+  duration.
+- **The Focus compact Tool row uses the tool identity plus the official
+  description.** A foreground Bash call shows `Bash · <description>` and a
+  background card shows `<tool name> · <content description>`; an unknown custom
+  tool keeps its raw name, and the full command stays in the expanded tool card.
+- **The collapsed Thinking preview follows the reasoning tail.** While reasoning
+  streams, the one-line compact preview always shows the newest token, clipping
+  overflow from the left, driven only by real reasoning deltas; a settled row
+  still reads from the start of its line.
+- **A short fullscreen opens the Todo panel with 3 rows.** On terminals with at
+  most 16 rows the compact Todo panel shows 3 items (5 otherwise), re-derived
+  from the current height on resize.
+- **Fullscreen drag selection and `/copy` share one clipboard policy.** Both
+  attempt the terminal OSC 52 leg and the native helper leg independently, and a
+  helper success no longer suppresses OSC 52; this fixes remote setups (e.g.
+  ORCA/xterm.js) where a selection was copied to the remote host's clipboard.
+- **File edit/write diff cards follow DSH 0.1.6's bounded contextual diff.**
+  Shared context lines are no longer misreported as additions or deletions and
+  sparse edits in large files stay exact; only a fragment past the official
+  bounded edit search (256 edits) degrades to a coarse replacement, with the
+  folded `+N/-M` totals derived from the same source as the expanded body.
+- **A Task Center Job detail returns one level, and capturing-overlay focus
+  restoration is unified.** Opening a Job **status detail** from Quick Tasks or
+  the full Task Center returns with `Esc` to the same Task Center instance
+  (selected row, scroll, filter, search, and disclosure preserved) before a
+  second `Esc` returns to the editor; a subagent job that resolves to a child
+  session still opens that transcript directly. After a close, a restored
+  **capturing** overlay regains keyboard focus and the focused seat, a
+  nonCapturing notice does not take focus or suppress its siblings, and a
+  Question / Save Location settle or a fullscreen swap is an internal restore
+  that keeps the current logical hierarchy, visibility and focus intent, and
+  front order.
+
+### Fixed
+
+- **A failed TUI startup is no longer silently treated as an optional plugin
+  failure.** When startup commits but the `tui-app` row never mounted, the bundle
+  prints an actionable error and **exits nonzero**, never a warning-plus-success
+  with a lingering process.
+- **Preset-selection visibility follows the deployment policy.** With
+  `modeSelectionEnabled` set to `false`, `/preset` no longer appears in the slash
+  candidates or `/help` while typing it still fails closed under the official
+  policy; an unavailable roster keeps the current presentation.
+- **Fullscreen historical scroll position is no longer pulled back to the tail.**
+  When the queue pane, other chrome, or a terminal resize changes the viewport
+  height, a view that had scrolled away from the live tail keeps its position;
+  only an explicit scroll to the end resumes following.
+
+### Compatibility
+
+- **PTC/workflow runtime aligned with the official 0.1.6 composition.** The `ptc`
+  preset receives its PTC runtime from the official `ptc-runtime` row, the TUI no
+  longer inserts the retired `code-runtime-worker-thread` row, and the host-plane
+  workflow row is aligned to the official `workflow-ptc`.
+
+> **Known limitation:** The production default backend remains Direct; remote attach is not supported.
+
 ## [0.4.6] - 2026-09-13
 
 ### Installation and version pairing
@@ -1107,7 +1473,10 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...HEAD
+[0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8
+[0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2
+[0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1
 [0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
 [0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2

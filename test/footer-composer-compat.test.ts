@@ -288,8 +288,8 @@ function defaultRow1Left(snap: StatusSnapshot, context: { taskBrowserAvailable: 
   return items
 }
 
-/** The default layout's row-1 RIGHT zone: the plan state and the Focus
- * Mode indicator (both render nothing when inactive). */
+/** The default layout's row-1 RIGHT zone: the plan state and the
+ * canonical display preset indicator (the preset always renders). */
 function defaultRow1Right(snap: StatusSnapshot): RefItem[] {
   const items: RefItem[] = []
   const state = snap.collaboration.plan.pending !== undefined
@@ -303,14 +303,12 @@ function defaultRow1Right(snap: StatusSnapshot): RefItem[] {
       order: 0,
     })
   }
-  if (snap.interaction.focusMode) {
-    items.push({
-      text: toneText('focus', 'textMuted'),
-      compact: toneText('focus', 'textMuted'),
-      importance: 120,
-      order: items.length,
-    })
-  }
+  items.push({
+    text: toneText(snap.interaction.displayPreset, 'textMuted'),
+    compact: toneText(snap.interaction.displayPreset, 'textMuted'),
+    importance: 120,
+    order: items.length,
+  })
   return items
 }
 
@@ -464,7 +462,7 @@ test('permission/plan/task/focus variants stay byte-equivalent', () => {
       ...snap,
       access: { permissionPreset: { id: permission, label: permission, matched: permission !== 'custom' } },
       collaboration: { plan: { effective: true } },
-      interaction: { ...snap.interaction, focusMode: true },
+      interaction: { ...snap.interaction, displayPreset: 'focus' },
       activity: { ...snap.activity, taskCount: 1, childAgentCount: 2 },
     }
     const expected = referenceFooter(defaultReferenceRows(variant, CONTEXT, ''), 100)
@@ -600,11 +598,11 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    // The status row (identity facts; the inactive plan/focus right zone
-    // renders nothing) and the stats row: the stats-line facts as semantic
+    // The status row (identity facts plus the always-visible display preset)
+    // and the stats row: the stats-line facts as semantic
     // placements plus the counters on the left, the full context pressure
     // flush right (no cache activity → the cache-hit placement is absent).
-    '[workspace-write]  [deepseek/flash]  x/proj  main\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
+    '[workspace-write]  [deepseek/flash]  x/proj  main                                               full\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
@@ -613,7 +611,7 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
     // rows); the stats row is a RIGHT-ZONE row (its single-line fit
     // contract), so the left zone compacts then drops the latency
     // placement against the context's reserved width.
-    '[workspace-write]  [deepseek/flash]\nx/proj  main\n↑1.2k ↓3.4k  0t/s  t2/s5  25k/100k (25%)',
+    'ww  flash  proj  main               full\n↑1.2k ↓3.4k  0t/s  t2/s5  25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
@@ -622,17 +620,17 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
     // (ww/flash/proj); only the model/cwd/branch survive. The stats row's
     // left zone loses every placement but the (truncated) usage pair — the
     // right-zone context stays reserved and renders flush right.
-    '[workspace-write]\nflash  proj  main\n↑1.2… 25k/100k (25%)',
+    'ww  flash  proj full\n↑1.2… 25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
     '[workspace-write]  [deepseek/flash]  x/proj  main  [███░░░░░░░░░] 25%  t2/s5',
   )
-  // The status row's right zone (plan state + Focus Mode) renders flush
-  // right when active — only the left zone is fitted to the remainder.
+  // The status row's right zone (plan state + display preset) renders flush
+  // right — only the left zone is fitted to the remainder.
   const focusSnap = mainSnapshot() as DeepMutable<StatusSnapshot>
-  focusSnap.interaction = { ...focusSnap.interaction, focusMode: true }
+  focusSnap.interaction = { ...focusSnap.interaction, displayPreset: 'focus' }
   assert.equal(
     composer.render({ snapshot: focusSnap as StatusSnapshot, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
@@ -642,7 +640,7 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: { ...CONTEXT, extensionFooterText: '[EXT-SEG]' } })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    '[workspace-write]  [deepseek/flash]  x/proj  main  [EXT-SEG]\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
+    '[workspace-write]  [deepseek/flash]  x/proj  main  [EXT-SEG]                                    full\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
   )
   // The dim pass wraps EVERY physical row in the textDim SGR pair.
   const ansi = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })

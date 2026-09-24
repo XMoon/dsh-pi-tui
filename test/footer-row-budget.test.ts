@@ -152,18 +152,16 @@ test('the Host instruction never deletes a user row when the budget fits', () =>
   assert.ok(lines.some(line => line.includes('deepseek')), `row 2 must survive:\n${JSON.stringify(lines)}`)
 })
 
-test('the Host instruction reserves its line; capacity 4 gives status 2 + stats 1 + hint', () => {
+test('the Host instruction reserves its line; capacity 4 gives status 1 + stats 1 + hint', () => {
   // Instruction + default 2-row layout at 40 columns with the effective
-  // total of 4 (the plan §7 example): the hint reserves 1, the two rows
-  // share the remaining 3 — a baseline each, the leftover buys the
-  // LEFT-ONLY status row its second line (no plan/focus: its right zone
-  // renders nothing; the stats row always carries the context right zone,
-  // so it keeps its single-line fit contract). 2 + 1 + 1 = 4; nothing
+  // total of 4 (the plan §7 example): the hint reserves 1, and the
+  // always-visible display preset gives the status row a right zone, so both
+  // user rows keep their one-line fit contract. 1 + 1 + 1 = 3; nothing is
   // replaced, nothing overflows.
   const snap = busySnapshot() as DeepMutable<StatusSnapshot>
   snap.collaboration.plan.effective = false
   const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { instruction: INSTRUCTION })
-  assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
+  assert.equal(lines.length, 3, `1 + 1 + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again to exit'), `the hint must be its own line:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('yolo')), `the status row must survive:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('160k/1.0M (16%)')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
@@ -353,7 +351,7 @@ test('an instruction that renders NOTHING reserves no line and paints nothing', 
 
 test('a right-zone row keeps its single-line contract while left-only siblings wrap', () => {
   const snap = busySnapshot() as DeepMutable<StatusSnapshot>
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   const layout: FooterLayoutV1 = {
     schemaVersion: 1,
     rows: [

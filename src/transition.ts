@@ -1,6 +1,6 @@
 /**
- * The session switch transaction — the canonical ordering shared by /new,
- * /fork, conversation rewind and `/sessions` switch/resume:
+ * The ordinary session-switch transaction — the canonical ordering shared by
+ * /new and `/sessions` switch/resume:
  *
  * ```text
  * 1. quiesce old (whenIdle + final flush)
@@ -26,8 +26,13 @@
 
 import { safeErrorMessage } from './error-boundary.ts'
 
-/** The settled outcome of a transition. */
-export type TransitionOutcome<T> = { ok: true; next: T } | { ok: false; message: string }
+/** The settled outcome of a transition. A failure carries the RAW abort so a
+ *  caller can read a machine-readable cause (e.g. a `LifecycleError` with
+ *  `ownership: "superseded"` or a published Session identity) instead of only
+ *  a formatted message. */
+export type TransitionOutcome<T> =
+  | { ok: true; next: T }
+  | { ok: false; message: string; error?: unknown }
 
 /** The caller-owned transition steps. */
 export interface TransitionSteps<T> {
@@ -68,7 +73,7 @@ export async function runTransitionTo<T>(
     await host.quiesceOld()
   } catch (error) {
     host.recordFailure('quiesce', error)
-    return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
+    return { ok: false, message: `transition failed: ${safeErrorMessage(error)}`, error }
   }
   // Phase 2 — ALL TUI-owned preflight, BEFORE the DSH boundary: a failure
   // aborts with zero side effects.
@@ -77,7 +82,7 @@ export async function runTransitionTo<T>(
       await steps.prepare()
     } catch (error) {
       host.recordFailure('prepare', error)
-      return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
+      return { ok: false, message: `transition failed: ${safeErrorMessage(error)}`, error }
     }
   }
   // Phase 3 — create/resume. A rejection is NEVER retried (no same-ID
@@ -87,7 +92,7 @@ export async function runTransitionTo<T>(
     next = await steps.create()
   } catch (error) {
     host.recordFailure('create', error)
-    return { ok: false, message: `transition failed: ${safeErrorMessage(error)}` }
+    return { ok: false, message: `transition failed: ${safeErrorMessage(error)}`, error }
   }
   // Phase 4 — COMMIT: a synchronous critical section, no awaits.
   host.commit(next)

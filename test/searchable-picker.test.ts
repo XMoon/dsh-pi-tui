@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CURSOR_MARKER, TuiAltScreen } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, TuiAltScreen, visibleWidth } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
   type SearchablePickerTheme,
@@ -730,4 +730,273 @@ test('async setItems WITHOUT a repaint between paint and press cannot select the
   const press = picker.handleMouse(mouse('press', 5, 2, 80, 10)) // press the old 'a' row
   assert.equal(press, undefined, 'a press on a row whose value no longer exists must be rejected')
   assert.deepEqual(selected, [], 'the press must not select the replacement at the stale index')
+})
+
+// ── Generic seams added for the /model command-palette picker ────────────
+
+test('selected-below expands only the selected row and moves with the selection', () => {
+  const items = [
+    { value: 'a', label: 'alpha', description: 'first detail', group: 'G' },
+    { value: 'b', label: 'bravo', description: 'second detail', group: 'G' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {
+    enableSearch: true,
+    descriptionMode: 'selected-below',
+  })
+  let rendered = picker.render(80)
+  assert.ok(rendered.some(line => line.includes('first detail')), 'selected detail missing')
+  assert.ok(!rendered.some(line => line.includes('second detail')), 'unselected detail must not render')
+
+  picker.handleInput('\x1b[B') // down to bravo
+  rendered = picker.render(80)
+  assert.ok(!rendered.some(line => line.includes('first detail')), 'old detail must disappear')
+  assert.ok(rendered.some(line => line.includes('second detail')), 'new detail must render')
+})
+
+test('selected-below detail stays inside the row budget and keeps the hint', () => {
+  const items = Array.from({ length: 12 }, (_, i) => ({
+    value: `v${i}`,
+    label: `item-${i}`,
+    description: `detail-${i}`,
+  }))
+  const picker = new SearchablePicker(items, 8, testTheme, {}, {
+    enableSearch: true,
+    descriptionMode: 'selected-below',
+  })
+  picker.setMaxRows(8)
+  const rendered = picker.render(80)
+  assert.ok(rendered.length <= 8, `render must respect the grant, got ${rendered.length}`)
+  assert.ok(rendered.some(line => line.includes('esc close')), 'the hint must survive')
+})
+
+test('a badge renders right-aligned and yields the label width to it', () => {
+  const items = [
+    { value: 'a', label: 'a-very-long-model-name', badge: 'current · high' },
+    { value: 'b', label: 'short' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { descriptionMode: 'selected-below' })
+  const rendered = picker.render(40)
+  const badgeLine = rendered.find(line => line.includes('current · high'))
+  assert.ok(badgeLine !== undefined, 'badge missing')
+  assert.ok(visibleWidth(badgeLine!) <= 40, 'badge line must fit the width')
+  assert.ok(badgeLine!.indexOf('current · high') > badgeLine!.indexOf('a-very-long'), 'badge must follow the label')
+  // A row too narrow for label + badge keeps the status and still fits.
+  const narrow = new SearchablePicker(items, 5, testTheme, {}, { descriptionMode: 'selected-below' }).render(12)
+  assert.ok(narrow.every(line => visibleWidth(line) <= 12), `narrow rows must fit:\n${narrow.join('\n')}`)
+  assert.ok(narrow.some(line => line.includes('current')), 'the status badge must survive a narrow row')
+})
+
+test('the search index covers group text and explicit searchText aliases', () => {
+  const items = [
+    { value: 'm1', label: 'Sol', group: 'OpenAI' },
+    { value: 'm2', label: 'Opus', group: 'Anthropic', searchText: 'provider-id-42' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true, descriptionMode: 'selected-below' })
+  picker.handleInput('openai')
+  let rendered = picker.render(80)
+  assert.ok(rendered.some(line => line.includes('Sol')), 'group name must match')
+  assert.ok(!rendered.some(line => line.includes('Opus')), 'other group must not match')
+  for (let i = 0; i < 6; i += 1) picker.handleInput('\b')
+  picker.handleInput('provider-id-42')
+  rendered = picker.render(80)
+  assert.ok(rendered.some(line => line.includes('Opus')), 'searchText alias must match')
+})
+
+test('setSelectedValue selects by identity within the filtered list and no-ops when unmatched', () => {
+  const items = [
+    { value: 'p1\u0000m', label: 'one' },
+    { value: 'p2\u0000m', label: 'two' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  picker.setSelectedValue('p2\u0000m')
+  assert.equal(picker.getSelectedItem()?.value, 'p2\u0000m', 'identity selection must land on the row')
+  picker.setSelectedValue('p3\u0000m')
+  assert.equal(picker.getSelectedItem()?.value, 'p2\u0000m', 'an unmatched identity must not move the selection')
+})
+
+test('an explicit hint overrides the default footer wording', () => {
+  const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, testTheme, {}, {
+    enableSearch: true,
+    hint: 'custom hint text',
+  })
+  const rendered = picker.render(80)
+  assert.ok(rendered.some(line => line.includes('custom hint text')), 'custom hint missing')
+  assert.ok(!rendered.some(line => line.includes('type to filter')), 'default hint must be replaced')
+})
+
+test('a cursor-only key does not reset the selection to the top', () => {
+  const items = [
+    { value: 'a', label: 'alpha' },
+    { value: 'b', label: 'bravo' },
+    { value: 'c', label: 'charlie' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true })
+  picker.handleInput('\x1b[B') // down to bravo
+  picker.handleInput('\x1b[B') // down to charlie
+  assert.equal(picker.getSelectedItem()?.value, 'c')
+  picker.handleInput('\x1b[C') // right arrow: cursor move, no query change
+  assert.equal(picker.getSelectedItem()?.value, 'c', 'a cursor move must not reset the selection')
+  picker.handleInput('\x1b[D') // left arrow
+  assert.equal(picker.getSelectedItem()?.value, 'c', 'a left cursor move must not reset the selection')
+})
+
+test('a tiny grant keeps the search row and the selected primary row (plan §17)', () => {
+  const items = [
+    { value: 'a', label: 'Alpha', description: 'detail-a', group: 'P1', badge: 'current' },
+    { value: 'b', label: 'Bravo', description: 'detail-b', group: 'P1' },
+    { value: 'c', label: 'Charlie', description: 'detail-c', group: 'P1' },
+  ]
+  const picker = new SearchablePicker(items, 8, testTheme, {}, {
+    enableSearch: true,
+    showHint: true,
+    header: 'Models',
+    descriptionMode: 'selected-below',
+  })
+  for (const grant of [4, 5, 6, 7]) {
+    picker.setMaxRows(grant)
+    const rendered = picker.render(60)
+    assert.ok(rendered.length <= grant, `grant ${grant} must cap rows, got ${rendered.length}`)
+    assert.ok(rendered.some(line => line.includes('→ Alpha')), `grant ${grant} must keep the selected primary row:\n${rendered.join('\n')}`)
+    assert.ok(rendered.some(line => line.includes('type to filter')), `grant ${grant} keeps the search row:\n${rendered.join('\n')}`)
+  }
+})
+
+test('a tiny grant preserves the selected item over spacers and the hint', () => {
+  const items = Array.from({ length: 6 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true })
+  picker.setMaxRows(2)
+  picker.setSelectedIndex(3)
+  const rendered = picker.render(80)
+  assert.ok(rendered.length <= 2, `grant must cap rows, got ${rendered.length}`)
+  assert.ok(rendered.some(line => line.includes('item 3')), `the selected item must survive:\n${rendered.join('\n')}`)
+})
+
+test('groupKey separates sections that share a display label', () => {
+  const items = [
+    { value: 'a', label: 'A', group: 'Same', groupKey: 'g1' },
+    { value: 'b', label: 'B', group: 'Same', groupKey: 'g2' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  const rendered = picker.render(40)
+  assert.equal(rendered.filter(line => line.includes('Same · 1')).length, 2,
+    `expected two separate "Same" sections:\n${rendered.join('\n')}`)
+})
+
+test('groupKey falls back to group so existing consumers keep identical grouping', () => {
+  const items = [
+    { value: 'a', label: 'A', group: 'G' },
+    { value: 'b', label: 'B', group: 'G' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  const rendered = picker.render(40)
+  assert.equal(rendered.filter(line => line.includes('G · 2')).length, 1, rendered.join('\n'))
+})
+
+test('a long no-match message is clipped to the render width', () => {
+  const picker = new SearchablePicker([], 5, testTheme, {}, {
+    noMatchText: '  Model catalog unavailable: a very long transport message that would otherwise overflow',
+  })
+  for (const width of [20, 40]) {
+    for (const line of picker.render(width)) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
+    }
+  }
+})
+
+test('badgeLayout defaults to inline (a long badge still squeezes the label)', () => {
+  const items = [{ value: 'a', label: 'Long Model Name', badge: 'current · effort ‹Extraordinarily Long›' }]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  const lines = picker.render(20)
+  assert.ok(lines.some(line => line.includes('current')), lines.join('\n'))
+  assert.ok(!lines.some(line => line.includes('Long Model Name')), `inline lets the badge win:\n${lines.join('\n')}`)
+})
+
+test('badgeLayout wrap-when-needed moves an un-fitting badge onto a second inert row', () => {
+  const items = [
+    { value: 'a', label: 'GPT-5.6 Sol', badge: 'current · effort ‹High›', badgeLayoutText: 'current · effort ‹Extraordinarily Long›' },
+    { value: 'b', label: 'Plain' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { badgeLayout: 'wrap-when-needed' })
+  const narrow = picker.render(30)
+  assert.ok(narrow.some(line => line.includes('GPT-5.6 Sol')), `identity must survive:\n${narrow.join('\n')}`)
+  assert.ok(narrow.some(line => line.includes('current · effort ‹High›')), narrow.join('\n'))
+  assert.ok(!narrow.some(line => line.includes('GPT-5.6 Sol') && line.includes('current')),
+    `the badge must wrap:\n${narrow.join('\n')}`)
+  const wide = picker.render(80)
+  assert.ok(wide.some(line => line.includes('GPT-5.6 Sol') && line.includes('current · effort ‹High›')),
+    `wide must be single-line:\n${wide.join('\n')}`)
+})
+
+test('the default badge layout keeps the badge TRAILING the label (no right-align)', () => {
+  const items = [{ value: 'a', label: 'Alpha', badge: 'allowed' }]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  const line = picker.render(60).find(candidate => candidate.includes('Alpha'))!
+  assert.ok(line.includes('Alpha  allowed'), `the badge must trail the label:\n${JSON.stringify(line)}`)
+  assert.ok(visibleWidth(line) < 60, `the default layout must not pad to the row edge:\n${JSON.stringify(line)}`)
+})
+
+test('multiline label/description project to ONE physical row while raw search still matches', () => {
+  const items = [
+    { value: 'multi', label: 'first\nsecond', description: 'desc\r\nmore' },
+    { value: 'plain', label: 'ordinary' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true })
+  const rows = picker.render(80)
+  for (const row of rows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into a row: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  // The primary display value is collapsed onto its one row.
+  assert.ok(rows.some(row => row.includes('first second')), `the collapsed label must render:\n${rows.join('\n')}`)
+  assert.ok(rows.some(row => row.includes('desc more')), `the collapsed description must render:\n${rows.join('\n')}`)
+  // Raw search semantics: the SECOND line of the raw label still matches
+  // the item (the filter corpus reads the raw item, not the projection).
+  picker.setFilter('second')
+  const filtered = picker.render(80)
+  assert.ok(filtered.some(row => row.includes('first second')), 'the multiline item must still match by its raw text')
+  assert.ok(!filtered.some(row => row.includes('ordinary')), 'the non-matching row must be filtered out')
+})
+
+test('caller-provided chrome (header/noMatch/group) projects to ONE physical row', () => {
+  // Group label and custom header: dynamic caller text rendered as one row.
+  const items = [
+    { value: 'a', label: 'alpha', group: 'group\nsecond' },
+    { value: 'b', label: 'beta', group: 'group\nsecond' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { header: 'head\r\nline' })
+  const rows = picker.render(80)
+  for (const row of rows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into chrome: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a chrome row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  assert.ok(rows.some(row => row.includes('head line')), `the collapsed header must render:\n${rows.join('\n')}`)
+  assert.ok(rows.some(row => row.includes('group second · 2')), `the collapsed group header must render:\n${rows.join('\n')}`)
+  // The raw group identity/search corpus is untouched (the raw group text
+  // still matches a filter).
+  picker.setFilter('second')
+  assert.ok(picker.render(80).some(row => row.includes('alpha')), 'the raw group text must still be searchable')
+  // No-match text: untrusted transport message text on one row.
+  const empty = new SearchablePicker([], 5, testTheme, {}, { noMatchText: 'oops\nnope' })
+  const emptyRows = empty.render(80)
+  for (const row of emptyRows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into no-match: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a no-match row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  assert.ok(emptyRows.some(row => row.includes('oops nope')), `the collapsed no-match text must render:\n${emptyRows.join('\n')}`)
+})
+
+test('a custom multiline hint projects to ONE physical row', () => {
+  const picker = new SearchablePicker(
+    [{ value: 'a', label: 'alpha' }],
+    5,
+    testTheme,
+    {},
+    { showHint: true, hint: 'foo\nbar' },
+  )
+  const rows = picker.render(80)
+  for (const row of rows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into the hint: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a hint row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  assert.ok(rows.some(row => row.includes('foo bar')), `the collapsed hint must render:\n${rows.join('\n')}`)
 })

@@ -98,7 +98,7 @@ interface BindingRecord {
  * Ctrl+O expand, Ctrl+T
  * todo, Ctrl+G external editor, Ctrl+R history search, Ctrl+V clipboard,
  * Ctrl+Enter accelerated submit (the busy-Enter opposite), Enter submit, Esc cancel, Shift+Tab permission,
- * Alt+Up dequeue, Alt+T thinking, Alt+K dismiss, Ctrl+End jump latest).
+ * Alt+Up recall-all, Alt+T thinking, Alt+K dismiss, Ctrl+End jump latest).
  * When a NEW default
  * host lifecycle key lands, extend THIS list in the same commit so
  * plugins cannot claim it; the runtime reservation needs no change (it
@@ -126,7 +126,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'enter', ctrl: false, alt: false, shift: false, super: false }, // Enter submit
   { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel
   { key: 'tab', ctrl: false, alt: false, shift: true, super: false },   // Shift+Tab permission cycle
-  { key: 'up', ctrl: false, alt: true, shift: false, super: false },    // Alt+Up dequeue
+  { key: 'up', ctrl: false, alt: true, shift: false, super: false },    // Alt+Up recall-all
   { key: 't', ctrl: false, alt: true, shift: false, super: false },     // Alt+T thinking detail toggle
   { key: 'k', ctrl: false, alt: true, shift: false, super: false },     // Alt+K dismiss settled local shell cards
   { key: 'end', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+End jump latest

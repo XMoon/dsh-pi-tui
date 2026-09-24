@@ -60,6 +60,19 @@ export interface ColorPalette {
   roleUserBg?: string
   /** Shell-mode accent (reserved for `!` shell mode). */
   shellMode: string
+  /** Transcript search: THE CURRENT exact occurrence's foreground. Paired with
+   * {@link ColorPalette.searchCurrentBg}; the highlight is ALWAYS an explicit
+   * themed block, never the terminal's inverse attribute. Optional only for a
+   * palette that predates the tokens — {@link withSearchCurrentTokens} fills it
+   * at every theme-apply boundary. */
+  searchCurrentFg?: string
+  /** Transcript search: the current exact occurrence's background. */
+  searchCurrentBg?: string
+  /** Transcript search: the ANCHOR-ONLY current result's row background. The
+   * query occurrences on that row stay weak-underlined — the background marks
+   * the owning source/card row, never a proven occurrence. Deliberately weaker
+   * than {@link ColorPalette.searchCurrentBg}. */
+  searchAnchorBg?: string
 }
 
 /** Dark palette (default), tuned for ≥ 4.5:1 contrast on black. */
@@ -85,6 +98,12 @@ export const darkColors: ColorPalette = {
   shellMode: '#BD93F9',
   /** dsh-web `--dsw-specific-bubble` (dark): neutral bluish-850. */
   roleUserBg: '#2C2C2F',
+  /** Search current occurrence (dark): dark ink on a bright amber block. */
+  searchCurrentFg: '#141410',
+  searchCurrentBg: '#F5C542',
+  /** Search anchor-only row (dark): a dim amber-tinted wash, clearly weaker
+   * than the exact occurrence block. */
+  searchAnchorBg: '#3A3220',
 }
 
 /** Light palette, tuned for ≥ 4.5:1 contrast on white (pi's values). */
@@ -110,6 +129,11 @@ export const lightColors: ColorPalette = {
   shellMode: '#7C3AED',
   /** dsh-web `--dsw-specific-bubble` (light): deepseek-100. */
   roleUserBg: '#E4EDFD',
+  /** Search current occurrence (light): dark ink on a saturated amber block. */
+  searchCurrentFg: '#1A1A1A',
+  searchCurrentBg: '#FFD75E',
+  /** Search anchor-only row (light): a pale amber wash. */
+  searchAnchorBg: '#FFF0C2',
 }
 
 /** The active palette; style helpers read it on every call, so swapping is live. */
@@ -136,16 +160,50 @@ export interface CustomThemeFile {
  */
 export function setTheme(theme: ThemeMode, custom?: ColorPalette): void {
   if (theme === 'custom' && custom !== undefined) {
-    currentPalette = custom
+    currentPalette = withSearchCurrentTokens(custom)
   } else {
     currentPalette = theme === 'light' ? lightColors : darkColors
+  }
+}
+
+/** Whether a palette's body text is LIGHT ink — i.e. a DARK-family palette
+ * (`darkColors.text` is light on a dark background). Used only to pick the
+ * inherited search block. Accepts the same `#rgb` / `#rrggbb` / `#rrggbbaa`
+ * forms the custom-theme validator does (alpha is ignored). */
+function bodyTextIsLight(color: string): boolean {
+  const match = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/u.exec(color.trim())
+  if (match === null) return false
+  const hex = match[1]!
+  const full = hex.length === 3 ? hex.split('').map(ch => ch + ch).join('') : hex.slice(0, 6)
+  // Perceived luminance (ITU-R BT.601); > 0.5 = light ink.
+  const luminance = (0.299 * parseInt(full.slice(0, 2), 16)
+    + 0.587 * parseInt(full.slice(2, 4), 16)
+    + 0.114 * parseInt(full.slice(4, 6), 16)) / 255
+  return luminance > 0.5
+}
+
+/** Fill the search-current tokens a palette that predates them omits. The
+ * inherited pair comes from the built-in palette of the MATCHING family — a
+ * light-ink palette inherits the dark-family block and vice versa — so the
+ * current occurrence is always an explicit themed block, never the
+ * terminal-inverse fallback. */
+export function withSearchCurrentTokens(palette: ColorPalette): ColorPalette {
+  if (palette.searchCurrentFg !== undefined && palette.searchCurrentBg !== undefined && palette.searchAnchorBg !== undefined) {
+    return palette
+  }
+  const base = bodyTextIsLight(palette.text) ? darkColors : lightColors
+  return {
+    ...palette,
+    searchCurrentFg: palette.searchCurrentFg ?? base.searchCurrentFg,
+    searchCurrentBg: palette.searchCurrentBg ?? base.searchCurrentBg,
+    searchAnchorBg: palette.searchAnchorBg ?? base.searchAnchorBg,
   }
 }
 
 /** Build a full palette from a custom theme file (base + overrides). */
 export function resolveCustomTheme(file: CustomThemeFile): ColorPalette {
   const base = file.base === 'light' ? lightColors : darkColors
-  return { ...base, ...file.colors }
+  return withSearchCurrentTokens({ ...base, ...file.colors })
 }
 
 /** Custom-theme directory convention: `~/.dsh-pi-tui/themes/*.json`. */
@@ -174,6 +232,7 @@ const PALETTE_KEYS: readonly (keyof ColorPalette)[] = [
   'diffAdded', 'diffRemoved', 'diffAddedStrong', 'diffRemovedStrong',
   'diffGutter', 'diffMeta',
   'roleUser', 'roleUserBg', 'shellMode',
+  'searchCurrentFg', 'searchCurrentBg', 'searchAnchorBg',
 ]
 
 /**
@@ -327,6 +386,18 @@ export const color = {
     ? text
     : chalk.bgHex(currentPalette.roleUserBg)(text),
   shellMode: (text: string) => hex('shellMode')(text),
+  /** The current EXACT search occurrence: bold with an explicit themed
+   * foreground AND background. NEVER the terminal's inverse attribute — a
+   * palette that omits the tokens has them filled at apply time
+   * ({@link withSearchCurrentTokens}), and this helper's own derivation stays
+   * inside the palette. */
+  searchCurrent: (text: string) => chalk.bold
+    .hex(currentPalette.searchCurrentFg ?? currentPalette.textStrong)
+    .bgHex(currentPalette.searchCurrentBg ?? currentPalette.primary)(text),
+  /** The anchor-only current result's ROW background: it marks the owning
+   * source/card row while every query occurrence on it stays weak-underlined.
+   * Never a proven occurrence — provenance is unchanged. */
+  searchAnchorBg: (text: string) => chalk.bgHex(currentPalette.searchAnchorBg ?? currentPalette.border)(text),
   /** Plain italics (kimi thinking parity); an optional tone override
    * colors the italic run. */
   italic: (text: string, tone?: string) => tone === undefined

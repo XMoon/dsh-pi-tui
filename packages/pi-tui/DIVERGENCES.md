@@ -80,8 +80,8 @@
 
 ## Summary
 
-- Records: 55
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 44, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 59
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 48, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -140,6 +140,10 @@
 | X052 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X053 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X054 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
+| X055 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM, LOCAL_UX | NO |
+| X056 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
+| X057 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
+| X058 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 
 ## Divergences
 
@@ -175,8 +179,10 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 **Host**
 - src/tui-app.ts openPicker and categorized picker rebuild (now Host SearchablePicker)
 - src/commands.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)
+- src/model-picker.ts /model ModelPicker (provider-grouped inline-effort model list via the Host SearchablePicker)
+- src/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)
 - advanced ui.select picker adapter
-- Audit note: The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker; the model picker in src/model-menu.ts and footer/configurator.ts are host-owned SettingsList/Input flows, not X001 consumers. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
+- Audit note: The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/model-picker.ts (which constructs SearchablePicker directly for the /model provider-grouped model list (with an inline per-model effort)); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
 
 **Public / extension**
 - Advanced ui.select and picker adapter contracts expose the searchable picker behavior to host-owned integrations.
@@ -192,6 +198,8 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 #### Guarding tests
 
 - test/searchable-picker.test.ts: search, groups, paging, setFilter, and zero-match navigation
+- test/model-picker.test.ts: /model model list exercises SearchablePicker search, grouping, identity selection, row budget, and the immediate loading/in-place hydration lifecycle
+- test/subagent-model-menu.test.ts: /settings allowlist picker exercises SearchablePicker search, provider grouping, partial failure, row budget, and mouse/focus
 - test/session-picker-loading.test.ts and picker integration coverage
 - test/session-categories.test.ts: categorized picker query carry
 - test/sessions.test.ts: PickerHandle.setItems and initialQuery
@@ -722,8 +730,9 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - src/tui-app.ts OverlayBroker.disposeAll and overlay leases
 - editor seat, panels, timers, and fullscreen surface teardown
 - test/pi-component-compat.test.ts public component compatibility
-- src/model-menu.ts ModelSubmenu/EffortSubmenu ownership-safe external dispose (latch/abort owned async work, dispose owned inner exactly once, never done/apply/navigation on teardown)
-- Audit note: Host final teardown relies on exactly-once release. Post-v0.85.1 audit: ModelSubmenu and EffortSubmenu now implement ownership-safe external dispose so the SettingsList's submenuComponent.dispose() chain (owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu) latches/aborts every owned async workflow; late resolves cannot repaint or apply after teardown (regressions in test/model-menu.test.ts).
+- src/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)
+- src/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)
+- Audit note: Host final teardown relies on exactly-once release. Post-v0.85.1 audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts).
 
 **Public / extension**
 - Stable/Advanced/Unstable extension mounts and public component leases
@@ -744,7 +753,10 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - packages/pi-tui/test/layout.test.ts: Stack entries and disposed layout behavior
 - packages/pi-tui/test/overlay-options.test.ts: disposeOnHide ownership
 - packages/pi-tui/test/dispose-lifecycle.test.ts: MouseRegion dispose forwarding — owned child disposed exactly once, wrapped Loader timer cleared
-- test/model-menu.test.ts: ModelSubmenu/EffortSubmenu ownership-safe external dispose — dispose latches/aborts pending work without done/apply/navigation, and the owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu chain terminates a late effort resolve
+- test/model-picker.test.ts: ModelPicker ownership-safe external dispose — dispose latches without close/apply/navigation, and a late write settlement after teardown makes no close/open decision
+- test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker ownership-safe external dispose — dispose latches, and a write settling after the submenu closed converges the outer row through the summarize seam without a late toast
+- test/advanced-interactive.test.ts: an approval-preserving fullscreen swap replaces (and disposes) the replaced approval frame — ownedApprovalFramesForTest stays 1 per swap and returns 0 after settle
+- test/runner-session-bootstrap.test.ts: switching sessions tears down the Job status viewer with its Task Browser (the tracked child closer)
 
 #### Upstream comparison
 
@@ -2352,13 +2364,13 @@ fd output can identify a directory without a trailing slash, including through s
 - Status: `ACTIVE`
 - Category: `HARD_HOST_API`
 - Risk: `CRITICAL`
-- Files: `src/tui-alt-screen.ts`, `src/components/scroll-view.ts`
-- Last audited: `2026-09-03`
+- Files: `src/tui-alt-screen.ts`, `src/components/scroll-view.ts`, `src/alt-screen-search.ts`, `src/index.ts`
+- Last audited: `2026-09-19`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
-The host virtual transcript owns paging and search while the fork owns viewport mechanics. Boundary callbacks, pre-input interception, canScroll, and clearSearch let both owners cooperate without duplicating the scroll implementation.
+The host virtual transcript owns paging, search, and the jump-to-latest semantic action while the fork owns viewport mechanics. Boundary callbacks, pre-input interception, canScroll, clearSearch, and the virtual-history-aware jump-to-end indicator seams let both owners cooperate without duplicating the scroll implementation.
 
 #### Changed surface
 
@@ -2366,6 +2378,9 @@ The host virtual transcript owns paging and search while the fork owns viewport 
 - onBeforeViewportInput before built-in Home/End/Page handling
 - ScrollView.canScroll and host prompt-navigation fallthrough
 - clearSearch and previous/next prompt routing
+- shouldShowScrollToEndIndicator so a host virtual-history window keeps the jump-to-end label even while its local view follows the end
+- onScrollToEndIndicator so a host can consume the label click and run its own semantic jump-to-latest instead of the local scrollToBottom fallback
+- root re-export of the pure rendered search matcher and AltScreenSearchIndex (findAltScreenSearchMatches with AltScreenSearchMatch/AltScreenSearchSegment plus the indexed cache) so the host reuses the same ANSI/grapheme/cell occurrence geometry and corpus invalidation semantics the native fullscreen search uses instead of implementing a second Unicode column mapper
 
 #### Dependency map
 
@@ -2378,11 +2393,14 @@ The host virtual transcript owns paging and search while the fork owns viewport 
 - Audit note: No host wrapper can reproduce the built-in scrollbar/viewport state safely.
 
 **Host**
-- src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, and calls clearSearch for jumpLatest and prompt navigation
+- src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, calls clearSearch for jumpLatest and prompt navigation, and wires scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator to the semantic TranscriptWindowController state
+- src/search-presentation.ts consumes the root matcher export to decorate the host full-history search occurrences (weak/current styles, image lines untouched, visible width and stripped text preserved)
+- src/tui-app.ts attaches the exported AltScreenSearchIndex to each live MessageComponentEntry so unchanged rendered lines reuse the native corpus/results cache
 - Audit note: Host wires the callbacks and clearSearch; ScrollView.canScroll is consumed internally by TuiAltScreen as fallback state, not called by the host.
 
 **Public / extension**
-- TuiAltScreenOptions viewport callbacks and ScrollView.canScroll public component shape.
+- TuiAltScreenOptions viewport callbacks, the scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator options, and ScrollView.canScroll public component shape.
+- root exports findAltScreenSearchMatches, AltScreenSearchIndex, and the AltScreenSearchMatch/AltScreenSearchSegment types.
 - Audit note: The seams are part of compatibility tests.
 
 **Behavioral coupling**
@@ -2390,13 +2408,19 @@ The host virtual transcript owns paging and search while the fork owns viewport 
 - host pre-input can claim semantic keys before built-ins
 - short transcripts let keys fall through to focused components
 - jump-latest resets built-in search
+- the jump-to-end label is host-forced for a virtual-history window and a host-consumed click skips the local scrollToBottom fallback
+- the exported matcher computes the same occurrence segments as the native fullscreen search (query normalization, ANSI stripping, grapheme-safe columns)
+- AltScreenSearchIndex reuses full matches only when rendered lines and the normalized query are unchanged, and rebuilds its corpus when rendered lines change
 - Audit note: Restoring upstream can silently consume navigation keys or bypass virtual transcript ownership.
 
 #### Guarding tests
 
-- packages/pi-tui/test/tui-alt-screen.test.ts: boundary, overscroll, page, scrollbar, and search reset
+- packages/pi-tui/test/tui-alt-screen.test.ts: boundary, overscroll, page, scrollbar, search reset, and host-forced/host-consumed jump-to-end indicator
 - packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage
-- test/home-end-keys.test.ts: bundle Home/End ownership
+- test/home-end-keys.test.ts: bundle Home/End ownership and the fullscreen jump-to-latest indicator
+- test/transcript-search-presentation.test.ts: host consumes the root matcher (ANSI/CJK/wrap, current vs weak style, width/text preserved)
+- packages/pi-tui/test/tui-alt-screen.test.ts: root export constructs AltScreenSearchIndex
+- test/transcript-search-performance.test.ts: Host per-message index lookup/result-cache reuse and rendered-line invalidation
 
 #### Upstream comparison
 
@@ -2426,7 +2450,7 @@ The host virtual transcript owns paging and search while the fork owns viewport 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Rechecked all four seams and the short-transcript fallthrough; KEEP HARD.
+- Notes: Rechecked the viewport seams, the short-transcript fallthrough, and the added pure-matcher/index root export consumed by the host search highlight/cache; KEEP HARD.
 
 ### X029 — Editor history callbacks
 
@@ -3476,13 +3500,15 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 **Inheritance / structural**
 - SettingsList implements Focusable; SettingsList forwards only when a submenu structurally exposes focused.
-- Audit note: The conditional optional-method edge is real; post-v0.85.1 audit: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child.
+- Audit note: The conditional optional-method edge is real; post-v0.85.1 audit: the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the two SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward the focused flag to their ACTIVE SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child.
 
 **Host**
 - src/tui-app.ts FocusForwardingFrame and settings overlays
-- src/theme-menu.ts, src/model-menu.ts, and src/subagent-model-menu.ts submenu wrappers
-- test/theme-picker.test.ts and test/model-menu.test.ts CURSOR_MARKER regressions
-- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: all four submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) forward Focusable state to their inner SettingsList/Input, including ModelSubmenu's async inner replacement (the swapped-in searchable list receives the already-active focus and emits CURSOR_MARKER); the non-searchable wrappers (EffortSubmenu, SubagentModelAllowlistSubmenu) forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
+- src/theme-menu.ts SettingsList submenu wrapper
+- src/subagent-model-menu.ts SubagentModelAllowlistPicker forwards focus to its SearchablePicker
+- src/model-picker.ts ModelPicker forwards focus to its active SearchablePicker
+- test/theme-picker.test.ts and test/model-picker.test.ts CURSOR_MARKER regressions
+- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: ThemeSubmenu forwards Focusable state to its inner SettingsList, and the /settings SubagentModelAllowlistPicker and the /model ModelPicker forward the active view's focused flag through to their SearchablePicker search Input so the IME cursor marker survives submenu/view transitions.
 
 **Public / extension**
 - Focusable component interface and row-budget-aware submenu public shape.
@@ -3493,17 +3519,19 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - IME candidate window follows top-level search focus
 - submenu receives focus only when it implements Focusable
 - selection/description tail remains within budget
-- Audit note: Post-v0.85.1 audit: ALL four Host submenu wrappers implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child; no follow-up gap remains.
+- Audit note: Post-v0.85.1 audit: the Host SettingsList submenu wrappers implement Focusable and forward the focused flag to their inner SettingsList, and the /model ModelPicker forwards focus to its active SearchablePicker, so the focus edge reaches every focus-sensitive child; no follow-up gap remains.
 
 #### Guarding tests
 
 - packages/pi-tui/test/settings-list.test.ts: focus/row-budget behavior
 - test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SettingsList or IME)
 - test/theme-picker.test.ts: ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER present when focused, absent when not)
-- test/model-menu.test.ts: ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER on the swapped-in searchable list only when focused)
+- test/model-picker.test.ts: ModelPicker keeps the active search Input focused (CURSOR_MARKER present) and restores physical focus after an approval covers it
+- test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker forwards focus to its search Input (CURSOR_MARKER) and keeps a partial-failure row inert
 - packages/pi-tui/test/settings-list.test.ts: description-shrink click identity (Case A), search+shrink row offset (Case B), inert chrome (Case C)
 - packages/pi-tui/test/settings-list.test.ts: a main-list press cannot transfer into a newly-created submenu — the press-time submenu generation fences the release/click (a submenu opened by keyboard after the press never receives a fresh-looking activation)
 - packages/pi-tui/test/settings-list.test.ts: a fresh press+click on a live-but-unpainted submenu is rejected; after the submenu is painted, a fresh press+click activates
+- packages/pi-tui/test/settings-list.test.ts: after a submenu CLOSE without a repaint, a main-list click is rejected while the submenu is still painted (stale main hit map fenced); after the repaint the main row is clickable again, and a pre-close press is consumed so it cannot activate after the close repaint
 
 #### Upstream comparison
 
@@ -3536,7 +3564,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps); CURSOR_MARKER regressions cover the searchable wrappers, and the non-searchable wrappers forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
+- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward focus to their active SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child; CURSOR_MARKER regressions cover ThemeSubmenu and ModelPicker, and no IME/cursor path is lost at any wrapper boundary.
 
 ### X043 — Deferred viewport input listener registration
 
@@ -4498,3 +4526,387 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed the host has no public entry point after the layout pass (a render probe runs during the measurement pass); the fork exposes the narrow frame-completion boundary + painted-box query.
+
+### X055 — Viewport growth must not re-arm follow-end
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`, `LOCAL_UX`
+- Risk: `MEDIUM`
+- Files: `src/components/scroll-view.ts`
+- Last audited: `2026-09-14`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the new maximum, interpreting that as 'the user's position caught up to the bottom'. That holds when the CONTENT shrank (a fold/collapse). It is wrong when the VIEWPORT grew (pinned chrome rows appearing/disappearing, terminal resize): maxScrollTop shrinks without any content change, so a user who had deliberately scrolled away from the tail is silently pulled back to it. The pinned fullscreen queue pane is a concrete trigger: a queued occurrence's create/remove changes the transcript viewport height. The host cannot compensate reliably (the alt screen owns the wheel/keyboard/scrollbar gestures after the host router sees them, and an overlay may consume the wheel), so the rule belongs in the viewport layer. When a content shrink and a viewport growth coincide in one layout pass, the viewport growth wins — the structural screen-capacity change dominates the clamp inference.
+
+#### Changed surface
+
+- ScrollView.updateLayout only re-arms follow-end when the viewport did NOT grow since the previous layout
+- when a content shrink and a viewport growth coincide in the SAME layout pass, the viewport growth wins and the historical intent is preserved (a structural screen-capacity change is never read as 'the user caught up to the tail')
+
+#### Dependency map
+
+**Vendor internal**
+- ScrollView.updateLayout owns followingEnd/followSuppressedAtEnd; the guard only skips the re-arm branch and never changes the clamp itself.
+- Audit note: The first layout (previous viewport 0) is treated as 'not a growth' so the initial follow-end state is preserved.
+
+**Inheritance / structural**
+- ScrollView extends Container; no class-hierarchy change.
+- Audit note: None.
+
+**Host**
+- TuiApp fullscreen transcript: pinned chrome (semantic queue pane, todo, goal, dock, working) changes the ScrollView viewport height; the Focus live-height stabilization cannot absorb a viewport-driven clamp because contentHeight is unchanged.
+- Audit note: The host no longer infers scroll intent; the viewport layer owns the rule.
+
+**Public / extension**
+- ScrollView is a public built-in component; scrollBy/scrollTo/scrollToEnd and the isFollowingEnd read keep their existing semantics, except that a viewport growth no longer re-arms follow-end.
+- Audit note: Additive correctness fix; no API shape change.
+
+**Behavioral coupling**
+- A content shrink (fold) still re-arms follow-end when the clamped position reaches the new maximum.
+- A viewport growth while not following leaves followingEnd false and keeps the clamped historical position.
+- A viewport growth while following keeps following (followingEnd was already true before the layout).
+- When a content shrink and a viewport growth coincide in one layout pass, the viewport growth wins: followingEnd stays false and the historical intent is preserved.
+- Audit note: Regression tests cover the growth and the shrink.
+
+#### Guarding tests
+
+- packages/pi-tui/test/layout.test.ts: (X055) a viewport growth does not re-arm follow-end after the user left the tail
+- packages/pi-tui/test/layout.test.ts: (X055) a content shrink still re-arms follow-end
+- packages/pi-tui/test/layout.test.ts: (X055) a simultaneous content shrink and viewport growth preserves the historical intent
+- test/focus-streaming-jitter.test.ts: semantic queue pane removal preserves historical wheel intent across fullscreen viewport growth
+- test/focus-streaming-jitter.test.ts: queue pane removal keeps a same-frame wheel-up off the tail
+- test/focus-streaming-jitter.test.ts: queue pane removal does not undo an explicit same-frame follow-end request
+- test/focus-streaming-jitter.test.ts: a wheel-up on a non-scrolling transcript does not arm the clamp correction
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/scroll-view.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: The pinned baseline's updateLayout re-arms follow-end on any clamp that reaches the maximum; the fork additionally requires that the viewport did not grow.
+
+#### Retirement conditions
+
+- Retire when upstream distinguishes a content-height clamp from a viewport-growth clamp (or stops re-arming follow-end on a clamp), then re-run the viewport-growth and content-shrink regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Checked upstream v0.85.1 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth.
+
+### X056 — Overlay operation and focus-transition supersession seam
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`
+- Last audited: `2026-09-17`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+The host temporarily suppresses a set of managed overlays (a Question / Save Location modal, or a fullscreen screen swap) and later restores them. Upstream setHidden(false) and focus() promote the overlay's visual order AND take keyboard focus as side effects, so an internal restore would raise a restored capturing overlay above a nonCapturing HUD that legitimately sat above it, and would fire spurious onFocus/onBlur on an overlay the plugin deliberately blurred. The fork adds the minimal opt-in seam so an internal restore reproduces the pre-suppression stacking and keyboard ownership: `preserveOrder`/`preserveFocus` on setHidden, and `initialFocus: false` on showOverlay for the fullscreen rebind. The same supersession rule applies inside the fork's focus core: Tui.setFocusInternal runs the previous component's onBlur synchronously BEFORE installing the next focus, so an onBlur that re-requests focus (or mounts another overlay) would be overwritten by the outer transition. A monotonic focus revision lets the outer transition detect that a newer one superseded it and leave the newer transaction's state in place. A pending transition must also survive an onBlur that mutates the pending target itself (blur/hide/close) WITHOUT starting a new focus transition: the fork records the released target so the outer transition re-derives instead of installing a released/hidden/removed node.
+
+#### Changed surface
+
+- OverlayOrderPreservingOptions { preserveOrder, preserveFocus } for OverlayHandle.setHidden
+- OverlayHandle.focus({ preserveOrder }) takes the keyboard without being promoted
+- OverlayOptions.initialFocus: false skips the mount-time auto-focus for an internal rebind
+- Tui.setFocusInternal stamps a monotonic focus revision, defers its overlay-focus-restore bookkeeping until it completes, and bails out after the blur/focus callback when a newer transition superseded it
+- Tui records the last explicitly released/unmounted focus target (unfocus / hide / setHidden(true)) and a pending transition to it re-derives from the topmost still-visible overlay
+
+#### Dependency map
+
+**Vendor internal**
+- setHidden(false, { preserveOrder }) gates the `entry.focusOrder = ++this.focusOrderCounter` promotion inside the showOverlay handle closure.
+- setHidden(false, { preserveFocus }) gates the `this.setFocus(component)` call inside the same closure.
+- focus({ preserveOrder }) gates the promotion inside the focus closure (focus always takes the keyboard).
+- showOverlay(component, { initialFocus: false }) gates the mount-time `this.setFocus(component)` outside the handle closures.
+- The focus revision gates setFocusInternal after `focused = false` (onBlur) and after `focused = true` (onFocus); pendingRestore/pendingClear are applied only when this transition is still newest.
+- focusIntentSeq/focusIntentTarget gate the pending nextFocus after the previous owner's onBlur: unfocus (even when the target is not yet focused), hide and setHidden(true) invalidate it.
+- focusReleaseSeq is a WeakMap keyed per component: hideOverlay, an idempotent setHidden(true) (recorded before the early-return) and an unfocus of a not-yet-focused target all invalidate a pending transition, and multiple releases in one callback are all tracked.
+- Audit note: Three additive gates over upstream behavior — focusOrder promotion, show-time focus, and mount-time focus — plus the order gate on focus(); hide() and unfocus() are untouched. The logical z promotion in showPhysical()/focusPhysical() runs BEFORE the fork call, so a nested mount triggered by the synchronous focus/show callback takes a HIGHER z (matching its later physical mount). The focus transition is now supersession-aware as well.
+
+**Inheritance / structural**
+- The handle is a closure over OverlayStackEntry; no subclass or structural edge is involved.
+- Audit note: None.
+
+**Host**
+- src/tui-app.ts showOverlayOnHost() mounts EVERY managed overlay with initialFocus: false; the broker commits the logical graph first and performs the single physical focus transition afterwards, so a plugin onFocus that mounts another overlay cannot observe a partial graph.
+- src/overlay-broker.ts showPhysical()/focusPhysical() pass preserveOrder (and preserveFocus on show) for INTERNAL restores: close-released children, a Question / Save Location settle, and the fullscreen rebind owner restore.
+- src/tui-app.ts rebindOverlayRaw() mounts every fullscreen rebind with initialFocus: false so a capturing entry does not auto-focus during the swap.
+- src/tui-app.ts renderApprovalDialog() mounts the approval as a remountable managed node and registers a rebind callback that re-creates the surface for the same logical node (the replaced frame is disposed).
+- src/overlay-broker.ts focus() skips its post-focus re-derivation when the node forwarded a caller-supplied unfocus target, so the explicit target is never overridden by the seat fallback.
+- Audit note: Explicit user show()/focus() keep the upstream promoting behavior; the host passes the preserve options only from its internal restore / rebind paths.
+
+**Public / extension**
+- OverlayHandle is a public type; the new parameter is optional and additive.
+- Audit note: Existing callers compile and behave unchanged.
+
+**Behavioral coupling**
+- A capturing overlay restored with preserveOrder/preserveFocus keeps its previous focusOrder and does NOT take focus on show; the host focuses exactly ONE owner afterwards.
+- A nonCapturing HUD restored with preserveOrder keeps its position above the focused overlay.
+- A rebind with initialFocus:false never auto-focuses, so a blurred overlay records no extra onFocus/onBlur across a screen swap.
+- Default (no options) setHidden(false)/focus() and showOverlay keep the upstream promoting + auto-focusing behavior.
+- An approval is a REMOUNTABLE managed node: a fullscreen swap rebinds the same logical node (fresh surface) so its suppressed children are never revealed/focused, and the replaced approval frame is disposed. Guarded by the approval focus-count + ownedApprovalFramesForTest regression.
+- Audit note: Guarded by packages/pi-tui/test/overlay-non-capturing.test.ts (the fork seam) plus the broker / advanced-interactive / extension-focus-seat host regressions.
+
+#### Guarding tests
+
+- packages/pi-tui/test/overlay-non-capturing.test.ts: preserveOrder restores a suppressed pair without changing the visual order (X056)
+- test/overlay-broker.test.ts: reveal is an internal restore that preserves the current order (P2-3)
+- test/advanced-interactive.test.ts: a question round-trip keeps a nonCapturing HUD visually above the focused overlay
+- test/extension-focus-seat.test.ts: a Save Location round-trip keeps a nonCapturing HUD visually above the focused overlay
+- test/advanced-interactive.test.ts: a fullscreen swap restores a retained overlay when the old front owner was not remountable
+- test/advanced-interactive.test.ts: a fullscreen swap keeps a nonCapturing HUD above an explicitly focused nonCapturing owner
+- test/overlay-broker.test.ts: a rebind restore focuses the surviving owner without promoting it
+- test/advanced-interactive.test.ts: closing the focused overlay does not re-activate a blurred sibling
+- test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (child close)
+- test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (question / save / fullscreen)
+- packages/pi-tui/test/overlay-non-capturing.test.ts: initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)
+- test/advanced-interactive.test.ts: an approval-preserving fullscreen swap never fabricates focus transitions on the overlay beneath it (focus/blur counts + one live approval frame per swap)
+- test/advanced-interactive.test.ts: a plugin onFocus that mounts another overlay cannot double-adopt a child (forest invariant)
+- test/overlay-broker.test.ts: a nested mount during the mount focus keeps the logical front order
+- test/advanced-interactive.test.ts: a nested nonCapturing HUD mounted from onFocus keeps the logical front order
+- test/advanced-broker.test.ts: a component that settles from onFocus never leaks the mounted overlay
+- test/advanced-interactive.test.ts: an explicit show whose onFocus mounts a nested overlay keeps its focus intent
+- test/overlay-broker.test.ts: an explicit focus whose show callback mounts a nested capture keeps the front order
+- test/overlay-broker.test.ts: a blur inside the focus callback keeps the released intent
+- test/advanced-interactive.test.ts: a blur inside the focus callback keeps the overlay released
+- test/overlay-broker.test.ts: a hidden capturing focus whose show mounts a nonCapturing HUD keeps the HUD in front
+- test/advanced-interactive.test.ts: a hidden capturing focus whose onFocus mounts a nonCapturing HUD keeps the HUD in front
+- test/overlay-broker.test.ts: a newer focus from the release callback survives a stale blur
+- test/overlay-broker.test.ts: a newer focus from the release callback survives a stale hide
+- test/advanced-interactive.test.ts: a newer focus from the release callback survives a stale blur
+- test/advanced-interactive.test.ts: a newer focus from the release callback survives a stale hide
+- test/overlay-broker.test.ts: a re-show during the suspend release wins over the suspension
+- packages/pi-tui/test/overlay-non-capturing.test.ts: a focus() issued from onBlur is not overwritten by the outer transition
+- test/advanced-interactive.test.ts: an onBlur re-focus is not overwritten by a capturing mount
+- test/advanced-interactive.test.ts: an onBlur re-focus is not overwritten by a blur release
+- test/advanced-interactive.test.ts: a newer focus from the detach seat release is restored after a fullscreen swap
+- test/advanced-interactive.test.ts: a newer focus from the modal suspension release wins on settle
+- test/overlay-broker.test.ts: a newer focus from the detach seat release is restored after the swap
+- test/overlay-broker.test.ts: a newer focus during the modal release wins on settle
+- packages/pi-tui/test/overlay-non-capturing.test.ts: a transition to a target unfocused from onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target blurred from the previous onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target hidden from the previous onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target closed from the previous onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target blurred from its own onFocus is not installed
+- test/advanced-interactive.test.ts: a pending focus target hidden from its own onFocus is not installed
+- test/advanced-interactive.test.ts: a pending focus target closed from its own onFocus is not installed
+- test/advanced-broker.test.ts: custom: a component that settles from onBlur closes its lease exactly once
+- packages/pi-tui/test/overlay-non-capturing.test.ts: a pending target hidden via hideOverlay from onBlur is not installed
+- packages/pi-tui/test/overlay-non-capturing.test.ts: an idempotently hidden pending target is not installed
+- packages/pi-tui/test/overlay-non-capturing.test.ts: a later release of another target does not lose an earlier pending-target release
+- test/overlay-broker.test.ts: an explicit unfocus target set from onFocus is not overridden
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream promotes focusOrder and takes keyboard focus unconditionally in setHidden(false)/focus() and auto-focuses every capturing showOverlay; the fork adds an opt-in preserveOrder/preserveFocus and initialFocus:false used only by the host's internal restores. Upstream setFocusInternal installs the next focus unconditionally after the synchronous onBlur; the fork's focus revision lets the newer nested transition win instead. Upstream also installs a pending target that a synchronous onBlur released/hid/removed; the fork's focus-intent target check re-derives instead.
+
+#### Retirement conditions
+
+- Retire when upstream exposes a non-promoting overlay restore (or the host no longer suppresses and restores managed overlays), then run the HUD/order regressions.
+- Retire the focus-revision guard when upstream makes a focus transition supersession-aware (or when no consumer re-enters focus from a callback), then run the onBlur-reentrancy regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream promotes focusOrder unconditionally in both setHidden(false) and focus(); the fork adds the minimal opt-in seam for host internal restores.
+
+### X057 — Copy-source line filter for host presentation chrome
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `LOW`
+- Files: `src/tui-alt-screen.ts`
+- Last audited: `2026-09-18`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+The host paints presentation-only chrome inside the transcript scroll content (the expanded long-user disclosure tail control). That row must stay visible and clickable, but it is not transcript text: a selection crossing it must copy the blank separator the row replaced, never the label. Upstream derives the copied text directly from the rendered scroll lines with no host hook, so the only way to keep paint, search, mouse hit-testing and word/line selection on the RENDERED line while filtering the clipboard is a narrow copy-source override. The seam is generic (any row, any host reason) and consulted ONLY in getActiveSelectionText; word/line range computation, search and the mouse hit map keep reading the rendered line, so double-click/triple-click and hit-testing semantics are unchanged.
+
+#### Changed surface
+
+- TuiAltScreenOptions.selectionLineText?: (context: { row, line, scrollView? }) => string | undefined — replaces that scroll-content row contribution to the copied selection; undefined keeps the rendered line
+
+#### Dependency map
+
+**Vendor internal**
+- getActiveSelectionText consults this.selectionLineText once per selected row (after resolving sourceLines and before getSelectionColumns/sliceByColumn) and slices the override line; returning undefined keeps the upstream path byte-identical.
+- Audit note: One additive lookup on the copy path; no other fork code reads the field.
+
+**Inheritance / structural**
+- No subclass or structural edge: the option is a plain constructor field on TuiAltScreen.
+- Audit note: None.
+
+**Host**
+- src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows/userDisclosureHit geometry; every other row returns undefined.
+- src/tui-app.ts selectionLineText returns undefined unless the context scrollView is the transcript ScrollView, so overlay/editor selections are never filtered.
+- Audit note: The host owns the semantic meaning of its chrome; the fork never learns what the row is.
+
+**Public / extension**
+- TuiAltScreenOptions is a public type; the new field is optional and additive, so existing consumers compile and behave unchanged.
+- Audit note: No behavioural change when the option is absent.
+
+**Behavioral coupling**
+- A row whose override is a string copies that string (an empty string copies as the blank separator); rows returning undefined copy the rendered line.
+- The paint, the word/line selection ranges, the search corpus/highlight and the mouse hit map are unaffected.
+- With no handler (or one returning undefined) the copied text is identical to the pinned upstream behavior.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X057) plus the host tail-control clipboard regression in test/long-user-disclosure.test.ts.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: filters only the copy source of a row via selectionLineText (X057)
+- packages/pi-tui/test/tui-alt-screen.test.ts: keeps the copied text unchanged when selectionLineText returns undefined (X057)
+- packages/pi-tui/test/tui-alt-screen.test.ts: computes word selection on the rendered line but copies the override (X057)
+- test/long-user-disclosure.test.ts: the tail control chrome never reaches the clipboard
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream copies selected scroll-content rows verbatim; the fork adds an optional per-row copy-source override consulted only when building the copied text. Default behavior is unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream exposes a host hook for non-copyable presentation rows (or the host stops painting chrome inside the copyable transcript content), then run the X057 copy regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only.
+
+### X058 — Viewport passthrough for a focused capturing overlay
+
+- Status: `ACTIVE`
+- Category: `LOCAL_UX`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`, `src/tui-alt-screen.ts`
+- Last audited: `2026-09-19`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+The host transcript-search box is a capturing overlay: it must keep KEYBOARD focus (typing must reach its Input, Esc/Ctrl+F/Enter are fixed overlay contracts), so `nonCapturing` is not an option. But while it is open the user must still be able to move around the transcript they are searching: wheel / Alt+wheel, PageUp/PageDown, scrollbar hover/drag, and background text selection outside the box. Upstream ties ALL of those to `hasOverlay()` / `isOverlayFocused()`: a focused overlay blocks the wheel, PageUp and PageDown (the early viewport-key return), `getScrollbarTargetAt` returns undefined whenever ANY overlay is visible, and the selection-anchor scrollView lookup is skipped under any overlay. A host-only implementation cannot restore those: the scrollbar hit-test/drag and the selection anchor live entirely inside TuiAltScreen, and reimplementing them in the host would duplicate pointer ownership rather than narrow it. The seam is therefore one optional boolean with a single predicate pair, and every non-opted-in overlay keeps the upstream behavior byte-for-byte.
+
+#### Changed surface
+
+- OverlayOptions.viewportPassthrough?: boolean — opt-in: the capturing overlay keeps keyboard focus and its own rectangle's pointer ownership, while the primary viewport additionally stays live for scroll/navigation the overlay did not consume.
+- TuiBase.hasBlockingOverlay(): visible overlay that did NOT opt in (nonCapturing still blocks, exactly like hasOverlay()).
+- TuiBase.overlayViewportPassthrough(): the FOCUSED visible overlay opted in AND no other visible overlay blocks the viewport.
+- TuiAltScreen wheel guard, a PageUp/PageDown-only key allow-list, the scrollbar target guard and the selection-anchor guard consult those predicates.
+- Host: src/overlay-broker.ts isOnlyVisibleModal(handle) — the exemption is granted only when the search handle ITSELF is visible and no other visible modal exists (a modal that SUPPRESSES the search box hides it, so it cannot keep the exemption).
+
+#### Dependency map
+
+**Vendor internal**
+- shouldDeferViewportInputToOverlay() keeps its upstream meaning for every overlay; the wheel path adds `&& !overlayViewportPassthrough()` on the deferral only, after the overlay-first dispatch (an event the overlay handles is never also applied to the background).
+- The viewport key chain's early `shouldDeferViewportInputToOverlay()` return is NOT relaxed; a narrow pre-branch allows ONLY PageUp/PageDown through, so Home/End (top/bottom), Ctrl+U/Ctrl+D (halfPage), Up/Down and previous/nextPrompt stay available to the overlay's focused component.
+- getScrollbarTargetAt and the selection-anchor scrollView lookup switch from hasOverlay() to hasBlockingOverlay(); these are the only two hasOverlay() call sites in tui-alt-screen.ts.
+- The shared pageViewport() helper preserves the upstream page semantics (release never scrolls but is consumed when scrollable; a non-scrollable viewport falls through to onScrollBoundary and otherwise returns undefined; PAGE_SCROLL_OVERLAP unchanged).
+- Audit note: All lookups are additive booleans read on the existing input paths; the painting, hit map, gesture liveness and copy paths are untouched.
+
+**Inheritance / structural**
+- The predicates live on TuiBase so TuiAltScreen reads its own private overlayStack without exposing entries, options, focusOrder or visibility.
+- No subclass or structural edge: `viewportPassthrough` is a plain optional field on OverlayOptions, and the entry's options object is already retained by the stack.
+- Audit note: The predicates are protected and cannot be overridden into a wider passthrough by a subclass without an explicit new API.
+
+**Host**
+- src/tui-app.ts startTranscriptSearch mounts the search overlay with viewportPassthrough: true; every other host overlay (model picker, task browser, question/approval, settings, history search) keeps the upstream block.
+- The host's fullscreen router (routeInput) is unchanged: typing, Esc, Ctrl+F, Enter and Shift+Enter still win through the existing overlay key contract.
+- src/tui-app.ts overlayBlocksTranscriptPointer consults overlayBroker.isOnlyVisibleModal(this.searchOverlay): a modal that suppresses/hides the search box (the search handle stays defined) blocks the transcript exactly like any other modal.
+- Audit note: The option is inert on the main screen, where the terminal (not the fork) owns scrollback.
+
+**Public / extension**
+- OverlayOptions is a public type; the new field is optional and additive, so existing consumers compile and behave unchanged.
+- The extension-facing TuiOverlayOptions surface is deliberately NOT widened: no plugin-facing behavior changes.
+- Audit note: Absent option = upstream behavior.
+
+**Behavioral coupling**
+- Focused opted-in overlay, nothing above it: wheel/Alt+wheel scroll the primary viewport on both sides of the overlay rectangle; PageUp/PageDown page it; the scrollbar hovers and drags; background selection outside the rectangle works; the overlay keeps keyboard focus and receives every key it can consume.
+- An ordinary modal stacked above stops the passthrough immediately (scrollbar and selection guards re-block); hiding it restores the passthrough.
+- An event the overlay's component handles is still applied only to the overlay (overlay-first pointer dispatch and the mouse-result truncation are unchanged).
+- Every overlay without the option (including nonCapturing ones) keeps the exact upstream viewport, scrollbar and selection blocking.
+- A capturing modal stacked above the search box SUPPRESSES it (the box is hidden, not closed): background transcript disclosure stays blocked while that modal is up, and the passthrough resumes when it closes.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X058) plus the host fullscreen search-interaction and stacked-modal regressions.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: keeps the viewport interactive for a focused viewportPassthrough overlay (X058)
+- packages/pi-tui/test/tui-alt-screen.test.ts: keeps the scrollbar and background selection live for a focused viewportPassthrough overlay (X058)
+- packages/pi-tui/test/tui-alt-screen.test.ts: gives wheel and viewport keys to a focused overlay (default block, unchanged)
+- test/transcript-search-interaction.test.ts: fullscreen search keeps the viewport interactive without losing the search input focus
+- test/focus-ui.test.ts: a modal that suppressed the search box blocks an outside-rectangle transcript disclosure, and closing it restores the passthrough (X058)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui.ts
+- packages/tui/src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream has no overlay option that keeps the primary viewport live under a capturing overlay; the fork adds one optional opt-in consulted only on the wheel deferral, the PageUp/PageDown allow-list, the scrollbar target guard and the selection-anchor guard. Default behavior is unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream exposes an equivalent focused-overlay viewport passthrough (or the host stops needing a capturing, keyboard-focused search box), then run the X058 fork and host search-interaction regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream blocks wheel, PageUp/PageDown, the scrollbar and the selection anchor under ANY visible overlay; the fork adds one optional passthrough keyed on the focused opted-in overlay with no other blocking overlay.

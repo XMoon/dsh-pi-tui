@@ -23,7 +23,7 @@ fields.
 | Exit contract | `src/exit.ts` | latch → surface cleanup → hint → appExit (pure, tested); Direct owned-session retirement in `src/runtime/direct/owned-session-retirement.ts` |
 | Detached tasks | `src/detached.ts` | runDetached rejection classification (pure, tested) |
 | Diagnostics | `src/diag.ts` | file/stderr sinks |
-| Model menu | `src/model-menu.ts` | per-open disposed latch + AbortController |
+| Model picker | `src/model-picker.ts` | Models/Efforts view state (query, selection, effort cursor), disposed latch |
 | Commands | `src/commands.ts` | command registry, skill disposers (generation-checked) |
 | The runner | `src/index.ts` (`apply`) | everything else: lifecycle controller + cleanup, session generation, callArgs, search state, local shell (`!` submits its command+output to the session via `shell-context.ts`; `!!` stays local), external editor, event firehose |
 

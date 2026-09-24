@@ -17,12 +17,15 @@ import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
-import { TuiApp } from '../src/tui-app.ts'
-import { Text, visibleWidth } from '@xmoon76/pi-tui'
+import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit } from '../src/tui-app.ts'
+import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
+import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../src/clipboard.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -57,6 +60,36 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; ge
  * deliberate second todo click must be a NEW gesture, never coalesced. */
 function sleepBeyondTodoCoalesce(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 550))
+}
+
+/** Start an app on a terminal of the given height (the Todo short-screen
+ * policy is vertical, so only rows vary here). */
+function startRows(rows: number): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(80, rows)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+/** Todo items in a mixed status pattern: `in_progress, pending, completed`
+ * repeating, so the ordered render (`in_progress → pending → completed`) is
+ * never the input order. */
+function todoItems(count: number): Array<{ id: string; content: string; status: 'in_progress' | 'pending' | 'completed' }> {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? 'in_progress' as const : i % 3 === 1 ? 'pending' as const : 'completed' as const,
+  }))
+}
+
+/** Click the currently rendered row carrying `needle` (the fullscreen todo
+ * panel is only reachable through real mouse coordinates). */
+function clickTodoRow(vt: VirtualTerminal, needle: string): void {
+  const row = vt.getViewport().findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the todo row must be rendered before clicking: ${needle}`)
+  vt.sendInput(`\x1b[<0;20;${row + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${row + 1}m`)
 }
 
 /** One Session v2 live chunk input (the transient plane replaces durable
@@ -314,7 +347,7 @@ test('tool cards present through the real registry: read shows the relativized p
 
     startedApps.add(app)
     life.defer(() => app.stop())
-    app.setToolOutputExpanded(true)
+    app.setTranscriptDetailExpanded(true)
     const folder = new TranscriptFolder()
     folder.apply([callEvent, resultEvent])
     app.setTranscript(folder.messages())
@@ -410,101 +443,374 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   assert.ok(view.includes('❯ follow up on the audit'), `followup row missing:\n${view}`)
   assert.ok(view.includes('❯ steer a correction'), `steer row missing:\n${view}`)
   assert.ok(view.includes('ctrl+s to steer all'), `steer-all hint missing:\n${view}`)
-  assert.ok(view.includes('alt+up to edit all'), `hint row missing:\n${view}`)
+  assert.ok(view.includes('alt+up to recall all'), `recall-all hint missing:\n${view}`)
+  // The TUI exposes ONLY the three bulk/submit gestures (plan §6.2 D): the
+  // keymap has NO per-row queue edit/remove action, so a symbolic or
+  // key-only row action cannot exist silently.
+  const queueActions = Object.keys(APP_KEYBINDINGS).filter(id => /queue|dequeue|steer/i.test(id)).sort()
+  assert.deepEqual(queueActions, ['app.input.dequeue', 'app.input.queue', 'app.input.steer'],
+    'no per-row queue edit/remove action may be bound')
+  assert.equal((view.match(/❯/g) ?? []).length, 3, 'two queue rows plus the editor prompt only')
+  // Every rendered queue row is EXACTLY the marker plus its text — no action
+  // token, bracket hint, or extra control (viewport padding is trimmed).
+  const plainLines = stripTerminalSequences(view).split('\n').map(line => line.trim())
+  assert.deepEqual(
+    plainLines.filter(line => line.startsWith('❯ ') && line !== '❯'),
+    ['❯ follow up on the audit', '❯ steer a correction'],
+    'each queued row is exactly the marker plus its text',
+  )
   app.setQueueItems([])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.equal((view.match(/❯/g) ?? []).length, 1, `cleared queue still rendered:\n${view}`)
 })
 
-test('job notices in the queue render with their own marker and drop the steer hints', async () => {
+test('queue pane renders every semantic queued row with the same steer affordances', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  // Only a job-completion notice queued: no steerable content at all.
-  app.setQueueItems([{ id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer', notice: true }])
-  await vt.waitForRender()
-  let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('⏳ bash-2 pnpm build finished'), `notice row missing its marker:\n${view}`)
-  // Only the editor prompt may carry a ❯ — a notice must never render as
-  // steerable input.
-  assert.equal((view.match(/❯/g) ?? []).length, 1, `a notice must not render as steerable input:\n${view}`)
-  assert.ok(!view.includes('ctrl+s to steer all'), `steer hints must not advertise for notices:\n${view}`)
-  assert.ok(view.includes('/tasks to view'), `jobs hint missing:\n${view}`)
-  // A notice alongside real user input keeps the steer verbs.
   app.setQueueItems([
-    { id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer', notice: true },
+    { id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer' },
     { id: 'm-1', text: 'please also fix the lint', mode: 'followup' },
   ])
   await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(view.includes('⏳ bash-2'), `notice row missing with mixed queue:\n${view}`)
-  assert.ok(view.includes('❯ please also fix the lint'), `user row missing:\n${view}`)
-  assert.ok(view.includes('ctrl+s to steer all'), `steer hint must survive a mixed queue:\n${view}`)
-  app.setQueueItems([])
-  await vt.waitForRender()
-  assert.ok(!vt.getViewport().join('\n').includes('⏳ bash-2'), `cleared notice survived:\n${view}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ bash-2 pnpm build finished'), `first semantic row missing:\n${view}`)
+  assert.ok(view.includes('❯ please also fix the lint'), `second semantic row missing:\n${view}`)
+  assert.equal((view.match(/❯/g) ?? []).length, 3, 'both queue rows and the editor prompt use the same marker')
+  assert.ok(view.includes('ctrl+s to steer all'), `steer hints missing:\n${view}`)
+  assert.ok(view.includes('alt+up to recall all'), `recall-all hint missing:\n${view}`)
 })
 
-test('notice rows beyond the fold collapse into a +N more line; user rows never fold', async () => {
+test('queue pane does not advertise the disabled recall-all gesture in a viewer', async () => {
   const { vt, app } = startApp()
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'running',
+    access: 'interactive-direct-child',
+  })
+  app.setQueueItems([{ id: 'child-q', text: 'child queue item', mode: 'followup' }])
   await vt.waitForRender()
-  // A backlog of notices (e.g. a batch of subagent settlements/reports):
-  // only the first MAX_NOTICE_ROWS render, the rest collapse into one line.
-  const notices = Array.from({ length: 8 }, (_, i) => ({
-    id: `n-${i}`, text: `notice ${i} text`, mode: 'steer' as const, notice: true,
-  }))
-  app.setQueueItems(notices)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('ctrl+s to steer all'), `viewer queue steer hint missing:\n${view}`)
+  assert.ok(!view.includes('alt+up to recall all'), `viewer must not advertise disabled recall-all:\n${view}`)
+})
+
+test('queue pane suppresses steer-all affordance while the active subject is idle', async () => {
+  const { vt, app } = startApp()
+  app.setQueueItems([{ id: 'idle-q', text: 'wait for the next turn', mode: 'followup' }], false)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('⏳ notice 0 text'), `first notice visible:\n${view}`)
-  assert.ok(view.includes('⏳ notice 4 text'), `fifth notice visible:\n${view}`)
-  assert.ok(!view.includes('⏳ notice 5 text'), `sixth notice must fold:\n${view}`)
-  assert.ok(view.includes('+3 more notices pending'), `fold line missing:\n${view}`)
-  assert.ok(!view.includes('ctrl+s to steer all'), 'notices alone must not advertise steer verbs')
-  assert.ok(view.includes('notices deliver after the current task · /tasks to view'), `notices hint missing:\n${view}`)
-  // User rows mixed in: every user row shows, notices still fold.
-  app.setQueueItems([
-    ...notices,
-    { id: 'm-1', text: 'my first queued message', mode: 'followup' },
-    { id: 'm-2', text: 'my second queued message', mode: 'steer' },
-  ])
+  assert.ok(view.includes('❯ wait for the next turn'), `idle queue row missing:\n${view}`)
+  assert.ok(view.includes('queued until the current task resumes'), `idle queue state missing:\n${view}`)
+  assert.ok(!view.includes('ctrl+s to steer all'), `idle queue must not advertise a no-op steer:\n${view}`)
+
+  app.setQueueItems([{ id: 'idle-q', text: 'wait for the next turn', mode: 'followup' }], true)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('❯ my first queued message'), `user row 1 missing:\n${view}`)
-  assert.ok(view.includes('❯ my second queued message'), `user row 2 missing:\n${view}`)
-  assert.ok(view.includes('+3 more notices pending'), `fold line must survive mixed queue:\n${view}`)
-  assert.ok(view.includes('ctrl+s to steer all'), 'steer hint must survive mixed queue:\n${view}')
-  // Claims drain the backlog: two notices gone, the fold shrinks.
-  app.setQueueItems([...notices.slice(0, 6), { id: 'm-1', text: 'my first queued message', mode: 'followup' }])
-  await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+1 more notices pending'), `fold count must shrink after claims:\n${view}`)
-  // Full drain: the group disappears entirely.
-  app.setQueueItems([{ id: 'm-1', text: 'my first queued message', mode: 'followup' }])
-  await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('more notices pending'), `fold line must vanish after drain:\n${view}`)
-  assert.ok(view.includes('❯ my first queued message'), `user row must survive the drain:\n${view}`)
+  assert.ok(view.includes('ctrl+s to steer all'), `running queue must restore the steer affordance:\n${view}`)
 })
 
 test('queue pane reflows from raw items across a narrow-to-wide resize', async () => {
   const { vt, app } = startApp()
-  const fullNotice = 'NOTICE-RESIZE ' + 'the original notice survives the narrow frame '.repeat(2)
-  app.setQueueItems([{ id: 'notice-1', text: fullNotice, mode: 'steer', notice: true }])
+  const fullText = 'QUEUE-RESIZE ' + 'the semantic row survives the narrow frame '.repeat(2)
+  app.setQueueItems([{ id: 'queue-1', text: fullText, mode: 'steer' }])
   await vt.waitForRender()
   vt.resize(40, 24)
   await vt.waitForRender()
   let lines = vt.getViewport()
-  const narrowNotice = lines.findIndex(line => line.includes('NOTICE-RESIZE'))
-  assert.ok(narrowNotice > 0, `notice must remain visible after narrowing:\n${lines.join('\n')}`)
+  const narrowRow = lines.findIndex(line => line.includes('QUEUE-RESIZE'))
+  assert.ok(narrowRow > 0, `queue row must remain visible after narrowing:\n${lines.join('\n')}`)
   let borderRows = 0
-  for (let index = narrowNotice - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
+  for (let index = narrowRow - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
   assert.equal(borderRows, 1, `a narrow queue must have one border row, not stale wrapped rows:\n${lines.join('\n')}`)
-  assert.equal(visibleWidth(lines[narrowNotice - 1]!), 40)
+  assert.equal(visibleWidth(lines[narrowRow - 1]!), 40)
   vt.resize(120, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  assert.ok(lines.some(line => line.includes(fullNotice)), `the wide queue must recover the raw notice:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.includes(fullText)), `the wide queue must recover the raw semantic row:\n${lines.join('\n')}`)
+})
+
+test('a client-local queued echo renders its content marked sending in the queue pane', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [{ id: 'req-1', rpcId: 'req-1', text: 'queued locally', mode: 'followup', local: true }],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ queued locally'), `local queued content missing:\n${view}`)
+  assert.ok(view.includes('sending…'), `local queued row must be marked sending:\n${view}`)
+})
+
+test('the ephemeral pending-steering lane renders user content at the conversation tail', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const before = (vt.getViewport().join('\n').match(/❯/g) ?? []).length
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'req-2', rpcId: 'req-2', text: 'steer this now', local: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ steer this now'), `pending steering content missing:\n${view}`)
+  assert.ok(view.includes('steering…'), `pending steering status missing:\n${view}`)
+  // The lane is a user-style row outside the queue pane: only the editor
+  // prompt plus the lane bullet carry the ❯ marker.
+  assert.equal((view.match(/❯/g) ?? []).length, before + 1, `the lane must add exactly one user marker:\n${view}`)
+})
+
+test('an active steering row reads steering…; an interrupted (parked) one reads waiting for next turn…', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const parked = (running: boolean): void => {
+    app.setPendingInputPresentation({
+      queued: [],
+      steering: [{ id: 'occ-1', rpcId: 'occ-1', text: 'steer this now', status: 'steering' }],
+      running,
+    })
+  }
+  parked(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ steer this now'), `pending steering content missing:\n${view}`)
+  assert.ok(view.includes('steering…'), `an active steer must read steering…:\n${view}`)
+  assert.ok(!view.includes('waiting for next turn'), `an active steer must not read waiting:\n${view}`)
+
+  // The turn is Interrupted: the Host leaves the steering occurrence PARKED in
+  // the inbox until the next wake. The row STAYS visible and only its status
+  // line changes — the semantic placement is untouched.
+  parked(false)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ steer this now'), `the parked row must stay visible:\n${view}`)
+  assert.ok(view.includes('waiting for next turn…'), `a parked steer must read waiting:\n${view}`)
+  assert.ok(!view.includes('steering…'), `a parked steer must no longer read steering…:\n${view}`)
+})
+
+test('a client-local steering echo never renders waiting: only an authoritative row can be parked', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // A local echo has no Host occurrence yet, so an idle subject must NOT turn
+  // it into a parked row while its submission is still in flight.
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'echo-1', rpcId: 'echo-1', text: 'local steer echo', local: true, status: 'steering' }],
+    running: false,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ local steer echo'), `the local echo must stay visible:\n${view}`)
+  assert.ok(view.includes('steering…'), `a local steering echo keeps steering…:\n${view}`)
+  assert.ok(!view.includes('waiting for next turn'), `a local echo is never parked:\n${view}`)
+})
+
+test('the parked waiting label follows the ACTIVE subject across a child viewer round trip', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    running: true,
+  })
+  await vt.waitForRender()
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'inactive',
+    access: 'interactive-direct-child',
+  })
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'child-occ', text: 'child steer', status: 'steering' }],
+    running: false,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ child steer'), `the child parked row must be visible:\n${view}`)
+  assert.ok(view.includes('waiting for next turn…'), `the child parked row must read waiting:\n${view}`)
+  assert.ok(!view.includes('parent steer'), `the parent row must not leak into the child viewer:\n${view}`)
+
+  app.setViewerMode(undefined)
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    running: true,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('child steer'), `the child parked row must not leak back into the parent:\n${view}`)
+  assert.ok(view.includes('parent steer'), `the parent row must return:\n${view}`)
+  assert.ok(view.includes('steering…'), `the parent active steer must read steering…:\n${view}`)
+})
+
+test('a narrow queue pane keeps a local sending suffix on the same row', async () => {
+  const { vt, app } = startApp()
+  vt.resize(24, 24)
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [{
+      id: 'req-narrow',
+      rpcId: 'req-narrow',
+      text: 'a long queued local submission that cannot fit',
+      mode: 'followup',
+      local: true,
+    }],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const row = lines.findIndex(line => line.includes('❯') && line.includes('a long queue'))
+  assert.ok(row >= 0, `the local queue row must render:\n${lines.join('\n')}`)
+  assert.ok(lines[row]!.includes('sending…'),
+    `the sending suffix must stay on the row, not wrap:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.trim() === 'sending…'),
+    `the suffix must never detach onto its own line:\n${lines.join('\n')}`)
+  assert.ok(visibleWidth(lines[row]!) <= 24, `the row must fit the pane width:\n${lines.join('\n')}`)
+})
+
+test('an ultra-narrow queue pane never wraps the local status onto a detached row', async () => {
+  const { vt, app } = startApp()
+  vt.resize(10, 24)
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [{
+      id: 'req-ultra',
+      rpcId: 'req-ultra',
+      text: 'a long queued local submission',
+      mode: 'followup',
+      local: true,
+    }],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  assert.ok(!lines.some(line => line.trim() === 'sending…'),
+    `the status must not detach onto its own row:\n${lines.join('\n')}`)
+  const row = lines.findIndex(line => line.includes('❯'))
+  assert.ok(row >= 0, `the local queue row must render:\n${lines.join('\n')}`)
+  assert.ok(visibleWidth(lines[row]!) <= 10, `the row must fit the pane width:\n${lines.join('\n')}`)
+})
+
+test('a local-only queue pane does not advertise the bulk steer/recall actions', async () => {
+  const { vt, app } = startApp()
+  app.setPendingInputPresentation({
+    queued: [{ id: 'req-l', rpcId: 'req-l', text: 'local only', mode: 'followup', local: true }],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ local only'), `the local row must render:\n${view}`)
+  assert.ok(view.includes('sending…'), `the local row must be marked sending:\n${view}`)
+  assert.ok(!view.includes('to steer all'),
+    `a local-only pane must not advertise a no-op steer-all:\n${view}`)
+  assert.ok(!view.includes('to recall all'),
+    `a local-only pane must not advertise a no-op recall-all:\n${view}`)
+
+  // A mixed pane keeps the hint: the bulk actions DO apply to its
+  // authoritative rows.
+  app.setPendingInputPresentation({
+    queued: [
+      { id: 'req-l', rpcId: 'req-l', text: 'local only', mode: 'followup', local: true },
+      { id: 'auth-q', rpcId: 'auth-rpc', text: 'authoritative row', mode: 'followup' },
+    ],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('to steer accepted'),
+    `a mixed pane must scope the hint to the accepted rows:\n${view}`)
+  assert.ok(view.includes('to recall accepted'),
+    `a mixed pane must scope the recall hint too:\n${view}`)
+  assert.ok(!view.includes('to steer all'),
+    `a mixed pane must not claim the sending row participates:\n${view}`)
+})
+
+test('the pending presentation never steals the fullscreen viewport (force-tail ownership is the runner\'s)', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(Array.from({ length: 40 }, (_, index) => ({
+    kind: 'assistant' as const,
+    turn: index,
+    text: `history row ${index}`,
+  })))
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.scrollToTop({ disableFollow: true })
+  await vt.waitForRender()
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, false,
+    'the reader must be browsing history before the update')
+
+  // A local echo and an authoritative steering occurrence alike are pure
+  // presentation updates here: the RUNNER decides whether own input takes the
+  // viewport (it also owns the virtual transcript window).
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, false,
+    'TuiApp must not force the viewport for a local echo on its own')
+
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [
+      { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true },
+      { id: 'remote-occ', rpcId: 'remote-rpc', text: 'REMOTE-MARKER', status: 'steering' },
+    ],
+    running: true,
+  })
+  await vt.waitForRender()
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, false,
+    'a background authoritative steering row must never steal the viewport')
+})
+
+test('clearing the pending-input presentation removes the lane and the queue pane', async () => {
+  const { vt, app } = startApp()
+  app.setPendingInputPresentation({
+    queued: [{ id: 'q', text: 'queued row', mode: 'followup', local: true }],
+    steering: [{ id: 's', text: 'steering row', local: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  app.setPendingInputPresentation({ queued: [], steering: [], running: false })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('steering row'), `stale steering row survived:\n${view}`)
+  assert.ok(!view.includes('queued row'), `stale queue row survived:\n${view}`)
+  assert.equal((view.match(/❯/g) ?? []).length, 1, `only the editor prompt remains:\n${view}`)
+})
+
+test('the viewer clears the main pending-steering lane on entry', async () => {
+  const { vt, app } = startApp()
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 's', text: 'main steering must not leak', local: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'running',
+    access: 'interactive-direct-child',
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('main steering must not leak'), `main lane leaked into the viewer:\n${view}`)
 })
 
 test('todo panel rebuilds its border from the live width', async () => {
@@ -575,6 +881,50 @@ test('height-only resize refreshes the extension widget row budget', async () =>
   assert.equal(widgetRows(), 3)
 })
 
+test('history overlay preserves background cells outside its physical frame', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  const background = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.repeat(5).slice(0, 116)
+  app.setDraft(Array.from({ length: 12 }, () => background).join('\n'))
+  await vt.waitForRender()
+  const plainViewport = (): string[] => vt.getViewport()
+    .map(line => stripTerminalSequences(line).padEnd(vt.columns, ' '))
+  const before = plainViewport()
+
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  const after = plainViewport()
+  const frameTop = after.findIndex(line => line.includes('╭'))
+  assert.ok(frameTop >= 0, `history frame must be painted:\n${after.join('\n')}`)
+  const leftBorder = after[frameTop]!.indexOf('╭')
+  const rightBorder = after[frameTop]!.indexOf('╮', leftBorder)
+  assert.ok(leftBorder > 0, 'history frame must have a background area on the left')
+  assert.ok(rightBorder > leftBorder, 'history frame right border must be present')
+  const coveredRow = frameTop + 1
+  assert.ok(before[coveredRow]!.includes(background.slice(0, 20)), 'the selected background row must contain the sentinel pattern')
+  assert.equal(
+    after[coveredRow]!.slice(0, leftBorder),
+    before[coveredRow]!.slice(0, leftBorder),
+    'cells to the left of the history frame must remain owned by the background',
+  )
+  assert.equal(
+    after[coveredRow]!.slice(rightBorder + 1),
+    before[coveredRow]!.slice(rightBorder + 1),
+    'cells to the right of the history frame must remain owned by the background',
+  )
+})
+
 test('history overlay reflows geometry without restarting its search state', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
@@ -619,22 +969,112 @@ test('history overlay reflows geometry without restarting its search state', asy
   await vt.waitForRender()
 })
 
+test('history overlay preserves query and selection across fullscreen rebinds', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  app.openHistorySearch()
+  await vt.waitForRender()
+  vt.sendInput('x')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  const strip = (line: string): string => stripTerminalSequences(line)
+  const hasSelectedBeta = (viewport: string[]): boolean => viewport.some(line => {
+    const plain = strip(line)
+    return plain.includes('entry beta') && plain.includes('›')
+  })
+  const before = vt.getViewport().map(strip).join('\n')
+  assert.ok(before.includes('Search: > x'), `history query must be visible before fullscreen:\n${before}`)
+  assert.ok(hasSelectedBeta(vt.getViewport()), `history selection must be visible before fullscreen:\n${before}`)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Search: > x'), `fullscreen rebind must preserve the query:\n${view}`)
+  assert.ok(hasSelectedBeta(vt.getViewport()), `fullscreen rebind must preserve the selection:\n${view}`)
+
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Search: > x'), `regular rebind must preserve the query:\n${view}`)
+  assert.ok(hasSelectedBeta(vt.getViewport()), `regular rebind must preserve the selection:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('a history-overlay click before the post-resize repaint is rejected at capped geometry', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true) // only the alt screen dispatches overlay mouse events
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const rowY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
+  assert.ok(rowY >= 0, `history rows must be painted:\n${vt.getViewport().map(strip).join('\n')}`)
+  // SGR x is 1-based; the item content starts two cells right of the frame's
+  // left border (`│` + one padding cell).
+  const leftBorder = vt.getViewport().map(strip)[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'history frame left border missing')
+  const clickX = leftBorder + 3
+  // 40 -> 41 keeps the history maxHeight clamped at 30, so only the RAW
+  // terminal dimensions change; the fence must still reject the stale click.
+  vt.resize(120, 41)
+  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}M`)
+  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}m`)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.ok(vt.getViewport().map(strip).some(line => line.includes('entry alpha')),
+    `a stale-geometry click must not accept a history row:\n${vt.getViewport().map(strip).join('\n')}`)
+  assert.equal(app.seatTextForTest(), '', 'the editor draft must be untouched by the stale click')
+  // After the repaint adopts the new geometry, the click accepts.
+  await vt.waitForRender()
+  const repaintedY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
+  assert.ok(repaintedY >= 0)
+  const repaintedX = (vt.getViewport().map(strip)[repaintedY]?.indexOf('│') ?? -1) + 3
+  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}M`)
+  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}m`)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(app.seatTextForTest(), 'entry alpha', 'a fresh post-resize click must accept the entry')
+  app.stop()
+})
+
 test('task browser no-match state fits a short terminal without clipping the hint', async () => {
   const { vt, app } = startApp()
   vt.resize(80, 8)
   await vt.waitForRender()
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }],
+    () => 'close',
     () => {},
-    () => {},
-    { header: 'Tasks', enableSearch: true, noMatchText: 'no matching tasks' },
+    { mode: 'full', header: 'Tasks', enableSearch: true, noMatchText: 'no matching tasks' },
   )
   await vt.waitForRender()
+  vt.sendInput('/') // explicit search mode owns printable filtering
   for (const key of 'zzzz') vt.sendInput(key) // no match
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('no matching tasks'), `no-match message must survive:\n${view}`)
-  assert.ok(view.includes('esc close'), `no-match hint must survive:\n${view}`)
+  assert.ok(view.includes('Esc back'), `no-match hint must survive:\n${view}`)
   assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -651,7 +1091,7 @@ test('Task Center full mode keeps the selected task on a very short terminal', a
       status: 'running',
       group: 'jobs',
     })),
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'Tasks', maxVisible: 10 },
   )
@@ -679,7 +1119,7 @@ test('Task Center full mode keeps search input and the selected task at 10 rows'
       status: 'running',
       group: 'jobs',
     })),
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'Tasks', maxVisible: 10, initialSearchMode: true },
   )
@@ -703,7 +1143,7 @@ test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)'
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
     startedApps.add(app)
-    app.openTaskBrowser(items, () => {}, () => {}, { width: '50%' })
+    app.openTaskBrowser(items, () => 'close', () => {}, { mode: 'full', width: '50%' })
     await vt.waitForRender()
     const lines = vt.getViewport().map(strip)
     const top = lines.findIndex(line => line.includes('╭'))
@@ -717,7 +1157,7 @@ test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)'
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
     startedApps.add(app)
-    app.openTaskBrowser(items, () => {}, () => {}, { maxHeight: '70%' })
+    app.openTaskBrowser(items, () => 'close', () => {}, { mode: 'full', maxHeight: '70%' })
     await vt.waitForRender()
     const lines = vt.getViewport().map(strip)
     const top = lines.findIndex(line => line.includes('╭'))
@@ -737,7 +1177,7 @@ test('openTaskBrowser full mode honors explicit numeric width and maxHeight', as
   startedApps.add(app)
   // Explicit options always win, even in full mode: 100 wide / 20 tall
   // (clamped by the margin-inset available area, never forced to 100%).
-  app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', width: 100, maxHeight: 20 })
+  app.openTaskBrowser(items, () => 'close', () => {}, { mode: 'full', width: 100, maxHeight: 20 })
   await vt.waitForRender()
   const lines = vt.getViewport().map(strip)
   const top = lines.findIndex(line => line.includes('╭'))
@@ -764,9 +1204,9 @@ test('task browser keeps the selected row and hint visible after a height shrink
       // fallback must keep the SELECTED MAIN row, not its detail tail.
       detail: `detail line ${index}`,
     })),
+    () => 'close',
     () => {},
-    () => {},
-    { header: 'Tasks', maxVisible: 10, enableSearch: true },
+    { mode: 'full', header: 'Tasks', maxVisible: 10, enableSearch: true },
   )
   await vt.waitForRender()
   for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
@@ -775,7 +1215,7 @@ test('task browser keeps the selected row and hint visible after a height shrink
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('task 17'), `selected task main row must remain visible after shrink:\n${view}`)
-  assert.ok(view.includes('esc close'), `task hint must remain visible after shrink:\n${view}`)
+  assert.ok(view.includes('Esc close'), `task hint must remain visible after shrink:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
@@ -983,6 +1423,142 @@ test('fullscreen click on the todo panel toggles its compact/full expansion', as
   app.setFullscreen(false)
 })
 
+test('todoCompactLimit is purely vertical: 5 normally, 3 at or below 16 rows', () => {
+  assert.equal(TODO_COMPACT_LIMIT, 5)
+  assert.equal(TODO_SHORT_COMPACT_LIMIT, 3)
+  assert.equal(TODO_SHORT_SCREEN_MAX_ROWS, 16)
+  assert.equal(todoCompactLimit(24), 5)
+  assert.equal(todoCompactLimit(17), 5)
+  assert.equal(todoCompactLimit(16), 3)
+  assert.equal(todoCompactLimit(10), 3)
+})
+
+test('a 24-row fullscreen keeps the 5-row compact Todo first open (plan §8)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const compact = vt.getViewport().join('\n')
+  assert.ok(compact.includes('todo item 4'), `the fifth compact row must show:\n${compact}`)
+  assert.ok(!compact.includes('todo item 5'), `the sixth row must stay hidden:\n${compact}`)
+  assert.equal(app.isTodoPanelExpanded(), false, 'the first open is compact')
+  app.toggleTodoExpanded()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 5'), 'the full state must reveal the hidden row')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a 16-row fullscreen opens the Todo panel with 3 rows and expands to full', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const compact = vt.getViewport().join('\n')
+  assert.ok(compact.includes('todo item 6'), `the third compact row must show:\n${compact}`)
+  assert.ok(!compact.includes('todo item 1'), `the fourth row must stay hidden on a short screen:\n${compact}`)
+  assert.equal(app.isTodoPanelExpanded(), false, 'the short first open is compact')
+  app.toggleTodoExpanded()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 1'), 'the full state must reveal the fourth row')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a short fullscreen with 3 items has no redundant full Todo state', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(3))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(app.toggleTodoExpanded(), false, '3 items fit the short compact cap: no full state')
+  assert.equal(app.isTodoPanelExpanded(), false)
+  // The click loop's next step closes the panel instead of a no-op full.
+  clickTodoRow(vt, 'todo item 0')
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelVisible(), false, 'the second gesture must close the panel')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a short fullscreen with 4 items keeps the full Todo state', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(4))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('todo item 2'), 'the fourth ordered row starts hidden')
+  assert.equal(app.toggleTodoExpanded(), true, '4 items exceed the short compact cap')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 2'))
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('shrinking the terminal re-derives the compact Todo cap and stays compact', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 4'), '24 rows start with 5 compact rows')
+  vt.resize(80, 16)
+  await vt.waitForRender()
+  const short = vt.getViewport().join('\n')
+  assert.ok(short.includes('todo item 6'), `the third row survives:\n${short}`)
+  assert.ok(!short.includes('todo item 1'), `the fourth row must hide after the shrink:\n${short}`)
+  assert.equal(app.isTodoPanelExpanded(), false, 'a compact panel stays compact across the shrink')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('growing the terminal re-derives the compact Todo cap up to 5', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('todo item 1'), '16 rows start with 3 compact rows')
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 1'), '24 rows restore the fourth row')
+  assert.equal(app.isTodoPanelExpanded(), false)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('an explicit full Todo survives a shrink but normalizes on a grow past the cap', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.toggleTodoExpanded()
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelExpanded(), true)
+  // Shrinking keeps the user's explicit full state (8 > 3 still overflows).
+  vt.resize(80, 16)
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelExpanded(), true, 'an explicit full survives the shrink')
+  // Growing past the cap for a 4-item list normalizes the ghost state.
+  app.setTodoSummary(todoItems(4))
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelExpanded(), false, 'a full state identical to compact must be cleared')
+  assert.ok(vt.getViewport().join('\n').includes('todo item 2'), 'all 4 items still render')
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('fullscreen click on the todo summary dock row opens the todo panel', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
@@ -997,25 +1573,25 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('☑'), `todo summary must render in the dock:\n${view}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
-  // at the bottom on the 80x24 test terminal: an all-unavailable status
-  // row renders nothing, so the stats row is the whole footer; the closed
-  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal: the canonical display-preset status
+  // row and stats row occupy the two footer lines; the closed
+  // panel renders zero rows, so the todo region clamps to [18, 19) —
   // exactly the dock row).
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'click on the summary row must open the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('todo item 0'), `compact panel must show after the click:\n${view}`)
   // With the panel open the summary is hidden and the panel owns rows
-  // 13..19 — the same cell is now a panel row, so the next click runs the
+  // 12..18 — the same cell is now a panel row, so the next click runs the
   // compact → full step of the loop. Paced beyond the todo click-coalescing
   // window: a DELIBERATE second gesture, not a rapid double-click.
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'panel must stay open (the cell is now a panel row)')
   assert.ok(app.isTodoPanelExpanded(), 'the click now expands the panel (compact → full)')
@@ -1037,12 +1613,12 @@ test('fullscreen todo: a dock press cannot run the panel action after a keyboard
   let view = vt.getViewport()
   assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
-  // at the bottom on the 80x24 test terminal: an all-unavailable status
-  // row renders nothing, so the stats row is the whole footer; the closed
-  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal: the canonical display-preset status
+  // row and stats row occupy the two footer lines; the closed
+  // panel renders zero rows, so the todo region clamps to [18, 19) —
   // exactly the dock row).
-  const dockY = 19
+  const dockY = 18
   // Press the dock row (no release): the press identity is todo:dock.
   vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
   await vt.waitForRender()
@@ -1085,12 +1661,12 @@ test('fullscreen todo: a dock press cannot toggle the panel across a session swi
   let view = vt.getViewport()
   assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
-  // at the bottom on the 80x24 test terminal: an all-unavailable status
-  // row renders nothing, so the stats row is the whole footer; the closed
-  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal: the canonical display-preset status
+  // row and stats row occupy the two footer lines; the closed
+  // panel renders zero rows, so the todo region clamps to [18, 19) —
   // exactly the dock row).
-  const dockY = 19
+  const dockY = 18
   // Press the dock row (no release): the press identity is todo:dock.
   vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
   await vt.waitForRender()
@@ -1162,10 +1738,10 @@ test('fullscreen todo: a session switch resets the click-coalescing window (mous
   let view = vt.getViewport()
   assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
-  // at the bottom on the 80x24 test terminal: an all-unavailable status
-  // row renders nothing, so the stats row is the whole footer).
-  const dockY = 19
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal: the canonical display-preset status
+  // row and stats row occupy the two footer lines).
+  const dockY = 18
   // A completed todo click in session A opens the panel AND sets the
   // click-coalescing window.
   vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
@@ -1196,7 +1772,7 @@ test('fullscreen todo: a session switch resets the click-coalescing window (mous
 test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -1271,7 +1847,7 @@ test('fullscreen transcript click: a press on a local card cannot transfer to a 
 test('fullscreen transcript click: a resize between press and release cannot act against the stale frame (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -1298,7 +1874,7 @@ test('fullscreen transcript click: a resize between press and release cannot act
 test('fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -1327,7 +1903,7 @@ test('fullscreen transcript click: a resize + repaint between press and release 
 test('fullscreen transcript click: a question-frame press clears the stale background gesture (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -1434,24 +2010,24 @@ test('todo state machine: ≤5 items is a two-state summary ↔ list (no redunda
   app.setTodoSummary(todos)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
-  // at the bottom on the 80x24 test terminal: an all-unavailable status
-  // row renders nothing, so the stats row is the whole footer; the closed
-  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal: the canonical display-preset status
+  // row and stats row occupy the two footer lines; the closed
+  // panel renders zero rows, so the todo region clamps to [18, 19) —
   // exactly the dock row). Click it: summary → list.
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact (visually identical to full at ≤5)')
-  // With the panel open (border + title + 5 rows = rows 14..19) the same
+  // With the panel open (border + title + 5 rows = rows 13..18) the same
   // cell is a panel row: a DELIBERATE second click (paced beyond the
   // coalescing window) must close the panel DIRECTLY — the second click
   // returns to the summary, no third click needed, and no intermediate
   // todoExpanded state exists.
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click closes the panel (list → summary)')
   assert.ok(!app.isTodoPanelExpanded(), 'no ghost expanded state at ≤5')
@@ -1469,9 +2045,9 @@ test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash op
   app.setTodoSummary(todos)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
-  // at the bottom on the 80x24 test terminal: an all-unavailable status
-  // row renders nothing, so the stats row is the whole footer). Two
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal: the canonical display-preset status
+  // row and stats row occupy the two footer lines). Two
   // press/release groups at the SAME coordinate, the first render landing
   // between them, both inside the double-click window (no pacing): the
   // first click opens the panel, the layout mutates (the dock vanishes,
@@ -1479,12 +2055,12 @@ test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash op
   // row — WITHOUT the todo coalescing it would immediately close the panel
   // (the todo "flashes and vanishes"). The coalesced pair must leave the
   // todo in the state the FIRST click produced.
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'fixture: the first click opens the panel')
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'the rapid second click must be coalesced — the panel stays open')
   assert.ok(!app.isTodoPanelExpanded(), 'and stays in the first click\'s state (compact)')
@@ -1493,8 +2069,8 @@ test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash op
   vt.sendInput('\x1b[<0;40;5M')
   vt.sendInput('\x1b[<0;40;5m')
   await vt.waitForRender()
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'after a different-target click the next todo click works')
   app.setFullscreen(false)
@@ -1507,16 +2083,16 @@ test('todo state machine: 1 item also closes on the second click (boundary)', as
   app.setTodoSummary([{ content: 'only todo', status: 'in_progress' }])
   app.setFullscreen(true)
   await vt.waitForRender()
-  // The dock summary row: 0-based 19 (editor seat 3 + footer 1 on the
-  // 80x24 terminal with an all-unavailable status row).
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  // The dock summary row: 0-based 18 (editor seat 3 + footer 2 on the
+  // 80x24 terminal with the canonical display-preset status row).
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
   // Deliberate second gesture (paced beyond the coalescing window).
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;20M')
-  vt.sendInput('\x1b[<0;20;20m')
+  vt.sendInput('\x1b[<0;20;19M')
+  vt.sendInput('\x1b[<0;20;19m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click closes the 1-item panel')
   assert.ok(!app.isTodoPanelExpanded(), 'no expanded state with 1 item')
@@ -1662,6 +2238,259 @@ test('the output viewer refreshes on a timer, stops on s, and closes on esc', as
   app.stop()
 })
 
+test('the output viewer shows a bottom action hint and stops through the tasks.stop semantic', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  const stopped: string[] = []
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'job-running',
+    refresh: () => 'job-running',
+    onStop: () => { stopped.push('stop') },
+    canStop: () => true,
+    closeHint: 'back',
+    intervalMs: 10,
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('job detail'), `viewer title missing:\n${view()}`)
+  assert.ok(view().includes('job-running'), `viewer body missing:\n${view()}`)
+  // The action hint is SEPARATE chrome: it never rides in the body string.
+  assert.ok(view().includes('S stop · Esc back'), `action hint missing:\n${view()}`)
+  assert.ok(!view().includes('job-runningS stop'), `the hint must not be appended to the body:\n${view()}`)
+  // The semantic stop key fires onStop (the same definition the hint shows).
+  vt.sendInput('s')
+  assert.deepEqual(stopped, ['stop'])
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('job detail'), `Esc must close the viewer:\n${view()}`)
+  app.stop()
+})
+
+test('a settled job drops the Stop hint and makes the stop key a no-op', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  const stopped: string[] = []
+  let canStop = true
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'job-running',
+    refresh: () => 'job-running',
+    onStop: () => { stopped.push('stop') },
+    canStop: () => canStop,
+    closeHint: 'back',
+    intervalMs: 10,
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('S stop · Esc back'), `the running hint must offer Stop:\n${view()}`)
+
+  canStop = false
+  await new Promise(resolve => setTimeout(resolve, 40))
+  await vt.waitForRender()
+  assert.ok(view().includes('Esc back'), `Esc back must survive the settle:\n${view()}`)
+  assert.ok(!view().includes('stop'), `the Stop hint must disappear once settled:\n${view()}`)
+  vt.sendInput('s')
+  assert.deepEqual(stopped, [], 'the stop key must be a no-op once settled')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('job detail'), `Esc must still close the viewer:\n${view()}`)
+  app.stop()
+})
+
+test('a long body keeps the Esc back hint on genuinely short terminals (rows 8..2)', async () => {
+  const longBody = Array.from({ length: 200 }, (_, index) => `body line ${index}`).join('\n')
+  for (const rows of [8, 6, 5, 4, 3, 2]) {
+    const { vt, app } = startApp()
+    vt.resize(80, rows)
+    await vt.waitForRender()
+    const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+    app.openOutputViewer({
+      title: 'job detail',
+      initial: longBody,
+      refresh: () => longBody,
+      onStop: () => {},
+      canStop: () => true,
+      closeHint: 'back',
+    })
+    await vt.waitForRender()
+    // The granted box is (rows - 2 frame borders) CONTENT rows; the hint must
+    // always survive even when that leaves no room for the body. At rows=2
+    // the fork keeps the top border + the hint.
+    assert.ok(view().includes('Esc back'), `rows=${rows}: the Esc back hint must survive:\n${view()}`)
+    assert.ok(!view().includes('body line 199'), `rows=${rows}: the body must be budgeted:\n${view()}`)
+    if (rows >= 5) assert.ok(view().includes('body line 0'), `rows=${rows}: the body should still start:\n${view()}`)
+    app.dispose()
+  }
+})
+
+test('a one-row terminal is below the bordered viewer floor (documented physical limit)', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 1)
+  await vt.waitForRender()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.equal(app.overlayGraphState().handles, 0)
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'body',
+    refresh: () => 'body',
+    onStop: () => {},
+    canStop: () => true,
+    closeHint: 'back',
+  })
+  await vt.waitForRender()
+  // The viewer mounts and never throws, but the fork keeps only the FIRST
+  // `maxHeight` (=1) line of the bordered box: the top border. No bordered
+  // overlay can render content at one row — this is the documented floor, so
+  // the hint contract starts at two rows.
+  assert.equal(app.overlayGraphState().handles, 1, 'the viewer still mounts at one row')
+  assert.ok(view().includes('╭'), `the documented floor is the frame border:\n${view()}`)
+  app.dispose()
+})
+
+test('a standalone output viewer (no onStop) shows Esc close and never offers Stop', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  app.openOutputViewer({
+    title: 'Sign in',
+    initial: 'device code ABCD',
+    refresh: () => 'device code ABCD',
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('Esc close'), `a standalone notice must say Esc close:\n${view()}`)
+  assert.ok(!view().includes('stop'), `a standalone notice must never offer Stop:\n${view()}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('Sign in'), `Esc must close the notice:\n${view()}`)
+  app.stop()
+})
+
+test('a Job View opened from Quick returns to the exact parent browser state on Esc', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  app.setEditorText('draft')
+  const handle = app.openTaskBrowser(
+    [
+      { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+      { value: 'job:2', label: 'bash · lint', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+    ],
+    (value) => {
+      app.openOutputViewer({
+        title: 'job detail',
+        initial: `selected ${value}`,
+        refresh: () => `selected ${value}`,
+        onStop: () => {},
+        canStop: () => true,
+        closeHint: 'back',
+      })
+      return 'keep-open'
+    },
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // move to the second row
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view().includes('job detail') && view().includes('selected job:2'),
+    `the Job View must open for the selected row:\n${view()}`)
+  assert.ok(!view().includes('Open Task Center'), `Quick must be hidden beneath it:\n${view()}`)
+  assert.equal(app.overlayGraphState().handles, 2, 'Quick stays mounted beneath the Job View')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the Job View holds physical focus')
+  vt.sendInput('X') // must be consumed by the Job View, never leak into the draft
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draft', 'printables must not reach the editor')
+
+  // A live refresh lands on the HIDDEN parent (the runtime's commit path):
+  // the same mounted instance must show the update after it is restored —
+  // this proves the parent is preserved by the overlay stack, not rebuilt
+  // from a saved snapshot.
+  handle.setItems([
+    { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+    { value: 'job:2', label: 'bash · lint (updated)', status: 'completed', active: true, source: 'job', type: 'bash', canStop: false, startedAt: Date.now(), group: 'jobs' },
+  ])
+
+  vt.sendInput('\x1b') // close only the Job View
+  await vt.waitForRender()
+  assert.ok(!view().includes('job detail'), `Esc must close the Job View:\n${view()}`)
+  assert.ok(view().includes('Open Task Center'), `Quick must be restored:\n${view()}`)
+  assert.ok(view().includes('bash · lint (updated)'), `the hidden parent must have absorbed the live refresh:\n${view()}`)
+  assert.equal(app.overlayGraphState().handles, 1, 'only Quick remains tracked')
+  assert.equal(handle.getViewState!().selectedId, 'job:2', 'the parent selection must be preserved')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored Quick holds physical focus')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('Open Task Center'), `the second Esc must close Quick:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ')
+  app.stop()
+})
+
+test('a Job View opened from Full returns to the exact Full state (type filter, tree disclosure, search, selection)', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  const handle = app.openTaskBrowser(
+    [
+      { value: 'agent:parent', label: 'subagent · parent', status: 'completed', active: false, source: 'subagent', type: 'subagent', hasChildren: true, group: 'subagents' },
+      { value: 'agent:child', label: 'subagent · child', status: 'completed', active: false, source: 'subagent', type: 'subagent', parentId: 'agent:parent', group: 'subagents' },
+      { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+    ],
+    (value) => {
+      app.openOutputViewer({
+        title: 'job detail',
+        initial: `selected ${value}`,
+        refresh: () => `selected ${value}`,
+        onStop: () => {},
+        canStop: () => true,
+        closeHint: 'back',
+      })
+      return 'keep-open'
+    },
+    () => {},
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 18 },
+  )
+  await vt.waitForRender()
+  // Establish a non-default TYPE FILTER (first cycle: the first item type).
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(handle.getViewState!().typeFilter, 'subagent', 'Tab must set the type filter')
+  // Establish non-default TREE DISCLOSURE on the selected parent row.
+  vt.sendInput('\x1b[C') // right arrow: expand
+  await vt.waitForRender()
+  assert.ok(handle.getViewState!().expandedIds.has('agent:parent'), 'right arrow must expand the parent')
+  // Establish SEARCH state.
+  vt.sendInput('/')
+  for (const key of 'parent') vt.sendInput(key)
+  await vt.waitForRender()
+  const before = handle.getViewState!()
+  assert.equal(before.searchMode, true)
+  assert.equal(before.searchQuery, 'parent')
+  assert.equal(before.typeFilter, 'subagent')
+  assert.ok(before.expandedIds.has('agent:parent'))
+
+  vt.sendInput('\r') // Enter selects the matching parent row
+  await vt.waitForRender()
+  assert.ok(view().includes('job detail') && view().includes('selected agent:parent'),
+    `the Job View must open for the filtered row:\n${view()}`)
+  assert.ok(!view().includes('Open Task Center'), `the parent browser must be hidden beneath it:\n${view()}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const after = handle.getViewState!()
+  assert.equal(after.searchMode, true, 'Full search mode must survive the Job View')
+  assert.equal(after.searchQuery, 'parent', 'the Full search query must survive the Job View')
+  assert.equal(after.typeFilter, 'subagent', 'the Full type filter must survive the Job View')
+  assert.ok(after.expandedIds.has('agent:parent'), 'the Full tree disclosure must survive the Job View')
+  assert.equal(after.selectedId, 'agent:parent', 'the Full selection must survive the Job View')
+  app.stop()
+})
+
 test('alt+up with no overlay reaches the dequeue host', async () => {
   const vt = new VirtualTerminal(80, 24)
   let dequeued = 0
@@ -1804,9 +2633,9 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
     startedApps.add(app)
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
+      () => 'close',
       () => {},
-      () => {},
-      { header: 'tasks' },
+      { mode: 'quick', header: 'tasks' },
     )
     await vt.waitForRender()
     const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -1846,9 +2675,9 @@ test('a fixed-width overlay keeps its frame geometry across fullscreen, resize a
   const openBrowser = (): void => {
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
+      () => 'close',
       () => {},
-      () => {},
-      { header: 'tasks' },
+      { mode: 'quick', header: 'tasks' },
     )
   }
   const assertRightEdge = (label: string): void => {
@@ -2023,7 +2852,7 @@ test('a running edit card renders its call-time diff', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-1')])
   app.setTranscript(folder.messages())
@@ -2043,7 +2872,7 @@ test('subagent-family tool cards show the model/provider line when the call carr
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   // A running subagent_route dispatch with an explicit model/provider.
   const args = JSON.stringify({ description: 'research', prompt: 'look it up', provider: 'ollama', model: 'deepseek-v4' })
   const folder = new TranscriptFolder()
@@ -2068,7 +2897,7 @@ test('subagent-family cards without an explicit model render unchanged (compatib
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   // The official subagent tool never carries model/provider in the args
   // (deployment config owns the route): no model line, no extra row.
   const args = JSON.stringify({ description: 'research', prompt: 'deep dive', run_in_background: false })
@@ -2098,7 +2927,7 @@ test('a completed diff card renders the applied result diffs', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-2'), diffResultEvent(1, 'call-diff-2', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
@@ -2137,7 +2966,7 @@ test('a settled Edit keeps folded and expanded views on the applied result diff'
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-applied'), diffResultEvent(1, 'call-diff-applied', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -2148,7 +2977,7 @@ test('a settled Edit keeps folded and expanded views on the applied result diff'
   assert.equal(folded.split('src/foo.ts').length - 1, 1, `Edit path must belong only to the card header:\n${folded}`)
   assert.ok(folded.includes('more diff lines hidden'), `folded cap must explain hidden context:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('Edit src/foo.ts [ok]  +1 -1'), `expanded result stats missing:\n${expanded}`)
@@ -2182,7 +3011,7 @@ test('a folded settled Edit caps the result diff across all hunks', async () => 
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-folded-hunks'), diffResultEvent(1, 'call-diff-folded-hunks', 'updated')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -2216,7 +3045,7 @@ test('a multi-hunk Edit keeps path ownership in the card header', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-multi'), diffResultEvent(1, 'call-diff-multi', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
@@ -2246,7 +3075,7 @@ test('expanded Edit headers reflow with terminal width changes', async () => {
   })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-resize', args), diffResultEvent(1, 'call-diff-resize', 'done')])
   app.setTranscript(folder.messages())
@@ -2291,7 +3120,7 @@ test('narrow Edit headers preserve status across running, success, and error sta
   })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const assertHeaderStatus = async (expected: string, events: SessionEvent[]): Promise<void> => {
     const folder = new TranscriptFolder()
@@ -2317,7 +3146,7 @@ test('expanded non-Edit headers retain full wrapped descriptions', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep',
     args: JSON.stringify({ pattern, path: 'src' }),
@@ -2353,14 +3182,14 @@ test('a successful Edit with a non-diff result view falls back consistently', as
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-generic', args), diffResultEvent(1, 'call-diff-generic', 'raw result')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded fallback diff missing:\n${folded}`)
   assert.ok(!folded.includes('GENERIC_RESULT'), `folded card must not use a non-diff result view:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded fallback diff missing:\n${expanded}`)
@@ -2393,14 +3222,14 @@ test('metadata-only successful Edit results render in folded and expanded views'
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-empty-success', args), emptyResultEvent(1, 'call-diff-empty-success')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(folded.includes('RESULT_OLD') && folded.includes('RESULT_NEW'), `folded metadata diff missing:\n${folded}`)
   assert.ok(!folded.includes('CALL_OLD') && !folded.includes('CALL_NEW'), `folded view used call data over structured result:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('RESULT_OLD') && expanded.includes('RESULT_NEW'), `expanded metadata diff missing:\n${expanded}`)
@@ -2438,7 +3267,7 @@ test('metadata-only error Edit results stay error and use the attempted call dif
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-empty-error', args), emptyResultEvent(1, 'call-diff-empty-error', true)])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -2447,7 +3276,7 @@ test('metadata-only error Edit results stay error and use the attempted call dif
   assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `folded error used applied data:\n${folded}`)
   assert.ok(!folded.includes('+1 -1'), `folded error fabricated success stats:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
@@ -2480,13 +3309,13 @@ test('malformed Edit args never substitute presenter call diffs', async () => {
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-malformed-edit', '{not-json'), diffResultEvent(1, 'call-malformed-edit', 'unstructured result')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(!folded.includes('PRESENTER_OLD') && !folded.includes('PRESENTER_NEW'), `folded malformed Edit used presenter call data:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(!expanded.includes('PRESENTER_OLD') && !expanded.includes('PRESENTER_NEW'), `expanded malformed Edit used presenter call data:\n${expanded}`)
@@ -2510,7 +3339,7 @@ test('a completed diff card without a result view falls back to the call-time di
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-3'), diffResultEvent(1, 'call-diff-3', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
@@ -2551,7 +3380,7 @@ test('an error Edit stays an error and never renders an applied result diff', as
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-error', args), diffResultEvent(1, 'call-diff-error', 'edit failed', true)])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -2560,7 +3389,7 @@ test('an error Edit stays an error and never renders an applied result diff', as
   assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `error card must not show an applied result diff:\n${folded}`)
   assert.ok(!folded.includes('+1 -1'), `error card must not fabricate success stats:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
@@ -2594,14 +3423,14 @@ test('an error Edit ignores non-diff result views and keeps the call diff', asyn
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-error-generic', args), diffResultEvent(1, 'call-diff-error-generic', 'edit failed', true)])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded attempted diff missing:\n${folded}`)
   assert.ok(!folded.includes('RESULT_GENERIC'), `folded error should not show result content:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded attempted diff missing:\n${expanded}`)
@@ -2627,7 +3456,7 @@ test('a big diff card caps in the default view with an expand hint', async () =>
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([{
     type: 'tool/call',
@@ -2705,10 +3534,10 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
   startedApps.add(app)
   app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'child-1', label: 'research', mode: 'one-shot', activity: 'running' })
   await vt.waitForRender()
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   vt.sendInput('\x0f') // ctrl+o
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), true, `ctrl+o must still toggle the fold while viewing`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, `ctrl+o must still toggle the fold while viewing`)
   app.setViewerMode(undefined)
   app.stop()
 })
@@ -2721,9 +3550,9 @@ test('openTaskBrowser renders status dots and live counts in the overlay', async
       { value: 'job:2', label: 'bash · lint', status: 'completed', startedAt: Date.now() - 60_000, group: 'jobs' },
       { value: 'agent:1', label: 'subagent · research', status: 'running', group: 'subagents' },
     ],
+    () => 'close',
     () => {},
-    () => {},
-    { header: 'tasks · subagents', enableSearch: true },
+    { mode: 'full', header: 'tasks · subagents', enableSearch: true },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -2746,9 +3575,9 @@ test('openTaskBrowser: Enter selects the highlighted row; Esc closes', async () 
       { value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' },
       { value: 'job:2', label: 'bash · lint', status: 'completed', startedAt: Date.now(), group: 'jobs' },
     ],
-    (value) => { selected = value },
+(value) => { selected = value; return 'close' },
     () => { cancelled = true },
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
   )
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // move to the second row
@@ -2759,9 +3588,9 @@ test('openTaskBrowser: Enter selects the highlighted row; Esc closes', async () 
   // Re-open and cancel.
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
-    () => {},
+    () => 'close',
     () => { cancelled = true },
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
   )
   await vt.waitForRender()
   vt.sendInput('\x1b')
@@ -2774,9 +3603,9 @@ test('openTaskBrowser setItems replaces rows live', async () => {
   const { vt, app } = startApp()
   const handle = app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
+    () => 'close',
     () => {},
-    () => {},
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
   )
   await vt.waitForRender()
   handle.setItems([
@@ -2791,12 +3620,99 @@ test('openTaskBrowser setItems replaces rows live', async () => {
   app.stop()
 })
 
+test('Quick Tasks overlay consumes non-whitelisted printable input (no editor leak, single-Esc close)', async () => {
+  // The real Host/overlay input path (not a direct panel call): opening the
+  // Quick overlay via the same `openTaskBrowser` the footer ↓ trigger uses,
+  // then driving the VirtualTerminal exactly like a TTY. Every printable
+  // must be a consumed no-op — neither a Quick action nor an editor edit.
+  const { vt, app } = startApp()
+  app.setEditorText('keep-this-draft')
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    [
+      { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+      { value: 'job:2', label: 'bash · lint', status: 'completed', active: false, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' },
+    ],
+    () => 'close',
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  for (const key of ['s', '/', 't', 'a', 'r', 'n', 'x', 'S', 'N', 'T']) vt.sendInput(key)
+  await vt.waitForRender()
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Open Task Center'), `Quick must stay open:\n${view}`)
+  assert.ok(!view.includes('confirm stop'), `no hidden stop confirmation:\n${view}`)
+  assert.ok(!view.includes('type to filter'), `no hidden search mode:\n${view}`)
+  assert.equal(app.seatTextForTest(), 'keep-this-draft', 'printables must not reach the editor')
+  // A single Esc closes Quick; the editor regains input ownership.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Open Task Center'), `one Esc must close Quick:\n${view}`)
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'keep-this-draftZ', 'the editor owns input again after the single Esc')
+  app.stop()
+})
+
+test('Quick Tasks: S then a single Esc returns to the editor (original regression)', async () => {
+  const { vt, app } = startApp()
+  app.setEditorText('draft')
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
+    () => 'close',
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  vt.sendInput('S')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+    'S must not arm a stop confirmation in Quick')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
+    'one Esc must close Quick')
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ', 'the editor owns input again after Esc')
+  app.stop()
+})
+
+test('Quick Tasks overlay drops a query restored from the full Task Center (Full→Quick regression)', async () => {
+  // index.ts reopens Quick with the full view's current state after
+  // Full → Esc → Esc, which can carry the query typed in Full. Quick owns
+  // no search, so the overlay must drop it instead of stranding the user in
+  // a filtered view with no pseudo-row (and therefore no way back to Full).
+  const { vt, app } = startApp()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' }],
+    () => 'close',
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8, initialQuery: 'no-match', initialSearchMode: false },
+  )
+  await vt.waitForRender()
+  const view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Open Task Center'), `the pseudo-row must survive a restored query:\n${view}`)
+  assert.ok(!view.includes('no-match'), `the restored query must be dropped in Quick:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
+    'one Esc must still close Quick')
+  app.stop()
+})
+
 test('openTaskBrowser repaints a subagent row in place on runtime re-projection (running -> inactive)', async () => {
   // The runner's agent/status path: the TaskBrowserRuntime re-projects
   // the CACHED catalog from the Agent registry and commits through
   // handle.setItems — the open browser must flip the SAME row's status
-  // word to inactive WITHOUT closing (plan §6.2 Case A) and drop the
-  // interrupt verb with it (plan §I).
+  // word to inactive WITHOUT closing (plan §6.2 Case A), repainting the
+  // state glyph with it.
   const { vt, app } = startApp()
   const handle = app.openTaskBrowser(
     [{
@@ -2806,18 +3722,18 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
       status: 'running',
       group: 'subagents',
       treePrefix: '├─ ',
-      interruptible: true,
+      canStop: true,
       type: 'subagent',
     }],
+    () => 'close',
     () => {},
-    () => {},
-    { header: 'tasks · subagents', enableSearch: true },
+    { mode: 'full', header: 'tasks · subagents', enableSearch: true },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   let view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('running'), `running row missing:\n${view}`)
-  assert.ok(view.includes('i interrupt'), `a running continuable must advertise the stop verb:\n${view}`)
+  assert.ok(view.includes('●'), `a running row must paint the active glyph:\n${view}`)
   // The child's driver goes idle: the runtime-only commit re-projects
   // the row (SAME value, new status) — this is exactly what the runner's
   // commitRows hook does on agent/status.
@@ -2828,14 +3744,14 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
     status: 'inactive',
     group: 'subagents',
     treePrefix: '├─ ',
-    interruptible: false,
+    canStop: false,
     type: 'subagent',
   }])
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('inactive'), `the row must repaint to inactive in place:\n${view}`)
   assert.ok(!view.includes('running'), `the old status word must be gone:\n${view}`)
-  assert.ok(!view.includes('i interrupt'), `an idle continuable must not advertise the stop verb:\n${view}`)
+  assert.ok(view.includes('○'), `an idle row must paint the settled glyph:\n${view}`)
   assert.ok(view.includes('tasks · subagents'), `the browser must stay open:\n${view}`)
   app.stop()
 })
@@ -3037,8 +3953,8 @@ test('fullscreen drag selection copies through the host copySelection policy (is
   startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
-    { type: 'assistant/message', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(1), time: 1_700_000_000_001, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   app.setFullscreen(true)
@@ -3059,17 +3975,68 @@ test('fullscreen drag selection copies through the host copySelection policy (is
   app.stop()
 })
 
+test('fullscreen drag selection reaches the shared clipboard policy (Remote ORCA regression)', async () => {
+  // The selection seam end-to-end: the app's copySelection callback is
+  // wired to the REAL unified copy policy, so a mouse drag must run the
+  // native compatibility leg AND still emit OSC 52 — the ORCA/xterm.js
+  // remote case has no SSH_* env and a host helper that succeeds, yet the
+  // terminal client is the only clipboard the user can paste from.
+  const vt = new VirtualTerminal(80, 24)
+  const emitted: string[] = []
+  const sequences: string[] = []
+  const helperCalls: string[] = []
+  const run: CopyExecutor = async (command, args) => {
+    helperCalls.push(`${command} ${args.join(' ')}`)
+    return { code: 0 }
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    copySelection: (text) => copyToClipboard(text, run, {
+      platform: 'linux',
+      env: { TMUX: '/tmp/tmux-1000/default,1,0', WAYLAND_DISPLAY: 'wayland-0' },
+      exists: () => true,
+      isTTY: () => true,
+      writeOsc52: (value) => {
+        emitted.push(value)
+        sequences.push(buildOsc52Sequence(value, true))
+      },
+    }),
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('s1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(1), time: 1_700_000_000_001, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('s2'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;1;1M')
+  vt.sendInput('\x1b[<32;10;5M')
+  vt.sendInput('\x1b[<0;10;5m')
+  await vt.waitForRender()
+
+  assert.ok(helperCalls.length > 0, 'the selection shares the native compatibility leg')
+  assert.equal(emitted.length, 1, `the drag selection must also reach the terminal-client writer:\n${vt.getViewport().join('\n')}`)
+  assert.ok(emitted[0]!.includes('alpha') && emitted[0]!.includes('beta'), `the OSC 52 payload must carry the selection: ${JSON.stringify(emitted[0])}`)
+  assert.ok(sequences[0]!.startsWith('\x1bPtmux;'), 'inside tmux the terminal leg rides the existing passthrough')
+  app.stop()
+})
+
 test('an interrupted assistant message keeps its body and renders a separate marker', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   folder.apply([
     {
       type: 'assistant/message',
-      seq: 0,
+      surfaceOp: 'append',
+      seq: SessionSeq(0),
       time: 1_700_000_000_000,
       data: {
         turn: 0,
         step: 0,
+      stream: [],
         message: {
           id: MessageId('interrupted-message'),
           role: 'assistant',
@@ -3099,16 +4066,16 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   startedApps.add(app)
   const folder = new TranscriptFolder()
   applyMixed(folder, [
-    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
     // Thinking streams (Session v2: THROUGH THE LIVE SEAM), then the step
     // settles with a reasoning-only message (NO text block): the image
     // pipeline's non-text-block retention keeps the empty assistant entry —
     // it must not occupy a spacer row, or the thinking card and the next
     // card read two blank rows apart.
     { type: 'assistant/chunk', seq: SessionSeq(1), time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think one\nthink two\n' } } },
-    { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(2), time: 1_700_000_000_002, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
     { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,
-    { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
+    { type: 'tool/result', surfaceOp: 'append', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   await vt.waitForRender()
@@ -3123,6 +4090,325 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   const between = view.slice(thinkingRow + 1, bashRow)
   const blankCount = between.filter(line => line.trim() === '').length
   assert.equal(blankCount, 1, `exactly one blank row between cards:\n${view.join('\n')}`)
+  app.stop()
+})
+
+test('a running compact Thinking row follows its reasoning tail (Focus off)', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const reasoning = `HEAD-TOKEN ${'x'.repeat(80)} TAIL-TOKEN`
+  applyMixed(folder, [
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('t1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/chunk', seq: SessionSeq(1), time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: reasoning } } },
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  assert.ok(view.some(line => line.includes('TAIL-TOKEN')), `the running tail must be visible:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('HEAD-TOKEN')), `the head must be clipped once the line overflows:\n${view.join('\n')}`)
+  app.stop()
+})
+
+test('ThinkingCompactComponent re-windows the running preview on resize', () => {
+  const message = {
+    kind: 'thinking',
+    turn: 0,
+    text: `HEAD-TOKEN ${'x'.repeat(120)} TAIL-TOKEN`,
+    running: true,
+  } as Extract<TranscriptMessage, { kind: 'thinking' }>
+  const component = new ThinkingCompactComponent(message, 'alt+t')
+  const narrow = component.render(30).join('\n')
+  assert.ok(narrow.includes('TAIL-TOKEN'), `narrow must follow the tail: ${JSON.stringify(narrow)}`)
+  assert.ok(!narrow.includes('HEAD-TOKEN'), `narrow must clip the head: ${JSON.stringify(narrow)}`)
+  const wide = component.render(200).join('\n')
+  assert.ok(wide.includes('HEAD-TOKEN') && wide.includes('TAIL-TOKEN'), `wide must restore the head: ${JSON.stringify(wide)}`)
+  // A settled row keeps head truncation at every width.
+  const settled = new ThinkingCompactComponent({ ...message, running: false }, 'alt+t')
+  const settledRow = settled.render(30).join('\n')
+  assert.ok(settledRow.includes('HEAD-TOKEN'), `settled keeps the head: ${JSON.stringify(settledRow)}`)
+  assert.ok(!settledRow.includes('TAIL-TOKEN'), `settled must not follow the tail: ${JSON.stringify(settledRow)}`)
+})
+
+test('opening an approval freezes the live Focus timer through the app projection', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 5_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('f1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const before = app.focusTimingForTest().activeMillis(activity, 'working', Date.now())
+  assert.ok(before !== undefined && before >= 5_000, `the live timer must be running: ${before}`)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  decision.catch(() => {})
+  await vt.waitForRender()
+  const frozen = app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now())
+  assert.ok(frozen !== undefined && frozen < 30_000, `the wait must freeze the live value: ${frozen}`)
+  assert.equal(
+    app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now() + 60_000),
+    frozen,
+    'a 60s approval wait must not grow the active timer',
+  )
+  app.stop()
+})
+
+test('an approval that opens before the delayed transcript repaint keeps the pre-wait active time', async () => {
+  // The production race (review P1): `folder.apply` schedules a delayed
+  // repaint, while the approval can open synchronously first. The activity
+  // map is therefore published only AFTER the phase is already
+  // waiting-approval — the timer must still count the span from the turn
+  // start to the pause boundary instead of reporting 0s.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 5_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('race1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  decision.catch(() => {})
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const frozen = app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now())
+  assert.ok(frozen !== undefined && frozen >= 5_000, `the pre-approval active span must survive the publication race: ${frozen}`)
+  const later = app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now() + 60_000)
+  assert.ok(later !== undefined && later < 30_000, `the wait itself must never count: ${later}`)
+  app.stop()
+})
+
+test('an approval that opens AND resolves before the delayed transcript repaint keeps the pre-wait active time', async () => {
+  // Review round-2 race: the approval is resolved inside the delayed-repaint
+  // gap, so the activity is first published after the pause already closed.
+  // The retained pause window must still be subtracted from the active span
+  // (the ~600ms hold is measurable: without the subtraction the reported
+  // active time would include it).
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 3_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('race2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // The activity is published only now, after the pause resolved.
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const active = app.focusTimingForTest().activeMillis(activity, 'working', Date.now())
+  assert.ok(active !== undefined && active >= 2_400, `the pre-approval active span must survive the fast-resolution race: ${active}`)
+  assert.ok(active < 3_300, `the approval wait must be subtracted: ${active}`)
+  app.stop()
+})
+
+test('two live activities published together both keep the pre-wait span', async () => {
+  // Review round-3 finding: the publication pass observes every activity in
+  // one loop. Clearing the pause windows per-activity would give the second
+  // activity wall time without the subtraction.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 3_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'turn/start', seq: 1, time: startedAt + 1, data: { turn: 1 } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const timing = app.focusTimingForTest()
+  const first = timing.activeMillis(folder.turnActivity(0)!, 'working', Date.now())
+  const second = timing.activeMillis(folder.turnActivity(1)!, 'working', Date.now())
+  assert.ok(first !== undefined && first >= 2_400 && first < 3_300, `first: ${first}`)
+  assert.ok(second !== undefined && second >= 2_400 && second < 3_300, `second: ${second}`)
+  assert.ok(Math.abs(first - second) < 100, `both activities must share the window snapshot: ${first} vs ${second}`)
+  app.stop()
+})
+
+test('an approval resolved before turn/end and before the delayed publish still freezes the active time', async () => {
+  // Review round-5 race: the live pause window is observed, then the turn
+  // ends, and only THEN is the activity first published. A completed turn
+  // must still freeze from the live window instead of the raw wall elapsed.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 1_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('race3'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // The turn ends BEFORE its first transcript publication.
+  applyMixed(folder, [{ type: 'turn/end', seq: 2, time: Date.now(), data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const active = app.focusTimingForTest().activeMillis(activity, 'idle', Date.now())
+  const wall = activity.endedAt! - activity.startedAt!
+  assert.ok(active !== undefined, 'the completed turn must freeze from live evidence')
+  assert.ok(active >= 700 && active < 1_300, `~1s of active time minus the ~600ms wait: ${active} (wall ${wall})`)
+  app.stop()
+})
+
+test('a session switch resets the Focus timer phase and pause windows', async () => {
+  // Review round-6 finding: segments are keyed by activity object, but the
+  // shared phase/pause timeline must not let the old session's wait leak
+  // into the new session's first live turn.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // The session-switch boundary while the old pause window is still retained.
+  app.clearSessionOverrides()
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 1_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('sess2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const active = app.focusTimingForTest().activeMillis(activity, 'working', Date.now())
+  assert.ok(active !== undefined && active >= 900 && active < 1_300, `the old session wait must not be subtracted: ${active}`)
+  app.stop()
+})
+
+test('the timer publication pass observes only windowed turns, never the full activity map', async () => {
+  // Review round-6 perf finding: `turnActivities()` is every known turn, so
+  // iterating it on every publication would reintroduce an O(total) scan
+  // into the long-session repaint path.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 5_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('win1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  const activities = new Map<number, TurnActivity>()
+  for (let turn = 0; turn < 2_000; turn += 1) {
+    activities.set(turn, { turn, startedAt, endedAt: startedAt + 1, completed: true, assistantMessages: 0, toolCalls: 0, tools: new Map(), revision: 0 })
+  }
+  const store = app.focusTimingForTest()
+  const original = store.observe.bind(store)
+  let observed = 0
+  store.observe = (activity, phase, now) => { observed += 1; original(activity, phase, now) }
+  try {
+    app.setTranscript(folder.messages(), activities)
+    await vt.waitForRender()
+  } finally {
+    store.observe = original
+  }
+  assert.ok(observed > 0, 'the windowed turn must be observed')
+  assert.ok(observed < 50, `the pass must stay windowed, observed ${observed} activities`)
+  app.stop()
+})
+
+test('the live timer keeps freezing while the transcript window shows history', async () => {
+  // Review round-7 blocker: the timer must not be presentation-window-local.
+  // Once a live turn has a segment, its pause/resume advances even when the
+  // user browses history and the turn is no longer in `messages`.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 1_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt - 5_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt - 4_999, data: { id: MessageId('h0'), role: 'user', content: [{ type: 'text', text: 'old' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'turn/end', seq: 2, time: startedAt - 4_000, data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent,
+    { type: 'turn/start', seq: 3, time: startedAt, data: { turn: 1 } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(4), time: startedAt + 1, data: { id: MessageId('live1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const activities = folder.turnActivities()
+  app.setTranscript(folder.messages(), activities)
+  await vt.waitForRender()
+  const live = folder.turnActivity(1)!
+  const initial = app.focusTimingForTest().activeMillis(live, 'working', Date.now())
+  assert.ok(initial !== undefined && initial >= 900, 'the live timer runs')
+  // Scroll to a history window that EXCLUDES the live turn.
+  const history = folder.messages().filter(message => !('turn' in message) || message.turn === 0)
+  app.setTranscript(history, activities)
+  await vt.waitForRender()
+  // Approval opens and resolves while the live turn is off-window.
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  // A history repaint during the wait must not clear the live boundary.
+  app.setTranscript(history, activities)
+  await vt.waitForRender()
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // Back to the latest window.
+  app.setTranscript(folder.messages(), activities)
+  await vt.waitForRender()
+  const active = app.focusTimingForTest().activeMillis(live, 'working', Date.now())
+  const wall = Date.now() - startedAt
+  assert.ok(active !== undefined && active >= 900, `the pre-wait span must survive: ${active}`)
+  assert.ok(active !== undefined && active < wall - 500, `the off-window wait must not count: active=${active} wall=${wall}`)
   app.stop()
 })
 
@@ -3436,4 +4722,63 @@ test('question: Esc between press and release cannot re-enter the free-text edit
   assert.ok(!final.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
   answers.catch(() => {})
   app.stop()
+})
+
+test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Quick Tasks)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let opened = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenTasks: () => { opened += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
+  await vt.waitForRender()
+  // A nonCapturing notice owns no keyboard: the empty-editor ↓ affordance
+  // (focusedSeat 'editor' + tasksActive) must still reach the resolver.
+  app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HUD notice' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // down
+  await vt.waitForRender()
+  assert.equal(opened, 1, '↓ must open Quick Tasks under a nonCapturing overlay')
+  app.stop()
+})
+
+test('a nonCapturing overlay keeps other Host shortcuts live (Ctrl+F search)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HUD notice' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  const before = app.overlayGraphState().handles
+  assert.equal(before, 1, 'only the notice overlay is tracked')
+  vt.sendInput('\x06') // Ctrl+F → app.transcript.search
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, before + 1,
+    'the Host search shortcut must still fire under a nonCapturing overlay')
+  app.stop()
+})
+
+test('a narrow short terminal prefers Esc back over the Stop hint', async () => {
+  const { vt, app } = startApp()
+  // One content row AND a width too small for `S stop · Esc back`: the full
+  // hint word-wraps, and its first line is all Stop — the close/back verb
+  // must win instead.
+  vt.resize(20, 2)
+  await vt.waitForRender()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'body',
+    refresh: () => 'body',
+    onStop: () => {},
+    canStop: () => true,
+    closeHint: 'back',
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('Esc back'), `the close/back verb must survive a narrow short terminal:\n${view()}`)
+  assert.ok(!view().includes('stop'), `Stop must degrade away first:\n${view()}`)
+  app.dispose()
 })

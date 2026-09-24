@@ -86,7 +86,7 @@ private `/tmp/tui-demo.XXXXXX/` (`.txt` plain + `.html` colored).
    connectivity first).
 2. **Background bash job**: have the model run
    `Run this in the background: sleep 20 && echo slow-done. Use the bash tool with run_in_background=true, do not wait.`
-   Verify: the dock's `⏳ bash-1 · …` row, the footer's
+   Verify: the dock's semantic `❯ bash-1 · …` row, the footer's
    `[N tasks running · ↓ view]` badge, `↓` opening the task browser while
    running, Enter showing the output viewer, and the completion notification
    being handled by the model.

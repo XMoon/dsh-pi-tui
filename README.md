@@ -52,19 +52,22 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.4.6`（已发布 `@latest`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前稳定版；最低 rc.1，兼容 rc.2 |
-| 当前 `next` npm 线（本 checkout；版本 `0.4.5`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前 next 线 |
+| `0.4.8`（stable / `@latest`） | `dsh-v0.1.7-rc.1` | 当前稳定版；最低 0.1.7-rc.1 |
+| `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
+| `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `next` 线混装。当前 `next` checkout 的 peer floor 是
-`>=0.1.5-rc.1`，旧 runtime 会在正常的不兼容边界以非零状态失败。完整的
-历史兼容矩阵和 fallback 命令见 [兼容性文档](docs/dsh-compatibility.md)；
-要查看 next 的最新集成状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+不要把稳定线与 `@next` 预发布线混装。`0.4.8` 的整个 DSH peer floor 统一为
+`>=0.1.7-rc.1`（rc.1 的 preset registry 精确 peer `dsh-agent`，更宽的旧
+floor 已无法满足独立 tarball 安装）；旧 runtime 会在正常的不兼容边界以非零状态失败，
+请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
+[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
+[next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
 DSH V3 migration 负责历史 session header/selection 的 `code -> ptc` 转换；
-当前 projection 会原样保留合法的自定义 `code`。只有省略请求的 legacy
-settings default `code` 才会在确认 roster 不含 `code` 后回退到 `ptc`。
+当前 projection 会原样保留合法的自定义 `code`。省略请求的 legacy settings
+default 不再做任何别名映射：当前 roster 没有声明就是无效偏好。
 
 ### Profile management
 
@@ -108,15 +111,20 @@ dsh --profile pi-tui --session <session-id>
 * Todo / Goal 状态展示
 * 可读的终端窗口标题
 * 长会话按有界窗口浏览，并保留翻页与实时跟随位置
+* 超长用户 Prompt 默认折叠为 head + marker + tail；普通与全屏非 Focus 下 `Ctrl+O` 展开、收回
 * Compaction / prune 后不会出现重复的幽灵 Tool Card
 
-`Ctrl+O` 控制工具和系统详情;在全屏 Focus 下它整体展开最近几个 Thought root,或全部收起。`Alt+T` 单独控制 Thinking。
+`Ctrl+O` 控制工具和系统详情，并在普通模式与全屏非 Focus 下展开/收起超长用户 Prompt;全屏 Focus 下它整体展开最近几个 Thought root 或全部收起，超长用户 Prompt 改用点击提示行（或搜索命中）展开、`Ctrl+O` 收回。`Alt+T` 单独控制 Thinking。
 
-### Focus Mode
+### Conversation display
 
-`/focus` 可以把运行中的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块。
+`/display focus` 将运行中的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块；`/display full` 恢复普通 Transcript 展示。`/focus` 仍作为兼容命令保留。Compact 预设尚未开放，`/display compact` 会明确拒绝。
 
-需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。Focus 只影响界面投影，不修改 Session 中保存的事件。
+需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。展示预设只影响界面投影，不修改 Session 中保存的事件。
+
+### 沟通策略
+
+`/settings` 提供两个独立的沟通设置。**Progress updates** 控制 Agent 工作时的中途更新节奏：`milestones`（默认）只在完整的阶段结束、方向实质变化或需要用户输入时简短汇报，不为「刚发现一个局部结论」而打断；`frequent` 在较长的多步工作中持续带用户跟进；`off` 完全不做过程叙述。**Response style** 控制可见回复的密度：`default` 不附加表达指导，`concise` 紧凑且结果优先，`explanatory` 补充原理、架构与取舍。两项切换都在下一次提示词组装时生效，无需重启 Agent，并跨会话保存。Focus 是展示能力而非第三个偏好：进入 Focus 时进度更新节只是暂时失效（不生成只含进度的中间消息），保存的节奏偏好不变，Response style 在 Focus 下仍然生效。
 
 ### Session
 
@@ -180,7 +188,9 @@ main
 * nested descendant
 * 后台 Job
 
-两个视图共享同一份运行时状态：`A` 切换 Active / All scope，`Tab` 切换类型过滤，`/` 进入搜索，`S`（确认后）停止所选任务，`N` / `Shift+N` 在运行中的任务间跳转，Quick 内 `T` 或底部 "View all" 行进入完整 Task Center，`Esc` 逐层返回。
+Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导航、左右展开/折叠、`Tab` 类型过滤、`Enter` 打开和 `Esc` 关闭。底部 “Open Task Center” 行可进入完整 Task Center。
+
+完整 Task Center 额外提供 `A` 切换 Active / All、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick Tasks 只消费上述白名单按键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
 
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 
@@ -291,8 +301,8 @@ TUI 使用 DSH 提供的模型和设置服务。
 | `Ctrl+T`      | 切换 Todo 面板              |
 | `Ctrl+R`      | 搜索输入历史                 |
 | `Ctrl+F`      | 搜索 Transcript          |
-| `Ctrl+End`    | 全屏时跳到最新 Transcript 输出 |
-| `Ctrl+O`      | 展开 / 折叠工具和系统详情;全屏 Focus 下整体切换 Thought root |
+| `Ctrl+End`    | 全屏时跳到最新 Transcript 输出；离开 live tail 时底部显示可点击的 `↓ Latest` |
+| `Ctrl+O`      | 展开 / 折叠工具和系统详情；普通与全屏非 Focus 下展开/收起超长用户 Prompt；全屏 Focus 下整体切换 Thought root（超长用户 Prompt 用点击/搜索展开） |
 | `Alt+T`       | 展开 / 折叠 Thinking       |
 | `Ctrl+G`      | 使用 `$VISUAL`/`$EDITOR` 编辑输入 |
 | `Ctrl+V`      | 粘贴图片                   |
@@ -307,20 +317,21 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 Host 快捷键是语义 action(`app.*`),通过 context-aware keymap 解析——
 UI(页脚提示、`/help`、`/keybindings`)始终显示**生效**的按键,因此
-改键后所有提示自动更新。在 `dsh-pi-tui` settings 命名空间中配置,
-然后用 `/keybindings reload` 应用(显式 reload——改设置后执行 reload
-即生效,无需重启):
+改键后所有提示自动更新。配置入口是 TUI 里的 `/keybindings` 面板
+(写入 `tui-app` 插件的 profile 配置的 `keybindings` 字段——DSH 0.1.7
+起 TUI 偏好保存在 profile-owned Config,不再使用旧 `dsh-pi-tui`
+settings 命名空间);保存后用 `/keybindings reload` 应用(显式
+reload——配置变更后执行 reload 即生效,无需重启)。字段形状:
 
 ```yaml
-dsh-pi-tui:
-  keybindings:
-    app.input.steer: ctrl+s          # 单个按键
-    app.permission.cycle: [shift+tab, ctrl+shift+p]   # 多个按键
-    app.history.search: ctrl+r
-    app.transcript.toggleThinking: false   # 禁用该 action 的按键
-    leader: ctrl+x                    # M6:leader 序列
-    bindings:
-      app.tasks.open: <leader>t
+keybindings:
+  app.input.steer: ctrl+s          # 单个按键
+  app.permission.cycle: [shift+tab, ctrl+shift+p]   # 多个按键
+  app.history.search: ctrl+r
+  app.transcript.toggleThinking: false   # 禁用该 action 的按键
+  leader: ctrl+x                    # M6:leader 序列
+  bindings:
+    app.tasks.open: <leader>t
 ```
 
 - 普通可打印键永远不能绑定到 Host action(会吞掉输入);坏配置只是
@@ -532,8 +543,8 @@ dsh --profile pi-tui-dev
 
 ### npm 模式（当前 `next`）
 
-当前 `next` 线是 npm 模式：以本 checkout 的 `package.json` 声明、冻结
-lockfile 解析的已发布 `dsh-v0.1.5-rc.1` family 为兼容目标。隔离的 npm
+当前兼容列车线是 npm 模式：以本 checkout 的 `package.json` 声明、
+lockfile 解析的已发布 `dsh-v0.1.7-rc.1` family 为兼容目标。隔离的 npm
 驱动从公共 registry 安装该精确 family，并跑完整 build/test/package 路径：
 
 ```sh

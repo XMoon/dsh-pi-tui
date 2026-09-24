@@ -54,23 +54,27 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.6` (published `@latest`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable line; rc.1 minimum, rc.2 compatible |
-| Current `next` npm line (this checkout; version `0.4.5`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current next line |
+| `0.4.8` (stable / `@latest`) | `dsh-v0.1.7-rc.1` | Current stable line; 0.1.7-rc.1 minimum |
+| `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
+| `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `next` lines. The current `next` checkout declares
-the published `0.1.5-rc.1` npm floor; older runtimes fail at the normal
-incompatible-runtime boundary. The startup notice is best-effort rather than a
-Loader startup-order guarantee. See the [full historical compatibility matrix](docs/dsh-compatibility.md)
-for official-tag pairings and fallback commands, and see the [latest `next`
+Do not mix the stable and `@next` prerelease lines. The `0.4.8` line unifies its
+whole DSH peer floor at `>=0.1.7-rc.1` (the rc.1 preset registry peers
+`dsh-agent` exactly, so a wider legacy floor no longer satisfies a standalone
+tarball install); older runtimes fail at the normal incompatible-runtime
+boundary, so install the paired TUI line from the table above. The startup notice
+is best-effort rather than a Loader startup-order guarantee. See the [full
+historical compatibility matrix](docs/dsh-compatibility.md) for official-tag
+pairings and fallback commands, and see the [latest `next`
 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for the current
 integration status.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
 current roster. DSH V3 migration owns historical session `code -> ptc`
-conversion, while the current projection preserves a legal custom `code`. Only
-an omitted legacy settings default `code` falls back to `ptc` after the roster
-proves that no custom `code` preset exists.
+conversion, while the current projection preserves a legal custom `code`. An
+omitted legacy settings default is never aliased: with no matching declaration
+in the current roster it is simply an invalid preference.
 
 ### Profile management
 
@@ -114,15 +118,20 @@ dsh --profile pi-tui --session <session-id>
 * Todo / Goal status
 * Human-readable terminal window titles
 * Bounded long-session windows with stable paging and live-follow position
+* Long user prompts collapse to head + marker + tail; `Ctrl+O` expands and collapses them in regular mode and in fullscreen outside Focus
 * No duplicate ghost Tool Cards after compaction / pruning
 
-`Ctrl+O` controls Tool and System details — and in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all. `Alt+T` controls Thinking separately.
+`Ctrl+O` controls Tool and System details and expands/collapses long user prompts in regular mode and in fullscreen outside Focus — in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all, while long user prompts are expanded by clicking the marker (or by a search hit) and collapsed with `Ctrl+O`. `Alt+T` controls Thinking separately.
 
-### Focus Mode
+### Conversation display
 
-`/focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block.
+`/display focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block; `/display full` restores the normal Transcript projection. `/focus` remains available as a compatibility command. The Compact preset is reserved and `/display compact` is rejected until its projection ships.
 
-The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Disabling Focus restores the normal Transcript projection. Focus only changes presentation; it does not modify Session events.
+The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Display presets only change presentation; they do not modify Session events.
+
+### Communication policy
+
+`/settings` exposes two independent communication controls. **Progress updates** owns the mid-turn update cadence: `milestones` (default) posts a brief update only when a substantial phase completes, the direction materially changes, or required user input blocks progress — never for a freshly discovered partial finding; `frequent` keeps the user actively informed through longer multi-step work; `off` suppresses progress narration entirely. **Response style** owns the visible answer's density: `default` adds no extra guidance, `concise` is compact and result-first, `explanatory` adds rationale, architecture, and tradeoffs. Changes apply on the next prompt assembly without restarting the agent and are saved across sessions. Focus is a surface capability, not a third preference: while Focus is active the progress section is simply ineffective (progress-only intermediate messages are not generated) and the saved cadence is untouched; the response style stays active in Focus.
 
 ### Sessions
 
@@ -187,11 +196,16 @@ The browser distinguishes:
 * nested descendants
 * background Jobs
 
-The two views share the same runtime state: `A` toggles Active / All scope,
-`Tab` changes type filters, `/` enters search, `S` stops the selected task after
-confirmation, and `N` / `Shift+N` moves between running tasks. In Quick Tasks,
-`T` or the bottom “View all” row opens the full Task Center, and `Esc` returns
-one layer at a time.
+The Footer's `↓` opens Quick Tasks as a lightweight browsing view: it only
+supports arrow navigation, left/right expand/collapse, `Tab` type cycling,
+`Enter` open, and `Esc` close. The bottom “Open Task Center” row opens the full
+Task Center.
+
+The full Task Center additionally offers `A` to toggle Active / All, `/` search,
+`Tab` / `Shift+Tab` to cycle types in both directions, `S` to stop the selected
+task after confirmation, and `R` to refresh/retry. Quick Tasks consumes only the
+whitelist above; every other keystroke is a no-op that never enters search, stop
+confirmation, or management state, so `Esc` always closes it in one layer.
 
 Completed one-shot Subagents remain available for persisted Transcript inspection.
 
@@ -305,8 +319,8 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
 | `Ctrl+F`      | Search Transcript                                   |
-| `Ctrl+End`    | Jump to the latest Transcript output in fullscreen  |
-| `Ctrl+O`      | Expand / collapse Tool and System details; in fullscreen Focus, bulk-toggle the Thought roots |
+| `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
+| `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
 | `Alt+T`       | Expand / collapse Thinking                          |
 | `Ctrl+G`      | Edit current input in `$VISUAL`/`$EDITOR`           |
 | `Ctrl+V`      | Paste image                                         |
@@ -322,20 +336,22 @@ Use `/help` inside the TUI for the current command and keybinding list. The tabl
 Host shortcuts are semantic actions (`app.*`) resolved through a
 context-aware keymap — the UI (footer hints, `/help`, `/keybindings`)
 always shows the EFFECTIVE keys, so a remap updates every hint. Configure
-them in the `dsh-pi-tui` settings namespace; apply with `/keybindings
-reload` (explicit — a settings edit takes effect after the reload, no
-restart):
+them through the in-TUI `/keybindings` panel (it writes the `keybindings`
+field of the `tui-app` plugin's profile-owned configuration — since DSH
+0.1.7 TUI preferences live on the profile Config, not the retired
+`dsh-pi-tui` settings namespace); apply with `/keybindings reload`
+(explicit — a configuration edit takes effect after the reload, no
+restart). Field shape:
 
 ```yaml
-dsh-pi-tui:
-  keybindings:
-    app.input.steer: ctrl+s          # one key
-    app.permission.cycle: [shift+tab, ctrl+shift+p]   # several keys
-    app.history.search: ctrl+r
-    app.transcript.toggleThinking: false   # disable the action's keys
-    leader: ctrl+x                    # M6: leader sequences
-    bindings:
-      app.tasks.open: <leader>t
+keybindings:
+  app.input.steer: ctrl+s          # one key
+  app.permission.cycle: [shift+tab, ctrl+shift+p]   # several keys
+  app.history.search: ctrl+r
+  app.transcript.toggleThinking: false   # disable the action's keys
+  leader: ctrl+x                    # M6: leader sequences
+  bindings:
+    app.tasks.open: <leader>t
 ```
 
 - A plain printable key can never be bound to a Host action (it would
@@ -556,9 +572,9 @@ This section contains DSH compatibility and CI validation details only; ordinary
 
 ### npm mode (current `next`)
 
-The current `next` line is npm mode: it targets the published
-`dsh-v0.1.5-rc.1` family declared by this checkout's `package.json` and
-resolved by its frozen lockfile. The isolated npm driver installs that exact
+The current compatibility-train line is npm mode: it targets the published
+`dsh-v0.1.7-rc.1` family declared by this checkout's `package.json` and
+resolved by its lockfile. The isolated npm driver installs that exact
 family from the public registry and exercises the TUI build/test/package path:
 
 ```sh

@@ -271,6 +271,14 @@ function main() {
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
+    // The generated preset mirror MUST ship: upstream bundle-patch loading
+    // downgrades a missing patch file to a stderr "skipping profile bundle"
+    // line, so a stripped mirror would silently drop the whole preset roster
+    // from an otherwise-clean install. Assert every dsh.bundle.patch entry
+    // (cordis.patch.yml + the four generated preset patches) is packed.
+    for (const patch of pkg.dsh?.bundle?.patch ?? []) {
+      check(`bundle patch ships: ${patch}`, has(patch.replace('./', '')))
+    }
     check('README included', has('README.md'))
     check('English README included', has('README.en.md'))
     const leaks = files.filter(name => name.includes('test/')
@@ -377,7 +385,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(builtins|commands|diag|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|image\/admission|image\/types|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(builtins|commands|communication-policy|diag|display-preset|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|image\/admission|image\/types|index|skill-catalog|startup|surface-catalog)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }

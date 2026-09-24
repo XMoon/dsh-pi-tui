@@ -1,21 +1,21 @@
 /**
- * The Direct session writer (M1.4, contract-reviewed round 2) — the
- * in-process implementation of `SessionWriter` over the live agent objects
- * and the dsh `sessionTitle` service. The contract is identity-based: the
- * adapter resolves the live agent/session FROM THE SESSION ID through the
- * runner-injected resolver (never a stale captured object — the resolver
- * re-reads the live surface on every call). This is the ONLY module in the
- * session-write path that touches `ctx`; a Remote adapter will implement
- * the same interface over the wire.
+ * The Direct session writer (D2.1 contract convergence) — the in-process
+ * implementation of `SessionWriter` over live Agent objects and the dsh
+ * `sessionTitle` service. The adapter resolves the live agent from the
+ * session id at call time; it never captures a stale Agent at construction.
  *
- * Steer ORCHESTRATION (fence / barrier — steerAll in src/steer.ts)
- * stays in the runner; the FINAL steer delivery goes through this port.
+ * Queue mutations are occurrence-level: the adapter applies the official
+ * `edit` / `remove` / `steer` action to the Host-owned message. Multi-message
+ * gestures are client orchestration over this single-operation contract, not
+ * SessionWriter batch verbs.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-writer-direct
  */
 
-import type { SessionWriter } from '../session-writer-port.ts'
+import { safeErrorMessage, safeErrorString } from '../../error-boundary.ts'
+import { isCancellation } from '../../detached.ts'
+import type { QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -26,73 +26,261 @@ export interface HostContextLike {
 /** The live-agent surface the Direct adapter drives (structural). */
 export interface LiveAgentLike {
   readonly session: { readonly id: string }
+  readonly status: string
   followup(message: unknown): void
-  /** Deliver the steered batch into the next step (the agent's steer). */
   steer(message: unknown): void
-  cancel(reason: unknown, options: { keepInbox: boolean }): void
-  readonly inbox: { remove(id: string): void }
+  cancel(reason: { kind: 'user' }, options: { keepInbox: boolean }): void
+  readonly inbox: {
+    readonly nextTurn: readonly { readonly id: string; readonly role?: string; readonly content?: readonly unknown[]; readonly source?: unknown }[]
+    readonly nextStep: readonly { readonly id: string; readonly role?: string; readonly content?: readonly unknown[]; readonly source?: unknown }[]
+    replace(id: string, message: unknown): boolean
+    remove(id: string): boolean
+  }
 }
 
 /** The structural `sessionTitle` service surface. */
 export interface SessionTitleServiceLike {
-  rename(session: unknown, name: string): void
-  refresh(session: unknown, signal: AbortSignal): Promise<{ title: string } | undefined>
+  rename(session: unknown, title: string): { readonly title: string }
+  refresh(session: unknown, signal: AbortSignal): Promise<{ readonly title: string } | undefined>
+}
+
+interface FileUploadsLike {
+  retirePrompt(agent: LiveAgentLike, requestId: string): void
+}
+
+function sessionNotFound<T>(sessionId: string): WriteOutcome<T> {
+  return {
+    kind: 'rejected',
+    error: { code: 'session/not-found', message: `session "${sessionId}" is not available` },
+  }
+}
+
+function queueItemNotFound<T>(itemId: string): WriteOutcome<T> {
+  return {
+    kind: 'rejected',
+    error: { code: 'session/queue-item-not-found', message: `queued item "${itemId}" is no longer pending` },
+  }
+}
+
+function steerUnavailable<T>(itemId: string): WriteOutcome<T> {
+  return {
+    kind: 'rejected',
+    error: { code: 'session/steer-unavailable', message: `queued item "${itemId}" cannot be steered while the session is not running` },
+  }
+}
+
+function indeterminate(error: unknown): WriteOutcome {
+  return {
+    kind: 'indeterminate',
+    error: {
+      code: 'session/write-indeterminate',
+      message: safeErrorMessage(error),
+    },
+  }
+}
+
+function mutationFailure(error: unknown): WriteOutcome {
+  return isCancellation(error) ? { kind: 'cancelled' } : indeterminate(error)
+}
+
+function isSessionTitleInvalid(error: unknown): error is Error {
+  try {
+    return error instanceof Error && error.name === 'SessionTitleInvalidError'
+  } catch {
+    return false
+  }
 }
 
 /** The Direct backend's session writer: identity-based operations over the
- * live agents and the `ctx.sessionTitle` service. The agent resolver is
- * injected by the runner (a closure over the live surface), so a session
- * switch between calls is observed at call time. */
+ * live agents and the `ctx.sessionTitle` service. */
 export class DirectSessionWriter implements SessionWriter {
   private readonly ctx: HostContextLike
+  /** Ordinary session verbs stay on the caller-authorized resolver. */
   private readonly agentFor: (sessionId: string) => LiveAgentLike | undefined
+  /** Queue mutations may address the currently viewed continuable child through
+   * a separately fenced resolver; this never widens prompt authority. */
+  private readonly queueAgentFor: (sessionId: string) => LiveAgentLike | undefined
 
-  constructor(ctx: HostContextLike, agentFor: (sessionId: string) => LiveAgentLike | undefined) {
+  constructor(
+    ctx: HostContextLike,
+    agentFor: (sessionId: string) => LiveAgentLike | undefined,
+    queueAgentFor: (sessionId: string) => LiveAgentLike | undefined = agentFor,
+  ) {
     this.ctx = ctx
     this.agentFor = agentFor
+    this.queueAgentFor = queueAgentFor
   }
 
-  followup(sessionId: string, message: unknown): void {
+  async prompt(sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome> {
     const agent = this.agentFor(sessionId)
-    if (agent === undefined) return
-    agent.followup(message)
+    if (agent === undefined) return sessionNotFound(sessionId)
+    try {
+      if (mode === 'queue') agent.followup(message)
+      else agent.steer(message)
+    } catch (error) {
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'session/agent-busy',
+          message: 'prompt rejected',
+          details: { reason: safeErrorString(error) },
+        },
+      }
+    }
+    return { kind: 'committed', value: undefined }
   }
 
-  steer(sessionId: string, messages: readonly unknown[]): void {
+  /** Apply one official queue mutation to an exact pending occurrence. A
+   * boolean miss is a typed not-found; non-cancellation mutation exceptions
+   * are indeterminate. */
+  async updateQueue(sessionId: string, itemId: string, action: QueueAction): Promise<WriteOutcome> {
+    // Match the official Host boundary: edit validation happens before Agent
+    // resolution and does not alter the caller's content bytes. Because this
+    // semantic port is structural, malformed text blocks are non-text here.
+    if (action.kind === 'edit') {
+      const nonText = action.content.some(block => {
+        if (typeof block !== 'object' || block === null || Array.isArray(block)
+          || !('type' in block) || block.type !== 'text') return true
+        return !('text' in block) || typeof block.text !== 'string'
+      })
+      if (nonText) {
+        return {
+          kind: 'rejected',
+          error: {
+            code: 'session/attachment-invalid',
+            message: 'queue edits accept text content only',
+            details: { reason: 'QUEUE_EDIT_NON_TEXT' },
+          },
+        }
+      }
+      const hasText = action.content.some(block => {
+        if (typeof block !== 'object' || block === null || !('type' in block) || block.type !== 'text') return false
+        return 'text' in block && typeof block.text === 'string' && block.text.trim().length > 0
+      })
+      if (!hasText) {
+        return {
+          kind: 'rejected',
+          error: { code: 'gateway/bad-request', message: 'queue edit content must include non-whitespace text' },
+        }
+      }
+    }
+
+    const agent = this.queueAgentFor(sessionId)
+    if (agent === undefined) return queueItemNotFound(itemId)
+
+    const nextTurn = agent.inbox.nextTurn.find(item => item.id === itemId)
+    const nextStep = agent.inbox.nextStep.find(item => item.id === itemId)
+    const located = nextTurn === undefined
+      ? nextStep === undefined ? undefined : { target: 'next-step' as const, message: nextStep }
+      : { target: 'next-turn' as const, message: nextTurn }
+    if (located === undefined) return queueItemNotFound(itemId)
+    const { target, message } = located
+    if (action.kind === 'steer' && (target !== 'next-turn' || agent.status !== 'running')) {
+      return steerUnavailable(itemId)
+    }
+
+    if (action.kind === 'edit') {
+      try {
+        const replaced = agent.inbox.replace(itemId, { ...message, content: [...action.content] })
+        return replaced ? { kind: 'committed', value: undefined } : queueItemNotFound(itemId)
+      } catch (error) {
+        return mutationFailure(error)
+      }
+    }
+
+    if (action.kind === 'remove') {
+      let removed: boolean
+      try {
+        removed = agent.inbox.remove(itemId)
+      } catch (error) {
+        return mutationFailure(error)
+      }
+      if (!removed) return queueItemNotFound(itemId)
+      try {
+        const source = message.source
+        if (typeof source === 'object' && source !== null
+          && 'kind' in source && source.kind === 'user'
+          && 'rpcId' in source && typeof source.rpcId === 'string') {
+          const fileUploads = this.ctx.get('fileUploads') as FileUploadsLike | undefined
+          if (fileUploads === undefined) {
+            return indeterminate(new Error('file upload service unavailable while retiring queue prompt'))
+          }
+          fileUploads.retirePrompt(agent, source.rpcId)
+        }
+      } catch (error) {
+        // The queue occurrence was removed; an upload-retirement failure is
+        // therefore indeterminate even when the failure is cancellation-shaped.
+        return indeterminate(error)
+      }
+      return { kind: 'committed', value: undefined }
+    }
+
+    let removed = false
+    try {
+      const didRemove = agent.inbox.remove(itemId)
+      if (!didRemove) return queueItemNotFound(itemId)
+      removed = true
+      agent.steer(message)
+    } catch (error) {
+      // Removal may have happened before either the exception or steering;
+      // the caller must not restore and automatically replay this occurrence.
+      return removed ? indeterminate(error) : mutationFailure(error)
+    }
+    return { kind: 'committed', value: undefined }
+  }
+
+  async cancel(sessionId: string): Promise<WriteOutcome> {
     const agent = this.agentFor(sessionId)
-    if (agent === undefined) return
-    for (const message of messages) agent.steer(message)
+    if (agent === undefined) return sessionNotFound(sessionId)
+    // The TUI semantic is always a user cancel that preserves pending inbox
+    // work; Direct Agent implementation knobs do not cross the port.
+    agent.cancel({ kind: 'user' }, { keepInbox: true })
+    return { kind: 'committed', value: undefined }
   }
 
-  dequeue(sessionId: string, messageId: string): void {
+  async rename(sessionId: string, title: string): Promise<WriteOutcome<{ readonly title: string }>> {
     const agent = this.agentFor(sessionId)
-    if (agent === undefined) return
-    agent.inbox.remove(messageId)
-  }
-
-  cancel(sessionId: string, reason: unknown, options: { keepInbox: boolean }): void {
-    const agent = this.agentFor(sessionId)
-    if (agent === undefined) return
-    agent.cancel(reason, options)
-  }
-
-  rename(sessionId: string, name: string): boolean {
+    if (agent === undefined) return sessionNotFound(sessionId)
     const titles = this.ctx.get('sessionTitle') as SessionTitleServiceLike | undefined
-    if (titles === undefined) return false
-    const agent = this.agentFor(sessionId)
-    if (agent === undefined) return false
-    titles.rename(agent.session, name)
-    return true
+    if (titles === undefined) {
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'gateway/internal',
+          message: 'renaming is unavailable: this deployment mounts no session-title service',
+          details: {},
+        },
+      }
+    }
+    try {
+      const snapshot = titles.rename(agent.session, title)
+      return { kind: 'committed', value: { title: snapshot.title } }
+    } catch (error) {
+      if (isSessionTitleInvalid(error)) {
+        return {
+          kind: 'rejected',
+          error: { code: 'session/title-invalid', message: safeErrorMessage(error), details: { sessionId } },
+        }
+      }
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'gateway/internal',
+          message: `failed to rename session "${sessionId}": ${safeErrorString(error)}`,
+          details: {},
+        },
+      }
+    }
   }
 
   async refreshTitle(sessionId: string, signal: AbortSignal): Promise<
-    | { kind: 'unavailable' }
-    | { kind: 'ok'; title: string | undefined }
+    | { readonly kind: 'ok'; readonly title: string | undefined }
+    | { readonly kind: 'unsupported'; readonly reason: string }
   > {
     const titles = this.ctx.get('sessionTitle') as SessionTitleServiceLike | undefined
-    if (titles === undefined) return { kind: 'unavailable' }
+    if (titles === undefined) return { kind: 'unsupported', reason: 'session title service unavailable' }
     const agent = this.agentFor(sessionId)
-    if (agent === undefined) return { kind: 'unavailable' }
+    if (agent === undefined) return { kind: 'unsupported', reason: 'session is not available' }
     const regenerated = await titles.refresh(agent.session, signal)
     return { kind: 'ok', title: regenerated?.title }
   }

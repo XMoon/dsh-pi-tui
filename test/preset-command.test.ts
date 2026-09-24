@@ -78,58 +78,117 @@ function fakeAgent(sessionId: string, events: readonly { type: string }[] = []):
 
 /** The four shipped rows WITH Chinese metadata, exactly as the dsh install's
  * agent-presets package ships them in its official shipped root. */
+/** The 0.1.7 shipped declarations publish no name/description of their
+ * own (the official built-in classification); the TUI's fixed English copy
+ * supplies the picker text. */
 const SHIPPED_ROWS = [
-  { id: 'standard', name: '标准模式', description: '功能完整的编码 Agent。', trust: 'system' },
-  { id: 'ptc', name: 'PTC 模式', description: 'Code Mode SDK。', trust: 'system' },
-  { id: 'minimal', name: '极简模式', description: '双工具编码 Agent。', trust: 'system' },
-  { id: 'cordis', name: '创造模式', description: '自定义 Agent preset。', trust: 'system' },
+  { id: 'standard' },
+  { id: 'ptc' },
+  { id: 'minimal' },
+  { id: 'cordis' },
 ]
 
 function presetService(
   rows: { id: string; name?: string; description?: string; trust?: string }[],
   defaultPresetId = 'standard',
+  selectFailure?: unknown,
+  /** Scripted Host lock state; true = locked, false/undefined = unlocked. The
+   *  double never derives blankness from the fake transcript. */
+  selectLocked?: boolean,
+  /** Per-call official roster projection override (gating/disabled tests). */
+  rosterOverride?: () => Promise<unknown>,
+  /** Explicit resolve override (subject-drift windows). */
+  resolveOverride?: (id?: string) => Promise<{ readonly id: string; broken?: string }>,
+  /** Runs inside the official Host select BEFORE it settles (transition drift). */
+  selectHook?: () => void,
 ) {
   const resolved: string[] = []
+  const selected: string[] = []
   return {
     resolved,
+    selected,
     service: {
       defaultId: defaultPresetId,
-      list: async () => rows.map(row => ({
-        id: row.id,
-        trust: row.trust ?? 'system',
-        path: `/presets/${row.id}`,
-        ...row.name === undefined ? {} : { name: row.name },
-        ...row.description === undefined ? {} : { description: row.description },
-      })),
+      // The PUBLIC official roster projection (the @Remote('list') method).
+      remoteExportList: async () => rosterOverride !== undefined
+        ? await rosterOverride()
+        : {
+            presets: rows.map(row => ({
+              id: row.id,
+              isDefault: row.id === defaultPresetId,
+              ...row.name === undefined ? {} : { name: row.name },
+              ...row.description === undefined ? {} : { description: row.description },
+            })),
+            modeSelectionEnabled: true,
+          },
       resolve: async (id?: string) => {
-        const row = rows.find(candidate => candidate.id === id)
-        if (row === undefined) throw new Error(`agent-presets: preset "${id}" not found (available: standard)`)
-        resolved.push(id!)
+        if (resolveOverride !== undefined) return resolveOverride(id)
+        // Real-registry semantics: an omitted id resolves the deployment
+        // default; an unknown id (explicit OR default) is refused.
+        const wanted = id ?? defaultPresetId
+        resolved.push(wanted)
+        const row = rows.find(candidate => candidate.id === wanted)
+        if (row === undefined) throw new Error(`agent-presets: preset "${wanted}" not found (available: standard)`)
         return { id: row.id, trust: row.trust ?? 'system', path: `/presets/${row.id}` }
+      },
+      // The official blank-session select: re-checks the session's turn
+      // boundary and refuses a started one with agent-preset/locked.
+      select: async (agent: unknown, id: string) => {
+        selectHook?.()
+        if (selectFailure !== undefined) throw selectFailure
+        const row = rows.find(candidate => candidate.id === id)
+        if (row === undefined) throw Object.assign(new Error(`agent-presets: preset "${id}" not found (available: standard)`), { code: 'agent-preset/not-found' })
+        if (selectLocked === true) {
+          throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' })
+        }
+        void agent
+        selected.push(id)
+        return id
       },
       composedPreset: () => undefined,
     },
   }
 }
 
-/** A fake commands service recording the registered definitions. */
-function fakeCommands() {
-  const defs: { name: string; handler?: unknown }[] = []
+/** A fake commands service recording the registered definitions. With
+ * `registered` the effective list returns the recorded definitions too — the
+ * real official service lists what the TUI registered (`/preset` included),
+ * which the candidate-visibility tests must observe. `presetOverride` models a
+ * scoped preset/plugin command that SHADOWS the TUI's `/preset` with its own
+ * descriptor (same name, its OWN definitionId). */
+function fakeCommands(
+  registered = false,
+  presetOverride?: { name: string; definitionId?: string; description?: string },
+) {
+  const defs: { name: string; definitionId?: string; description?: string; input?: { hint: string }; handler?: unknown }[] = []
   return {
     defs,
     service: {
-      register: (def: { name: string; handler?: unknown }): (() => void) => {
+      register: (def: { name: string; definitionId?: string; description?: string; input?: { hint: string }; handler?: unknown }): (() => void) => {
         defs.push(def)
         return () => {}
       },
-      list: () => [{ name: 'builtin', description: 'a builtin', input: { hint: '' } }],
+      list: () => {
+        const entries = registered
+          ? defs.map(def => ({
+              name: def.name,
+              ...def.definitionId === undefined ? {} : { definitionId: def.definitionId },
+              description: def.description ?? '',
+              ...def.input === undefined ? {} : { input: def.input },
+            }))
+          : []
+        const shadowed = presetOverride === undefined
+          ? entries
+          : entries.map(entry => entry.name === 'preset' ? { ...presetOverride } : entry)
+        return [...shadowed, { name: 'builtin', description: 'a builtin', input: { hint: '' } }]
+      },
       find: () => undefined,
       execute: async () => undefined,
     },
   }
 }
 
-/** A stub runner with a MUTABLE pending preset and an optional recompose.
+/** A stub runner with a MUTABLE pending preset and a scripted Host blank read.
  * `refreshCatalog` records every request and resolves a scripted outcome
  * (a failed outcome by default, so a test that does not care about the
  * refresh still sees the preset change succeed). */
@@ -137,7 +196,9 @@ function stubRunner(options: {
   ctx: Context
   app: TuiApp
   agent: Agent | undefined
-  recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
+  /** A mutable live-Session holder (agent + generation) for stale tests. */
+  state?: { agent: Agent | undefined; generation: number }
+  sessionBlank?: boolean
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   ensureCalls?: string[]
   tuiSettings?: TuiSettingsLike
@@ -157,7 +218,7 @@ function stubRunner(options: {
     ctx: options.ctx,
     app: options.app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return options.agent },
+    get liveAgent() { return options.state !== undefined ? options.state.agent : options.agent },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -165,20 +226,28 @@ function stubRunner(options: {
     setDefaultIntent: () => {},
     defaultIntentRecord: undefined,
     settleIntent: () => {},
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => options.sessionBlank,
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     agents: options.agents ?? {
       create: async () => ({}) as never,
-      resume: async () => ({}) as never,
+      open: async () => ({}) as never,
     },
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
        ...options.sessionReader,
     },
-    catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
+    catalog: new DirectCatalogPort(options.ctx as never, (sessionId) => {
+      const live = options.state !== undefined ? options.state.agent : options.agent
+      return live?.session.id === sessionId ? live : undefined
+    }),
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
     commandRegistry: options.ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort(() => undefined),
@@ -188,11 +257,10 @@ function stubRunner(options: {
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -203,7 +271,7 @@ function stubRunner(options: {
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
+    get sessionGeneration() { return options.state?.generation ?? 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -217,8 +285,8 @@ function stubRunner(options: {
       refreshes.push(request)
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
     },
-    recomposeBlank: options.recomposeBlank ?? (async () => ({ kind: 'switched', preset: 'standard' })),
     refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
@@ -267,7 +335,16 @@ function invoke(rawInput: string): CommandInvocation {
 function setup(options: {
   rows?: { id: string; name?: string; description?: string; trust?: string }[]
   agent?: Agent
-  recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
+  state?: { agent: Agent | undefined; generation: number }
+  sessionBlank?: boolean
+  selectFailure?: unknown
+  selectLocked?: boolean
+  /** Per-call official roster override (see presetService). */
+  roster?: () => Promise<unknown>
+  /** Explicit resolve override (see presetService). */
+  resolve?: (id?: string) => Promise<{ readonly id: string; broken?: string }>
+  /** Runs inside the official Host select before it settles (see presetService). */
+  selectHook?: () => void
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   tuiSettings?: TuiSettingsLike
@@ -279,25 +356,36 @@ function setup(options: {
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
+  /** Make the fake commands service list what was registered (the real
+   * service's behavior; required to observe `/preset` in the candidates). */
+  commandsListRegistered?: boolean
+  /** A scoped same-name `/preset` descriptor that shadows the TUI's own
+   * (its OWN definitionId — never the TUI identity). */
+  commandsPresetOverride?: { name: string; definitionId?: string; description?: string }
+  /** Omit the `agentPresets` service (a rosterless deployment). */
+  noPresets?: boolean
   width?: number
+  /** Viewport height; a taller screen keeps the whole `/help` list on one page. */
+  height?: number
 }) {
   const ctx = new Context()
-  const vt = new VirtualTerminal(options.width ?? 100, 24)
+  const vt = new VirtualTerminal(options.width ?? 100, options.height ?? 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
-  const commands = fakeCommands()
+  const commands = fakeCommands(options.commandsListRegistered === true, options.commandsPresetOverride)
   ctx.provide('commands', commands.service as never)
-  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
-  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId)
-  ctx.provide('agentPresets', presets.service as never)
+  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
+  if (options.noPresets !== true) ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
   const { runner, pending, refreshes } = stubRunner({
     ctx,
     app,
     agent: options.agent,
-    recomposeBlank: options.recomposeBlank,
+    state: options.state,
+    sessionBlank: options.sessionBlank,
     refreshCatalog: options.refreshCatalog,
     ensureCalls,
     tuiSettings: options.tuiSettings,
@@ -322,7 +410,7 @@ function setup(options: {
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
   })
-  registerTuiCommands(runner)
+  const surface = registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'preset')
   assert.ok(def?.handler !== undefined, 'preset handler missing')
   const run = async (rawInput: string): Promise<unknown> =>
@@ -336,7 +424,7 @@ function setup(options: {
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, runCommand, view, pending, presets, ensureCalls, refreshes }
+  return { vt, app, run, runCommand, view, pending, presets, ensureCalls, refreshes, surface }
 }
 
 test('/preset is in the sessionless dispatch gate', () => {
@@ -355,7 +443,6 @@ test('/keybindings opens sessionless without creating a session', async () => {
       busyEnter: 'queue',
       localShellSandbox: 'bypass',
       homeEndKeys: 'viewport',
-      focusMode: 'off',
     wheelScrollLines: '1',
       iconStyle: 'emoji',
       notificationMode: 'unfocused',
@@ -415,12 +502,51 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   t.app.stop()
 })
 
-test('/preset code remains unknown when the roster has no code entry', async () => {
+test('/preset default refuses a declared-but-broken preset without writing', async () => {
+  const writes: unknown[] = []
+  const t = setup({
+    rows: [{ id: 'broken-one', description: 'visible but unusable' }],
+    roster: async () => ({
+      presets: [{ id: 'broken-one', broken: 'preset failed to mount: missing plugin', isDefault: false }],
+      modeSelectionEnabled: true,
+    }),
+    resolve: async () => ({ id: 'broken-one', broken: 'preset failed to mount: missing plugin' }),
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (_ns, patch) => { writes.push(patch); return undefined },
+    },
+  })
+  const result = await t.run('default broken-one') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /preset failed to mount/u, 'the broken diagnostic surfaces')
+  assert.deepEqual(writes, [], 'a broken preset is never persisted as the default')
+  assert.deepEqual(t.refreshes, [])
+  t.app.stop()
+})
+
+test('/preset <broken> sessionless never stages the broken preset', async () => {
+  const t = setup({
+    rows: [{ id: 'broken-one' }],
+    roster: async () => ({
+      presets: [{ id: 'broken-one', broken: 'preset failed to mount: missing plugin', isDefault: false }],
+      modeSelectionEnabled: true,
+    }),
+    resolve: async () => ({ id: 'broken-one', broken: 'preset failed to mount: missing plugin' }),
+  })
+  const result = await t.run('broken-one') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /preset failed to mount/u)
+  assert.equal(t.pending.value, undefined, 'a broken preset is never staged as the pending preset')
+  t.app.stop()
+})
+
+test('/preset reports an unknown id verbatim — no legacy alias hint', async () => {
   const t = setup({})
   const result = await t.run('code') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /preset "code" not found/)
-  assert.match(result.text, /use preset "ptc"/)
+  assert.doesNotMatch(result.text, /use preset "ptc"/, 'the retired code→ptc alias must not surface as a hint')
   assert.equal(t.pending.value, undefined)
   t.app.stop()
 })
@@ -433,7 +559,7 @@ test('/preset code selects a legal custom code roster entry', async () => {
   t.app.stop()
 })
 
-test('/new resolves an absent legacy code default as canonical ptc', async () => {
+test('/new refuses a registry default no declaration supplies — no guessed replacement', async () => {
   const created: { agentPreset?: string }[] = []
   const t = setup({
     defaultPresetId: 'code',
@@ -442,13 +568,14 @@ test('/new resolves an absent legacy code default as canonical ptc', async () =>
         created.push({ agentPreset: options.agentPreset })
         return {} as never
       },
-      resume: async () => ({}) as never,
+      open: async () => ({}) as never,
     },
   })
   const result = await t.runCommand('new') as { kind: string; text?: string }
-  assert.deepEqual(result, { kind: 'success', text: 'started a fresh session' })
-  assert.deepEqual(t.presets.resolved, ['ptc'], 'the legacy default falls back to the canonical ptc roster entry')
-  assert.deepEqual(created, [{ agentPreset: 'ptc' }], 'new session metadata must stay canonical')
+  assert.equal(result.kind, 'error', 'an invalid deployment default must surface, never silently become ptc')
+  assert.match(result.text ?? '', /preset "code" not found/u)
+  assert.deepEqual(t.presets.resolved, ['code'], 'exactly one registry resolution — no fallback probe')
+  assert.deepEqual(created, [], 'no session is created on a refused default')
   t.app.stop()
 })
 
@@ -457,7 +584,7 @@ test('/sessions opens input-first and shows projection-pending rows before enric
   const batch = new Promise<Map<string, { title?: string; preset?: string }>>(resolve => { resolveBatch = resolve })
   const t = setup({
     sessionReader: {
-      list: async () => [{ id: 'session-cold', createdAt: 10, cwd: '/ws', live: false }],
+      list: async () => [{ id: 'session-cold', updatedAt: 10, createdAt: 10, cwd: '/ws', live: false }],
       projectionBatch: async () => batch,
     },
   })
@@ -486,7 +613,7 @@ test('/new honors the launch-time effective preset', async () => {
         created.push({ agentPreset: options.agentPreset })
         return {} as never
       },
-      resume: async () => ({}) as never,
+      open: async () => ({}) as never,
     },
   })
   const result = await t.runCommand('new') as { kind: string; text?: string }
@@ -510,16 +637,12 @@ test('/preset picker with no session sets the pending preset on one Enter', asyn
 })
 
 test('/preset picker switches a blank session with one Enter', async () => {
-  const recomposed: string[] = []
-  const t = setup({
-    agent: fakeAgent('s1', []),
-    recomposeBlank: async (id) => { recomposed.push(id); return { kind: 'switched', preset: id } },
-  })
+  const t = setup({ agent: fakeAgent('s1', []) })
   await t.run('')
   await t.view()
   t.vt.sendInput('\r')
   await t.view()
-  assert.deepEqual(recomposed, ['standard'], 'Enter must confirm the switch (values mechanism)')
+  assert.deepEqual(t.presets.selected, ['standard'], 'Enter must confirm the switch (values mechanism)')
   assert.equal(t.pending.value, undefined)
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('session preset switched to standard'), `notify missing:\n${view}`)
@@ -528,43 +651,42 @@ test('/preset picker switches a blank session with one Enter', async () => {
 })
 
 test('/preset <id> switches a blank session', async () => {
-  const recomposed: string[] = []
-  const t = setup({
-    agent: fakeAgent('s1', []),
-    recomposeBlank: async (id) => { recomposed.push(id); return { kind: 'switched', preset: id } },
-  })
+  const t = setup({ agent: fakeAgent('s1', []) })
   const result = await t.run('minimal')
   assert.deepEqual(result, { kind: 'success', text: 'session preset switched to minimal' })
-  assert.deepEqual(recomposed, ['minimal'])
+  assert.deepEqual(t.presets.selected, ['minimal'])
   t.app.stop()
 })
 
 test('/preset with a started session refuses without offering a roster', async () => {
-  const recomposed: string[] = []
-  const t = setup({
-    agent: fakeAgent('s1', [{ type: 'turn/start' }]),
-    recomposeBlank: async (id) => { recomposed.push(id); return { kind: 'locked' } },
-  })
+  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]), sessionBlank: false })
   const result = await t.run('') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /only available in a new session/)
   const view = await t.view()
   assert.ok(!view.includes('Standard mode (standard)'), `roster offered for a started session:\n${view}`)
   assert.ok(view.includes('only available in a new session'), `notify missing:\n${view}`)
-  assert.deepEqual(recomposed, [])
+  assert.deepEqual(t.presets.selected, [])
+  t.app.stop()
+})
+
+test('/preset on a blank session opens the roster (Host blank authority, not the transcript)', async () => {
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  const view = await t.view()
+  assert.ok(view.includes('Standard mode (standard)'), `a blank session must offer the roster:\n${view}`)
   t.app.stop()
 })
 
 test('/preset <id> with a started session refuses with the locked text', async () => {
-  let recomposed = 0
-  const t = setup({
-    agent: fakeAgent('s1', [{ type: 'turn/start' }]),
-    recomposeBlank: async () => { recomposed += 1; return { kind: 'locked' } },
-  })
+  // The Host outcome is scripted explicitly (agent-preset/locked); the double
+  // must NOT re-implement the Host blank state machine (§0.11).
+  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]), sessionBlank: false, selectLocked: true })
   const result = await t.run('minimal') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /has already started; its agent preset is fixed/)
-  assert.equal(recomposed, 1)
+  assert.deepEqual(t.presets.selected, [], 'the Host refusal is the final race check')
   t.app.stop()
 })
 
@@ -626,7 +748,7 @@ test('/preset default <id> with no override requests a standing refresh of the n
   t.app.stop()
 })
 
-test('/preset default code remains unknown when the roster has no code entry', async () => {
+test('/preset default reports an unknown id verbatim — no legacy alias hint', async () => {
   const writes: unknown[] = []
   const t = setup({
     refreshCatalog: async () => standingOutcome(['glab']),
@@ -638,7 +760,7 @@ test('/preset default code remains unknown when the roster has no code entry', a
   const result = await t.run('default code') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /preset "code" not found/u)
-  assert.match(result.text, /use preset "ptc"/u)
+  assert.doesNotMatch(result.text, /use preset "ptc"/u, 'the retired code→ptc alias must not surface as a hint')
   assert.deepEqual(writes, [], 'an unknown code id must never be persisted')
   assert.deepEqual(t.refreshes, [])
   t.app.stop()
@@ -656,7 +778,7 @@ test('/preset default code writes a legal custom roster entry', async () => {
   })
   const result = await t.run('default code') as { kind: string; text: string }
   assert.deepEqual(result, { kind: 'success', text: 'default preset set: code' })
-  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'code' }]])
+  assert.deepEqual(writes, [[{ op: 'set', path: ['selectedDefault'], value: 'code' }]])
   assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
   t.app.stop()
 })
@@ -673,6 +795,27 @@ test('/preset default <id> masked by a pending preset does NOT refresh', async (
   const result = await t.run('default ptc') as { kind: string; text: string }
   assert.equal(result.kind, 'success')
   assert.equal(t.refreshes.length, 0, 'the pending override masks the new default — no refresh')
+  t.app.stop()
+})
+
+test('a disabled deployment refuses the /preset default mutation (fail closed)', async () => {
+  const writes: unknown[] = []
+  const t = setup({
+    roster: policyRoster(false),
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (_ns, patch) => { writes.push(patch); return undefined },
+    },
+  })
+  const result = await t.run('default ptc') as { kind: string; text?: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /preset selection is disabled in this deployment/)
+  assert.deepEqual(writes, [], 'no default write may happen while preset selection is disabled')
+  assert.deepEqual(t.refreshes, [], 'no standing refresh may follow a refused mutation')
+  // Read-only queries stay available (the web keeps its read-only label).
+  assert.equal((await t.run('status') as { kind: string }).kind, 'success')
+  assert.equal((await t.run('default') as { kind: string }).kind, 'success')
   t.app.stop()
 })
 
@@ -698,7 +841,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
     get: () => {
       reads += 1
       onGet?.(reads)
-      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }
+      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }
     },
     replace: doc => { currentTheme = doc.theme as string },
   }
@@ -855,7 +998,7 @@ test('/keybindings reload re-reads the settings document LAZILY (the explicit re
   // reload time (a stale cached parse would miss a later settings edit).
   let settingsDoc = {
     theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue',
-    localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1',
+    localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1',
     iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto',
     keybindings: { 'app.input.steer': 'ctrl+x' },
   }
@@ -894,7 +1037,6 @@ test('/keybindings reload queues behind an editor write and applies the latest d
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
@@ -960,7 +1102,6 @@ test('/keybindings reset queues behind an editor write and keeps the final reset
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
@@ -1018,7 +1159,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   // now-keybindings-less document.
   let replaced = 0
   const failing: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { replaced += 1; throw new Error('write refused') },
   }
   let t = setup({ tuiSettings: failing })
@@ -1045,7 +1186,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
     get: () => {
       okReads += 1
       if (okReads > 1) throw new Error('no second read allowed')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => { okReplaced += 1 },
   }
@@ -1106,7 +1247,7 @@ test('/keybindings reload is fail-soft: a throwing settings read keeps the last-
   const tuiSettings: TuiSettingsLike = {
     get: () => {
       if (failing) throw new Error('settings read exploded')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => {},
   }
@@ -1130,5 +1271,583 @@ test('/keybindings reload refuses an absent settings service (no false "reloaded
   const result = await t.runCommand('keybindings', 'reload')
   assert.equal((result as { kind: string }).kind, 'error', 'an absent settings service must report an error result')
   assert.ok((result as { text: string }).text.includes('unavailable'), `error text missing: ${JSON.stringify(result)}`)
+  t.app.stop()
+})
+
+test('/preset <id> surfaces an indeterminate switch without retrying', async () => {
+  const t = setup({ agent: fakeAgent('s1', []), selectFailure: new Error('append exploded after recompose') })
+  const result = await t.run('minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /append exploded after recompose/)
+  assert.match(result.text, /do not retry/)
+  assert.deepEqual(t.presets.selected, [], 'an ambiguous switch is never retried')
+  t.app.stop()
+})
+
+test('/preset commits a Host-blank selection even when the transcript has a turn', async () => {
+  // The fake Host select is authoritative (selectLocked: false) while the fake
+  // transcript still has a turn/start: the command must open the roster AND
+  // commit the switch, proving it never folds the transcript itself.
+  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]), sessionBlank: true, selectLocked: false })
+  const opened = await t.run('') as { kind: string }
+  assert.equal(opened.kind, 'success')
+  const view = await t.view()
+  assert.ok(view.includes('Standard mode (standard)'), 'the Host turn-boundary authority wins over the transcript')
+  t.vt.sendInput('\r') // pick the first roster row
+  await t.view()
+  assert.deepEqual(t.presets.selected, ['standard'],
+    'the Host blank selection commits despite the transcript turn')
+  t.app.stop()
+})
+
+test('/preset supersedes (never error-notifies) a switch whose Session was replaced during the catalog refresh', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  const t = setup({
+    state,
+    sessionBlank: true,
+    selectLocked: false,
+    refreshCatalog: async () => {
+      // A transition lands while the refresh is in flight.
+      state.generation = 2
+      state.agent = fakeAgent('s2', [])
+      return { kind: 'failed', error: 'superseded by a switch' }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  // v2 §0.2.1/§0.3.3: the committed switch lost local ownership — the surface
+  // moved, so superseded is SILENT (no notice, no success text).
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, undefined)
+  assert.deepEqual(t.presets.selected, ['minimal'],
+    'the Host switch itself committed before the surface moved')
+  t.app.stop()
+})
+
+test('/preset refuses an EMPTY transcript when the Host turn boundary says started', async () => {
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: false })
+  const result = await t.run('') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /only available in a new session/)
+  const view = await t.view()
+  assert.ok(!view.includes('Standard mode (standard)'), 'no roster is offered for a Host-started Session')
+  t.app.stop()
+})
+
+test('a newer preset pick supersedes an older pick on the same Session generation', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  let secondStarted = false
+  const holder: { run?: (rawInput: string) => Promise<unknown> } = {}
+  const t = setup({
+    state,
+    sessionBlank: true,
+    selectLocked: false,
+    refreshCatalog: async () => {
+      if (!secondStarted) {
+        secondStarted = true
+        // A newer pick starts while the older refresh is in flight.
+        await holder.run!('minimal')
+      }
+      return { kind: 'superseded', error: 'a newer refresh started' }
+    },
+  })
+  holder.run = t.run
+  const first = await t.run('standard') as { kind: string; text?: string }
+  assert.equal(first.kind, 'success')
+  assert.equal(first.text, undefined, 'a superseded pick is silent (no success text)')
+  t.app.stop()
+})
+
+test('a newer sessionless preset pick supersedes an older one', async () => {
+  let secondStarted = false
+  const holder: { run?: (rawInput: string) => Promise<unknown> } = {}
+  const t = setup({
+    refreshCatalog: async () => {
+      if (!secondStarted) {
+        secondStarted = true
+        // A newer sessionless pick starts while the older refresh is in flight.
+        await holder.run!('minimal')
+      }
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  holder.run = t.run
+  const first = await t.run('standard') as { kind: string; text?: string }
+  assert.equal(first.kind, 'success')
+  assert.equal(first.text, undefined, 'a superseded sessionless pick is silent')
+  assert.equal(t.pending.value, 'minimal', 'the newest sessionless pick is the effective pending preset')
+  t.app.stop()
+})
+
+test('an older /preset superseded during the roster read is silent even when the roster is disabled', async () => {
+  let calls = 0
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const t = setup({
+    roster: async () => {
+      calls += 1
+      if (calls === 1) await gate
+      return {
+        presets: SHIPPED_ROWS.map(row => ({
+          id: row.id,
+          isDefault: row.id === 'standard',
+        })),
+        modeSelectionEnabled: false,
+      }
+    },
+  })
+  const first = t.run('minimal') as Promise<{ kind: string; text?: string }>
+  await new Promise(resolve => setImmediate(resolve))
+  const second = t.run('standard') as Promise<{ kind: string; text?: string }>
+  const newer = await second
+  release()
+  const older = await first
+  // The older op lost ownership while its roster was in flight: it must be
+  // UI-silent, NOT surface the policy rejection (§0.2.5/§0.3.3).
+  assert.equal(older.kind, 'success')
+  assert.equal(older.text, undefined, 'a superseded op must not emit a stale notice')
+  assert.equal(newer.kind, 'error', 'the newest op still reports the disabled-policy rejection')
+  t.app.stop()
+})
+
+test('a superseded preset-roster read keeps /preset silent (typed verb and picker)', async () => {
+  const { SupersededReadError } = await import('../src/runtime/read-error.ts')
+  const t = setup({ roster: async () => { throw new SupersededReadError('connection changed') } })
+  const verbResult = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(verbResult.kind, 'success')
+  assert.equal(verbResult.text, undefined, 'a superseded roster read must not surface a stale error')
+  const pickerResult = await t.run('') as { kind: string; text?: string }
+  assert.equal(pickerResult.kind, 'success')
+  const view = await t.view()
+  assert.ok(!view.includes('connection changed'), `no stale roster notice:\n${view}`)
+  t.app.stop()
+})
+
+test('an older /preset whose Session generation moved during the roster read is silent even when disabled', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    roster: async () => {
+      // A /new/switch lands while the DIRECT roster is in flight, and a new
+      // blank Agent appears: the old sessionless operation must NOT apply to it.
+      state.generation = 2
+      state.agent = fakeAgent('s2', [])
+      return {
+        presets: SHIPPED_ROWS.map(row => ({
+          id: row.id,
+          isDefault: row.id === 'standard',
+        })),
+        modeSelectionEnabled: false,
+      }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success', 'a generation-moved op must not surface the policy rejection')
+  assert.equal(result.text, undefined, 'a generation-moved op is silent')
+  assert.deepEqual(t.presets.selected, [], 'the stale op must not apply its preset to the new Session')
+  t.app.stop()
+})
+
+test('a /preset picker opened on S1 cannot switch S2 after a session switch (subject fence)', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  const t = setup({ state, sessionBlank: true })
+  await t.run('') // open the picker on S1
+  await t.vt.waitForRender()
+  // Prove the overlay actually opened (not a vacuous early return).
+  assert.match(t.vt.getViewport().join('\n'), /standard/i, 'the preset picker must open before the switch')
+  // A Session switch lands AFTER the overlay opened.
+  state.agent = fakeAgent('s2', [])
+  state.generation = 2
+  t.vt.sendInput('\r') // submit the STALE overlay
+  await t.vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(t.presets.selected, [], 'a stale preset picker must not switch the new Session')
+  t.app.stop()
+})
+
+test('a sessionless /preset picker cannot switch a Session that appeared in the same generation', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({ state })
+  await t.run('') // sessionless picker (owner sessionId === undefined)
+  await t.vt.waitForRender()
+  assert.match(t.vt.getViewport().join('\n'), /standard/i, 'the sessionless preset picker must open before the create')
+  // A first create publishes a live Agent BEFORE the generation bump.
+  state.agent = fakeAgent('s1', [])
+  t.vt.sendInput('\r') // submit the stale sessionless overlay
+  await t.vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(t.presets.selected, [], 'a stale sessionless picker must not switch the new live Session')
+  t.app.stop()
+})
+
+test('typed /preset whose subject drifts to a same-generation live Session is superseded', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    roster: async () => {
+      // A first create publishes a live Agent while the roster is in flight,
+      // WITHOUT a generation bump.
+      state.agent = fakeAgent('s2', [])
+      return {
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
+        modeSelectionEnabled: true,
+      }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, undefined, 'a drifted subject is silent')
+  assert.deepEqual(t.presets.selected, [], 'the stale op must never switch the newly appeared Session')
+  assert.equal(t.pending.value, undefined, 'no sessionless intent is staged onto a now-live surface')
+  t.app.stop()
+})
+
+test('typed /preset whose subject drifts during resolve() is superseded', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    resolve: async (id?: string) => {
+      state.agent = fakeAgent('s2', [])
+      return { id: id ?? 'standard', trust: 'system', path: `/presets/${id ?? 'standard'}` }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, undefined)
+  assert.deepEqual(t.presets.selected, [], 'a subject that drifts during resolve must not stage or switch')
+  assert.equal(t.pending.value, undefined)
+  t.app.stop()
+})
+
+test('a /preset whose subject moves during the Host switch stays silent (transition-await fence)', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  const t = setup({
+    state,
+    selectLocked: true,
+    selectHook: () => {
+      // The subject moves to another Session in the SAME generation while the
+      // official Host switch is in flight; the switch then refuses (locked).
+      state.agent = fakeAgent('s2', [])
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success', 'a drifted subject must not surface the stale lock rejection')
+  assert.equal(result.text, undefined, 'a drifted subject is silent')
+  assert.deepEqual(t.presets.selected, [], 'the Host refusal never committed')
+  assert.ok(!t.vt.getViewport().join('\n').includes('locked'), 'no stale lock notice is rendered')
+  t.app.stop()
+})
+
+test('a /preset picker whose Session identity drifts during the roster read never opens', async () => {
+  const state = { agent: fakeAgent('s1', []) as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    sessionBlank: true,
+    roster: async () => {
+      // The subject moves to another Session in the SAME generation while the
+      // roster read is in flight.
+      state.agent = fakeAgent('s2', [])
+      return {
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
+        modeSelectionEnabled: true,
+      }
+    },
+  })
+  await t.run('')
+  await t.vt.waitForRender()
+  assert.ok(!t.vt.getViewport().join('\n').includes('standard'),
+    'the stale picker must never open on the newly appeared Session')
+  t.app.stop()
+})
+
+// ── preset-selection presentation (the Host roster's modeSelectionEnabled) ──
+//
+// The policy is a client-local PRESENTATION filter: `/preset` is hidden from
+// the slash candidates and `/help` when (and only when) an authoritative
+// roster reports selection disabled. The handler stays registered, so a manual
+// `/preset` still fails closed. A rosterless deployment is UNKNOWN and keeps
+// the affordance rather than infer `false`.
+
+/** A roster returning the shipped rows with an explicit deployment policy. */
+function policyRoster(enabled: boolean) {
+  return async () => ({
+    presets: SHIPPED_ROWS.map(row => ({
+      id: row.id,
+      isDefault: row.id === 'standard',
+    })),
+    modeSelectionEnabled: enabled,
+  })
+}
+
+const EMPTY_SURFACE_SNAPSHOT = Object.freeze({
+  commands: Object.freeze([]),
+  scopedCommands: Object.freeze([]),
+  skills: Object.freeze([]),
+  issues: Object.freeze([]),
+}) as never
+
+test('modeSelectionEnabled=true keeps /preset in the candidates and /help', async () => {
+  const t = setup({ commandsListRegistered: true, roster: policyRoster(true), height: 80 })
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'an enabled deployment keeps /preset as a candidate')
+  await t.runCommand('help')
+  await t.vt.waitForRender()
+  t.vt.sendInput('preset')
+  await t.vt.waitForRender()
+  const view = await t.view()
+  assert.ok(view.includes('Show or switch the session agent preset'), '/help lists /preset when enabled')
+  t.app.stop()
+})
+
+test('modeSelectionEnabled=false hides the /preset affordance but still fails closed', async () => {
+  const t = setup({ commandsListRegistered: true, roster: policyRoster(false), height: 80 })
+  assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the affordance stays visible until an authoritative read')
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await waitFor(async () => !t.app.commandCompletionsForTest().some(command => command.name === 'preset'))
+  await t.runCommand('help')
+  await t.vt.waitForRender()
+  t.vt.sendInput('preset')
+  await t.vt.waitForRender()
+  const view = await t.view()
+  assert.ok(!view.includes('Show or switch the session agent preset'),
+    '/help hides the preset switching affordance when disabled')
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'error', 'a manual /preset still fails closed while hidden')
+  assert.match(result.text ?? '', /preset selection is disabled in this deployment/)
+  t.app.stop()
+})
+
+test('a rosterless deployment keeps /preset visible and does not crash', async () => {
+  const t = setup({ commandsListRegistered: true, noPresets: true })
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'an unavailable roster must not be inferred as disabled')
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /agent presets unavailable/)
+  t.app.stop()
+})
+
+test('a stale roster result cannot rewrite the new Session preset visibility', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  let calls = 0
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const t = setup({
+    state,
+    commandsListRegistered: true,
+    roster: async () => {
+      calls += 1
+      if (calls === 1) await gate
+      return {
+        presets: SHIPPED_ROWS.map(row => ({
+          id: row.id,
+          isDefault: row.id === 'standard',
+        })),
+        // The generation-1 read says ENABLED and settles late; the
+        // generation-2 read says DISABLED.
+        modeSelectionEnabled: calls === 1,
+      }
+    },
+  })
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await new Promise(resolve => setImmediate(resolve))
+  // The Session moves while the first (enabled) read is in flight.
+  state.agent = fakeAgent('s2', [])
+  state.generation = 2
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await waitFor(async () => !t.app.commandCompletionsForTest().some(command => command.name === 'preset'))
+  release()
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the stale generation-1 read must not re-show /preset on the generation-2 surface')
+  t.app.stop()
+})
+
+test('a disabled preset policy does not leak across owners; an unavailable roster keeps /preset', async () => {
+  const state = { agent: fakeAgent('s1', []) as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  let calls = 0
+  const t = setup({
+    state,
+    commandsListRegistered: true,
+    roster: async () => {
+      calls += 1
+      if (calls === 1) {
+        return {
+          presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
+          modeSelectionEnabled: false,
+        }
+      }
+      // The new owner's roster read is unavailable/unknown.
+      throw new Error('roster unavailable')
+    },
+  })
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await waitFor(async () => !t.app.commandCompletionsForTest().some(command => command.name === 'preset'))
+  // A NEW Session owner appears; its roster cannot be read. The previous
+  // owner's `false` must not hide the affordance (unknown => visible).
+  state.agent = fakeAgent('s2', [])
+  state.generation = 2
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the previous owner disabled policy must not hide /preset for the new owner')
+  t.app.stop()
+})
+
+test('a same-owner late roster read cannot overwrite a newer preset-visibility read', async () => {
+  const state = { agent: fakeAgent('s1', []) as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  let calls = 0
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const t = setup({
+    state,
+    commandsListRegistered: true,
+    roster: async () => {
+      calls += 1
+      if (calls === 1) await gate
+      return {
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
+        // The LATE first read says ENABLED; the newer read says DISABLED.
+        modeSelectionEnabled: calls === 1,
+      }
+    },
+  })
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await new Promise(resolve => setImmediate(resolve))
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await waitFor(async () => !t.app.commandCompletionsForTest().some(command => command.name === 'preset'))
+  release()
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the stale same-owner read must not overwrite the newer authoritative value')
+  t.app.stop()
+})
+
+/** A gated roster whose FIRST (stale) read says ENABLED and every later read
+ * says DISABLED — the newer read must win even when the stale one settles
+ * later. */
+function gatedStaleEnabledRoster() {
+  let calls = 0
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const roster = async () => {
+    calls += 1
+    // Snapshot the policy at CALL time: the shared counter advances while the
+    // gated first read waits, and the first (stale) read must still report the
+    // policy it observed (ENABLED).
+    const enabled = calls === 1
+    if (calls === 1) await gate
+    return {
+      presets: SHIPPED_ROWS.map(row => ({
+        id: row.id,
+        isDefault: row.id === 'standard',
+      })),
+      modeSelectionEnabled: enabled,
+    }
+  }
+  return { roster, release: () => release() }
+}
+
+test('a late typed /preset roster read cannot overwrite newer visibility, but still dispatches', async () => {
+  const state = { agent: fakeAgent('s1', []) as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const gated = gatedStaleEnabledRoster()
+  const t = setup({ state, commandsListRegistered: true, sessionBlank: true, roster: gated.roster })
+  // The typed /preset read STARTS first (stale ENABLED) and is held open.
+  const typed = t.run('minimal')
+  await new Promise(resolve => setImmediate(resolve))
+  // A newer visibility probe for the SAME owner says DISABLED.
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await waitFor(async () => !t.app.commandCompletionsForTest().some(command => command.name === 'preset'))
+  gated.release()
+  await typed
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the stale typed read must not overwrite the newer visibility state')
+  // Presentation freshness is separate from mutation ownership: the still-current
+  // user operation decides from ITS OWN roster and must still dispatch.
+  assert.deepEqual(t.presets.selected, ['minimal'],
+    'a still-current typed /preset operation must still dispatch the Host select')
+  t.app.stop()
+})
+
+test('a late /preset picker roster read cannot overwrite a newer visibility read', async () => {
+  const state = { agent: fakeAgent('s1', []) as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const gated = gatedStaleEnabledRoster()
+  const t = setup({ state, commandsListRegistered: true, sessionBlank: true, roster: gated.roster })
+  // The picker read STARTS first (stale ENABLED) and is held open.
+  const picker = t.run('')
+  await new Promise(resolve => setImmediate(resolve))
+  // A newer visibility probe for the SAME owner says DISABLED.
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await waitFor(async () => !t.app.commandCompletionsForTest().some(command => command.name === 'preset'))
+  gated.release()
+  await picker
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the stale picker read must not re-show /preset after the newer visibility read')
+  await t.vt.waitForRender()
+  assert.ok(!t.vt.getViewport().join('\n').includes('Standard mode (standard)'),
+    'a stale picker read must not open the preset picker')
+  t.app.stop()
+})
+
+test('a stale /preset default read cannot overwrite newer visibility, but still writes', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const gated = gatedStaleEnabledRoster()
+  const writes: unknown[] = []
+  const t = setup({
+    state,
+    commandsListRegistered: true,
+    roster: gated.roster,
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: { get: () => undefined, mutate: async (_ns, patch) => { writes.push(patch); return undefined } },
+  })
+  const run = t.run('default ptc')
+  await new Promise(resolve => setImmediate(resolve))
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await waitFor(async () => !t.app.commandCompletionsForTest().some(command => command.name === 'preset'))
+  gated.release()
+  await run
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the stale default read must not overwrite the newer visibility state')
+  assert.deepEqual(writes, [[{ op: 'set', path: ['selectedDefault'], value: 'ptc' }]],
+    'a still-current /preset default mutation must still write, decided by ITS OWN roster')
+  t.app.stop()
+})
+
+test('a scoped same-name /preset with a DIFFERENT definitionId stays visible when disabled', async () => {
+  // The mode-selection policy is bound to the TUI's OWN `/preset` identity
+  // (definitionId), not the command NAME. A preset/plugin command that
+  // shadows the name with its own descriptor is semantically unrelated and
+  // keeps its presentation even while the deployment disables mode selection.
+  const t = setup({
+    commandsListRegistered: true,
+    commandsPresetOverride: { name: 'preset', definitionId: 'example/scoped-preset', description: 'A scoped preset command' },
+    roster: policyRoster(false),
+    settings: { get: () => undefined, mutate: async () => undefined },
+    height: 80,
+  })
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await new Promise(resolve => setTimeout(resolve, 25))
+  // The policy IS active: the TUI's own selection/default mutations fail closed.
+  const refused = await t.run('default ptc') as { kind: string; text?: string }
+  assert.equal(refused.kind, 'error')
+  assert.match(refused.text ?? '', /preset selection is disabled in this deployment/)
+  // ... yet the scoped same-name command stays visible in both surfaces.
+  assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'a scoped same-name command with a different definitionId must stay a candidate')
+  await t.runCommand('help')
+  await t.vt.waitForRender()
+  t.vt.sendInput('preset')
+  await t.vt.waitForRender()
+  assert.ok((await t.view()).includes('A scoped preset command'),
+    '/help must keep the scoped same-name command visible')
   t.app.stop()
 })

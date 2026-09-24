@@ -17,8 +17,10 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.0-alpha.2` | `dsh-v0.1.2-alpha.4`, `dsh-v0.1.2-alpha.5` | Previous 0.4 prerelease |
 | `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
 | `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
-| `0.4.6` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
-| `next` npm line (current checkout) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Same target while the next prerelease is being qualified |
+| `0.4.6` (published stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; validated against the published npm rc.1 family |
+| `0.4.7-alpha.1` (published) | `dsh-v0.1.6-alpha.1` | Published forward-integration target; keeps its own alpha.1 contract and is the fallback TUI for an alpha.1 runtime |
+| `0.4.7-alpha.2` (published) | `dsh-v0.1.6-alpha.2` | Released forward-integration line; first line on the alpha.2 Client Session contract and the fallback TUI for a 0.1.6-alpha.2 runtime |
+| `0.4.8` (published stable) | `dsh-v0.1.7-rc.1` | Current stable line: the 0.1.7 profile-owned Config, declarative preset registry, SessionId-owned jobs, execute/result shell, and official Client projections/ClientJobs |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
@@ -26,35 +28,54 @@ from a package peer lower bound alone: npm/node-semver excludes a prerelease
 whose major/minor/patch tuple differs from the comparator's prerelease tuple.
 For example, `>=0.1.2-rc.1` does not include `0.1.3-alpha.1`, and
 `^0.1.1-rc.1` does not include `0.1.2-alpha.1`. The 0.4.5 release raised the
-floor to the published npm `0.1.5-rc.1` release, and 0.4.6 keeps that same
-floor; the open peer range also accepts the compatible `0.1.5-rc.2` family.
-Its startup notice is best-effort because Loader rows mount concurrently. The
-floor is a registry release, so the notice suggests the exact npm upgrade
-target.
+floor to the published npm `0.1.5-rc.1` release, and 0.4.6 kept that same
+floor; their open peer range also accepted the compatible `0.1.5-rc.2` family.
+The `0.4.7-alpha.2` line raised the floor to the published npm `0.1.6-alpha.2`
+release. The `0.4.8` stable release raises the floor to the published npm
+`0.1.7-rc.1` release: TUI preferences now live on the
+`tui-app` plugin's profile-owned volatile Config (the retired
+`settings.register`/`settings.get` business store is gone upstream), and preset
+identity comes from the official `@deepseek-ai/dsh-agent-preset-registry` with
+the four shipped `@deepseek-ai/dsh-agent-preset` declarations composed from
+the generated `generated/dsh-presets/` mirror (the retired `@deepseek-ai/dsh-agent-presets`
+path-root/trust model no longer exists). A `0.1.6-alpha.2` runtime therefore
+falls back to the released `0.4.7-alpha.2` bundle, which is what the startup
+notice offers. `dsh-v0.1.6-alpha.1` predates the alpha.2 Client Session
+reference contract; its last compatible TUI stays the published
+`0.4.7-alpha.1` bundle. The startup notice is best-effort because Loader rows
+mount concurrently; the floor is a registry release, so the notice suggests the
+exact npm upgrade target.
 
-For the current stable 0.4 line, install the recommended DSH family and the
-stable TUI. DSH `0.1.5-rc.1` is the minimum; `0.1.5-rc.2` is also compatible.
-The recommended install command explicitly allows the DSH native install
-scripts:
+For the current stable `0.4.8` line, install the recommended DSH family and the
+stable TUI. DSH `0.1.7-rc.1` is the minimum and the validated target; older
+runtimes must use their paired TUI line from the table above. The recommended
+install command explicitly allows the DSH native install scripts:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The current `next` checkout is npm mode. Use the isolated npm driver, which
-installs the exact DSH version declared by the checkout's `package.json`
-(`0.1.5-rc.1`) from the public registry and exercises the TUI build/test/
-package path:
+The `0.4.8` checkout is npm Mode and targets the published
+`0.1.7-rc.1` family through its lockfile. Use the local development
+flow to materialize it:
 
 ```sh
-pnpm compat:dsh:npm
+pnpm dev:doctor
+pnpm dev:bootstrap
+pnpm dev:doctor
+```
+
+Source Mode remains available for explicit source-boundary validation:
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 ```
 
 The startup notice on an old runtime suggests the exact published upgrade:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1
 ```
 
 If the official `dsh-v0.1.0-rc.8` runtime must be kept, use the compatible
@@ -77,9 +98,12 @@ The historical 0.4.1 stable pair uses the concrete `dsh-v0.1.2-rc.1` tag.
 Official `dsh-v0.1.2-alpha.2`/`alpha.3` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, `alpha.4`/`alpha.5` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and `dsh-v0.1.3-alpha.2` uses
-`@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The current npm-mode checkout is
-separate: its peer floor is `>=0.1.5-rc.1`, and its exact npm family is
-verified by the frozen lockfile.
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The published 0.1.5-rc.1/rc.2 family is
+the last runtime for the `0.4.6` stable release. The `0.4.8` npm-mode line is
+separate: its whole DSH peer floor is unified at `>=0.1.7-rc.1` (the
+rc.1 preset registry peers `dsh-agent` exactly, so a wider legacy floor can
+no longer satisfy a fresh standalone tarball install), and its exact npm
+family is verified by the lockfile.
 
 The root README intentionally uses DSH's moving `latest`/`alpha` channels for
 ordinary stable/preview installs; the exact release pairing and compatibility
@@ -90,21 +114,32 @@ reproducible release verification, always name a published version explicitly.
 
 Runtime compatibility and data compatibility are separate. A 0.4 runtime
 requires the declared DSH lower bound, but it continues to read
-sessions created by 0.3.x. The minimum DSH `0.1.5-rc.1` runtime persists
-Session V2; compatible `0.1.5-rc.2` persists Session V3 and owns the V2-to-V3
-migration when an older session is opened.
+sessions created by 0.3.x. The historical DSH `0.1.5-rc.1` runtime persists
+Session V2; `0.1.5-rc.2` and the current `0.1.6-alpha.2` line persist
+Session V3 and own the V2-to-V3 migration when an older session is opened.
 Preset state is read through DSH's `agentPreset` session projection: the
 creation header initializes the state and the newest `agent-preset/selected`
 event wins.
 
 The canonical shipped preset ids are `standard`, `ptc`, `minimal`, and `cordis`,
-resolved from DSH's official shipped root. No local preset copy or `code` runtime
+declared as ordinary Cordis rows and registered through the official
+`@deepseek-ai/dsh-agent-preset-registry`. dsh-pi-tui does not own these
+definitions: the four patch files under `generated/dsh-presets/` are a
+generated byte-exact mirror of `@deepseek-ai/dsh-web-app`'s exported preset
+assets (`pnpm gen:dsh-presets`), parity-gated by
+`test/dsh-preset-parity.test.mjs` — a recorded workaround for the 0.1.7
+`dsh.bundle.patch` limitation that bundle patches only resolve
+package-relative paths. Remove the mirror when DSH ships a shared preset
+bundle or cross-package patch references. Built-in display classification is
+the official rule (a known shipped id publishing no `name`); the TUI keeps only
+its fixed English copy. No local preset copy or `code` runtime
 alias is shipped. DSH's V2→V3 migration owns historical session header and
 `agent-preset/selected` conversion from `code` to `ptc`; the current projection
-therefore preserves a native custom preset literally named `code`. Only an
-omitted legacy settings default is mapped to `ptc` after the current roster
-proves that `code` is absent; new command/config writes are validated against the
-roster before they are saved.
+therefore preserves a native custom preset literally named `code`. An
+omitted legacy settings default is never aliased — with no matching
+declaration in the current roster it is an invalid preference that keeps the
+official default; new command/config writes are validated against the roster
+(including its broken diagnostics) before they are saved.
 
 ## Source Mode validation
 
@@ -129,10 +164,12 @@ cannot be consulted for unpublished DSH metadata;
 The CI policy is deliberately explicit: pushes to `next` and pull requests
 whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
 `main` and every tag, including `next-v*`, always use registry-backed npm mode
-with a frozen lockfile. Source Mode builds and validates the pinned source
-family from `test/compat/dsh-source.json`'s `expectedVersion`; npm Mode uses the
-exact DSH version declared by the checkout's `package.json` and resolved by its
-frozen lockfile. The Source Mode ecosystem check prints
+with a frozen lockfile. This checkout's policy is npm mode and targets
+the published `0.1.7-rc.1` family declared by `package.json` and resolved by
+its lockfile. The source lane independently pins `deepseek-harness` to
+`46a7f68b0922371ce7144b668b90e377d8e799f4` (`0.1.7-rc.1`) in
+`test/compat/dsh-source.json` and builds and validates that family from source.
+The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the
 published `pi2dsh` bridge cannot prove compatibility against an unpublished
 source family. That check remains blocking in npm mode.

@@ -14,12 +14,14 @@ import {
   readHumanSkillCatalog,
   resolveColdSkillTarget,
   resolveLiveSkillTarget,
+  subscribeSkillsChange,
   type AgentPresetsLike,
   type SkillCatalogContext,
   type SkillCatalogReadOptions,
   type SkillRegistryLike,
   type SkillSummaryLike,
 } from '../src/skill-catalog.ts'
+import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 
 /** A catalog entry helper with the full invocation policy. */
 function skill(name: string, userInvocable: boolean, extra: Partial<SkillSummaryLike> = {}): SkillSummaryLike {
@@ -72,11 +74,12 @@ test('the collector uses snapshot-first, filters with the official policy, sorts
   const catalog = await readHumanSkillCatalog(registry, { cwd: '/ws', scope: {}, signal: new AbortController().signal })
   assert.deepEqual(catalog.skills.map(item => item.name), ['aaa', 'zzz'], 'only user-invocable skills, name-sorted')
   assert.equal(catalog.skills[1]?.whenToUse, 'late alphabet', 'whenToUse is copied')
+  assert.equal(catalog.skills[1]?.modelInvocable, true, 'modelInvocable is copied')
   assert.equal(catalog.complete, true)
   assert.ok(Object.isFrozen(catalog) && Object.isFrozen(catalog.skills))
   assert.ok(Object.isFrozen(catalog.skills[0]))
-  assert.deepEqual(Object.keys(catalog.skills[1]!).sort(), ['description', 'name', 'whenToUse'],
-    'the entry carrying whenToUse keeps exactly the supported display fields')
+  assert.deepEqual(Object.keys(catalog.skills[1]!).sort(), ['description', 'modelInvocable', 'name', 'whenToUse'],
+    'the entry carrying metadata keeps exactly the supported display fields')
   assert.equal(options?.cwd, '/ws')
 })
 
@@ -173,17 +176,21 @@ function abortError(): Error {
 test('the cold target resolves the standing scope of the effective preset', async () => {
   const key = { agentPreset: 'fixture' }
   const registry = fakeRegistry({})
+  let released = false
   const presets: AgentPresetsLike = {
-    standingKeyFor: async (id) => {
+    acquireScope: async (id) => {
       assert.equal(id, 'fixture')
-      return key
+      return { key, [Symbol.asyncDispose]: async () => { released = true } }
     },
   }
   const resolution = await resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'fixture', '/ws')
   assert.equal(resolution.target?.kind, 'cold-standing')
-  assert.equal(resolution.target?.scope, key, 'the standing key is the view scope')
+  assert.equal(resolution.target?.scope, key, 'the standing lease key is the view scope')
   assert.equal(resolution.target?.registry, registry)
   assert.equal(resolution.degraded, undefined)
+  assert.equal(released, false, 'the lease stays retained until the caller releases it')
+  await resolution.release?.()
+  assert.equal(released, true, 'the caller-owned release disposes the lease')
 })
 
 test('a rosterless deployment resolves the global cold view with no scope', async () => {
@@ -194,7 +201,7 @@ test('a rosterless deployment resolves the global cold view with no scope', asyn
   assert.equal(resolution.degraded, undefined)
 })
 
-test('a missing standingKeyFor capability degrades to the global view (upstream API drift)', async () => {
+test('a missing acquireScope capability degrades to the global view (upstream API drift)', async () => {
   const registry = fakeRegistry({})
   const resolution = await resolveColdSkillTarget(
     fakeCtx({ skills: registry, presets: { serviceFor: () => undefined } }),
@@ -205,10 +212,10 @@ test('a missing standingKeyFor capability degrades to the global view (upstream 
   assert.equal(resolution.degraded, undefined, 'a missing capability is a quiet degradation, not a failure notice')
 })
 
-test('an AbortError from standingKeyFor propagates instead of degrading to global', async () => {
+test('an AbortError from acquireScope propagates instead of degrading to global', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw abortError() },
+    acquireScope: async () => { throw abortError() },
   }
   await assert.rejects(
     resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'cancelled', '/ws'),
@@ -216,10 +223,10 @@ test('an AbortError from standingKeyFor propagates instead of degrading to globa
   )
 })
 
-test('a cross-realm-shaped AbortError from standingKeyFor propagates', async () => {
+test('a cross-realm-shaped AbortError from acquireScope propagates', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw { name: 'AbortError', code: 'ABORT_ERR' } },
+    acquireScope: async () => { throw { name: 'AbortError', code: 'ABORT_ERR' } },
   }
   await assert.rejects(
     resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'cross-realm', '/ws'),
@@ -227,10 +234,10 @@ test('a cross-realm-shaped AbortError from standingKeyFor propagates', async () 
   )
 })
 
-test('a hostile standingKeyFor abort probe degrades safely', async () => {
+test('a hostile acquireScope abort probe degrades safely', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => {
+    acquireScope: async () => {
       throw new Proxy({}, { get: () => { throw new Error('hostile getter') } })
     },
   }
@@ -239,21 +246,21 @@ test('a hostile standingKeyFor abort probe degrades safely', async () => {
   assert.match(resolution.degraded ?? '', /<unprintable error>/)
 })
 
-test('a standingKeyFor failure degrades to the global view with a one-shot notice', async () => {
+test('an acquireScope failure degrades to the global view with a one-shot notice', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw new Error('preset broken') },
+    acquireScope: async () => { throw new Error('preset broken') },
   }
   const resolution = await resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'broken', '/ws')
   assert.equal(resolution.target?.kind, 'cold-global', 'a broken preset still serves the global view')
   assert.match(resolution.degraded ?? '', /skill catalog unavailable for preset "broken": preset broken/)
 })
 
-test('a hostile standingKeyFor rejection degrades through safeErrorMessage, never escapes', async () => {
+test('a hostile acquireScope rejection degrades through safeErrorMessage, never escapes', async () => {
   const hostile = { toString: () => { throw new Error('hostile') } } as never
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw hostile },
+    acquireScope: async () => { throw hostile },
   }
   const resolution = await resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'x', '/ws')
   assert.equal(resolution.target?.kind, 'cold-global')
@@ -295,4 +302,40 @@ test('the live target falls back to the host registry without a preset-scoped on
 
 test('no reachable registry resolves no live target', () => {
   assert.equal(resolveLiveSkillTarget(fakeCtx({}), { ctx: {} }, '/ws'), undefined)
+})
+
+test('the skills/change subscription registers its listener and degrades without an event bus', () => {
+  const listeners: (() => void)[] = []
+  let fired = 0
+  subscribeSkillsChange(
+    { on: (event, listener) => { assert.equal(event, 'skills/change'); listeners.push(listener) } },
+    () => { fired += 1 },
+  )
+  assert.equal(listeners.length, 1, 'the invalidation listener must be subscribed')
+  listeners[0]!()
+  assert.equal(fired, 1, 'the subscription must forward the invalidation notification')
+  // An absent `on` (a composition without the event bus) degrades to NO
+  // subscription instead of throwing.
+  assert.doesNotThrow(() => subscribeSkillsChange({}, () => {}))
+})
+
+test('the Direct catalog skills capability wires the skills/change subscription through the adapter', () => {
+  // The runner subscribes via `backend.catalog.skills.onSkillsChange(...)`;
+  // this pins the DIRECT adapter's half of the wiring (the event-bus
+  // registration). The coalescer that the listener drives is covered by
+  // test/skill-catalog-refresh.test.ts.
+  const listeners: (() => void)[] = []
+  const ctx = {
+    get: () => undefined,
+    on: (event: string, listener: () => void) => {
+      assert.equal(event, 'skills/change')
+      listeners.push(listener)
+    },
+  }
+  const port = new DirectCatalogPort(ctx as never, () => undefined)
+  let fired = 0
+  port.skills.onSkillsChange(() => { fired += 1 })
+  assert.equal(listeners.length, 1, 'the Direct skills capability must subscribe to skills/change')
+  listeners[0]!()
+  assert.equal(fired, 1, 'the invalidation notification must reach the registered listener')
 })

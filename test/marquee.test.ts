@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SelectedMarquee, marqueeStateAt, MARQUEE_STEP_MS } from '../src/marquee.ts'
+import { singlePhysicalLine } from '../src/presentation-lines.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 
 // --- pure timeline math (fake clock) ---
@@ -244,5 +245,59 @@ test('a clock that advances BETWEEN reads never shifts the timer deadline (revie
   // separately, two renders would need four reads — the assertion proves
   // the single-capture fix is in place (the test is meaningful).
   assert.equal(ticks, 2, 'one clock read per render (state + deadline share the instant)')
+  marquee.dispose()
+})
+
+// --- single-physical-row containment (presentation boundary) ---
+
+test('singlePhysicalLine collapses CR/LF into one space and never trims', () => {
+  assert.equal(singlePhysicalLine('first\r\nsecond\nthird\rfourth'), 'first second third fourth')
+  assert.equal(singlePhysicalLine('a\r\n\r\n\nb'), 'a b', 'a CR/LF run collapses into ONE space')
+  assert.equal(singlePhysicalLine('  padded  '), '  padded  ', 'ordinary/structural spaces are preserved')
+  assert.equal(singlePhysicalLine('no breaks'), 'no breaks')
+})
+
+test('multiline text renders as ONE physical row in every marquee branch', () => {
+  const text = 'first\r\nsecond\nthird\rfourth'
+  // Selected + fits: the whole collapsed projection, verbatim, no timer.
+  const fits = fakeMarquee()
+  const outFits = fits.marquee.render({ key: 'k', text, maxWidth: 40, selected: true })
+  assert.equal(outFits, 'first second third fourth')
+  assert.equal(/[\r\n]/.test(outFits), false)
+  assert.ok(visibleWidth(outFits) <= 40)
+  assert.equal(fits.renders, 0, 'a fitting collapsed row must not arm a timer')
+  fits.marquee.dispose()
+  // Selected + overflow: the window is a slice of the collapsed text.
+  const overflow = fakeMarquee()
+  const outOverflow = overflow.marquee.render({ key: 'k', text, maxWidth: 8, selected: true })
+  assert.equal(/[\r\n]/.test(outOverflow), false)
+  assert.equal(outOverflow, 'first se')
+  assert.equal(visibleWidth(outOverflow), 8)
+  assert.equal(overflow.marquee.pendingTimerDeadlineForTest(), 800,
+    'multiline normalization must not change the timer contract')
+  overflow.marquee.dispose()
+  // Unselected: collapsed text under ordinary ellipsis truncation.
+  const plain = fakeMarquee()
+  const outPlain = plain.marquee.render({ key: 'k', text, maxWidth: 10, selected: false })
+  assert.equal(/[\r\n]/.test(outPlain), false)
+  assert.equal(outPlain.replace(/\x1b\[[0-9;]*m/g, ''), 'first sec…')
+  assert.ok(visibleWidth(outPlain) <= 10)
+  assert.equal(plain.renders, 0, 'an unselected row never arms a timer')
+  plain.marquee.dispose()
+})
+
+test('the marquee cycle identity anchors the NORMALIZED text, not the raw one', () => {
+  const { marquee, setNow } = fakeMarquee()
+  setNow(0)
+  assert.equal(marquee.render({ key: 'k', text: 'abcdefgh\nijkl', maxWidth: 8, selected: true }), 'abcdefgh')
+  // Same key + same projection (raw newlines vs real spaces): the cycle
+  // must CONTINUE, not re-anchor — the identity is built from the
+  // normalized text, so an equivalent raw input is not a row change.
+  setNow(800 + MARQUEE_STEP_MS)
+  const moved = marquee.render({ key: 'k', text: 'abcdefgh ijkl', maxWidth: 8, selected: true })
+  assert.equal(moved, 'bcdefgh ', 'the cycle continues past the pause (no re-anchor)')
+  // A genuinely different projection still re-anchors at offset 0.
+  setNow(800 + 2 * MARQUEE_STEP_MS)
+  assert.equal(marquee.render({ key: 'k', text: 'zzzzzzzz yyyy', maxWidth: 8, selected: true }), 'zzzzzzzz')
   marquee.dispose()
 })

@@ -17,6 +17,7 @@ import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -93,8 +94,9 @@ function longThoughtTurn(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: lines }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: lines }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
@@ -144,7 +146,7 @@ test('expanding a collapsed SETTLED Thought preserves the viewport (plan 2026-08
   app.scrollToBottom()
   await vt.waitForRender()
   let view = vt.getViewport()
-  const headerY = findRow(view, '🐋 Thought')
+  const headerY = findFocusHeaderRow(view, false)
   assert.ok(headerY >= 0, `collapsed Thought header missing:\n${view.join('\n')}`)
   const before = app.fullscreenScrollForTest()
   assert.equal(before?.isFollowingEnd, true, 'precondition: following the end')
@@ -153,9 +155,11 @@ test('expanding a collapsed SETTLED Thought preserves the viewport (plan 2026-08
   // 2026-08-25 §4.2) instead of jumping to the end.
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('🐳 Thought'), `expanded symbol missing:\n${joined}`)
+  assert.ok(hasFocusHeader(joined, true), `expanded symbol missing:\n${joined}`)
   const after = app.fullscreenScrollForTest()
   assert.ok(after !== undefined)
   assert.equal(after.isFollowingEnd, false, 'a settled Thought expansion must disable follow-end')
@@ -191,9 +195,11 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
   await vt.waitForRender()
   // Expand the root.
   let view = vt.getViewport()
-  let y = findRow(view, '🐋 Thought')
+  let y = findFocusHeaderRow(view, false)
   assert.ok(y >= 0, `Thought header missing:\n${view.join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   // The process timeline is COMPACT: the 120-line result is NOT visible.
@@ -220,7 +226,7 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
   await vt.waitForRender()
   view = vt.getViewport()
   const after = view.join('\n')
-  assert.ok(after.includes('🐳 Thought'), 'the root must stay open after a secondary body click')
+  assert.ok(hasFocusHeader(after, true), 'the root must stay open after a secondary body click')
   assert.ok(!after.includes('result line 99'), `the secondary must collapse:\n${after}`)
   assert.ok(after.includes('Bash seq 1 120'), 'the compact Bash card must remain visible')
   app.setFullscreen(false)
@@ -237,11 +243,11 @@ test('clicking a NON-secondary process row collapses the owner Thought (plan §3
   await vt.waitForRender()
   // Expand the root.
   let view = vt.getViewport()
-  let y = findRow(view, '🐋 Thought')
+  let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('🐳 Thought'), 'must be expanded before the body click')
+  assert.ok(hasFocusHeader(view.join('\n'), true), 'must be expanded before the body click')
   // The intermediate assistant is a NON-secondary process row: clicking it
   // collapses the OWNER Thought (the old body-click-collapse capability).
   const bodyY = findRow(view, 'intermediate step')
@@ -250,7 +256,7 @@ test('clicking a NON-secondary process row collapses the owner Thought (plan §3
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('🐋 Thought'), 'a non-secondary process row must collapse the owner Thought')
+  assert.ok(hasFocusHeader(joined, false), 'a non-secondary process row must collapse the owner Thought')
   // The process rows are gone (the collapsed card's previews are not the
   // process timeline — the compact cards' hints only exist there).
   assert.ok(!joined.includes('to expand'), `the expanded body must be gone:\n${joined}`)
@@ -271,8 +277,10 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   await vt.waitForRender()
   // Expand the root.
   let view = vt.getViewport()
-  let y = findRow(view, '🐋 Thought')
+  let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   // The Thinking card is compact by default: expand BOTH secondaries
   // (Thinking + Bash) via their per-card clicks.
@@ -297,23 +305,25 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   await vt.waitForRender()
   view = vt.getViewport()
   // Click the Thought header: Collapse All.
-  y = findRow(view, '🐳 Thought')
+  y = findFocusHeaderRow(view, true)
   assert.ok(y >= 0, `Thought header missing after scroll-to-top:\n${view.join('\n')}`)
   click(vt, 3, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('🐋 Thought'), 'the root must collapse')
+  assert.ok(hasFocusHeader(view.join('\n'), false), 'the root must collapse')
   // Reopen: the secondaries must be COMPACT again (no restored long
   // output). The reopen click lands on a DIFFERENT cell of the header row
   // (the whole row is the hit area) — the alt screen treats a fast repeat
   // at the same cell as a double-click word selection, and a fixed sleep
   // would be timing-sensitive.
-  y = findRow(view, '🐋 Thought')
+  y = findFocusHeaderRow(view, false)
   click(vt, 20, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('🐳 Thought'), 'the root must reopen')
+  assert.ok(hasFocusHeader(joined, true), 'the root must reopen')
   assert.ok(!joined.includes('result line 99'), `the Bash secondary must be compact again:\n${joined}`)
   assert.ok(joined.includes('Bash seq 1 120'), 'the compact Bash card must be visible')
   assert.ok(joined.includes('(click to expand)'), 'the reopened Thinking card must be compact again (no stale override)')
@@ -397,13 +407,13 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   await vt.waitForRender()
   // Expand the turn.
   let view = vt.getViewport()
-  const headerY = findRow(view, '🐋 Thought')
+  const headerY = findFocusHeaderRow(view, false)
   assert.ok(headerY >= 0, `Thought header missing:\n${view.join('\n')}`)
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('🐳 Thought'), 'turn must be expanded')
+  assert.ok(hasFocusHeader(joined, true), 'turn must be expanded')
   // The image INFO BAR row (the attachment's own hit area) is inside the
   // expanded content: clicking it must toggle the attachment collapse,
   // NOT the whole Thought. Match the info bar (dimensions + bytes), never
@@ -415,14 +425,14 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   await settleClick()
   view = vt.getViewport()
   const after = view.join('\n')
-  assert.ok(after.includes('🐳 Thought'), `the Thought must stay expanded after an attachment click:\n${after}`)
+  assert.ok(hasFocusHeader(after, true), `the Thought must stay expanded after an attachment click:\n${after}`)
   assert.equal(collapsedCount(), 1, `the attachment must collapse (its own toggle):\n${after}`)
   // Click again: the attachment expands back, the Thought still expanded.
   click(vt, 10, imageY + 1)
   await settleClick()
   view = vt.getViewport()
   assert.equal(collapsedCount(), 0, `attachment must expand back:\n${view.join('\n')}`)
-  assert.ok(view.join('\n').includes('🐳 Thought'), `Thought must survive the second attachment click:\n${view.join('\n')}`)
+  assert.ok(hasFocusHeader(view.join('\n'), true), `Thought must survive the second attachment click:\n${view.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -444,8 +454,9 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
     eventAt('tool/result', {
       turn: 3, step: 0,
       message: {
-        id: MessageId('r3'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c3'), content: [{ type: 'text', text: '1\n2\n3' }] }],
+        id: MessageId('r3'), role: 'tool',
+        toolCallId: ToolCallId('c3'),
+        content: [{ type: 'text', text: '1\n2\n3' }],
         source: { kind: 'tool', callId: ToolCallId('c3') },
       },
     }, T0 + 3, 203),
@@ -473,12 +484,12 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   await vt.waitForRender()
   // Expand by clicking the header.
   let view = vt.getViewport()
-  const headerY = findRow(view, '🐋 Thought')
+  const headerY = findFocusHeaderRow(view, false)
   assert.ok(headerY >= 0, `Thought header missing:\n${view.join('\n')}`)
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('🐳 Thought'), 'must be expanded before the body clicks')
+  assert.ok(hasFocusHeader(view.join('\n'), true), 'must be expanded before the body clicks')
   // The USER's own prompt is rendered before the Thought: clicking it must
   // keep the Thought expanded (it is the user's row, not revealed process
   // content).
@@ -487,7 +498,7 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   click(vt, 10, userY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('🐳 Thought'),
+  assert.ok(hasFocusHeader(view.join('\n'), true),
     `clicking the user's own message must NOT collapse the Thought:\n${view.join('\n')}`)
   // The FINAL assistant answer is rendered after the process rows:
   // clicking it must also keep the Thought expanded.
@@ -497,7 +508,7 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(joined.includes('🐳 Thought'),
+  assert.ok(hasFocusHeader(joined, true),
     `clicking the final assistant must NOT collapse the Thought:\n${joined}`)
   // Sanity: clicking a NON-secondary process row (the intermediate
   // assistant) STILL collapses the owner.
@@ -506,7 +517,7 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
   click(vt, 10, bodyY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('🐋 Thought'), 'a non-secondary process-row click must still collapse the owner')
+  assert.ok(hasFocusHeader(view.join('\n'), false), 'a non-secondary process-row click must still collapse the owner')
   app.setFullscreen(false)
   app.stop()
 })
@@ -524,8 +535,10 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   await vt.waitForRender()
   // Expand the root, then the Bash secondary.
   let view = vt.getViewport()
-  let y = findRow(view, '🐋 Thought')
+  let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   const bashY = findRow(view, 'Bash seq 1 120')
@@ -547,7 +560,7 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   await vt.waitForRender()
   view = vt.getViewport()
   const after = view.join('\n')
-  assert.ok(after.includes('🐳 Thought'), 'the secondary body click must close only the secondary after resize')
+  assert.ok(hasFocusHeader(after, true), 'the secondary body click must close only the secondary after resize')
   assert.ok(!after.includes('result line 99'), `the secondary must collapse:\n${after}`)
   // A non-secondary process row still closes the root.
   const midY = findRow(view, 'intermediate step')
@@ -555,7 +568,7 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   click(vt, 10, midY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('🐋 Thought'), 'the non-secondary row must close the root after resize')
+  assert.ok(hasFocusHeader(view.join('\n'), false), 'the non-secondary row must close the root after resize')
   app.setFullscreen(false)
   app.stop()
 })
@@ -581,7 +594,7 @@ test('a press on a Thought cannot transfer across a session switch (mouse parity
   app.setFullscreen(true)
   await vt.waitForRender()
   const view = vt.getViewport()
-  const headerY = findRow(view, '🐋 Thought')
+  const headerY = findFocusHeaderRow(view, false)
   assert.ok(headerY >= 0, `Thought A header missing:\n${view.join('\n')}`)
   // Press Thought A's header (no release): the press-time identity is
   // activity:1:<tokenA>.
@@ -593,7 +606,7 @@ test('a press on a Thought cannot transfer across a session switch (mouse parity
   show(app, folderB)
   await vt.waitForRender()
   const after = vt.getViewport()
-  const headerB = findRow(after, '🐋 Thought')
+  const headerB = findFocusHeaderRow(after, false)
   assert.ok(headerB >= 0, `Thought B header missing:\n${after.join('\n')}`)
   assert.equal(headerB, headerY, `Thought B must occupy the pressed row:\n${after.join('\n')}`)
   // Release on the same cell: the click must NOT expand Thought B (the
@@ -601,12 +614,12 @@ test('a press on a Thought cannot transfer across a session switch (mouse parity
   vt.sendInput(`\x1b[<0;3;${headerY + 1}m`)
   await vt.waitForRender()
   const final = vt.getViewport()
-  assert.ok(final.join('\n').includes('🐋 Thought'), `the stale session press must not expand Thought B:\n${final.join('\n')}`)
+  assert.ok(hasFocusHeader(final.join('\n'), false), `the stale session press must not expand Thought B:\n${final.join('\n')}`)
   // A fresh press/release on Thought B expands it (the identity is B's;
   // a different column so the fork never reads a double-click).
   click(vt, 20, headerY + 1)
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), `a fresh press must expand Thought B:\n${vt.getViewport().join('\n')}`)
+  assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), `a fresh press must expand Thought B:\n${vt.getViewport().join('\n')}`)
   app.setFullscreen(false)
   app.stop()
 })

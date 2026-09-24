@@ -401,7 +401,7 @@ test('preparing rows are inert in the fullscreen hit map', async () => {
   const activity: TurnActivity = {
     turn: 1,
     completed: false,
-    think: { text: 'still thinking' },
+    think: { text: 'still thinking', running: true },
     assistantMessages: 0,
     toolCalls: 0,
     tools: new Map(),
@@ -420,13 +420,13 @@ test('preparing rows are inert in the fullscreen hit map', async () => {
   await vt.waitForRender()
 
   const before = vt.getViewport().join('\n')
-  const previewRow = vt.getViewport().findIndex(line => line.includes('Preparing Edit...'))
+  const previewRow = vt.getViewport().findIndex(line => line.includes('Preparing Edit'))
   assert.ok(previewRow >= 0, `preview row missing:\n${before}`)
   assert.deepEqual(app.focusExpandedTurnsForTest(), new Set([1]))
   click(vt, 10, previewRow + 1)
   await vt.waitForRender()
   assert.deepEqual(app.focusExpandedTurnsForTest(), new Set([1]), 'preview click must not toggle a Thought')
-  assert.ok(vt.getViewport().join('\n').includes('Preparing Edit...'), 'preview click must be inert')
+  assert.ok(vt.getViewport().join('\n').includes('Preparing Edit'), 'preview click must be inert')
 })
 
 test('renders preparing rows with the selected icon style and no spinner state', async () => {
@@ -474,7 +474,7 @@ test('renders preparing rows with the selected icon style and no spinner state',
   const focusActivity: TurnActivity = {
     turn: 1,
     completed: false,
-    think: { text: 'still thinking' },
+    think: { text: 'still thinking', running: true },
     assistantMessages: 0,
     toolCalls: 0,
     tools: new Map(),
@@ -484,7 +484,7 @@ test('renders preparing rows with the selected icon style and no spinner state',
   app.setTranscript(focusMessages, new Map([[1, focusActivity]]), undefined, [preview])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Tool:    Preparing Edit…'), `Focus collapsed Tool slot missing:\n${view}`)
+  assert.ok(view.includes('Action:  Preparing Edit…'), `Focus collapsed Tool slot missing:\n${view}`)
   assert.ok(!view.includes('src/foo.ts'), `Focus collapsed must not show the live path:\n${view}`)
   assert.ok(!view.includes('1.2 KiB'), `Focus collapsed must not show live argument bytes:\n${view}`)
   assert.ok(!view.includes('Preparing Edit src/foo.ts...'), `Focus collapsed must not render a standalone row:\n${view}`)

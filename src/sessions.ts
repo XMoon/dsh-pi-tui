@@ -138,8 +138,10 @@ export function sessionRowMatchesQuery(row: SessionPickerRow, query: string): bo
 export interface SessionPickerRow {
   /** Full session id (the picker's value). */
   id: string
-  /** Creation epoch-ms, for the relative age. */
-  createdAt: number
+  /** Host-authoritative activity/order timestamp. */
+  updatedAt: number
+  /** Source-specific creation hint; Remote rows may not provide it. */
+  createdAt?: number
   /** Latest session title, absent until the background title read lands. */
   title?: string
   /** Absolute working directory, for the workspace group. */
@@ -195,7 +197,7 @@ export function sanitizeTerminalText(value: string): string {
 export function sessionPickerItem(row: SessionPickerRow, currentId: string, indent = 0, contentHit?: SessionContentHit): SessionPickerItem {
   const marker = row.id === currentId ? '● ' : ''
   const treePrefix = indent <= 0 ? '' : `${'  '.repeat(indent)}└─ `
-  const meta: string[] = [shortSessionId(row.id), formatSessionAge(row.createdAt)]
+  const meta: string[] = [shortSessionId(row.id), formatSessionAge(row.createdAt ?? row.updatedAt)]
   if (row.origin === 'subagent') meta.push('sub')
   if (row.parentSession !== undefined) meta.push('fork')
   if (row.preset !== undefined) meta.push(`preset:${row.preset}`)
@@ -253,19 +255,26 @@ export function sessionLabelParts(label: string): { prefix: string; title: strin
  * fork children, rewind branches AND subagents alike (plan §20: `origin`
  * only decides the badge, `parentSession` decides the hierarchy) — hangs
  * under its parent chain (depth = distance to the nearest root). Orphans —
- * a parent outside the shown window, or a missing parent id — sit at
- * depth 1. The input order (newest first) is preserved per level; a
- * `placed` set guards against parent cycles in corrupt data.
+ * a parent outside the shown window, or a missing parent id — degrade to root
+ * depth 0. The input order (newest first) is preserved per level; a `placed`
+ * set guards against parent cycles in corrupt data, which are emitted from
+ * root depth when no ordinary root reaches them.
  * @param rows - the picker rows, newest first.
  * @returns rows in display order with their tree depth.
  */
 export function buildSessionTree(rows: readonly SessionPickerRow[]): { row: SessionPickerRow; depth: number }[] {
+  const known = new Set(rows.map(row => row.id))
   const children = new Map<string, SessionPickerRow[]>()
+  const roots: SessionPickerRow[] = []
   for (const row of rows) {
-    if (row.parentSession !== undefined) {
+    if (row.parentSession !== undefined && known.has(row.parentSession)) {
       const list = children.get(row.parentSession)
       if (list === undefined) children.set(row.parentSession, [row])
       else list.push(row)
+    } else {
+      // Match the official Client flattenLineage projection: an absent parent
+      // is an orphaned root, never an indented pseudo-child.
+      roots.push(row)
     }
   }
   const result: { row: SessionPickerRow; depth: number }[] = []
@@ -276,11 +285,11 @@ export function buildSessionTree(rows: readonly SessionPickerRow[]): { row: Sess
     result.push({ row, depth })
     for (const child of children.get(row.id) ?? []) place(child, depth + 1)
   }
+  for (const root of roots) place(root, 0)
+  // A cycle has no root. Emit its first member as a root and let the placed
+  // guard terminate the back-edge without dropping any session.
   for (const row of rows) {
-    if (row.parentSession === undefined) place(row, 0)
-  }
-  for (const row of rows) {
-    if (row.parentSession !== undefined) place(row, 1)
+    if (!placed.has(row.id)) place(row, 0)
   }
   return result
 }
@@ -307,6 +316,7 @@ export function findSessionMatch(rows: readonly SessionPickerRow[], query: strin
 export function headerToPickerRow(header: SessionHeader, live: boolean): SessionPickerRow {
   return {
     id: header.id,
+    updatedAt: header.createdAt,
     createdAt: header.createdAt,
     cwd: header.cwd,
     // This pure mapper has no roster to disambiguate the legal custom `code`

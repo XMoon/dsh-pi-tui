@@ -181,6 +181,19 @@ export interface TuiAltScreenOptions {
 	 * primary scroll view while that view is scrolled away from its end.
 	 */
 	scrollToEndIndicator?: () => string;
+	/**
+	 * Force the jump-to-end label to show even when the primary scroll view already
+	 * follows its end — the host's virtual transcript window is not at the live tail.
+	 * Consulted only when {@link scrollToEndIndicator} is set and the primary view
+	 * supports follow-end. (dsh-pi-tui divergence X028.)
+	 */
+	shouldShowScrollToEndIndicator?: () => boolean;
+	/**
+	 * Handle a primary-button press on the jump-to-end label. Returning true consumes
+	 * the click (the host performed its own semantic jump); otherwise the fork falls
+	 * back to scrolling the local view to its end. (dsh-pi-tui divergence X028.)
+	 */
+	onScrollToEndIndicator?: () => boolean | void;
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
@@ -192,6 +205,20 @@ export interface TuiAltScreenOptions {
 	 * an error otherwise. When omitted, the selection is copied via an OSC 52 write.
 	 */
 	copySelection?: (text: string) => Promise<boolean>;
+	/**
+	 * Override the COPY source line of one scroll-content row. Returning a string
+	 * replaces that row's contribution to the copied selection (an empty string
+	 * makes the row copy as a blank separator); returning `undefined` keeps the
+	 * normally rendered line. The visual render, word/line selection ranges,
+	 * search, and mouse hit-testing are never affected — this only filters what
+	 * reaches the clipboard, for host presentation chrome that must not be
+	 * copied. (dsh-pi-tui divergence X057.)
+	 */
+	selectionLineText?: (context: {
+		row: number;
+		line: string;
+		scrollView?: ScrollView;
+	}) => string | undefined;
 	/**
 	 * Called when a viewport navigation attempt reaches an edge. The callback
 	 * receives -1 for older/upward navigation and +1 for newer/downward
@@ -315,10 +342,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly searchNavigationButtonStyle: (text: string, hovered: boolean) => string;
 	private readonly scrollToEndIndicator?: () => string;
+	private readonly shouldShowScrollToEndIndicator?: () => boolean;
+	private readonly onScrollToEndIndicator?: () => boolean | void;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly selectionLineText?: (context: {
+		row: number;
+		line: string;
+		scrollView?: ScrollView;
+	}) => string | undefined;
 	private readonly onCellClick?: (x: number, y: number) => void;
 	private readonly onCellPress?: (x: number, y: number) => void;
 	private readonly onFramePainted?: () => void;
@@ -348,10 +382,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
+		this.shouldShowScrollToEndIndicator = options.shouldShowScrollToEndIndicator;
+		this.onScrollToEndIndicator = options.onScrollToEndIndicator;
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
 		this.copySelection = options.copySelection;
+		this.selectionLineText = options.selectionLineText;
 		this.onCellClick = options.onCellClick;
 		this.onCellPress = options.onCellPress;
 		this.onFramePainted = options.onFramePainted;
@@ -992,7 +1029,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					consumed = true;
 					return;
 				}
-				if (this.shouldDeferViewportInputToOverlay()) return;
+				// A `viewportPassthrough` overlay (X058) does not own the wheel:
+				// when it leaves the event unhandled the primary viewport still
+				// scrolls, on either side of the overlay rectangle. The overlay's
+				// rectangle keeps pointer ownership for every event it DOES
+				// handle (the dispatch above).
+				if (this.shouldDeferViewportInputToOverlay() && !this.overlayViewportPassthrough()) return;
 				this.routeWheel(wheelEvent);
 				consumed = true;
 			});
@@ -1012,6 +1054,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// a host-claimed viewport key (Home/End, search chords). The search
 		// overlay is excluded so the host seam below can still suppress the
 		// built-in search key while the search input is focused.
+		// A `viewportPassthrough` overlay (X058) keeps its keyboard focus but
+		// lets the PRIMARY VIEWPORT's page navigation through when the overlay
+		// does not consume the key. Deliberately limited to PageUp/PageDown:
+		// Home/End, Ctrl+U/Ctrl+D, Up/Down and the prompt keys stay available to
+		// the overlay's own focused input, so the narrow allow-list never steals
+		// an editing key from the search box.
+		if (this.overlayViewportPassthrough()) {
+			if (keybindings.matches(data, "tui.altScreen.pageUp")) {
+				const handled = this.pageViewport(-1, isRelease);
+				if (handled !== undefined) return handled;
+			}
+			if (keybindings.matches(data, "tui.altScreen.pageDown")) {
+				const handled = this.pageViewport(1, isRelease);
+				if (handled !== undefined) return handled;
+			}
+		}
 		if (this.shouldDeferViewportInputToOverlay()) return undefined;
 		if (!isRelease && this.onBeforeViewportInput?.(data) === true) return { consume: true };
 		// When the primary scroll view has nothing to scroll (short content, or a
@@ -1037,32 +1095,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 		}
 		if (keybindings.matches(data, "tui.altScreen.pageUp")) {
-			if (!primaryScrollable) {
-				if (!isRelease && this.onScrollBoundary?.(-1, "page") === true) return { consume: true };
-				return undefined;
-			}
-			if (!isRelease) {
-				const remaining = this.getPrimaryScrollView().scrollBy(
-					-Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP),
-				);
-				if (remaining < 0) this.onScrollBoundary?.(-1, "page");
-				this.requestRender();
-			}
-			return { consume: true };
+			return this.pageViewport(-1, isRelease);
 		}
 		if (keybindings.matches(data, "tui.altScreen.pageDown")) {
-			if (!primaryScrollable) {
-				if (!isRelease && this.onScrollBoundary?.(1, "page") === true) return { consume: true };
-				return undefined;
-			}
-			if (!isRelease) {
-				const remaining = this.getPrimaryScrollView().scrollBy(
-					Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP),
-				);
-				if (remaining > 0) this.onScrollBoundary?.(1, "page");
-				this.requestRender();
-			}
-			return { consume: true };
+			return this.pageViewport(1, isRelease);
 		}
 		if (primaryScrollable && keybindings.matches(data, "tui.altScreen.halfPageUp")) {
 			if (!isRelease) this.scrollBy(-Math.max(1, Math.floor(this.getPrimaryScrollView().viewportHeight / 2)));
@@ -1097,6 +1133,28 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return { consume: true };
 		}
 		return undefined;
+	}
+
+	/**
+	 * One primary-viewport page step (shared by the normal viewport key chain
+	 * and the X058 `viewportPassthrough` allow-list). Preserves the upstream
+	 * semantics exactly: a key RELEASE never scrolls but is still consumed when
+	 * the viewport can scroll; a non-scrollable viewport falls through to the
+	 * boundary callback and otherwise returns undefined (so the key reaches the
+	 * focused component).
+	 */
+	private pageViewport(direction: -1 | 1, isRelease: boolean): { consume: true } | undefined {
+		const view = this.getPrimaryScrollView();
+		if (!view.canScroll) {
+			if (!isRelease && this.onScrollBoundary?.(direction, "page") === true) return { consume: true };
+			return undefined;
+		}
+		if (!isRelease) {
+			const remaining = view.scrollBy(direction * Math.max(1, view.viewportHeight - PAGE_SCROLL_OVERLAP));
+			if (direction < 0 ? remaining < 0 : remaining > 0) this.onScrollBoundary?.(direction, "page");
+			this.requestRender();
+		}
+		return { consume: true };
 	}
 
 	private decodeMouseButton(button: number): TuiMouseButton {
@@ -1479,12 +1537,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const rect = this.scrollToEndIndicatorRect;
 		if (!rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
 		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
-		this.scrollToBottom();
+		const handled = this.onScrollToEndIndicator?.() === true;
+		if (!handled) this.scrollToBottom();
 		return true;
 	}
 
 	private getScrollbarTargetAt(x: number, y: number, includeHiddenAuto = false): ScrollbarTarget | undefined {
-		if (this.hasOverlay() || !this.currentLayout) return undefined;
+		// A `viewportPassthrough` overlay (X058) leaves the SCROLLBAR live; every
+		// other visible overlay keeps the upstream block.
+		if (this.hasBlockingOverlay() || !this.currentLayout) return undefined;
 		for (const scrollView of getScrollViewsAt(this.currentLayout, x, y)) {
 			const box = getScrollViewBox(this.currentLayout, scrollView);
 			const geometry = box ? getScrollbarGeometry(box, includeHiddenAuto) : undefined;
@@ -1890,7 +1951,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// divergence X018.)
 		this.onCellPress?.(event.x, event.y);
 		const scrollView =
-			!this.hasOverlay() && this.currentLayout
+			// A `viewportPassthrough` overlay (X058) keeps background selection
+			// anchored in scroll-content coordinates; every other visible overlay
+			// keeps the upstream screen-coordinate block. The overlay rectangle
+			// itself already rejects selection through the pointer-ownership
+			// truncation above.
+			!this.hasBlockingOverlay() && this.currentLayout
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
 				: undefined;
 		const anchor = this.getSelectionPoint(event, scrollView);
@@ -1962,9 +2028,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const lines: string[] = [];
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
 			const line = sourceLines[row] ?? "";
+			const override = this.selectionLineText?.({ row, line, ...(selection.start.scrollView === undefined ? {} : { scrollView: selection.start.scrollView }) });
+			const copyLine = override === undefined ? line : override;
+			// The column RANGE always comes from the RENDERED line: a non-empty
+			// override only replaces the copied text, never the selection's
+			// grapheme/word/line boundaries. (dsh-pi-tui divergence X057.)
 			const columns = this.getSelectionColumns(line, row, selection);
 			const sliced = stripTerminalSequences(
-				sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
+				sliceByColumn(copyLine, columns.start, Math.max(0, columns.end - columns.start), true),
 			).trimEnd();
 			// dsh-pi-tui extension: when the selection starts at the line
 			// head, drop the emoji-column indent (1-3 cells) so copied
@@ -2155,7 +2226,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private compositeScrollToEndIndicator(screen: string[], layout: LayoutFrame, width: number): string[] {
 		this.scrollToEndIndicatorRect = undefined;
 		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
-		if (!this.scrollToEndIndicator || !scrollView.followEnd || scrollView.isFollowingEnd) return screen;
+		// The host predicate is part of the documented contract only when an
+		// indicator is configured AND the primary view supports follow-end:
+		// short-circuit those prerequisites before consulting it.
+		if (!this.scrollToEndIndicator || !scrollView.followEnd) return screen;
+		const hostNeedsIndicator = this.shouldShowScrollToEndIndicator?.() === true;
+		if (scrollView.isFollowingEnd && !hostNeedsIndicator) {
+			return screen;
+		}
 		const box = getScrollViewBox(layout, scrollView);
 		const clip = box?.clip;
 		if (!clip || clip.width <= 0 || clip.height <= 0) return screen;

@@ -12,7 +12,12 @@
  * @module @xmoon76/dsh-pi-tui/search-overlay
  */
 
-import { TranscriptFolder, type TranscriptSearchMatch } from './transcript.ts'
+import {
+  TranscriptFolder,
+  transcriptSearchMatchKey,
+  transcriptSearchSourceKey,
+  type TranscriptSearchMatch,
+} from './transcript.ts'
 
 /** The runner's search-overlay state (the input of
  * {@link refreshedSearchState} / {@link steppedSearchOverlayState}). */
@@ -30,9 +35,10 @@ export interface SearchOverlayState {
  * stored state is still current; otherwise the SAME query is re-run as a
  * lightweight scan (never the previous candidates — a foreign folder or a
  * moved revision must not refine against them), the previously current
- * match is recovered by stable id when it still matches, and the current
- * index is clamped otherwise (an EMPTIED result set clamps to -1 — the
- * 0/0 counter, never 0). Returns the refreshed state the runner commits. */
+ * OCCURRENCE is recovered by its match key (then the nearest same-source
+ * occurrence in the same card) when it still matches, and the current index
+ * is clamped otherwise (an EMPTIED result set clamps to -1 — the 0/0
+ * counter, never 0). Returns the refreshed state the runner commits. */
 export function refreshedSearchState(
   state: SearchOverlayState,
   activeFolder: TranscriptFolder,
@@ -43,15 +49,37 @@ export function refreshedSearchState(
   if (state.query === '') {
     return { matches: [], current: -1, revision: activeFolder.searchRevision(), changed: true }
   }
-  const previousId = state.current >= 0 ? state.matches[state.current]?.id : undefined
+  const previous = state.current >= 0 ? state.matches[state.current] : undefined
   const matches = activeFolder.search(state.query)
   const revision = activeFolder.searchRevision()
   let current: number
   if (matches.length === 0) {
     // An emptied result set clamps to -1 (the 0/0 counter), never 0.
     current = -1
-  } else if (previousId !== undefined) {
-    const found = matches.findIndex(match => match.id === previousId)
+  } else if (previous !== undefined) {
+    // Occurrence-aware recovery (plan §5): an exact occurrence key wins,
+    // then the nearest occurrence of the same semantic source in the same
+    // card, then any occurrence in the same card, then the old numeric
+    // position clamped into the refreshed list.
+    const previousKey = transcriptSearchMatchKey(previous)
+    const previousSourceKey = transcriptSearchSourceKey(previous.source)
+    let found = matches.findIndex(match => transcriptSearchMatchKey(match) === previousKey)
+    if (found < 0) {
+      let nearest = -1
+      let nearestDistance = Number.POSITIVE_INFINITY
+      for (let index = 0; index < matches.length; index += 1) {
+        const match = matches[index]!
+        if (match.id !== previous.id) continue
+        if (transcriptSearchSourceKey(match.source) !== previousSourceKey) continue
+        const distance = Math.abs(match.sourceOccurrence - previous.sourceOccurrence)
+        if (distance < nearestDistance) {
+          nearestDistance = distance
+          nearest = index
+        }
+      }
+      found = nearest
+    }
+    if (found < 0) found = matches.findIndex(match => match.id === previous.id)
     current = found >= 0 ? found : Math.min(state.current, matches.length - 1)
   } else {
     current = 0

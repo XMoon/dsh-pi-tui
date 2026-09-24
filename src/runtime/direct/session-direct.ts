@@ -3,8 +3,7 @@
  * `SessionReader` over the dsh `sessionPersistence` / `sessionQuery` /
  * projection services. This is the ONLY module in the session-read
  * path that touches `ctx`; the consumer (commands.ts) depends on the port,
- * and a Remote adapter will implement the same interface in a later
- * milestone.
+ * and the experimental D1.1 Remote adapter implements the same interface.
  *
  * The domain semantics live here: semantic session-query listing with
  * capability-aware activity ordering and bounded content search; the combined
@@ -15,7 +14,8 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-direct
  */
 
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { turnBoundaryBlank } from './session-preset-direct.ts'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   projectionBatch,
@@ -92,8 +92,9 @@ export interface DirectSessionLiveResolvers {
 }
 
 /** Read the optional activity projection without activating a cold Session.
- * Missing projection capability, seeded headers without an exact cut, and
- * derived-cache failures all safely fall back to header creation time. */
+ * A cold row reads the persisted cache by header alone (the cache owns
+ * lifecycle-identity matching); missing projection capability and
+ * derived-cache failures safely fall back to header creation time. */
 function activityTimestamp(
   header: SessionHeader,
   liveRow: boolean,
@@ -106,8 +107,8 @@ function activityTimestamp(
     if (liveRow && live !== undefined && projections !== undefined) {
       const metadata = projections.cachedSnapshot(live, ['sessionListMetadata'])?.values?.sessionListMetadata
       if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
-    } else if (!liveRow && live === undefined && header.isSeeded === false && cache !== undefined) {
-      const metadata = cache.cachedSnapshot(header, SessionLogOffset(0), ['sessionListMetadata'])?.values?.sessionListMetadata
+    } else if (!liveRow && live === undefined && cache !== undefined) {
+      const metadata = cache.cachedSnapshot(header, ['sessionListMetadata'])?.values?.sessionListMetadata
       if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
     }
   } catch {
@@ -142,6 +143,24 @@ export class DirectSessionReader implements SessionReader {
   }
 
   /** Resolve the attached Session independently from the current TUI owner. */
+  /** Host-authoritative blankness through the official turn-boundary
+   *  projection (v2 §0.6) — the Direct mapping of the semantic read. */
+  blank(sessionId: string): boolean | undefined {
+    const live = this.liveAgent(sessionId)
+    if (live === undefined) return undefined
+    const projections = this.ctx.get('sessionProjections') as {
+      stateOf(session: unknown, key: string): unknown
+    } | undefined
+    if (projections === undefined) return undefined
+    try {
+      return turnBoundaryBlank(projections.stateOf(live.session, 'turnBoundary'))
+    } catch {
+      // The semantic `SessionReader.blank` contract: an unavailable/broken
+      // projection authority is `undefined` (unknown), never a crash.
+      return undefined
+    }
+  }
+
   private liveSession(sessionId: string): Session | undefined {
     return this.liveResolvers?.sessionOf(SessionId(sessionId)) as Session | undefined
   }
@@ -197,17 +216,21 @@ export class DirectSessionReader implements SessionReader {
     this.headerSnapshot = new Map(visibleRecords.map(record => [String(record.header.id), record.header]))
     const projections = this.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
     const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
-    const rows = visibleRecords.map(record => ({
-      row: {
-        id: record.header.id,
-        createdAt: record.header.createdAt,
-        cwd: record.header.cwd,
-        parentSession: record.header.parentSession,
-        origin: record.header.origin,
-        live: record.live,
-      },
-      activity: activityTimestamp(record.header, record.live, record.session, projections, cache),
-    }))
+    const rows = visibleRecords.map(record => {
+      const updatedAt = activityTimestamp(record.header, record.live, record.session, projections, cache)
+      return {
+        row: {
+          id: record.header.id,
+          updatedAt,
+          createdAt: record.header.createdAt,
+          cwd: record.header.cwd,
+          parentSession: record.header.parentSession,
+          origin: record.header.origin,
+          live: record.live,
+        },
+        activity: updatedAt,
+      }
+    })
     signal?.throwIfAborted()
     rows.sort((a, b) => b.activity - a.activity)
     return rows.map(({ row }) => row)

@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { HistoryPanel, HISTORY_PANEL_FOOTER, HISTORY_PANEL_SPLIT_WIDTH } from '../src/history-panel.ts'
+import { HistoryPanel, HISTORY_PANEL_FOOTER, HISTORY_PANEL_SPLIT_WIDTH, historyOverlayGeometry } from '../src/history-panel.ts'
 import type { HistorySearchResult, HistorySearchSource } from '../src/history-search.ts'
 import type { HistoryScope } from '../src/history-search.ts'
 
@@ -281,6 +281,23 @@ test('panel: wide render splits list and details; narrow stacks them', async () 
   assert.ok(wide.some(line => line.includes('│')), 'wide layout separates the detail column')
   const narrow = panel.render(HISTORY_PANEL_SPLIT_WIDTH - 20)
   assert.ok(narrow.some(line => line.includes('Directory')), 'the detail rows are present')
+})
+
+test('history geometry matches the bounded physical overlay width', () => {
+  const cases = [
+    [239, 100],
+    [120, 100],
+    [80, 74],
+    [50, 44],
+    [6, 1],
+    [1, 1],
+  ] as const
+  for (const [columns, expectedWidth] of cases) {
+    const geometry = historyOverlayGeometry(columns, 24)
+    assert.equal(geometry.width, expectedWidth, `${columns} columns must resolve to the physical history width`)
+    assert.ok(geometry.width >= 1)
+    assert.ok(geometry.width <= Math.max(1, columns - 6))
+  }
 })
 
 test('panel: the selection viewport FOLLOWS the cursor (a long list scrolls, the › marker never hides)', async () => {

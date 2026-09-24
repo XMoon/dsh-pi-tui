@@ -46,9 +46,10 @@ silently discard untracked user work.
 
 Read the `[Unreleased]` entries and the user-visible commits since the previous
 tag. Merge repeated review fixes into the final user-facing outcome instead of
-copying commit subjects into the changelog. Keep known limitations explicit;
-for example, the production backend is still Direct and remote attach is not
-supported while M2–M8 remain unfinished.
+copying commit subjects into the changelog. Keep genuinely user-visible
+limitations explicit; do not restate an internal migration target (such as the
+unshipped remote backend, tracked in docs/client-server-migration.md) as if it
+were a promised capability.
 
 ## 2. Update release metadata and documentation
 
@@ -74,10 +75,21 @@ For the selected package version `X.Y.Z` (including any prerelease suffix) on
 release date `YYYY-MM-DD`:
 
 1. Change the root `package.json` version to `X.Y.Z`.
-2. In both changelogs, add `## [X.Y.Z] - YYYY-MM-DD` immediately below the
+2. Update `src/dsh-compat-matrix.json`, the single source for the DSH/TUI
+   pairing shared by `src/startup.ts`, the release tooling and the
+   installation-doc gate. When the shipped DSH target changes, update `current`
+   (`since`, `requires`, `upgradeDsh`, `upgradeCommand`, `guidance`) and append
+   or adjust the `matrix` row for the new DSH line (`dshFrom`, `tui`, and the
+   covered `versions`); a row without `tui` means no released TUI supports that
+   DSH range. Do not edit `floor` unless the oldest supported row moves. The
+   install guidance the release body must carry (the shipped DSH floor, the
+   exact TUI version, and the two most recent compatible rows) is derived from
+   this file, so a stale matrix fails the release-notes gate loudly instead of
+   publishing a mixed install.
+3. In both changelogs, add `## [X.Y.Z] - YYYY-MM-DD` immediately below the
    empty `## [Unreleased]` heading, then move the accumulated entries under
    that version. Leave a fresh empty `[Unreleased]` section at the top.
-3. Update both changelog reference blocks. Use the matching channel prefix for
+4. Update both changelog reference blocks. Use the matching channel prefix for
    both links:
 
    ```text
@@ -90,18 +102,18 @@ release date `YYYY-MM-DD`:
    [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/next-v<previous>...next-vX.Y.Z
    ```
 
-4. Keep the Chinese and English changelog sections in the same order and make
+5. Keep the Chinese and English changelog sections in the same order and make
    sure behavior changes, migration notes, and security fixes are represented
    in both languages.
-5. Mirror every README change in the other language. In particular, check
+6. Mirror every README change in the other language. In particular, check
    command names, save/submit keys, default-versus-effective keybinding
    wording, and package installation commands.
-6. Check the resulting diff:
+7. Check the resulting diff:
 
    ```sh
    git diff --check
-   git diff -- package.json pnpm-lock.yaml README.md README.en.md \
-     CHANGELOG.md CHANGELOG.en.md
+   git diff -- package.json pnpm-lock.yaml src/dsh-compat-matrix.json \
+     README.md README.en.md CHANGELOG.md CHANGELOG.en.md
    ```
 
 ## 3. Validate the release notes before tagging
@@ -249,9 +261,10 @@ gh release view next-vX.Y.Z-alpha.N --repo XMoon/dsh-pi-tui
 ```
 
 Inspect the visible Release body as well. For the 0.4 line it must show the
-matching `@deepseek-ai/dsh` command, the matching TUI channel, and the legacy
-0.3 fallback note; these are sourced from the bilingual dated changelog section
-and must not be replaced by a manually edited summary.
+shipped DSH floor, the exact TUI version, and the two most recent compatible
+matrix rows (rows without a TUI are skipped and at most one alpha row is
+listed); these are derived from `src/dsh-compat-matrix.json`, enforced by the
+release-notes gate, and must not be replaced by a manually edited summary.
 
 For the next cycle, `[Unreleased]` is intentionally empty. Its comparison link
 should use the tag prefix of the channel being continued (`v...` or `next-v...`).

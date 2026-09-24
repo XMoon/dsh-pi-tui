@@ -11,7 +11,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   classifySubagentPromptError,
+  classifySubagentPromptSettlement,
   resolveSubagentSettleTarget,
+  subagentPromptDisposition,
   submitSubagentPrompt,
   viewerCanonicalizeScope,
   type SubagentPromptContentPart,
@@ -24,6 +26,7 @@ import {
 const request: SubagentViewerSubmitRequest = {
   parentSessionId: 'session-parent',
   childSessionId: 'session-child',
+  delivery: 'queue',
   content: [{ type: 'text', text: 'focus on cancellation races' }],
 }
 
@@ -85,6 +88,15 @@ test('delivers through the official prompt call with the official request vocabu
   assert.equal(calls[0]!.signal, signal, 'the caller-owned signal is forwarded to the official call')
 })
 
+test('forwards a resolved steer delivery without changing human provenance', async () => {
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt({ ...request, delivery: 'steer' }, deps({
+    subagents: () => service(calls),
+  }))
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(calls[0]!.delivery, 'steer', 'the resolved delivery must reach the official prompt unchanged')
+})
+
 test('every submit mints a FRESH requestId (a retry is a new human prompt)', async () => {
   const calls: RecordedCall[] = []
   let minted = 0
@@ -106,6 +118,7 @@ test('the prompt text runs through the SAME canonicalization as the main session
     {
       parentSessionId: request.parentSessionId,
       childSessionId: request.childSessionId,
+      delivery: 'queue',
       content: [{ type: 'text', text: 'review @src/foo.ts' }],
     },
     deps({
@@ -149,8 +162,11 @@ test('classifies the official RemoteError vocabulary into the stable reason set'
   const cases: Array<[string, string]> = [
     ['subagent/parent-unavailable', 'parent-unavailable'],
     ['subagent/not-resumable', 'stale-child'],
+    ['subagent/not-found', 'stale-child'],
+    ['subagent/catalog-diagnostic', 'stale-child'],
     ['subagent/unauthorized', 'unauthorized'],
     ['subagent/delivery-unavailable', 'unavailable'],
+    ['subagent/projections-unavailable', 'unavailable'],
     ['gateway/cancelled', 'cancelled'],
     ['subagent/invalid-time-zone', 'error'],
     ['subagent/attachment-invalid', 'error'],
@@ -187,17 +203,80 @@ test('a prompt that REJECTS surfaces the classified reason (never a throw)', asy
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'stale-child' } })
 })
 
-test('an unexpected throw surfaces as a safe error reason with a message', async () => {
+test('an unexpected throw after dispatch is indeterminate, never a false "not sent"', async () => {
   const outcome = await submitSubagentPrompt(request, deps({
     subagents: () => ({
       prompt: async () => { throw new Error('boom') },
     }),
   }))
-  assert.equal(outcome.kind, 'rejected')
-  if (outcome.kind === 'rejected') {
-    assert.equal(outcome.reason.kind, 'error')
-    if (outcome.reason.kind === 'error') assert.equal(outcome.reason.message, 'boom')
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'boom' })
+})
+
+test('a gateway/internal carrier failure after dispatch is indeterminate, not rejected', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => ({
+      prompt: async () => { throw makeError('gateway/internal') },
+    }),
+  }))
+  assert.equal(outcome.kind, 'indeterminate')
+  assert.equal(outcome.kind === 'indeterminate' ? outcome.message : undefined, 'remote error: gateway/internal')
+})
+
+test('subagentPromptDisposition never restores an indeterminate delivery', () => {
+  assert.deepEqual(subagentPromptDisposition({ kind: 'ok', messageId: 'm' }), { kind: 'sent' })
+  assert.deepEqual(subagentPromptDisposition({ kind: 'indeterminate', message: 'carrier reset' }), { kind: 'uncertain' })
+  assert.deepEqual(subagentPromptDisposition({ kind: 'rejected', reason: { kind: 'cancelled' } }), { kind: 'cancelled' })
+  assert.deepEqual(
+    subagentPromptDisposition({ kind: 'rejected', reason: { kind: 'parent-unavailable' } }),
+    { kind: 'rejected', reason: { kind: 'parent-unavailable' } },
+  )
+})
+
+test('a structured admission refusal settles rejected, never indeterminate', () => {
+  const cases: Array<[string, string]> = [
+    ['subagent/not-found', 'stale-child'],
+    ['subagent/catalog-diagnostic', 'stale-child'],
+    ['subagent/projections-unavailable', 'unavailable'],
+    ['subagent/attachment-invalid', 'error'],
+    ['subagent/invalid-time-zone', 'error'],
+    ['gateway/bad-request', 'error'],
+  ]
+  for (const [code, kind] of cases) {
+    const settlement = classifySubagentPromptSettlement(makeError(code))
+    assert.equal(settlement.kind, 'rejected', `code ${code} must be a proven refusal`)
+    if (settlement.kind === 'rejected') assert.equal(settlement.reason.kind, kind, `code ${code}`)
   }
+})
+
+test('gateway/internal, post-invocation/unknown gateway, or code-less failures settle indeterminate', () => {
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/internal')).kind, 'indeterminate')
+  assert.equal(classifySubagentPromptSettlement(new Error('boom')).kind, 'indeterminate')
+})
+
+test('gateway pre-invocation refusals are rejected, post-invocation stays indeterminate', () => {
+  // Pinned Gateway raises these strictly before the business method runs.
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/invocation-unavailable')).kind, 'rejected')
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/service-unavailable')).kind, 'rejected')
+  // `gateway/result-invalid` is raised after the method returned, and an
+  // unknown future gateway code is never assumed to be a refusal.
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/result-invalid')).kind, 'indeterminate')
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/unknown-future-code')).kind, 'indeterminate')
+})
+
+test('a pre-dispatch canonicalization failure is rejected, never indeterminate', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service([]),
+    canonicalizeText: () => { throw new Error('mention expansion failed') },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mention expansion failed' } })
+})
+
+test('a pre-dispatch request-identity mint failure is rejected, never indeterminate', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service([]),
+    mintRequestId: () => { throw new Error('mint failed') },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mint failed' } })
 })
 
 function makeError(code: string): Error {
@@ -287,6 +366,7 @@ test('image parts are forwarded VERBATIM (the Host admits them; the TUI never re
     {
       parentSessionId: request.parentSessionId,
       childSessionId: request.childSessionId,
+      delivery: 'queue',
       content: [
         { type: 'text', text: 'review @src/foo.ts' },
         { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' },

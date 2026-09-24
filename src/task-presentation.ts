@@ -34,8 +34,6 @@ export interface TaskPanelItem {
   readonly source?: 'subagent' | 'job'
   readonly canOpen?: boolean
   readonly canStop?: boolean
-  /** Kept as a compatibility alias for older callers. */
-  readonly interruptible?: boolean
   readonly active?: boolean
   readonly attention?: boolean
   /** Durable tree facts. Parent ids are row ids when possible. */

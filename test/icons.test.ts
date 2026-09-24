@@ -23,12 +23,13 @@ const MINIMAL_VISIBLE: ReadonlySet<string> = new Set([
   'question',
   'disclosure-collapsed',
   'disclosure-expanded',
+  // Compact Work / Context-cluster section disclosure affordances.
+  'section-collapsed',
+  'section-expanded',
   'working-a',
   'working-b',
-  // Structure anchors survive minimal: the message bullet and the
-  // queued-notice hourglass (plan §34 addendum).
+  // Structure anchors survive minimal: the message bullet.
   'assistant-bullet',
-  'queue-notice',
 ])
 
 /** The EAW classes that are safe under CJK-width terminals: ambiguous
@@ -91,16 +92,12 @@ test('iconLead composes SINGLE-space titles and never dangles under minimal', ()
   // Historical single-space titles stay byte-identical under emoji.
   assert.equal(`${iconLead('thinking', 'emoji')}Thinking`, '🌊 Thinking')
   assert.equal(`${iconLead('compaction', 'emoji')}Context compacted`, '🗜 Context compacted')
-  assert.equal(`${iconLead('queue-notice', 'emoji')}notice text`, '⏳ notice text')
   // Symbols swaps the glyphs.
   assert.equal(`${iconLead('thinking', 'symbols')}Thinking`, '∿ Thinking')
   assert.equal(`${iconLead('compaction', 'symbols')}Context compacted`, '↧ Context compacted')
-  assert.equal(`${iconLead('queue-notice', 'symbols')}notice text`, '⧗ notice text')
   // Minimal hides thinking/compaction with NO leading space...
   assert.equal(`${iconLead('thinking', 'minimal')}Thinking`, 'Thinking')
   assert.equal(`${iconLead('compaction', 'minimal')}Context compacted`, 'Context compacted')
-  // ...but keeps the queued-notice hourglass (a real waiting state).
-  assert.equal(`${iconLead('queue-notice', 'minimal')}notice text`, '⧗ notice text')
   // The assistant bullet keeps its TWO-space prefix in every style (the
   // continuation indent depends on it).
   assert.equal(`${iconPrefix('assistant-bullet', 'emoji')}line`, '🐋  line')
@@ -133,12 +130,13 @@ test('the emoji palette preserves the historical glyphs', () => {
     'context-generic': '📎',
     'disclosure-collapsed': '🐋',
     'disclosure-expanded': '🐳',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '🐋',
     'working-b': '🐳',
     'assistant-bullet': '🐋',
     thinking: '🌊',
     compaction: '🗜',
-    'queue-notice': '⏳',
   }
   for (const semantic of ALL_ICON_SEMANTICS) {
     assert.equal(iconFor(semantic, 'emoji'), expected[semantic], `emoji glyph for ${semantic}`)
@@ -168,12 +166,13 @@ test('the symbols palette is the documented compact vocabulary', () => {
     'context-generic': '⋅',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '∙',
     'working-b': '◦',
     'assistant-bullet': '∙',
     thinking: '∿',
     compaction: '↧',
-    'queue-notice': '⧗',
   }
   for (const semantic of ALL_ICON_SEMANTICS) {
     assert.equal(iconFor(semantic, 'symbols'), expected[semantic], `symbols glyph for ${semantic}`)
@@ -192,4 +191,11 @@ test('iconStyleOf normalizes every persisted value', () => {
   // Unknown/legacy values fail safe to emoji.
   assert.equal(iconStyleOf('hello'), 'emoji')
   assert.equal(iconStyleOf('1'), 'emoji')
+})
+
+test('the Activity identity icon semantic is retired (2026-09-22 v2 addendum)', () => {
+  // Activity is identified by its disclosure marker + name only; the old
+  // `work` semantic must not come back as a dead registry entry.
+  assert.ok(!(ALL_ICON_SEMANTICS as readonly string[]).includes('work'), 'no `work` icon semantic remains')
+  assert.ok(!JSON.stringify(iconFor('subagent', 'emoji')).includes('🧰'))
 })

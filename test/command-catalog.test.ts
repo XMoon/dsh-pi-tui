@@ -11,10 +11,11 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
-import { shouldConsumeAdvertisedMiss } from '../src/index.ts'
+import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../src/index.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
+import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -68,10 +69,16 @@ function fakeAgent(sessionId: string, delivered: { kind: 'steer' | 'followup' | 
 function stubRunner(
   ctx: Context,
   app: TuiApp,
-  state: { agent: Agent | undefined },
+  state: {
+    agent: Agent | undefined
+    writerOutcome?: WriteOutcome
+    writerCalls?: { kind: 'prompt'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[]
+    displayWrites?: ('focus' | 'compact' | 'full')[]
+  },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
-  options: { transitionPending?: boolean; busyEnter?: string } = {},
+  options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number; initialDisplayPreset?: 'focus' | 'compact' | 'full' } = {},
 ): TuiCommandRunner {
+  let displayPreset: 'focus' | 'compact' | 'full' = options.initialDisplayPreset ?? 'full'
   return {
     ctx,
     app,
@@ -95,8 +102,7 @@ function stubRunner(
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
@@ -108,11 +114,22 @@ function stubRunner(
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async (_sessionId: string, message: unknown, mode: 'queue' | 'steer') => {
+        const outcome = state.writerOutcome
+        if (outcome !== undefined && outcome.kind !== 'committed') return outcome
+        state.writerCalls?.push({ kind: 'prompt', mode, messages: [message] })
+        const target = state.agent as Agent & { followup(message: unknown): void; steer(message: unknown): void }
+        if (mode === 'queue') target.followup(message)
+        else target.steer(message)
+        return outcome ?? { kind: 'committed' as const, value: undefined }
+      },
+      updateQueue: async (_sessionId: string, _messageId: string) => {
+        const outcome = state.writerOutcome
+        if (outcome !== undefined && outcome.kind !== 'committed') return outcome
+        return outcome ?? { kind: 'committed' as const, value: undefined }
+      },
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -123,7 +140,7 @@ function stubRunner(
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 1 },
+    get sessionGeneration() { return options.generation?.() ?? 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -133,10 +150,23 @@ function stubRunner(
     pendingPreset: undefined,
     effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'locked' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
-    focusEnabled: () => false,
-    setFocusMode: () => {},
+    displayPreset: () => displayPreset,
+    setDisplayPreset: (preset) => {
+      if (displayPreset === preset) return { kind: 'unchanged', preset }
+      displayPreset = preset
+      state.displayWrites?.push(preset)
+      return { kind: 'applied', preset }
+    },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    focusEnabled: () => displayPreset === 'focus',
+    setFocusMode: (enabled) => { displayPreset = enabled ? 'focus' : 'full' },
     setNotificationMode: () => {},
     setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
@@ -201,6 +231,83 @@ function snapshotOf(options: { skills?: { name: string; description: string }[];
     issues: Object.freeze([]),
   })
 }
+
+test('display and focus commands share the canonical preset and apply Compact', async () => {
+  assert.equal(LOCAL_COMMANDS.has('display'), true, '/display must execute locally')
+  assert.equal(SESSIONLESS_COMMANDS.has('display'), true, '/display must work before the first session')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const displayWrites: ('focus' | 'compact' | 'full')[] = []
+  const runner = stubRunner(ctx, app, { agent: undefined, displayWrites })
+  registerTuiCommands(runner)
+  const invoke = (name: string, rawInput: string): Promise<{ kind: string; text?: string }> | { kind: string; text?: string } => {
+    const definition = services.defs.find(candidate => candidate.name === name)
+    assert.ok(definition?.handler !== undefined, `${name} must be registered`)
+    return (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput })
+  }
+  assert.deepEqual(await invoke('display', ''), { kind: 'success', text: 'Display: full.' })
+  assert.deepEqual(await invoke('display', 'focus'), { kind: 'success', text: 'Display: focus.' })
+  assert.deepEqual(await invoke('display', 'status'), { kind: 'success', text: 'Display: focus.' })
+  assert.deepEqual(await invoke('focus', 'status'), { kind: 'success', text: 'Focus mode is on.' })
+  assert.deepEqual(await invoke('focus', 'off'), { kind: 'success', text: 'Focus mode off.' })
+  assert.deepEqual(await invoke('display', 'compact'), { kind: 'success', text: 'Display: compact.' })
+  assert.deepEqual(displayWrites, ['focus', 'full', 'compact'], 'every applied preset persists')
+  assert.equal(runner.displayPreset?.(), 'compact', 'Compact is the canonical live preset')
+  assert.deepEqual(await invoke('focus', 'toggle'), { kind: 'success', text: 'Focus mode on.' })
+  assert.deepEqual(await invoke('focus', 'status'), { kind: 'success', text: 'Focus mode is on.' })
+  assert.deepEqual(displayWrites, ['focus', 'full', 'compact', 'focus'])
+  assert.deepEqual(await invoke('display', 'garbage'), { kind: 'error', text: 'unknown /display verb "garbage" (full|focus|compact|status)' })
+  app.stop()
+})
+
+test('/focus off maps a seeded Compact state to Full', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const displayWrites: ('focus' | 'compact' | 'full')[] = []
+  const runner = stubRunner(ctx, app, { agent: undefined, displayWrites }, undefined, { initialDisplayPreset: 'compact' })
+  registerTuiCommands(runner)
+  const definition = services.defs.find(candidate => candidate.name === 'focus')
+  assert.ok(definition?.handler !== undefined)
+  const result = await (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput: 'off' })
+  assert.deepEqual(result, { kind: 'success', text: 'Focus mode off.' })
+  assert.equal(runner.displayPreset?.(), 'full')
+  assert.deepEqual(displayWrites, ['full'])
+  app.stop()
+})
+
+test('/display compact fails closed on a legacy runner without the canonical setter', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const focusModes: boolean[] = []
+  const stub = stubRunner(ctx, app, { agent: undefined })
+  const legacy: TuiCommandRunner = { ...stub, setFocusMode: (enabled) => { focusModes.push(enabled) } }
+  delete (legacy as { setDisplayPreset?: unknown }).setDisplayPreset
+  registerTuiCommands(legacy)
+  const definition = services.defs.find(candidate => candidate.name === 'display')
+  assert.ok(definition?.handler !== undefined, '/display must be registered')
+  const result = await (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput: 'compact' })
+  assert.deepEqual(result, { kind: 'error', text: 'Display preset "compact" is not available in this build.' })
+  assert.deepEqual(focusModes, [], 'Compact must never fall back to setFocusMode(false), which would activate Full')
+  app.stop()
+})
 
 test('an initial snapshot installs skill wrappers and claims SYNCHRONOUSLY with zero catalog I/O', () => {
   const ctx = new Context()
@@ -324,15 +431,49 @@ test('the revalidating transition keeps skill names as revalidating handlers and
     'the transition wrapper stays advertised: submitting /glab resolves through the revalidating handler')
   // The transition handler still executes against the CURRENT agent with a
   // fresh get + policy recheck (the same execution boundary). The original
-  // line is steered (which wakes an idle driver) and the body rides the
-  // same next-step batch as an injection — turns that wake the driver.
+  // line is steered (which wakes an idle driver) and the body follows as a
+  // second ordered steer prompt — turns that wake the driver.
   const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
   assert.equal(result.kind, 'success')
   assert.equal(delivered.length, 2, 'the transition executes through loadSkill on the current agent')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is steered (waking an idle driver)')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch as an injection')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
+  app.stop()
+})
+
+test('loadSkill refuses a session switch while resolving the skill body', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const first = fakeAgent('session-a', delivered)
+  const replacement = fakeAgent('session-a', delivered)
+  const state: { agent: Agent | undefined } = { agent: first }
+  let generation = 1
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => {
+      state.agent = replacement
+      generation = 2
+      return { name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+    },
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, state, undefined, { generation: () => generation }), { snapshot: snapshotOf({
+    skills: [{ name: 'glab', description: 'GitLab CLI' }],
+  }) })
+  const wrapper = defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: '' })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /session changed while loading/u)
+  assert.deepEqual(delivered, [], 'the stale skill must not write either Agent')
   app.stop()
 })
 
@@ -361,7 +502,7 @@ test('loadSkill steers a RUNNING agent at the next step boundary instead of park
   assert.equal(delivered.length, 2, 'a bare /name delivers the original line AND the injected body')
   assert.equal(delivered[0]?.kind, 'steer', 'a running agent receives the original line as a steer')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch as an injection')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
   app.stop()
 })
@@ -391,7 +532,7 @@ test('the explicit /skill <name> path steers the original line and injects the b
   assert.equal(delivered.length, 2, 'the explicit /skill path delivers the original line AND the loaded body')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is steered (waking an idle driver)')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch as an injection')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
   app.stop()
 })
@@ -421,7 +562,7 @@ test('a missing agent status still delivers via steer+inject (no status branch)'
   assert.equal(result.kind, 'success')
   assert.equal(delivered.length, 2, 'the load still delivers')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is always steered, regardless of status')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   app.stop()
 })
 
@@ -704,7 +845,7 @@ test('the /skill command with args on a RUNNING agent steers the pair into the r
   assert.equal(delivered.length, 2, 'the running /skill path delivers the original line AND the body')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line steers into the running turn')
   assert.equal(delivered[0]?.text, '/glab fix bug', 'the arguments are forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   app.stop()
 })
 
@@ -735,7 +876,7 @@ test('the wrappers tolerate an undefined invocation (defensive rawInput fallback
   app.stop()
 })
 
-test('the fallback injection carries the official source fields and a provider default', async () => {
+test('the ordered prompt fallback carries the official source fields and a provider default', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -743,20 +884,18 @@ test('the fallback injection carries the official source fields and a provider d
   startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  // The fake agent records the FULL message, not just the text, so the
-  // source can be asserted.
-  const injected: { source: { kind?: string; name?: string; form?: string }; text: string }[] = []
+  // The fake agent records the FULL messages, not just their text, so the
+  // source can be asserted. A raw inject would fail this contract test.
+  const steered: { content: { text: string }[]; source: { kind?: string; name?: string; form?: string } }[] = []
   const agent = {
     session: { id: 'session-a', header: { cwd: '/ws' }, events: [] },
     options: { provider: 'p', model: 'm' },
     status: 'idle',
   } as unknown as Agent
   Object.assign(agent, {
-    steer: () => {},
+    steer: (message: { content: { text: string }[]; source: { kind?: string; name?: string; form?: string } }) => steered.push(message),
     followup: () => {},
-    inject: (message: { content: { text: string }[]; source: unknown }) => {
-      injected.push({ ...message, text: message.content[0]?.text ?? '' } as never)
-    },
+    inject: () => { throw new Error('raw inject is not part of the semantic skill fallback') },
   })
   // No provider field on the loaded skill: the fallback must default it.
   ctx.provide('skills', {
@@ -764,19 +903,26 @@ test('the fallback injection carries the official source fields and a provider d
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  const writerCalls: { kind: 'prompt'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[] = []
+  registerTuiCommands(stubRunner(ctx, app, { agent, writerCalls }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
   assert.ok(wrapper?.handler !== undefined)
   const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
   assert.equal(result.kind, 'success')
-  assert.equal(injected.length, 1, 'the fallback injected exactly one body message')
-  assert.equal(injected[0]?.source.kind, 'skill-invocation', 'the fallback uses the official skill-invocation source kind')
-  assert.equal(injected[0]?.source.name, 'glab', 'the source names the invoked skill')
-  assert.equal(injected[0]?.source.form, 'instructions', 'the source marks the injection as instructions-form context')
-  assert.match(injected[0]?.text ?? '', /provider "tui"/, 'a missing provider defaults to "tui" in the rendering')
-  assert.match(injected[0]?.text ?? '', /<skill_content name="glab">/, 'the body uses the official skill_content rendering')
+  assert.deepEqual(writerCalls.map(call => call.kind), ['prompt', 'prompt'], 'the fallback uses two official prompt operations')
+  assert.deepEqual(writerCalls.map(call => call.mode), ['steer', 'steer'], 'both fallback messages use steer mode')
+  assert.equal(writerCalls[0]?.messages?.[0], steered[0], 'the line is sent first')
+  assert.equal(writerCalls[1]?.messages?.[0], steered[1], 'the skill body is sent second')
+
+  assert.equal(steered.length, 2, 'the fallback steers the line and body')
+  const body = steered[1]
+  assert.equal(body?.source.kind, 'skill-invocation', 'the fallback uses the official skill-invocation source kind')
+  assert.equal(body?.source.name, 'glab', 'the source names the invoked skill')
+  assert.equal(body?.source.form, 'instructions', 'the source marks the body as instructions-form context')
+  assert.match(body?.content[0]?.text ?? '', /provider "tui"/, 'a missing provider defaults to "tui" in the rendering')
+  assert.match(body?.content[0]?.text ?? '', /<skill_content name="glab">/, 'the body uses the official skill_content rendering')
   app.stop()
 })
 
@@ -839,6 +985,83 @@ test('a tool merely NAMED skill without a loader shape is treated as no host loa
   app.stop()
 })
 
+test('a cancelled semantic skill write propagates cancellation instead of a command error', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  const runner = stubRunner(ctx, app, { agent, writerOutcome: { kind: 'cancelled' } })
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  registerTuiCommands(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
+  const wrapper = services.defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  await assert.rejects(
+    () => (wrapper!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' }),
+    (error: unknown) => error instanceof Error && error.name === 'AbortError',
+  )
+  app.stop()
+})
+
+test('an indeterminate semantic skill write is explicit and does not auto-retry', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  const runner = stubRunner(ctx, app, { agent, writerOutcome: { kind: 'indeterminate', error: { code: 'transport/unknown', message: 'delivery state unknown' } } })
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  registerTuiCommands(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
+  const wrapper = services.defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  await assert.rejects(
+    () => (wrapper!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' }),
+    (error: unknown) => isIndeterminateSkillWrite(error),
+  )
+  app.stop()
+})
+
+test('an indeterminate title write suppresses outer draft restoration', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  const runner = stubRunner(ctx, app, { agent })
+  runner.sessionWriter.rename = async () => ({
+    kind: 'indeterminate' as const,
+    error: { code: 'transport/unknown', message: 'title result unknown' },
+  })
+  const registered = registerTuiCommands(runner)
+  const title = services.defs.find(def => def.name === 'title')
+  assert.ok(title?.handler !== undefined)
+
+  const result = await (title.handler as (invocation: { rawInput: string; commandId: string }) => Promise<unknown>)({ rawInput: 'new title', commandId: 'cmd-title' })
+  assert.deepEqual(result, {
+    kind: 'error',
+    text: 'session title result is indeterminate — do not retry automatically',
+  })
+  assert.equal(registered.takeCommandDraftDisposition('cmd-title'), 'suppressed')
+  assert.equal(registered.takeCommandDraftDisposition('cmd-title'), undefined)
+  // The normalized public result carries no private draft marker.
+  app.stop()
+})
+
 test('a throwing skill steer releases the image pin (review finding)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -887,17 +1110,18 @@ test('the transition fence refuses a skill invocation mid-transition (zero write
     list: async () => [],
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  registerTuiCommands(
+  const registered = registerTuiCommands(
     stubRunner(ctx, app, { agent }, createDiag({ filePath: undefined, stderrLevel: 'off' }), { transitionPending: true }),
     { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) },
   )
   const wrapper = services.defs.findLast(def => def.name === 'glab')
   assert.ok(wrapper?.handler !== undefined, 'the skill wrapper must be registered')
-  const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'fix the pipeline' })
+  const result = await (wrapper!.handler as (invocation: { rawInput: string; commandId: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'fix the pipeline', commandId: 'cmd-transition' })
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /transition is in progress/, 'the refusal explains the retry')
   assert.equal(delivered.length, 0, 'the skill must never write the old agent during a transition')
   assert.ok(app.getDraft().includes('/glab fix'), 'the invocation line is restored to the editor')
+  assert.equal(registered.takeCommandDraftDisposition('cmd-transition'), 'restored')
   app.stop()
 })
 

@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
@@ -24,6 +25,7 @@ import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type Workf
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { hasFocusHeader } from './support/focus-header.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -874,7 +876,7 @@ test('a fullscreen click on an option row selects it', async () => {
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
 })
 
-test('clicks outside the active question frame are captured (the modal owns every click)', async () => {
+test('Todo presentation remains clickable outside the active Question frame', async () => {
   const { vt, app } = startApp()
   const todos = Array.from({ length: 3 }, (_, i) => ({
     id: `t-${i}`, content: `todo item ${i}`,
@@ -890,12 +892,13 @@ test('clicks outside the active question frame are captured (the modal owns ever
   const dockIdx = lines.findIndex(line => strip(line).includes('☑'))
   assert.ok(dockIdx >= 0, `todo summary dock row missing:\n${view}`)
   assert.ok(lines.some(line => strip(line).includes('Proceed?')), `question missing:\n${view}`)
-  // A click on the dock row (outside the question frame) must NOT open the
-  // todo panel — the capturing modal consumes every click.
+  // A click on the dock row (outside the question frame) is a read-only
+  // presentation action and may open the Todo panel without disturbing the
+  // response owner.
   clickCell(vt, 10, dockIdx)
   await vt.waitForRender()
   view = await viewport(vt)
-  assert.ok(!app.isTodoPanelVisible(), 'a click outside the frame must not open the todo panel')
+  assert.ok(app.isTodoPanelVisible(), 'a Todo presentation click must open the panel')
   assert.ok(view.includes('Proceed?'), `question must stay mounted:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
@@ -1541,10 +1544,45 @@ test('a click on a PTC sub-call header expands only that child body', async () =
   assert.ok(!view.includes('file content'), `the other child stays collapsed:\n${view}`)
 })
 
+test('a manually-expanded PTC child can still be collapsed while a search target covers it', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = ptcCodeCard()
+  app.setTranscript([card])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  // Manually expand the first child BEFORE the search navigation exists.
+  let bashIdx = vt.getViewport().join('\n').split('\n').findIndex(line => strip(line).includes('Bash'))
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('4 failed'), 'precondition: the child is manually expanded')
+
+  // A search target that covers the SAME child (already in the manual set).
+  app.setTranscriptSearchTarget({
+    query: 'failed',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'subcall-field', subCallIds: ['code-1:code:1'], field: 'result' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('4 failed'), 'the search target keeps the child open')
+
+  // One explicit click must COLLAPSE it (not be reopened by the search force).
+  bashIdx = vt.getViewport().join('\n').split('\n').findIndex(line => strip(line).includes('Bash'))
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('4 failed'), 'the explicit click must collapse the search-forced child')
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('a PTC sub-call press cannot transfer after a sibling settle reflow (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const message: Extract<TranscriptMessage, { kind: 'tool' }> = {
     kind: 'tool', turn: 0, name: 'run_code',
     args: '{"code":"print(1)"}', result: 'program output', status: 'ok',
@@ -1596,7 +1634,7 @@ test('a PTC sub-call press cannot transfer after a sibling settle reflow (mouse 
 
 test('regular mode: the root disclosure reveals the full child bodies and the bash command', async () => {
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([ptcCodeCard()])
   const view = await viewport(vt)
   assert.ok(view.includes('program output'), `expanded root shows its own body:\n${view}`)
@@ -1829,11 +1867,13 @@ test('fullscreen Ctrl+F and Ctrl+Shift+F search the full folder and re-window to
   const folder = new TranscriptFolder()
   folder.apply(Array.from({ length: 100 }, (_, turn) => ({
     type: 'assistant/message',
-    seq: turn,
+    surfaceOp: 'append',
+    seq: SessionSeq(turn),
     time: 1_700_000_000_000 + turn,
     data: {
       turn,
       step: 0,
+    stream: [],
       message: {
         id: MessageId(`history-${turn}`),
         role: 'assistant',
@@ -1940,7 +1980,7 @@ test('fullscreen suppresses the stale fork search key after host search is remap
   }
 })
 
-test('history hint uses the effective latest-jump keybinding', async () => {
+test('history window shows the location gutter plus the effective jump-latest indicator', async () => {
   const { vt, app } = startApp(100, 24)
   app.setTranscript([{ kind: 'user', turn: 40, text: 'history row' }], undefined, {
     mode: 'history',
@@ -1950,12 +1990,14 @@ test('history hint uses the effective latest-jump keybinding', async () => {
   })
   app.setFullscreen(true)
   let view = await viewport(vt)
-  assert.ok(view.includes('Ctrl+End latest'), `default history hint missing:\n${view}`)
+  assert.ok(view.includes('History · turn 31–40'), `history location gutter missing:\n${view}`)
+  assert.ok(!view.includes('Ctrl+End latest'), `the gutter must not repeat the jump key:\n${view}`)
+  assert.ok(view.includes('↓ Latest · Ctrl+End'), `default jump indicator missing:\n${view}`)
 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.jumpLatest': 'ctrl+l' }))
   view = await viewport(vt)
-  assert.ok(view.includes('Ctrl+L latest'), `remapped history hint missing:\n${view}`)
-  assert.ok(!view.includes('Ctrl+End latest'), `stale history hint remains:\n${view}`)
+  assert.ok(view.includes('↓ Latest · Ctrl+L'), `remapped jump indicator missing:\n${view}`)
+  assert.ok(!view.includes('Ctrl+End'), `stale jump hint remains:\n${view}`)
   app.stop()
 })
 
@@ -2029,7 +2071,7 @@ test('viewport anchors distinguish duplicate messages and cloned Focus activitie
   scroll = app.fullscreenScrollForTest()
   assert.ok(scroll !== undefined && scroll.scrollTop > 0, 'the cloned activity anchor must land below the same-turn user row')
   view = await viewport(vt)
-  assert.ok(view.includes('Thought'), `the cloned activity anchor selected the same-turn message row:\n${view}`)
+  assert.ok(hasFocusHeader(view), `the cloned activity anchor selected the same-turn message row:\n${view}`)
   assert.ok(!view.includes('focus user'), `the cloned activity anchor left the user row at the viewport top:\n${view}`)
   app.stop()
 })
@@ -2407,7 +2449,7 @@ test('search cards group matches by file and mark truncation', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep',
     args: '{"pattern":"const","path":"/ws/src"}',
@@ -2433,7 +2475,7 @@ test('terminal cards show the output and the exit code', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
     args: '{"command":"echo hi"}',
@@ -2461,7 +2503,7 @@ test('expanded bash cards keep the command row without a presenter', async () =>
   }])
   let view = await viewport(vt)
   assert.ok(view.includes('$ ls -la /tmp && echo done'), `folded command preview missing:\n${view}`)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
     args: '{"command":"ls -la /tmp && echo done"}',
@@ -2476,7 +2518,7 @@ test('expanded bash cards keep the command row without a presenter', async () =>
 
 test('running bash cards surface the command row when expanded', async () => {
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
     args: '{"command":"pnpm test"}',
@@ -2500,7 +2542,7 @@ test('running bash cards use the presenter command and never double-render it', 
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
     args: '{"command":"echo hi"}',
@@ -2514,7 +2556,7 @@ test('running bash cards use the presenter command and never double-render it', 
 
 test('pwsh cards render the command under a PS> prompt', async () => {
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'pwsh',
     args: '{"command":"Get-ChildItem"}',
@@ -2539,7 +2581,7 @@ test('generic presenter cards keep the command row above the raw input', async (
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
     args: '{"command":"sleep 5"}',
@@ -2574,7 +2616,7 @@ test('a SETTLED background bash keeps the $ command above the generic result', a
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'bash',
     args: '{"command":"npm run build"}',
@@ -2604,7 +2646,7 @@ test('a settled generic result on a NON-terminal tool adds no command row', asyn
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'exit_plan_mode',
     args: '{"plan":"do things"}',
@@ -2628,7 +2670,7 @@ test('injected context renders a web-style labeled row and expands to its body',
   assert.ok(folded.includes('Context injection AGENTS.md'), `injected label missing:\n${folded}`)
   assert.ok(!folded.includes('Do the thing'), `injected body leaked while folded:\n${folded}`)
   // Expanded: the body appears under the labeled header.
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const expanded = await viewport(vt)
   assert.ok(expanded.includes('Context injection AGENTS.md'), `labeled header missing when expanded:\n${expanded}`)
   assert.ok(expanded.includes('Do the thing carefully.'), `injected body missing:\n${expanded}`)
@@ -2775,7 +2817,7 @@ test('tool cards degrade to generic rendering when the registry lookup is absent
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep',
     args: '{"pattern":"foo"}',
@@ -3034,13 +3076,15 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   app.setFullscreen(true)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐋 Thought'), `emoji collapsed disclosure missing in fullscreen:\n${view}`)
+  assert.ok(hasFocusHeader(view, false), `emoji collapsed disclosure missing in fullscreen:\n${view}`)
   // Open the Thought: the fullscreen secondaries default compact, so the
   // tool/context headers are visible in the same frame.
   app.toggleFocusTurn(0)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐳 Thought'), `emoji expanded disclosure missing in fullscreen:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `emoji expanded disclosure missing in fullscreen:\n${view}`)
   assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing in fullscreen:\n${view}`)
   assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing in fullscreen:\n${view}`)
   // Symbols: the SAME fullscreen session repaints with the new palette —
@@ -3048,7 +3092,7 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   app.setIconStyle('symbols')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('▾ Thought'), `symbols disclosure missing after fullscreen switch:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `symbols disclosure missing after fullscreen switch:\n${view}`)
   assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing after fullscreen switch:\n${view}`)
   assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing after fullscreen switch:\n${view}`)
   // Minimal: decorative icons vanish (no dangling space), the disclosure
@@ -3058,7 +3102,7 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   view = vt.getViewport().join('\n')
   const lines = view.split('\n').map(stripTerminalSequences)
   assert.ok(lines.some(line => line.startsWith('Read /ws/src/foo.ts')), `minimal read header missing in fullscreen:\n${view}`)
-  assert.ok(view.includes('▾ Thought'), `minimal disclosure must survive in fullscreen:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `minimal disclosure must survive in fullscreen:\n${view}`)
 })
 
 
@@ -3148,7 +3192,7 @@ test('skill and read_image cards fold their envelope summaries, never the raw XM
 
 test('expanded skill and read_image cards render their content, never the envelope', async () => {
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   // The name attribute is producer-escaped (&quot;) and must decode back;
   // the body is embedded verbatim — angle brackets stay as written.
   const skillBody = 'Follow the loop.\n\nRound until accepted.\n\nKeep <tag> verbatim.'
@@ -3445,7 +3489,7 @@ test('injected skill rows fold with the instruction count and expand to the pars
   assert.ok(!view.includes('Base directory'), `resource chrome leaked into the folded row:\n${view}`)
   // Expanded (Ctrl+O, recent turn): the instructions body renders, the
   // envelope stays out — the same no-XML rule as the skill tool card.
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{ kind: 'system', turn: 0, text: envelope, label: 'review-fix-loop', icon: 'context-skill' }])
   view = await viewport(vt)
   assert.ok(view.includes('Context injection review-fix-loop'), `labeled header missing:\n${view}`)
@@ -3464,7 +3508,7 @@ test('injected skill rows fold with the instruction count and expand to the pars
 
 test('injected catalog and instruction rows strip their reminder framing when expanded', async () => {
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const catalog = [
     '<system-reminder>',
     'A skill is a reusable set of task-specific instructions.',
@@ -3502,7 +3546,7 @@ test('injected catalog and instruction rows strip their reminder framing when ex
 
 test('malformed read/write results render nothing expanded, never the raw envelope', async () => {
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'read',
     args: '{"file_path":"/ws/a.ts"}',
@@ -3596,7 +3640,7 @@ test('merged read groups expand into one tree row per file', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   // The merged card is what groupConsecutiveReads produces: args "N files"
   // plus the consecutive envelopes joined in the result.
   const envelopeA = `<path>/ws/a.ts</path>\n<type>file</type>\n<content>\n1: a\n\n(End of file - total 1 lines)\n</content>`
@@ -3728,7 +3772,7 @@ test('assistant markdown tables reflow on terminal resize', async () => {
 
 test('workflow runs expand into a phase-grouped member tree', async () => {
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'workflow',
     turn: 0,
@@ -3777,7 +3821,7 @@ test('workflow live member/status updates invalidate the cached card (plan §8.1
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript(folder.messages())
   const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
   const first = folder.messages()[0]
@@ -3935,7 +3979,7 @@ test('settled ask_user_question cards show the answered count, never raw JSON', 
       status: 'ok',
     },
   ])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('2/3 answered'), `answered count missing:\n${view}`)
   // The expanded card carries the actual answers, one line per question —
@@ -3980,7 +4024,7 @@ test('settled goal cards show field lines, never the raw goal JSON', async () =>
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: GOAL_RESULT, status: 'ok' },
   ])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('● objective: ship the polish release'), `objective line missing:\n${view}`)
   assert.ok(view.includes('● active · revision 3'), `identity line missing:\n${view}`)
@@ -4007,7 +4051,7 @@ test('goal cards without a goal say no goal set', async () => {
   app.setTranscript([
     { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: JSON.stringify({ goal: null }), status: 'ok' },
   ])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('no goal set'), `empty-goal verdict missing:\n${view}`)
   assert.ok(!view.includes('"goal"'), `raw goal JSON leaked:\n${view}`)
@@ -4122,7 +4166,7 @@ test('cancelled ask_user_question cards show the structured error identity', asy
       error: { name: 'UserQuestionError', code: 'ASK_CANCELLED' },
     },
   ])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('UserQuestionError: ASK_CANCELLED'), `error identity missing:\n${view}`)
   assert.ok(!view.includes('"answers"'), `raw answers JSON leaked:\n${view}`)
@@ -4205,7 +4249,7 @@ test('web search result views render sources and the answer (WebBlock parity)', 
     status: 'ok',
     resultBlocks: [{ type: 'text', text: 'raw model-facing text must not appear' }],
   }])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('The harness renders cards.'), `answer missing:\n${view}`)
   assert.ok(view.includes('• Card docs — https://example.com/a'), `source title-url missing:\n${view}`)
@@ -4232,7 +4276,7 @@ test('web fetch result views render the URL and HTTP status', async () => {
     args: '{"url":"https://example.com/page"}',
     result: 'raw body', status: 'ok', resultBlocks: [{ type: 'text', text: 'raw body' }],
   }])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('https://example.com/page — HTTP 200'), `fetch summary missing:\n${view}`)
   assert.ok(!view.includes('raw body'), `raw body leaked:\n${view}`)
@@ -4265,7 +4309,7 @@ test('todo_write rawInput renders as a checklist instead of pretty JSON', async 
     ] }),
     result: '', status: 'running',
   }])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('● fix tests'), `active item missing:\n${view}`)
   assert.ok(view.includes('○ ship it'), `pending item missing:\n${view}`)
@@ -4293,7 +4337,7 @@ test('exit_plan_mode renders its content plan body while running', async () => {
     args: JSON.stringify({ plan: '# The Plan\nStep one.\nStep two.' }),
     result: '', status: 'running',
   }])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('Step one.'), `plan body missing:\n${view}`)
   assert.ok(view.includes('Step two.'), `plan body truncated:\n${view}`)
@@ -4317,7 +4361,7 @@ test('generic result content renders instead of the raw model-facing text', asyn
     args: '{"plan":"x"}', result: 'raw plan review', status: 'ok',
     resultBlocks: [{ type: 'text', text: 'raw plan review' }],
   }])
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const view = await viewport(vt)
   assert.ok(view.includes('The plan was approved.'), `generic result content missing:\n${view}`)
   assert.ok(!view.includes('raw plan review'), `raw result text leaked:\n${view}`)
@@ -4630,7 +4674,7 @@ test('assistant bullet, thinking and compaction follow the symbols palette', asy
   assert.ok(!view.includes('🌊') && !view.includes('🗜') && !view.includes('🐋  para'), `emoji glyphs leaked into symbols:\n${view}`)
 })
 
-test('minimal keeps the bullet and notice hourglass; thinking/compaction titles go bare', async (t) => {
+test('minimal keeps the bullet and semantic queue marker; thinking/compaction titles go bare', async (t) => {
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
   t.after(() => app.stop())
@@ -4642,11 +4686,11 @@ test('minimal keeps the bullet and notice hourglass; thinking/compaction titles 
     { kind: 'thinking', turn: 0, text: 'reasoning preview line' },
     { kind: 'compaction', turn: 0, text: 'summary', items: 3, tokens: 2 },
   ])
-  app.setQueueItems([{ id: 'j-1', text: 'job done: exit 0', mode: 'steer', notice: true }])
+  app.setQueueItems([{ id: 'j-1', text: 'job done: exit 0', mode: 'steer' }])
   const view = await viewport(vt)
   const lines = view.split('\n').map(stripTerminalSequences)
   assert.ok(lines.some(line => line.startsWith('∙  para one')), `the bullet must survive minimal:\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Thinking')), `thinking title must go bare (no leading space):\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Context compacted')), `compaction title must go bare:\n${view}`)
-  assert.ok(view.includes('⧗ job done: exit 0'), `the queue-notice hourglass must survive minimal:\n${view}`)
+  assert.ok(view.includes('❯ job done: exit 0'), `the semantic queue marker must survive minimal:\n${view}`)
 })

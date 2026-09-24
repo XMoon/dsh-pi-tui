@@ -100,7 +100,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   // The fake document starts from the FULL default shape. When no
   // wheelScrollLines is passed, the field is OMITTED entirely — the exact
   // shape of an old settings file written before the preference existed.
@@ -118,7 +118,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return undefined },
+        get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -131,8 +131,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -144,11 +143,10 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -170,9 +168,15 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
@@ -212,10 +216,10 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const t = setupSettings({})
   await t.run()
   await t.view()
-  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B')
+  t.vt.sendInput('Mouse wheel lines')
   const view = await t.view()
   assert.ok(view.includes('Mouse wheel lines'), `row missing:\n${view}`)
-  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('Mouse wheel lines'))
+  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('›Mouse wheel lines'))
   assert.ok(row !== undefined && row.includes('1'),
     `missing persisted value must fall back to 1 (row: ${row}):\n${view}`)
   t.app.dispose()
@@ -224,7 +228,7 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const t2 = setupSettings({ wheelScrollLines: 'garbage' })
   await t2.run()
   await t2.view()
-  for (let i = 0; i < 10; i += 1) t2.vt.sendInput('\x1b[B')
+  t2.vt.sendInput('Mouse wheel lines')
   const view2 = await t2.view()
   assert.ok(stripTerminalSequences(view2).split('\n').some(line => line.includes('Mouse wheel lines') && line.includes('1')),
     `invalid persisted value must fall back to 1:\n${view2}`)
@@ -235,7 +239,7 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const t3 = setupSettings({ wheelScrollLines: '8' })
   await t3.run()
   await t3.view()
-  for (let i = 0; i < 10; i += 1) t3.vt.sendInput('\x1b[B')
+  t3.vt.sendInput('Mouse wheel lines')
   const view3 = await t3.view()
   assert.ok(stripTerminalSequences(view3).split('\n').some(line => line.includes('Mouse wheel lines') && line.includes('8')),
     `persisted 8 must render on the row:\n${view3}`)
@@ -246,7 +250,7 @@ test('the Mouse wheel lines row toggle persists without dropping other fields', 
   const t = setupSettings({ wheelScrollLines: '1' })
   await t.run()
   await t.view()
-  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B') // move to the wheel row
+  t.vt.sendInput('Mouse wheel lines') // move to the wheel row
   await t.view()
   t.vt.sendInput('\r') // toggle 1 -> 2
   await t.view()

@@ -64,18 +64,16 @@ export interface HistoryOverlayGeometry {
 
 /**
  * Derive the history overlay geometry from the CURRENT terminal dimensions.
- * The outer Frame owns two rows, so `panelRows` is the budget passed to the
- * stateful HistoryPanel. Every dimension is clamped so a very small terminal
- * still receives a usable positive layout instead of a negative overlay size.
+ * The width mirrors the physical overlay's numeric 100-column cap with three
+ * columns of horizontal margin on each side. The outer Frame owns two rows, so
+ * `panelRows` is the budget passed to the stateful HistoryPanel. Every dimension
+ * is clamped so a very small terminal still receives a usable positive layout
+ * instead of a negative overlay size.
  */
 export function historyOverlayGeometry(columns: number, rows: number): HistoryOverlayGeometry {
   const safeColumns = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 1
   const safeRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 1
-  const availableWidth = Math.max(1, safeColumns - 2)
-  const width = Math.max(1, Math.min(
-    availableWidth,
-    Math.max(20, Math.min(100, safeColumns - 6)),
-  ))
+  const width = Math.max(1, Math.min(100, safeColumns - 6))
   const availableHeight = Math.max(1, safeRows - 2)
   const maxHeight = Math.max(1, Math.min(
     availableHeight,

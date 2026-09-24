@@ -1278,7 +1278,7 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
     // summary instead).
     else if (block.type === 'image') lines.push('[image]')
     else if (block.type === 'file') lines.push(fileAttachmentSummary(block.attachment))
-    else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+    else if (block.type === 'reasoning' || block.type === 'tool-call') {
       // Preserve the existing raw projection for known process blocks; their
       // dedicated transcript surfaces own ordinary rendering.
       lines.push(JSON.stringify(block, null, 2))
@@ -1543,24 +1543,60 @@ export function focusToolDisplay(
   options: { presenter?: ToolPresenter; cwd?: string } = {},
 ): string {
   const owned = options.presenter?.call(tool.name, tool.args)
-  if (owned !== undefined) return formatOwnedCallForCompactFocus(owned)
+  if (owned !== undefined) return formatOwnedCallForCompactFocus(tool.name, owned)
   return focusToolFallbackDisplay(tool.name, tool.args, options.cwd)
 }
 
-/** The compact line from a tool-owned presentCall view: the title, plus
- * the rawInput when it is a string the title does not already carry (the
- * skill tool's title is `Load skill <name>` — appending its rawInput
- * again would duplicate). The terminal title is the FULL command, which
- * may contain real line breaks (heredoc / python / node -); the compact
- * Focus Tool slot is exactly ONE physical framebuffer row, so only its
- * FIRST line may surface here — the expanded tool card still renders the
- * full multiline command (ghost-row fix). */
-function formatOwnedCallForCompactFocus(view: ToolCallView): string {
-  if (view.card === 'terminal') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
+/** The compact line from a tool-owned presentCall view. The official shell
+ * presenters split the COMMAND (`title` / `rawInput`) from the human
+ * `description` that is "shown in the UI"; the Focus Tool slot is a
+ * description surface, so it prefers that description and never re-derives
+ * the command from args. Because a description alone loses the tool's
+ * identity, the two description-backed paths (foreground terminal and
+ * background generic execute) prefix it with the human-facing tool title —
+ * `Bash · Show working tree status`. Every other path keeps the previous
+ * title / rawInput behavior, and the terminal title's FULL command still
+ * renders in the expanded tool card — the compact row is exactly ONE
+ * physical framebuffer row, so only a first logical line may surface here. */
+function formatOwnedCallForCompactFocus(name: string, view: ToolCallView): string {
+  if (view.card === 'terminal') {
+    // Foreground shell: description above the card, command as the title.
+    const description = firstLine((view.description ?? '').replace(/\r\n|\r/g, '\n')).trim()
+    if (description !== '') return `${compactFocusToolIdentity(name)} · ${description}`
+    return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
+  }
   if (view.card === 'diff') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
+  // Generic execute (background shell): the description rides in the
+  // presenter's content text while the rawInput is the command.
+  if (view.kind === 'execute') {
+    const description = firstContentText(view)
+    if (description !== undefined) return `${compactFocusToolIdentity(name)} · ${description}`
+  }
   const raw = typeof view.rawInput === 'string' ? view.rawInput.trim() : undefined
   if (raw === undefined || raw === '') return view.title
   return view.title.endsWith(raw) ? view.title : `${view.title} ${firstLine(raw)}`
+}
+
+/** The human-facing tool identity for a description-backed compact row.
+ * Reuses the formal title mapping; a name it resolves only to the generic
+ * `Tool`/`tool` keeps its raw name so a custom tool is never flattened to a
+ * meaningless `Tool · description` (same unknown-tool identity principle as
+ * the static fallback). */
+function compactFocusToolIdentity(name: string): string {
+  const title = toolTitle(name)
+  return title === 'Tool' || title === 'tool' ? name : title
+}
+
+/** The first meaningful text block of a call view's content as one logical
+ * line — the official Bash background presenter puts its human description
+ * in `content[0]`. Undefined when no non-blank text block exists. */
+function firstContentText(view: { content?: ContentBlock[] }): string | undefined {
+  for (const block of view.content ?? []) {
+    if (block.type !== 'text') continue
+    const line = firstLine(block.text.replace(/\r\n|\r/g, '\n')).trim()
+    if (line !== '') return line
+  }
+  return undefined
 }
 
 /** The compact line from the static Web row-model header (replay /

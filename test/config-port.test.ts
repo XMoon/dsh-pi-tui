@@ -20,9 +20,12 @@ function host(services: Record<string, unknown>): HostContextLike {
   return { get: (name) => services[name], on: () => {} }
 }
 
+/** The 0.1.7 SettingsForms surface over an in-memory form document:
+ * `describe()` projects each section as a descriptor (value + user +
+ * revision) and `mutate()` records the path ops. */
 function settings(doc: Record<string, unknown>, writes: Array<{ ns: string; ops: unknown }> = []) {
   return {
-    get: (ns: string) => doc[ns],
+    describe: () => Object.entries(doc).map(([ns, value]) => ({ ns, value, user: value, revision: 3 })),
     mutate: async (ns: string, ops: unknown) => { writes.push({ ns, ops }) },
   }
 }
@@ -87,10 +90,10 @@ test('providers listCredentialOptions falls back to the settings-only reader wit
   assert.deepEqual(port({}).providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
 })
 
-test('providers degrade when reading an unregistered settings namespace', () => {
+test('providers degrade when the settings projection throws', () => {
   const providers = port({
     settings: {
-      get: () => { throw new Error('namespace not registered') },
+      describe: () => { throw new Error('settings projection failed') },
       mutate: async () => {},
     },
   }).providers
@@ -552,17 +555,18 @@ async function settle(): Promise<void> {
 
 // ── permissions ───────────────────────────────────────────────────────────
 
-test('permissions read names and the persisted default, and persist the default', async () => {
+test('permissions read names and the effective default, and persist the default', async () => {
   const writes: Array<{ ns: string; ops: unknown }> = []
   const permissions = port({
-    permissionPresets: { get names() { return ['workspace-write', 'danger-full-access'] } },
-    settings: settings({ permission: { defaultPreset: 'workspace-write' } }, writes),
+    permissionPresets: { get names() { return ['workspace-write', 'danger-full-access'] }, get defaultPreset() { return 'workspace-write' } },
+    settings: settings({}, writes),
   }).permissions
   assert.deepEqual(permissions.presetNames(), ['workspace-write', 'danger-full-access'])
+  // The 0.1.7 read authority is the owning service's effective value.
   assert.equal(permissions.defaultPreset(), 'workspace-write')
   await permissions.setDefaultPreset('danger-full-access')
   assert.deepEqual(writes, [{ ns: 'permission', ops: [{ op: 'set', path: ['defaultPreset'], value: 'danger-full-access' }] }])
-  assert.equal(port({}).permissions.defaultPreset(), undefined, 'no settings -> no default')
+  assert.equal(port({}).permissions.defaultPreset(), undefined, 'no service -> no default')
 })
 
 test('applyPermissionPreset runs the OFFICIAL command line through the resolved agent', async () => {
@@ -597,24 +601,26 @@ test('applyPermissionPreset refuses a preset id the composed table does not offe
 
 // ── preset default ────────────────────────────────────────────────────────
 
-test('presetDefault preserves a legal code id and allows the roster to validate it', async () => {
+test('presetDefault reads the registry policy and writes the selectedDefault user preference', async () => {
   const writes: Array<{ ns: string; ops: unknown }> = []
   const presetDefault = port({
-    settings: settings({ 'agent-presets': { default: 'code' } }, writes),
-    agentPresets: { get defaultId() { return 'standard' } },
+    settings: settings({}, writes),
+    agentPresets: { get defaultId() { return 'code' } },
   }).presetDefault
   assert.equal(presetDefault.available(), true)
-  assert.equal(presetDefault.get(), 'code', 'the config adapter cannot disambiguate code without a roster snapshot')
+  // The registry's own merged policy (deployment default + selectedDefault
+  // + mode selection) is the read authority — a `code` id is ordinary.
+  assert.equal(presetDefault.get(), 'code')
   await presetDefault.set('code')
-  assert.deepEqual(writes, [{ ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'code' }] }])
+  assert.deepEqual(writes, [{ ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'code' }] }])
   await presetDefault.set('ptc')
   assert.deepEqual(writes, [
-    { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'code' }] },
-    { ns: 'agent-presets', ops: [{ op: 'set', path: ['default'], value: 'ptc' }] },
+    { ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'code' }] },
+    { ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }] },
   ])
 })
 
-test('presetDefault falls back to the roster default and degrades without settings', () => {
+test('presetDefault degrades without the registry or the settings surface', () => {
   const presetDefault = port({
     settings: settings({}),
     agentPresets: { get defaultId() { return 'standard' } },
@@ -669,26 +675,23 @@ test('permissions approvalOverrideOf reads the official approval service session
 
 // ── subagent model selection (the official settings section) ──────────────
 
-test('subagentModelSelection reads the official section and degrades to the shipped default', () => {
+test('subagentModelSelection reads the official service and degrades to the shipped default', () => {
   const config = port({
-    subagentModelSelection: {},
-    settings: settings({
-      'subagent-model-selection': { enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }] },
-    }),
+    subagentModelSelection: { current: () => ({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }] }) },
+    settings: settings({}),
   }).subagentModelSelection
   assert.equal(config.available(), true)
   const current = config.get()
   assert.equal(current.enabled, true)
   assert.deepEqual(current.allowedModels, [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }])
 
-  const missing = port({ subagentModelSelection: {}, settings: settings({}) }).subagentModelSelection
-  assert.deepEqual(missing.get(), { enabled: false, allowedModels: [] }, 'an unregistered section reads as the shipped default')
+  const missing = port({ subagentModelSelection: { current: () => ({ enabled: false, allowedModels: [] }) }, settings: settings({}) }).subagentModelSelection
+  assert.deepEqual(missing.get(), { enabled: false, allowedModels: [] }, 'the service reads its own shipped default')
   const noService = port({}).subagentModelSelection
   assert.equal(noService.available(), false)
   assert.deepEqual(noService.get(), { enabled: false, allowedModels: [] })
   // A generic settings service WITHOUT the official subagentModelSelection
-  // service is NOT the capability: the section is not registered, so the
-  // /settings rows must not appear (review finding).
+  // service is NOT the capability: the /settings rows must not appear.
   const settingsOnly = port({ settings: settings({}) }).subagentModelSelection
   assert.equal(settingsOnly.available(), false, 'settings alone must not advertise the official section')
 })
@@ -698,7 +701,7 @@ test('subagentModelSelection writes the whole official section through the setti
   const config = port({ settings: settings({}, writes) }).subagentModelSelection
   await config.set({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] })
   assert.equal(writes.length, 1)
-  assert.equal(writes[0]!.ns, 'subagent-model-selection')
+  assert.equal(writes[0]!.ns, 'subagent-model-selection-settings')
   assert.deepEqual(writes[0]!.ops, [
     { op: 'set', path: ['enabled'], value: true },
     { op: 'set', path: ['allowedModels'], value: [{ provider: 'p', model: 'm1' }] },

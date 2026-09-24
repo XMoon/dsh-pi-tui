@@ -167,6 +167,7 @@ function inertAdvancedHostState(): AdvancedHostState {
     setTheme: () => {},
     setTitle: () => {},
     setWorkingMessage: () => {},
+    setTranscriptDetailExpanded: () => {},
     setToolsExpanded: () => {},
   }
 }

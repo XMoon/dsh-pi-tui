@@ -85,12 +85,9 @@ function toolResult(seq: number, callId: string, text: string, name = 'bash'): S
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
@@ -103,12 +100,9 @@ function pruneReplacement(seq: number, callId: string, text: string, originalSeq
     step: 0,
     message: {
       id: MessageId(`msg-prune-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, { op: 'replace', start: originalSeq, end: originalSeq })
@@ -411,12 +405,9 @@ test('pairs tool calls with their results and caps long summaries', () => {
       step: 0,
       message: {
         id: MessageId('msg-3'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-1'),
-          content: [{ type: 'text', text: long }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-1'),
+        content: [{ type: 'text', text: long }],
         source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
     }, 1),
@@ -450,12 +441,9 @@ test('run_code root call folds into a stable Code card', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 1),
@@ -492,12 +480,9 @@ test('nested PTC bash dispatch attaches to the run_code card subCalls tree', () 
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: '(run_code completed with no output)' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: '(run_code completed with no output)' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -563,8 +548,9 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 5),
@@ -642,8 +628,9 @@ test('nested PTC siblings keep their durable dispatch order', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 7),
@@ -680,12 +667,9 @@ test('nested PTC dispatch with an error outcome keeps the durable error status',
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -723,8 +707,9 @@ test('a spilled result with an exit marker still parses the terminal failure', (
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -765,12 +750,9 @@ test('nested spilled/generic dispatch content stays readable without a fabricate
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -811,12 +793,9 @@ test('nested dispatch with an explicit exit marker keeps the marker in the body'
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -854,12 +833,9 @@ test('nested dispatch with a signal marker is marked failed', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -897,12 +873,9 @@ test('nested dispatch with an exit code 0 marker stays ok', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -942,8 +915,9 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-4'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-4'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 4),
@@ -951,8 +925,9 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-6'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('r1'), content: [{ type: 'text', text: 'aaa' }] }],
+        id: MessageId('msg-6'), role: 'tool',
+        toolCallId: ToolCallId('r1'),
+        content: [{ type: 'text', text: 'aaa' }],
         source: { kind: 'tool', callId: ToolCallId('r1') },
       },
     }, 6),
@@ -960,8 +935,9 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-8'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('r2'), content: [{ type: 'text', text: 'bbb' }] }],
+        id: MessageId('msg-8'), role: 'tool',
+        toolCallId: ToolCallId('r2'),
+        content: [{ type: 'text', text: 'bbb' }],
         source: { kind: 'tool', callId: ToolCallId('r2') },
       },
     }, 8),
@@ -1023,8 +999,9 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-2'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 2),
@@ -1060,8 +1037,9 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-3'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-3'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -1099,8 +1077,9 @@ test('a settle parked before its start applies when the parent is already mounte
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -1121,13 +1100,10 @@ test('an outer run_code error result keeps the error status', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          isError: true,
-          content: [{ type: 'text', text: 'CODE_RUN_FAILED: boom' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'CODE_RUN_FAILED: boom' }],
+        isError: true,
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 1),
@@ -1163,12 +1139,9 @@ test('PTC event replay folds to the same topology and presentation', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -1337,44 +1310,50 @@ test('turn/end error renders a failure line', () => {
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, 'error')
   assert.equal(tool.result, 'authentication failed')
+  assert.equal(tool.origin, 'turn-error')
 })
 
-test('command/run + command/done fold into an executed line', () => {
+test('command/run + command/done fold into one real command node', () => {
   const messages = foldTranscript([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
     event('command/done', { commandId: CommandId('cmd-1'), kind: 'success' }, 1),
   ])
-  assert.deepEqual(kinds(messages), ['tool'])
-  const tool = messages[0]
-  assert.ok(tool !== undefined && tool.kind === 'tool')
-  assert.equal(tool.name, '/compact')
+  assert.deepEqual(kinds(messages), ['command'])
+  const command = messages[0]
+  assert.ok(command !== undefined && command.kind === 'command')
+  assert.equal(command.name, 'compact')
+  assert.ok(!('turn' in command), 'a real command node carries no semantic turn')
+  assert.equal(command.outcome?.kind, 'success')
 })
 
-test('command/done success text and error text fold into the card', () => {
+test('command/done success text and error text settle the same command row', () => {
   const success = foldTranscript([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', source: { kind: 'user' } }, 0),
     event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', text: 'title set: hello' }, 1),
   ])
   const ok = success[0]
-  assert.ok(ok !== undefined && ok.kind === 'tool')
-  assert.equal(ok.result, 'executed — title set: hello')
+  assert.ok(ok !== undefined && ok.kind === 'command')
+  assert.equal(ok.outcome?.text, 'title set: hello')
   const failed = foldTranscript([
     event('command/run', { commandId: CommandId('cmd-2'), name: 'title', source: { kind: 'user' } }, 0),
     event('command/done', { commandId: CommandId('cmd-2'), kind: 'error', text: 'boom' }, 1),
   ])
   const bad = failed[0]
-  assert.ok(bad !== undefined && bad.kind === 'tool')
-  assert.equal(bad.status, 'error')
-  assert.equal(bad.result, 'executed — error: boom')
+  assert.ok(bad !== undefined && bad.kind === 'command')
+  assert.equal(bad.outcome?.kind, 'error')
+  assert.equal(bad.outcome?.text, 'boom')
 })
 
-test('plugin-sourced user messages fold as system entries', () => {
+test('skill-invocation user messages fold as system entries', () => {
+  // The retired catch-all `plugin` source kind became per-producer kinds;
+  // a producer-named injected instruction context is carried by the
+  // official `skill-invocation` source (name + form 'instructions').
   const messages = foldTranscript([
     event('user/message', {
       id: MessageId('msg-4'),
       role: 'user',
       content: [{ type: 'text', text: '<system-reminder>\nworkspace instructions…' }],
-      source: { kind: 'plugin', plugin: 'agent-instructions' },
+      source: { kind: 'skill-invocation', name: 'workspace-instructions', form: 'instructions' },
     }, 0),
     event('user/message', {
       id: MessageId('msg-5'),
@@ -1387,7 +1366,7 @@ test('plugin-sourced user messages fold as system entries', () => {
   const system = messages[0]
   assert.ok(system !== undefined && system.kind === 'system')
   assert.ok(system.text.includes('<system-reminder>'))
-  assert.equal(system.label, 'agent-instructions', 'the producer label must be projected')
+  assert.equal(system.label, 'workspace-instructions', 'the producer label must be projected')
 })
 
 test('aborted turn/end folds into an interrupted card', () => {
@@ -1400,6 +1379,20 @@ test('aborted turn/end folds into an interrupted card', () => {
   assert.equal(tool.name, 'interrupted')
   assert.equal(tool.status, 'error')
   assert.equal(tool.result, 'cancelled by user')
+  assert.equal(tool.origin, 'turn-interrupted')
+})
+
+test('crash-recovery interrupted turn/end folds into an attention card', () => {
+  const messages = foldTranscript([
+    event('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 0),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'])
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.name, 'interrupted')
+  assert.equal(tool.status, 'error')
+  assert.equal(tool.result, 'interrupted')
+  assert.equal(tool.origin, 'turn-interrupted')
 })
 
 test('parallel same-name tool calls pair results by callId', () => {
@@ -1414,12 +1407,9 @@ test('parallel same-name tool calls pair results by callId', () => {
       step: 0,
       message: {
         id: MessageId('msg-a'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-1'),
-          content: [{ type: 'text', text: 'out-one' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-1'),
+        content: [{ type: 'text', text: 'out-one' }],
         source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
     }, 3),
@@ -1428,12 +1418,9 @@ test('parallel same-name tool calls pair results by callId', () => {
       step: 0,
       message: {
         id: MessageId('msg-b'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-2'),
-          content: [{ type: 'text', text: 'out-two' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-2'),
+        content: [{ type: 'text', text: 'out-two' }],
         source: { kind: 'tool', callId: ToolCallId('call-2') },
       },
     }, 4),
@@ -1530,8 +1517,16 @@ test('late reasoning keeps an assistant-settled thinking entry closed', () => {
     }, 1),
   ])
   // The transcript preserves the late replay fragment, but it must not
-  // re-enter the open lifecycle set or become running again.
+  // re-enter the open lifecycle set or become running again. The live
+  // chronology (Thinking BEFORE the Assistant row — §4.5) stays anchored:
+  // an in-place refresh on an EXISTING row never re-judges its position
+  // against the stored authority.
   folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: ' after' }, 1_700_000_000_002))
+  assert.deepEqual(
+    folder.messages().map(message => message.kind),
+    ['thinking', 'assistant'],
+    'the §4.5-anchored lane order survives the late in-place refresh',
+  )
   const thinking = folder.messages().find((message): message is Extract<TranscriptMessage, { kind: 'thinking' }> => message.kind === 'thinking')
   assert.ok(thinking)
   assert.equal(thinking.running, false)
@@ -1553,8 +1548,9 @@ test('windows older turns into one summary entry', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('call-0'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('call-0'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('call-0') },
       },
     }, 3),
@@ -1630,31 +1626,32 @@ test('the window projection reads incremental counts: deep history never rescann
   assert.equal(folder.messages().length, 1200)
 })
 
-test('a cross-turn read group keeps the fast window consistent with the full scan', () => {
-  // turn 1: read ok; turn 2: read ok (merges with turn 1's read into one
-  // card with turn 2); turn 3: plain user message. The fast window's
-  // turn index counts the RAW items (3 turns) while the grouped output
-  // only has turns {2, 3} — the summaries must still agree.
+test('a same-turn read group keeps the fast window consistent with the full scan', () => {
+  // turn 1: two reads (merge into one "2 files" card on turn 1); turn 2:
+  // plain user message. The fast window's turn index counts the RAW items
+  // while the grouped output merges turn 1's reads — the summaries must
+  // still agree.
   const folder = new TranscriptFolder()
   const events: SessionEvent[] = [
     event('turn/start', { turn: 1 }, 0),
     event('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-1'), name: 'read', arguments: '{}' }, 1),
     event('tool/result', {
       turn: 1, step: 0,
-      message: { id: MessageId('msg-1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-1'), content: [{ type: 'text', text: 'a' }] }], source: { kind: 'tool', callId: ToolCallId('call-1') } },
+      message: { id: MessageId('msg-1'), role: 'tool', toolCallId: ToolCallId('call-1'),
+      content: [{ type: 'text', text: 'a' }], source: { kind: 'tool', callId: ToolCallId('call-1') } },
     }, 2),
-    event('turn/start', { turn: 2 }, 3),
-    event('tool/call', { turn: 2, step: 0, callId: ToolCallId('call-2'), name: 'read', arguments: '{}' }, 4),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-2'), name: 'read', arguments: '{}' }, 3),
     event('tool/result', {
-      turn: 2, step: 0,
-      message: { id: MessageId('msg-2'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-2'), content: [{ type: 'text', text: 'b' }] }], source: { kind: 'tool', callId: ToolCallId('call-2') } },
-    }, 5),
-    event('turn/start', { turn: 3 }, 6),
+      turn: 1, step: 0,
+      message: { id: MessageId('msg-2'), role: 'tool', toolCallId: ToolCallId('call-2'),
+      content: [{ type: 'text', text: 'b' }], source: { kind: 'tool', callId: ToolCallId('call-2') } },
+    }, 4),
+    event('turn/start', { turn: 2 }, 5),
     event('user/message', {
       id: MessageId('msg-3'), role: 'user',
       content: [{ type: 'text', text: 'q3' }],
       source: { kind: 'user' },
-    }, 7),
+    }, 6),
   ]
   folder.apply(events)
   const fast = folder.messages({ maxTurns: 1 })
@@ -1663,12 +1660,12 @@ test('a cross-turn read group keeps the fast window consistent with the full sca
   assert.equal(JSON.stringify(bounded.messages), JSON.stringify(full),
     `the indexed window must match the full scan:\n${JSON.stringify(bounded.messages)}\nvs\n${JSON.stringify(full)}`)
   assert.deepEqual({ firstTurn: bounded.firstTurn, lastTurn: bounded.lastTurn, hasOlder: bounded.hasOlder, hasNewer: bounded.hasNewer }, {
-    firstTurn: 3, lastTurn: 3, hasOlder: true, hasNewer: false,
+    firstTurn: 2, lastTurn: 2, hasOlder: true, hasNewer: false,
   })
   assert.equal(JSON.stringify(fast), JSON.stringify(full),
     `the fast window must match the full scan:\n${JSON.stringify(fast)}\nvs\n${JSON.stringify(full)}`)
-  const anchored = folder.window({ maxTurns: 1, endTurn: 2 })
-  const anchoredFull = windowMessages(folder.messages(), 1, 2)
+  const anchored = folder.window({ maxTurns: 1, endTurn: 1 })
+  const anchoredFull = windowMessages(folder.messages(), 1, 1)
   assert.equal(JSON.stringify(anchored.messages), JSON.stringify(anchoredFull),
     `anchored indexed window must match the full scan:\n${JSON.stringify(anchored.messages)}\nvs\n${JSON.stringify(anchoredFull)}`)
   const summary = fast[0]
@@ -1778,14 +1775,16 @@ test('the fast window matches the full scan across mixed grouping shapes', () =>
     events.push(event('tool/call', { turn, step: 0, callId: ToolCallId(`call-${seq}`), name: 'read', arguments: '{}' }, seq++))
     events.push(event('tool/result', {
       turn, step: 0,
-      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${seq}`), content: [{ type: 'text', text: 'file' }] }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
+      message: { id: MessageId(`msg-${seq}`), role: 'tool', toolCallId: ToolCallId(`call-${seq}`),
+      content: [{ type: 'text', text: 'file' }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
     }, seq++))
   }
   const tool = (turn: number): void => {
     events.push(event('tool/call', { turn, step: 0, callId: ToolCallId(`call-${seq}`), name: 'bash', arguments: '{}' }, seq++))
     events.push(event('tool/result', {
       turn, step: 0,
-      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${seq}`), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
+      message: { id: MessageId(`msg-${seq}`), role: 'tool', toolCallId: ToolCallId(`call-${seq}`),
+      content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
     }, seq++))
   }
   // turn 0: user + read; turn 1: read (cross-turn merge with turn 0)
@@ -1834,8 +1833,9 @@ test('the window summary counts grouped read cards from the incremental projecti
     events.push(event('tool/result', {
       turn, step: 0,
       message: {
-        id: MessageId(`msg-${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${turn}`), content: [{ type: 'text', text: 'file' }] }],
+        id: MessageId(`msg-${turn}`), role: 'tool',
+        toolCallId: ToolCallId(`call-${turn}`),
+        content: [{ type: 'text', text: 'file' }],
         source: { kind: 'tool', callId: ToolCallId(`call-${turn}`) },
       },
     }, seq++))
@@ -1896,12 +1896,9 @@ test('consecutive read results group into one card', () => {
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
@@ -1916,8 +1913,9 @@ test('consecutive read results group into one card', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-6'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('b1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('msg-6'), role: 'tool',
+        toolCallId: ToolCallId('b1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('b1') },
       },
     }, 6),
@@ -1938,18 +1936,20 @@ test('consecutive read results group into one card', () => {
 })
 
 
-test('consecutive read grouping spans turn boundaries (incremental projection parity)', () => {
+test('consecutive read grouping never spans turn boundaries (incremental projection parity)', () => {
   const readResult = (seq: number, callId: string, text: string): SessionEvent => event('tool/result', {
     turn: 0,
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text }] }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
-  // Two reads in DIFFERENT turns, applied incrementally.
+  // Two reads in DIFFERENT turns, applied incrementally: grouping must not
+  // merge them (post-F6 PR B — per-turn Activity ownership).
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -1962,20 +1962,40 @@ test('consecutive read grouping spans turn boundaries (incremental projection pa
     readResult(5, 'r2', 'bbb'),
   ])
   const tools = folder.messages().filter(message => message.kind === 'tool')
-  assert.equal(tools.length, 1, 'grouping ignores turn boundaries (same as the one-shot pass)')
-  assert.equal(tools[0]?.args, '2 files')
-  assert.ok((tools[0]?.result ?? '').includes('aaa') && (tools[0]?.result ?? '').includes('bbb'))
+  assert.equal(tools.length, 2, 'a group never crosses a turn boundary')
+  assert.equal(tools[0]?.args, '{"file":"a.ts"}')
+  assert.equal(tools[1]?.args, '{"file":"b.ts"}')
+  // Same-turn incremental merging still works exactly as before.
+  const sameTurn = new TranscriptFolder()
+  sameTurn.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    readResult(4, 'r2', 'bbb'),
+  ])
+  const merged = sameTurn.messages().filter(message => message.kind === 'tool')
+  assert.equal(merged.length, 1, 'same-turn reads still merge incrementally')
+  assert.equal(merged[0]?.args, '2 files')
+  // The exported mirror carries the SAME merged genuine-call cardinality as
+  // the folder's group card (field-for-field parity, post-F6 plan §10.2).
+  assert.equal(groupConsecutiveReads(sameTurn.messages()).filter(message => message.kind === 'tool')[0]?.callCount, 2)
 })
 
 test('a failed read breaks the group; late settlement preserves reflow counts', () => {
   const readResult = (seq: number, callId: string, text: string, isError = false): SessionEvent => event('tool/result', {
     turn: 0,
     step: 0,
+    // Native V4 admission requires `message.isError: true` whenever
+    // structured `data.error` metadata is present; the fold reads the durable
+    // outcome from `message.isError` alone.
     ...isError ? { error: { name: 'read-failed', code: 'read-failed' } } : {},
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text }] }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
+      ...isError ? { isError: true } : {},
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
@@ -2058,8 +2078,9 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
       step: 0,
       message: {
         id: MessageId(`hydrate-read-message-${index}`),
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `result-${index}` }] }],
+        role: 'tool',
+        toolCallId: callId,
+        content: [{ type: 'text', text: `result-${index}` }],
         source: { kind: 'tool', callId },
       },
     }, events.length))
@@ -2116,8 +2137,9 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
       step: 0,
       message: {
         id: MessageId('hydrate-read-live-message'),
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: nextCall, content: [{ type: 'text', text: 'live-result' }] }],
+        role: 'tool',
+        toolCallId: nextCall,
+        content: [{ type: 'text', text: 'live-result' }],
         source: { kind: 'tool', callId: nextCall },
       },
     }, events.length + 1),
@@ -2128,7 +2150,11 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
   assert.ok(liveTools[0]?.result.endsWith('live-result'))
 })
 
-test('subagent/descriptor folds into a delegation card', () => {
+test('subagent/descriptor materializes no transcript message', () => {
+  // Post-PR166 convergence: the descriptor is child identity metadata, not
+  // transcript content — the viewer holds the authoritative child identity
+  // and the parent's genuine tool/call name=subagent is the delegation
+  // evidence. The fold consumes the event without appending any row.
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     event('subagent/descriptor', {
@@ -2138,15 +2164,9 @@ test('subagent/descriptor folds into a delegation card', () => {
       label: 'do the thing',
       agentModel: 'deepseek-chat',
     }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
   ])
-  assert.deepEqual(kinds(messages), ['tool'])
-  const card = messages[0]
-  assert.ok(card !== undefined && card.kind === 'tool')
-  assert.equal(card.name, 'subagent')
-  assert.equal(card.args, 'do the thing')
-  assert.equal(card.status, 'ok')
-  assert.ok(card.result.includes('mode: continuable'))
-  assert.ok(card.result.includes('model: deepseek-chat'))
+  assert.deepEqual(kinds(messages), [])
 })
 
 test('workflow run events fold into one workflow card with member rows', () => {
@@ -2429,6 +2449,7 @@ test('llm/retry folds into a system line with the delay', () => {
   assert.ok(entry !== undefined && entry.kind === 'system')
   assert.ok(entry.text.includes('llm retry 1/2 in 3s'), `text:\n${entry.text}`)
   assert.ok(entry.text.includes('RATE_LIMITED'), `text:\n${entry.text}`)
+  assert.equal(entry.origin, 'llm-retry')
 })
 
 test('AUTH failures use generic presentation text without leaking durable messages', () => {
@@ -2470,6 +2491,7 @@ test('max-tokens turn end folds into a notice', () => {
   const entry = messages[0]
   assert.ok(entry !== undefined && entry.kind === 'system')
   assert.ok(entry.text.includes('max tokens'), `text:\n${entry.text}`)
+  assert.equal(entry.origin, 'turn-max-tokens')
 })
 
 test('window anchored at endTurn shows the match turn instead of the newest', () => {
@@ -2557,12 +2579,9 @@ test('tool results keep their content blocks and meta for presentation', () => {
       step: 0,
       message: {
         id: MessageId('msg-3'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-1'),
-          content: [{ type: 'text', text: 'hi' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-1'),
+        content: [{ type: 'text', text: 'hi' }],
         source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
       meta: { path: '/ws/src/foo.ts', totalLines: 1 },
@@ -2631,13 +2650,57 @@ test('a notice-form injection records its one-line summary', () => {
       id: MessageId('msg-notice'),
       role: 'user',
       content: [{ type: 'text', text: '3 files written' }],
-      source: { kind: 'plugin', plugin: 'todo', form: 'notice', summary: 'saved the todo list' },
+      // The official notice carrier is any ContextFormed producer kind;
+      // `plan-mode` declares form 'notice' with its one-line summary.
+      source: { kind: 'plan-mode', form: 'notice', summary: 'saved the todo list' },
     }, 0),
   ])
   const system = messages[0]
   assert.ok(system !== undefined && system.kind === 'system')
-  assert.equal(system.label, 'todo')
+  assert.equal(system.label, 'plan-mode')
   assert.equal(system.summary, 'saved the todo list')
+})
+
+test('a subagent settlement notice folds as the Host-constructed text-only notice', () => {
+  // 0.1.6's parent settlement notice carries ONLY the child's closing text
+  // blocks; the Host builds it and the TUI folds it as-is — it never
+  // re-filters the child's blocks nor rebuilds a notice of its own.
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('msg-settled'),
+      role: 'user',
+      content: [{ type: 'text', text: 'child finished: 2 files written' }],
+      source: { kind: 'subagent-settled' } as never,
+    }, 0),
+  ])
+  const notice = messages[0]
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.icon, 'context-notice')
+  assert.equal(notice.text, 'child finished: 2 files written')
+})
+
+test('multiple subagent settlement notices keep their Host order', () => {
+  const text = (message: TranscriptMessage | undefined): string | undefined =>
+    message !== undefined && message.kind === 'system' ? message.text : undefined
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('m1'),
+      role: 'user',
+      content: [{ type: 'text', text: 'first child closed' }],
+      source: { kind: 'subagent-settled' } as never,
+    }, 0),
+    event('user/message', {
+      id: MessageId('m2'),
+      role: 'user',
+      content: [{ type: 'text', text: 'second child closed' }],
+      source: { kind: 'subagent-settled' } as never,
+    }, 1),
+  ])
+  assert.deepEqual(
+    messages.map(text),
+    ['first child closed', 'second child closed'],
+    'settlement notices must present in the order the Host projected them',
+  )
 })
 
 test('an unreadable injection source degrades to its kind as the label', () => {
@@ -2828,12 +2891,9 @@ test('Test F: legacy unmarked sessions keep their current behavior', () => {
       step: 0,
       message: {
         id: MessageId('msg-legacy'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('legacy-1'),
-          content: [{ type: 'text', text: 'legacy result' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('legacy-1'),
+        content: [{ type: 'text', text: 'legacy result' }],
         source: { kind: 'tool', callId: ToolCallId('legacy-1') },
       },
     }, 2),
@@ -2879,12 +2939,9 @@ test('a replacement does not disturb consecutive-read grouping or the window sum
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
@@ -2918,12 +2975,9 @@ test('window summaries stay identical across a prune replacement', () => {
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
@@ -3909,6 +3963,516 @@ test('compact assistant stream records preserve first-lane parity across represe
     assert.deepEqual(live.messages(), cold.messages(), `${scenario.name}: live/cold parity`)
     assert.deepEqual(live.messages().slice(0, 2).map(message => message.kind), scenario.expected, `${scenario.name}: first-lane order`)
   }
+})
+
+// ── assistant/message lane-order authority (post-F6 plan PR A) ───────────
+
+/** One reasoning-first / text-first durable assistant step: the complete
+ * embedded stream records plus the matching assembled message content. */
+function laneOrderedStep(first: 'thinking' | 'assistant'): { stream: AssistantStreamRecord[]; content: ContentBlock[] } {
+  const thought = { type: 'reasoning' as const, text: 'ordered thought' }
+  const answer = { type: 'text' as const, text: 'ordered answer' }
+  const thinkingChunks = [
+    { type: 'block-start' as const, index: 0, blockType: 'reasoning' as const },
+    { type: 'reasoning-delta' as const, index: 0, text: thought.text },
+    { type: 'block-end' as const, index: 0, block: thought },
+  ]
+  const assistantChunks = [
+    { type: 'block-start' as const, index: 1, blockType: 'text' as const },
+    { type: 'text-delta' as const, index: 1, text: answer.text },
+    { type: 'block-end' as const, index: 1, block: answer },
+  ]
+  const firstLane = first === 'thinking' ? thinkingChunks : assistantChunks
+  const secondLane = first === 'thinking' ? assistantChunks : thinkingChunks
+  return {
+    stream: [
+      ...firstLane.map((chunk, index) => ({ type: 'chunk' as const, time: 2 + index, chunk })),
+      ...secondLane.map((chunk, index) => ({ type: 'chunk' as const, time: 5 + index, chunk })),
+    ] as unknown as AssistantStreamRecord[],
+    content: first === 'thinking' ? [thought, answer] : [answer, thought],
+  }
+}
+
+/** One durable `assistant/message` settlement carrying the step evidence. */
+function messageSettlement(seq: number, step: { stream: AssistantStreamRecord[]; content: ContentBlock[] }): SessionEvent {
+  return event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: { id: MessageId('lane-order'), role: 'assistant', content: step.content, source: { kind: 'model', provider: 'p', model: 'm' } },
+    stream: [...step.stream],
+  }, seq)
+}
+
+/** One durable text-only `assistant/message` settlement (empty stream — no
+ * STREAM lane evidence; the text-only content itself proves an
+ * assistant-first step). */
+function textOnlySettlement(seq: number, text = 'final answer'): SessionEvent {
+  return event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: { id: MessageId(`text-only-${seq}`), role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    stream: [],
+  }, seq)
+}
+
+test('cold assistant/message settlements preserve the durable lane order in both directions', () => {
+  for (const first of ['thinking', 'assistant'] as const) {
+    const folder = new TranscriptFolder()
+    folder.hydrate([
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+      messageSettlement(2, laneOrderedStep(first)),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+    ])
+    assert.deepEqual(
+      kinds(folder.messages()),
+      first === 'thinking' ? ['thinking', 'assistant'] : ['assistant', 'thinking'],
+      `${first}-first durable step must keep its stream order`,
+    )
+    const thinking = folder.messages().find(message => message.kind === 'thinking')
+    assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+    assert.equal(thinking.text, 'ordered thought')
+    assert.equal(thinking.running, false, 'the durable settlement restores the Thinking lane settled')
+  }
+})
+
+test('a stream-less assistant/message settles its lanes from the durable content order', () => {
+  for (const first of ['thinking', 'assistant'] as const) {
+    const content = first === 'thinking'
+      ? [{ type: 'reasoning', text: 'ordered thought' }, { type: 'text', text: 'ordered answer' }] as ContentBlock[]
+      : [{ type: 'text', text: 'ordered answer' }, { type: 'reasoning', text: 'ordered thought' }] as ContentBlock[]
+    const folder = new TranscriptFolder()
+    folder.hydrate([
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+      event('assistant/message', {
+        turn: 0,
+        step: 0,
+        message: { id: MessageId('content-order'), role: 'assistant', content, source: { kind: 'model', provider: 'p', model: 'm' } },
+        stream: [],
+      }, 2),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+    ])
+    assert.deepEqual(
+      kinds(folder.messages()),
+      first === 'thinking' ? ['thinking', 'assistant'] : ['assistant', 'thinking'],
+      `${first}-first durable content must keep its block order`,
+    )
+  }
+})
+
+test('a lane-evidence-free stream defers the lane order to the durable content', () => {
+  // A NON-EMPTY stream can still carry no lane evidence (usage/finish frames
+  // only): the content fallback must apply whenever the stream's projection
+  // yields no first lane, not only when the stream array is missing/empty.
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('usage-only-stream'),
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'ordered thought' },
+          { type: 'text', text: 'ordered answer' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } },
+        { type: 'chunk', time: 3, chunk: { type: 'finish', reason: { kind: 'stop' } } },
+      ] as unknown as AssistantStreamRecord[],
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['thinking', 'assistant'],
+    'a stream without lane evidence must not mask the content-proven Thinking → Assistant order',
+  )
+})
+
+test('live streaming plus message settlement matches cold hydration for both lane orders', () => {
+  for (const first of ['thinking', 'assistant'] as const) {
+    const step = laneOrderedStep(first)
+    const prefix = [
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+    ]
+    const settlement = messageSettlement(2, step)
+    const end = event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3)
+    const live = new TranscriptFolder()
+    live.apply(prefix)
+    for (const member of expandAssistantStream(step.stream)) {
+      live.applyLiveInput(liveChunk(0, 0, member.chunk as never, member.time))
+    }
+    live.apply([settlement, end])
+    const cold = new TranscriptFolder()
+    cold.hydrate([...prefix, settlement, end])
+    // The live-settled entry clears its transient evidence with explicit
+    // `displayBlocks: undefined` / `interrupted: undefined` own keys, and its
+    // `content` is assigned unconditionally (a `content: undefined` own key
+    // for text-only messages); a cold-materialized entry never had those own
+    // keys. They are behaviorally absent in both, so the parity contract
+    // compares the serialized surface (order, text, content, flags) — JSON
+    // drops undefined own keys.
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(live.messages())),
+      JSON.parse(JSON.stringify(cold.messages())),
+      `${first}-first: live/cold transcript parity`,
+    )
+    assert.deepEqual(
+      kinds(live.messages()),
+      first === 'thinking' ? ['thinking', 'assistant'] : ['assistant', 'thinking'],
+      `${first}-first: live settlement order`,
+    )
+  }
+})
+
+test('first late reasoning after a text-only settlement is preserved as settled diagnostic evidence', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['assistant'])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: 'late diagnostic thought' }, 4))
+  // The evidence is KEPT (plan §4.6): an assistant-first step owns its
+  // Thinking lane after the Assistant row — valid topology, never running.
+  assert.deepEqual(kinds(folder.messages()), ['assistant', 'thinking'])
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'late diagnostic thought')
+  assert.equal(thinking.running, false, 'late reasoning is never made running again')
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.deepEqual([...((activity as { settledSteps?: Set<number> }).settledSteps ?? [])], [0], 'the step remains settled')
+  assert.ok(activity.think !== undefined, 'the Think slot keeps the preserved evidence')
+  assert.equal(activity.think.running, false, 'the Think slot stays settled')
+})
+
+test('late reasoning created for a thinking-first step relocates before the Assistant row', () => {
+  // Matrix-E counterpart under a THINKING-first authority: after a retry
+  // reset tombstones the settled Thinking row (the Assistant row survives —
+  // it is no longer transient), a late diagnostic delta CREATES the row via
+  // the settled path. The created row is placed by the stored thinking-first
+  // authority — relocated BEFORE the Assistant row, never appended as a
+  // trailing Activity.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.apply([
+    event('llm/retry', {
+      retryId: 'retry-late' as RetryId,
+      turn: 0,
+      step: 0,
+      provider: 'p',
+      mode: 'normal',
+      policyKey: 'test',
+      retry: 1,
+      maxRetries: 2,
+      delayMs: 0,
+      failure: { message: 'failed', code: 'TEST' },
+    }, 3),
+  ])
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['assistant', 'system'],
+    'the retry reset tombstones the settled Thinking row; the settled Assistant row survives',
+  )
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'recreated diagnostic thought' }, 4))
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['thinking', 'assistant', 'system'],
+    'the created Thinking row is placed by the stored thinking-first authority — no trailing Activity',
+  )
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'recreated diagnostic thought')
+  assert.equal(thinking.running, false, 'late reasoning is never made running again')
+})
+
+test('cold reasoning from the embedded stream survives a text-only assembled content', () => {
+  // Scenario A: stream = Reasoning -> Text, assembled content = Text only.
+  // The Thinking lane restores from the SAME projection that owns lane
+  // order/usage — durable reasoning is never lost to a lossy content list.
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('stream-reasoning'), role: 'assistant', content: [{ type: 'text', text: 'ordered answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: laneOrderedStep('thinking').stream,
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'ordered thought', 'the reasoning comes from the embedded stream, not the text-only content')
+  assert.equal(thinking.running, false)
+})
+
+test('a same-step replacement moves the Thinking lane to its own authority', () => {
+  // Scenario B: first settlement text-only, replacement Reasoning -> Text.
+  // Row existence is not chronology ownership — the replacement's durable
+  // evidence relocates the Thinking row BEFORE the Assistant row, so the
+  // invalid trailing Activity from #161's row-existence gate cannot return.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['assistant'])
+  folder.apply([messageSettlement(3, laneOrderedStep('thinking'))])
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['thinking', 'assistant'],
+    'the replacement settles Thinking -> Assistant with no trailing Activity',
+  )
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'ordered thought')
+  assert.equal(thinking.running, false)
+})
+
+test('a same-step replacement converges a reasoning-first step to assistant-first', () => {
+  // Scenario C: first settlement Reasoning -> Text, replacement Text ->
+  // Reasoning. The newer authoritative evidence owns the topology in BOTH
+  // directions.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.apply([messageSettlement(3, laneOrderedStep('assistant'))])
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['assistant', 'thinking'],
+    'the replacement converges the rows to the assistant-first topology',
+  )
+})
+
+test('remove and re-add reasoning keeps the lane chronology drift-free', () => {
+  // Scenario D: Reasoning -> Text, then a text-only replacement, then a
+  // Reasoning -> Text replacement again. The final topology is Thinking ->
+  // Assistant with no trailing drift.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.apply([textOnlySettlement(3, 'replacement answer')])
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'the text-only replacement removes the Thinking row')
+  folder.apply([messageSettlement(4, laneOrderedStep('thinking'))])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'ordered answer', 'the final replacement owns the Assistant text')
+})
+
+test('a replacement durable attempt converges the lane topology in both directions', () => {
+  // Attempt replacement without a presentation reset: `llm/retry-started`
+  // only opens the usage replacement slot, so BOTH rows persist and the
+  // newer attempt's durable authority must converge their display order —
+  // otherwise the stale topology would survive into the final message
+  // settlement behind the §4.5 first-settlement gate.
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const retryStarted = event('llm/retry-started', { retryId: 'retry-conv' as RetryId, turn: 0, step: 0, retry: 1 }, 4)
+  const cases = [
+    {
+      name: 'thinking-first then assistant-first replacement',
+      first: 'thinking' as const,
+      replacement: 'assistant' as const,
+      expected: ['assistant', 'thinking'],
+    },
+    {
+      name: 'assistant-first then thinking-first replacement',
+      first: 'assistant' as const,
+      replacement: 'thinking' as const,
+      expected: ['thinking', 'assistant'],
+    },
+  ]
+  for (const scenario of cases) {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      ...prefix,
+      event('assistant/attempt', { turn: 0, step: 0, stream: laneOrderedStep(scenario.first).stream }, 2),
+      retryStarted,
+      event('assistant/attempt', { turn: 0, step: 0, stream: laneOrderedStep(scenario.replacement).stream }, 5),
+    ])
+    assert.deepEqual(
+      kinds(folder.messages()),
+      scenario.expected,
+      `${scenario.name}: the replacement attempt owns the lane topology`,
+    )
+    // A same-topology final message settlement must not regress the
+    // converged order behind the §4.5 gate (the anchored topology IS the
+    // converged one now).
+    folder.apply([messageSettlement(6, laneOrderedStep(scenario.replacement))])
+    assert.deepEqual(kinds(folder.messages()), scenario.expected, `${scenario.name}: the final settlement keeps the converged order`)
+    const thinking = folder.messages().find(message => message.kind === 'thinking')
+    assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+    assert.equal(thinking.running, false, 'attempt replacement restores the Thinking lane settled')
+  }
+})
+
+test('lane displacement keeps TranscriptItemId and search/window/group contracts intact', () => {
+  // Scenario H: a display-displaced Thinking row must keep every
+  // index-keyed contract — ABOVE ALL the stable TranscriptItemId the search
+  // overlay recovers hits by (items stays append-only; nothing is spliced).
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file_path":"r1.ts"}' }, 3),
+    toolResult(4, 'r1', 'r1 ok', 'read'),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 9, text: 'late diagnostic thought' }, 5))
+  folder.apply([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file_path":"r2.ts"}' }, 6),
+    toolResult(7, 'r2', 'r2 ok', 'read'),
+  ])
+  // [Assistant, read r1, Thinking, read r2] — the two reads are separated
+  // by the Thinking row's physical slot and stay individual cards.
+  assert.deepEqual(kinds(folder.messages()), ['assistant', 'tool', 'thinking', 'tool'])
+  // Hold the pre-displacement search identities: the displacement must not
+  // renumber ANY raw item (the overlay recovers the open hit by id). The
+  // query matches the row both before ('late diagnostic thought') and after
+  // the replacement ('ordered thought' — the authoritative replacement
+  // replaces the row TEXT in place, same id).
+  const thinkingBefore = folder.search('thought')
+  const readBefore = folder.search('r1 ok')
+  assert.equal(thinkingBefore.length, 1)
+  assert.equal(readBefore.length, 1)
+  folder.apply([messageSettlement(8, laneOrderedStep('thinking'))])
+  // The replacement displaces the Thinking row BEFORE the Assistant row in
+  // DISPLAY order only — physical ids are untouched, so the same id still
+  // resolves to the same logical row even though its text was replaced.
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool', 'tool'])
+  assert.equal(folder.search('late diagnostic').length, 0, 'the authoritative replacement replaced the diagnostic text in place')
+  const thinkingAfter = folder.search('thought')
+  const readAfter = folder.search('r1 ok')
+  assert.equal(thinkingAfter.length, 1)
+  assert.equal(readAfter.length, 1)
+  assert.equal(thinkingAfter[0]?.id, thinkingBefore[0]?.id, 'the Thinking hit keeps its TranscriptItemId across the displacement')
+  assert.equal(readAfter[0]?.id, readBefore[0]?.id, 'the read hit keeps its TranscriptItemId across the displacement')
+  // Multi-hit search parity: match ORDER follows DISPLAY order (the shared
+  // display traversal), which is what search Next/Prev navigation walks.
+  const multi = folder.search('ordered')
+  assert.deepEqual(
+    multi.map(match => match.id),
+    [thinkingAfter[0]?.id, folder.search('ordered answer')[0]?.id],
+    'search emits hits in display order — the displaced Thinking row first',
+  )
+  // Window and grouped-turn projections stay consistent; the reads stay
+  // separate cards (grouping follows PHYSICAL adjacency — conservative).
+  const windowed = folder.window({ maxTurns: 1 })
+  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool', 'tool'])
+  assert.deepEqual([...folder.groupedTurns()], [0])
+})
+
+test('a displaced lane pair stays unique and ordered inside a bounded window', () => {
+  // The window cuts by COMPLETE turns; lane peers share one turn, so a
+  // displaced Thinking row whose physical slot sits many rows after its
+  // anchor must still appear exactly once, in display order, when the
+  // anchor's turn is windowed.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  for (const [seq, name] of [[3, 'r1'], [5, 'r2'], [7, 'r3']] as const) {
+    folder.apply([
+      event('tool/call', { turn: 0, step: 0, callId: ToolCallId(name), name: 'read', arguments: `{"file_path":"${name}.ts"}` }, seq),
+      toolResult(seq + 1, name, `${name} ok`, 'read'),
+    ])
+  }
+  folder.apply([messageSettlement(9, laneOrderedStep('thinking'))])
+  // Physical: [Assistant, r1, r2, r3, Thinking(displaced before Assistant)].
+  // Grouping follows PHYSICAL adjacency: the three consecutive reads merge
+  // into one card regardless of the display displacement.
+  const full = folder.messages()
+  assert.deepEqual(full.map(message => message.kind), ['thinking', 'assistant', 'tool'])
+  const windowed = folder.window({ maxTurns: 1 })
+  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
+  assert.equal(windowed.messages.filter(message => message.kind === 'thinking').length, 1, 'the displaced Thinking row appears exactly once')
+  assert.equal(windowed.messages.filter(message => message.kind === 'assistant').length, 1, 'the anchor Assistant row appears exactly once')
+  const merged = windowed.messages.find(message => message.kind === 'tool')
+  assert.ok(merged !== undefined && merged.kind === 'tool')
+  assert.ok(merged.result.includes('r1 ok') && merged.result.includes('r2 ok') && merged.result.includes('r3 ok'))
+  const anchored = folder.window({ maxTurns: 1, endTurn: 0 })
+  assert.deepEqual(anchored.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
+  assert.deepEqual([...folder.groupedTurns()], [0])
+})
+
+test('empty late reasoning never creates a Thinking row (visibility contract)', () => {
+  // P2-2: empty reasoning is not Thinking lane evidence — the settled late
+  // path must obey the same `thinkingVisible` contract as the live restore.
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: '' }, 4))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'an empty first delta creates no row')
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 3, block: { type: 'reasoning', text: '' } } as never, 5))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'an empty finalized reasoning creates no row')
+})
+
+test('an empty finalized reasoning hides an existing late Thinking row', () => {
+  // P2-2 counterpart for an EXISTING row: the authoritative empty block-end
+  // replaces the row (reasoning === '' hides Thinking) instead of leaving a
+  // visible blank process row.
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: 'diagnostic thought' }, 4))
+  assert.deepEqual(kinds(folder.messages()), ['assistant', 'thinking'])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 3, block: { type: 'reasoning', text: '' } } as never, 5))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'the authoritative empty reasoning replaces the row')
+  const activity = folder.turnActivity(0)
+  assert.equal(activity?.think, undefined, 'the Think slot clears with the row')
+})
+
+test('late reasoning after settlement refreshes an existing Thinking row in place', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: ' +more' }, 4))
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'], 'the established lane order is preserved')
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'ordered thought +more')
+  assert.equal(thinking.running, false, 'late reasoning must not reopen the settled row')
 })
 
 test('tool-call-only assistant attempts stay hidden until the closed boundary', () => {
@@ -5178,4 +5742,91 @@ test('failed-attempt reasoning resets on retry and matches a cold replay', () =>
   assert.equal(liveThinking.length, 1)
   assert.ok(liveThinking[0] !== undefined && liveThinking[0].kind === 'thinking')
   assert.equal(liveThinking[0].text, 'attempt B reasoning', 'the retry reset the failed attempt\'s reasoning text')
+})
+
+test('image/offload is a safe presentation no-op across transcript, markdown, stats and Focus', () => {
+  // The official 0.1.6 plugin-owned durable event changes the MODEL-visible
+  // image surface only; it must never add a human transcript row, an export
+  // line, a stats count, or a Focus anchor. The TUI deliberately has no
+  // `image/offload` case — the fold ignores it structurally.
+  const header = { id: 's1' as never, cwd: '/ws', version: 1, createdAt: 0 }
+  // A REAL image occurrence on the user message: `image/offload` targets a
+  // current image-bearing node, so the safe-ignore assertion is not vacuous.
+  const IMAGE_REF = { attachmentId: 'att-image-1', mediaType: 'image/png', bytes: 4, width: 800, height: 600, name: 'shot.png' }
+  const base = (): SessionEvent[] => [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('u1'),
+      role: 'user',
+      content: [
+        { type: 'text', text: 'hello' },
+        { type: 'image', attachment: IMAGE_REF },
+      ] as never,
+      source: { kind: 'user' },
+    }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('a1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ]
+  // A structurally legal log-only projection event: a target names the
+  // user/message node by its seq with a nonempty depth-first image index list
+  // (the message really carries an image occurrence).
+  const offload = rawEvent('image/offload', { targets: [{ seq: 1, imageIndexes: [0] }] }, 4)
+  const after = [...base(), offload]
+  const fold = (events: readonly SessionEvent[]): TranscriptFolder => {
+    const folder = new TranscriptFolder()
+    folder.hydrate(events)
+    return folder
+  }
+  const plain = fold(base())
+  const offloaded = fold(after)
+
+  // The fixture must target a REAL image-bearing message (not an orphan).
+  const plainUser = plain.messages()[0]
+  assert.ok(
+    plainUser !== undefined && plainUser.kind === 'user'
+      && (plainUser.content?.some(block => (block as { type?: string }).type === 'image') ?? false),
+    'the image/offload fixture must target a real image-bearing user message',
+  )
+  // 1. No human transcript row is added.
+  assert.deepEqual(offloaded.messages(), plain.messages(), 'image/offload must not create a transcript row')
+  // 2. No markdown export line is added.
+  assert.equal(
+    renderTranscriptMarkdown({ header, snapshotEvents: () => after } as never),
+    renderTranscriptMarkdown({ header, snapshotEvents: () => base() } as never),
+    'image/offload must not change the markdown export',
+  )
+  // 3. No turn/step/tool/user count changes.
+  assert.deepEqual(computeStats(after), computeStats(base()), 'image/offload must not change stats')
+  // 4. Focus owner/anchor projection is unchanged.
+  assert.deepEqual(
+    projectFocus(offloaded.messages(), offloaded.turnActivities(), new Set([0]), true),
+    projectFocus(plain.messages(), plain.turnActivities(), new Set([0]), true),
+    'image/offload must not move a Focus anchor',
+  )
+  // 5. Replay is deterministic and does not crash.
+  assert.deepEqual(fold(after).messages(), offloaded.messages(), 'replay of the offload stream must be stable')
+  // 6. An ordinary user/assistant presentation after the event is normal.
+  const postMessages = fold([
+    ...after,
+    event('user/message', {
+      id: MessageId('u2'),
+      role: 'user',
+      content: [{ type: 'text', text: 'again' }],
+      source: { kind: 'user' },
+    }, 5),
+  ]).messages()
+  assert.deepEqual(kinds(postMessages), ['user', 'assistant', 'user'], 'a post-offload message presents normally')
+  const last = postMessages[2]
+  assert.ok(last !== undefined && last.kind === 'user')
+  assert.equal(last.text, 'again')
 })

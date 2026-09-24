@@ -18,7 +18,7 @@ import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
@@ -27,6 +27,7 @@ import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -141,8 +142,9 @@ function noReasoningTurn(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 3, seqBase + 3),
@@ -310,7 +312,7 @@ test('C1/C2: Focus collapsed — the Think: preview stays; Alt+T changes only th
   app.toggleThinkingExpanded()
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐋 Thought'), 'the root stays collapsed')
+  assert.ok(hasFocusHeader(view, false), 'the root stays collapsed')
   assert.ok(!view.includes('🌊 Thinking'), 'no process leak under a collapsed root')
   assert.equal(app.isThinkingExpanded(), true, 'the bulk preference changed')
   app.setFullscreen(false)
@@ -329,7 +331,7 @@ test('D1: regular Focus expanded root — Thinking compact (never absent), Tool 
   app.expandFocusTurn(1)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐳 Thought'), 'the root must expand')
+  assert.ok(hasFocusHeader(view, true), 'the root must expand')
   assert.ok(view.includes('Read src/transcript.ts [running]'), 'the non-Thinking process is full (regular)')
   assert.ok(view.includes('locating the transcript path'), 'Thinking is present — compact preview')
   assert.ok(view.includes('(alt+t to expand)'), 'the compact Thinking card carries the Alt+T hint')
@@ -341,7 +343,7 @@ test('D2/D3: Alt+T expands Thinking full; Ctrl+O never changes it — Tool uncha
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
-  app.setToolOutputExpanded(true) // Ctrl+O master ON (tools full)
+  app.setTranscriptDetailExpanded(true) // Ctrl+O master ON (tools full)
   show(app, folder)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
@@ -371,8 +373,10 @@ test('E1: Focus ON fullscreen expanded root — Thinking compact, Tool compact',
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  const y = findRow(vt.getViewport(), '🐋 Thought')
+  const y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('locating the transcript path'), 'the Thinking preview is present')
@@ -391,8 +395,10 @@ test('E2–E5: per-card clicks layer over the bulk preference; Alt+T resets them
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  const rootY = findRow(vt.getViewport(), '🐋 Thought')
+  const rootY = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, rootY + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('alpha latest') && view.includes('beta latest'), 'both Thinking cards present (compact)')
@@ -515,7 +521,7 @@ test('H2: Focus collapsed search hit opens the owner Thought with the matched Th
   app.revealSearchMatch(alpha)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐳 Thought'), `the owner root must open:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `the owner root must open:\n${view}`)
   assert.ok(view.includes('\n  alpha reasoning'), `the matched reasoning must be full:\n${view}`)
   assert.ok(view.includes('beta latest'), 'the unmatched card stays compact (preview)')
   assert.equal(app.isThinkingExpanded(), false, 'search never touches the bulk preference')
@@ -566,6 +572,7 @@ function setupSettings() {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    get defaultIntentOutcome() { return undefined },
     get liveAgent() { return undefined },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -580,8 +587,7 @@ function setupSettings() {
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -593,11 +599,10 @@ function setupSettings() {
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -619,8 +624,13 @@ function setupSettings() {
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'switched', preset: 'standard' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
@@ -1027,5 +1037,48 @@ test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component to
   app.toggleThinkingExpanded()
   await vt.waitForRender()
   assert.ok(calls.length > before, `the expanded transition must rebuild the plugin component (${calls.length} vs ${before})`)
+  app.stop()
+})
+
+test('H3: collapsing an unrelated Thinking card keeps the current search reveal', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, twoThinkingTurn(0))
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Manually expand beta.
+  let y = findRow(vt.getViewport(), 'beta latest')
+  assert.ok(y >= 0, 'beta card missing')
+  click(vt, 10, y + 1)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('\n  beta reasoning'), 'precondition: beta expanded')
+
+  const alpha = folder.messages().find(m => m.kind === 'thinking' && m.text.includes('alpha'))
+  assert.ok(alpha !== undefined)
+  app.setTranscriptSearchTarget({
+    query: 'alpha',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: alpha,
+  })
+  await vt.waitForRender()
+  let rows = vt.getViewport()
+  let alphaRow = rows.findIndex(line => stripTerminalSequences(line).includes('alpha reasoning'))
+  assert.ok(alphaRow >= 0, `the search target expands alpha:\n${rows.join('\n')}`)
+  let alphaCol = stripTerminalSequences(rows[alphaRow]!).indexOf('alpha')
+  // A Thinking card renders a `Thinking` header + indented body, so its whole
+  // card is not an occurrence-preserving projection: anchor-only, no strong.
+  assert.ok(!vt.getCellInverse(alphaRow, alphaCol), 'a Thinking card is anchor-only')
+
+  // Collapse the UNRELATED beta card (click its own row).
+  const betaRow = rows.findIndex(line => stripTerminalSequences(line).includes('beta reasoning'))
+  assert.ok(betaRow >= 0)
+  click(vt, 10, betaRow + 1)
+  await vt.waitForRender()
+  rows = vt.getViewport()
+  assert.ok(!rows.join('\n').includes('\n  beta reasoning'), 'beta collapsed')
+  alphaRow = rows.findIndex(line => stripTerminalSequences(line).includes('alpha reasoning'))
+  assert.ok(alphaRow >= 0, 'the unrelated Thinking collapse must NOT revoke alpha search reveal (alpha stays expanded)')
+  app.setFullscreen(false)
   app.stop()
 })

@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { mergeDraft } from '../src/steer.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -46,6 +46,14 @@ const oneShot = (overrides: Partial<SubagentViewerTarget> = {}): SubagentViewerT
   ...overrides,
 })
 
+test('viewer submit classification routes whitespace accelerated input to steer-all', () => {
+  assert.equal(isEmptyAcceleratedViewerSubmit('', 'accelerated'), true)
+  assert.equal(isEmptyAcceleratedViewerSubmit('   ', 'accelerated'), true)
+  assert.equal(isEmptyAcceleratedViewerSubmit('!', 'accelerated'), false)
+  assert.equal(isEmptyAcceleratedViewerSubmit('   ', 'enter'), false)
+  assert.equal(isEmptyAcceleratedViewerSubmit('   ', 'explicit-queue'), false)
+})
+
 /** A bare app whose events are the CALLER's (a fresh object per test —
  * the harness never mutates the app's private state). */
 async function startApp(
@@ -55,7 +63,7 @@ async function startApp(
     onSingleEscape?: () => boolean | void
     onSteer?: (text: string) => void
     onAcceleratedSubmit?: (text: string) => void
-    onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string }) => void
+    onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string; gesture: 'enter' | 'accelerated' | 'explicit-queue' }) => void
   } = {},
 ): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
   const vt = new VirtualTerminal(80, 24)
@@ -133,6 +141,7 @@ test('Enter in a continuable viewer submits to onSubagentSubmit — never the pa
     parentSessionId: 'session-main',
     childSessionId: 'child-1',
     text: 'focus on cancellation',
+    gesture: 'enter',
   }], 'Enter must deliver exactly one subagent follow-up')
   assert.deepEqual(parentSubmits, [], 'the parent onSubmit must never fire from the viewer')
   assert.equal(app.getDraft(), '', 'the child draft clears after a submit (the runner restores on rejection)')
@@ -143,21 +152,23 @@ test('Enter in a continuable viewer submits to onSubagentSubmit — never the pa
   app.stop()
 })
 
-test('the main session chords are inert inside the interactive viewer', async () => {
+test('the accelerated steer gesture targets the interactive child, not the parent', async () => {
   const steered: string[] = []
+  const childSubmits: unknown[] = []
   const accelerated: string[] = []
   const singleEscapes: number[] = []
   const { vt, app } = await startApp({
     onSteer: (text) => steered.push(text),
     onAcceleratedSubmit: (text) => accelerated.push(text),
+    onSubagentSubmit: (request) => childSubmits.push(request),
     onSingleEscape: () => { singleEscapes.push(1); return true },
   })
   app.setViewerMode(continuable())
   await vt.waitForRender()
   vt.sendInput('draft text')
   await vt.waitForRender()
-  // Ctrl+S (steer) and Ctrl+Enter (the accelerated submit) must be
-  // consumed, never parent.
+  // Ctrl+S is the accelerated gesture: it is consumed by the viewer and
+  // retargeted to the child, never the parent.
   vt.sendInput('\x13') // ctrl+s
   await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
@@ -171,13 +182,78 @@ test('the main session chords are inert inside the interactive viewer', async ()
   await vt.waitForRender()
   assert.deepEqual(steered, [], 'Ctrl+S must never steer the parent from the viewer')
   assert.deepEqual(accelerated, [], 'Ctrl+Enter must never submit to the parent from the viewer')
+  assert.deepEqual(childSubmits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: 'draft text',
+    gesture: 'accelerated',
+  }], 'Ctrl+S must submit exactly once to the child as accelerated')
   assert.equal(singleEscapes.length, 0, 'Ctrl+C must not exit (and no accidental Esc)')
-  // The child draft is untouched by the blocked chords.
-  assert.equal(app.getDraft(), 'draft text')
+  // The child draft clears after the accepted gesture; blocked parent chords
+  // do not create a parent side effect.
+  assert.equal(app.getDraft(), '')
   // Esc still exits through onSingleEscape.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(singleEscapes.length, 1, 'Esc must exit the viewer')
+  app.stop()
+})
+
+test('an empty accelerated submit reaches the child steer-all boundary without an empty prompt', async () => {
+  const childSubmits: unknown[] = []
+  const { vt, app } = await startApp({
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode(continuable({ activity: 'running' }))
+  await vt.waitForRender()
+  vt.sendInput('\x13') // ctrl+s with an empty child draft
+  await vt.waitForRender()
+  assert.deepEqual(childSubmits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: '',
+    gesture: 'accelerated',
+  }], 'empty Ctrl+S must reach the child queue-steer boundary')
+  app.stop()
+})
+
+test('a whitespace-only accelerated child draft still reaches the steer-all boundary', async () => {
+  const childSubmits: unknown[] = []
+  const { vt, app } = await startApp({
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode(continuable({ activity: 'running' }))
+  app.setDraft('   ')
+  await vt.waitForRender()
+  vt.sendInput('\x13') // ctrl+s with whitespace-only child draft
+  await vt.waitForRender()
+  assert.deepEqual(childSubmits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: '   ',
+    gesture: 'accelerated',
+  }], 'whitespace-only Ctrl+S must not become an empty prompt')
+  app.stop()
+})
+
+test('explicit queue from a continuable viewer preserves its queue intent for the runner', async () => {
+  const childSubmits: unknown[] = []
+  const { vt, app } = await startApp({
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode(continuable())
+  await vt.waitForRender()
+  vt.sendInput('queue this child prompt')
+  await vt.waitForRender()
+  app.submitDraft('explicit-queue')
+  await vt.waitForRender()
+  assert.deepEqual(childSubmits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: 'queue this child prompt',
+    gesture: 'explicit-queue',
+  }], 'the explicit queue gesture must cross the viewer boundary unchanged')
+  assert.equal(app.getDraft(), '')
   app.stop()
 })
 
@@ -371,6 +447,7 @@ test('a replacement (plugin) editor receives the child draft and the follow-up t
     parentSessionId: 'session-main',
     childSessionId: 'child-1',
     text: 'child draft via runner',
+    gesture: 'enter',
   }])
   app.setViewerMode(undefined)
   app.stop()
@@ -418,6 +495,7 @@ test('a replacement editor submit clears the child slot EXPLICITLY (no resurrect
     parentSessionId: 'session-main',
     childSessionId: 'child-1',
     text: 'delivered text',
+    gesture: 'enter',
   }])
   assert.equal(app.getDraft(), '', 'the child slot must clear without relying on onChange')
   // Re-enter: the delivered text must NOT resurrect.

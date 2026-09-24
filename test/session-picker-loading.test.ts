@@ -22,6 +22,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import type { SessionReader } from '../src/runtime/session-reader-port.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -59,7 +60,7 @@ interface Harness {
 }
 
 /** Mount the command surface with an injectable sessionReader. */
-function harness(sessionReader: unknown): Harness {
+function harness(sessionReader: SessionReader): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -82,6 +83,7 @@ function harness(sessionReader: unknown): Harness {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    get defaultIntentOutcome() { return undefined },
     get liveAgent() { return state.agent },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -92,13 +94,12 @@ function harness(sessionReader: unknown): Harness {
     settleIntent: () => {},
     tuiSettings: undefined,
     agents: {} as never,
-    sessionReader: sessionReader as never,
+    sessionReader,
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
@@ -129,9 +130,14 @@ function harness(sessionReader: unknown): Harness {
     pendingPreset: undefined,
     effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'locked' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
@@ -177,7 +183,7 @@ test('the picker opens and Esc cancels while list() pends forever', async (t) =>
     list: pendingList,
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -198,7 +204,7 @@ test('Enter on the loading placeholder never triggers a resume', async (t) => {
     list: pendingList,
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -212,7 +218,7 @@ test('Enter on the loading placeholder never triggers a resume', async (t) => {
 test('arrows, search, and Esc stay responsive while a projection batch pends', async (t) => {
   const rows = Array.from({ length: 8 }, (_, i) => ({
     id: `session-row${i}`,
-    createdAt: 1_000_000 - i,
+    updatedAt: 1_000_000 - i,
     cwd: '/ws',
     live: false,
   }))
@@ -220,7 +226,7 @@ test('arrows, search, and Esc stay responsive while a projection batch pends', a
     list: async () => rows,
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: () => new Promise<ProjectionMap>(() => {}),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -249,7 +255,7 @@ test('arrows, search, and Esc stay responsive while a projection batch pends', a
 test('closing the picker aborts the pending projection batch', async (t) => {
   let observedSignal: AbortSignal | undefined
   let settleBatch!: () => void
-  const rows = [{ id: 'session-a', createdAt: 10, cwd: '/ws', live: false }]
+  const rows = [{ id: 'session-a', updatedAt: 10, cwd: '/ws', live: false }]
   const h = harness({
     list: async () => rows,
     search: async () => ({ items: [], hasMore: false }),
@@ -257,7 +263,7 @@ test('closing the picker aborts the pending projection batch', async (t) => {
       observedSignal = signal
       return new Promise<ProjectionMap>(resolve => { settleBatch = () => resolve(new Map()) })
     },
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -278,7 +284,7 @@ test('a superseding open fences the previous load out of the UI', async (t) => {
   let firstListed = 0
   let secondListed = 0
   let firstSignal: AbortSignal | undefined
-  const rows = [{ id: 'session-old', createdAt: 10, cwd: '/ws', live: false }]
+  const rows = [{ id: 'session-old', updatedAt: 10, cwd: '/ws', live: false }]
   const h = harness({
     list: async (_id: string | undefined, signal?: AbortSignal) => {
       if (firstListed === 0) {
@@ -291,7 +297,7 @@ test('a superseding open fences the previous load out of the UI', async (t) => {
     },
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -309,7 +315,7 @@ test('a listing failure swaps the loading row for the refusal row', async (t) =>
     list: async () => undefined,
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -321,8 +327,8 @@ test('a listing failure swaps the loading row for the refusal row', async (t) =>
 
 test('progressive title enrichment preserves the live search query', async (t) => {
   const rows = [
-    { id: 'session-needle', createdAt: 20, cwd: '/ws', live: false },
-    { id: 'session-other', createdAt: 10, cwd: '/ws', live: false },
+    { id: 'session-needle', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
   ]
   let calls = 0
   let resolveBatch!: (value: ProjectionMap) => void
@@ -336,7 +342,7 @@ test('progressive title enrichment preserves the live search query', async (t) =
       }
       return new Map()
     },
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -359,7 +365,7 @@ test('/resume <arg> is input-first: the overlay opens while list() pends forever
     list: pendingList,
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -384,8 +390,8 @@ test('/resume <arg> is input-first: the overlay opens while list() pends forever
 
 test('/resume <arg> with NO match lists exactly once and keeps the argument as the query', async (t) => {
   const rows = [
-    { id: 'session-needle1', createdAt: 20, cwd: '/ws', live: false },
-    { id: 'session-other', createdAt: 10, cwd: '/ws', live: false },
+    { id: 'session-needle1', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
   ]
   let listCalls = 0
   const h = harness({
@@ -395,7 +401,7 @@ test('/resume <arg> with NO match lists exactly once and keeps the argument as t
     },
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -414,8 +420,8 @@ test('/resume <arg> with NO match lists exactly once and keeps the argument as t
 
 test('/resume <arg> with a unique match switches after exactly one listing', async (t) => {
   const rows = [
-    { id: 'session-target', createdAt: 20, cwd: '/ws', live: false },
-    { id: 'session-other', createdAt: 10, cwd: '/ws', live: false },
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
   ]
   let listCalls = 0
   const h = harness({
@@ -425,7 +431,7 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
     },
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   })
   t.after(() => h.app.stop())
 

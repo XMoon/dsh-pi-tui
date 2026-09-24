@@ -606,3 +606,94 @@ test('TuiApp: a resize does NOT re-run plugin renderers for unchanged content (w
   assert.equal(calls, 2, 'a content change must re-run the renderer')
   app.stop()
 })
+
+// ── Re-entrant renderer mutation: the cache revision is the SELECTION one ──
+
+test('TuiApp: a renderer that self-disposes inside render is reconciled on the next build', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const registry = new RendererRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+
+  const message = { kind: 'assistant' as const, turn: 0, text: 'hello' }
+  let handle: { dispose: () => void } | undefined
+  handle = registry.registerMessageRenderer({
+    id: 'self-dispose',
+    render: () => {
+      handle?.dispose()
+      return textView('SELF DISPOSED VIEW')
+    },
+  }, 'plugin')
+
+  const first = app.messageCacheEntryForTest?.(message)
+  assert.equal(first?.rendererId, 'self-dispose', 'the first build uses the renderer selection snapshot')
+  assert.notEqual(first?.rendererRevision, registry.revisionOf(),
+    'the entry must record the PRE-render selection revision, not the live one')
+
+  const second = app.messageCacheEntryForTest?.(message)
+  assert.equal(second?.rendererId, undefined, 'the next build must reconcile away from the disposed renderer')
+  app.stop()
+})
+
+test('TuiApp: a renderer registered inside another render wins the next build', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const registry = new RendererRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+
+  const message = { kind: 'assistant' as const, turn: 0, text: 'hello' }
+  registry.registerMessageRenderer({
+    id: 'a',
+    order: 10,
+    render: () => {
+      registry.registerMessageRenderer({ id: 'b', order: 1, render: () => textView('B VIEW') }, 'plugin-b')
+      return textView('A VIEW')
+    },
+  }, 'plugin-a')
+
+  const first = app.messageCacheEntryForTest?.(message)
+  assert.equal(first?.rendererId, 'a', 'the first build uses A from its selection snapshot')
+  const second = app.messageCacheEntryForTest?.(message)
+  assert.equal(second?.rendererId, 'b', 'the next build must pick up B registered during A.render')
+  app.stop()
+})
+
+test('renderer revision churn cannot recursively rebuild without bound', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const registry = new RendererRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant' as const, turn: 0, text: 'x' }])
+  await vt.waitForRender()
+
+  let renders = 0
+  registry.registerMessageRenderer({
+    id: 'churn-0',
+    order: 1,
+    render: () => {
+      renders += 1
+      // NEVER converges: every render bumps the registry revision again.
+      registry.registerMessageRenderer({ id: `churn-${renders}`, order: 5, render: () => undefined }, 'test')
+      return undefined
+    },
+  }, 'test')
+
+  // The request path rebuilds synchronously when the revision moved; a
+  // permanent churn must exit after the bound instead of recursing.
+  assert.doesNotThrow(() => app.requestRender())
+  assert.ok(renders > 0, 'the churn renderer actually ran')
+  assert.ok(renders <= 3, `the renderer reconcile must be bounded, saw ${renders} calls`)
+  await vt.waitForRender()
+  app.stop()
+})

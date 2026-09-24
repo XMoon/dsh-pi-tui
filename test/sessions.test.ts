@@ -15,6 +15,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import {
 
   MAX_PICKER_SESSIONS,
+  buildSessionTree,
   findSessionMatch,
   formatSessionAge,
   headerToPickerRow,
@@ -87,6 +88,7 @@ test('formatSessionAge is compact and bounded', () => {
 test('sessionPickerItem assembles a titled row with meta and group', () => {
   const row: SessionPickerRow = {
     id: 'session-0123456789abcdef',
+    updatedAt: 1_000,
     createdAt: 1_000,
     title: 'fix footer rendering',
     cwd: '/home/user/project/me/dsh-pi-tui',
@@ -104,9 +106,19 @@ test('sessionPickerItem assembles a titled row with meta and group', () => {
   assert.ok(!item.description.includes('live'), `unexpected live marker: ${item.description}`)
 })
 
+test('sessionPickerItem uses updatedAt when a Remote row has no createdAt', () => {
+  const row: SessionPickerRow = {
+    id: 'session-remote-age',
+    updatedAt: Date.now() - 2 * 86_400_000,
+    live: false,
+  }
+  assert.ok(sessionPickerItem(row, '').description.includes('2d'))
+})
+
 test('sessionPickerItem marks the current session, subagents, forks, live', () => {
   const row: SessionPickerRow = {
     id: 'session-0123456789abcdef',
+    updatedAt: 1_000,
     createdAt: 1_000,
     cwd: '/home/user/project',
     origin: 'subagent',
@@ -133,12 +145,48 @@ test('headerToPickerRow maps a header onto the row shape', () => {
     origin: 'subagent',
   }, true)
   assert.equal(row.id, 'session-0123456789abcdef')
+  assert.equal(row.updatedAt, 42)
   assert.equal(row.createdAt, 42)
   assert.equal(row.cwd, '/w')
   assert.equal(row.preset, 'minimal')
   assert.equal(row.parentSession, 'session-p')
   assert.equal(row.origin, 'subagent')
   assert.equal(row.live, true)
+})
+
+function treeRow(id: string, parentSession?: string): SessionPickerRow {
+  return {
+    id,
+    updatedAt: 0,
+    createdAt: 0,
+    live: false,
+    ...(parentSession === undefined ? {} : { parentSession }),
+  }
+}
+
+test('buildSessionTree follows Host lineage depth for normal ancestry', () => {
+  const rows = buildSessionTree([
+    treeRow('root'),
+    treeRow('child', 'root'),
+    treeRow('grandchild', 'child'),
+  ])
+  assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
+    ['root', 0], ['child', 1], ['grandchild', 2],
+  ])
+})
+
+test('buildSessionTree degrades an orphan to root depth', () => {
+  const rows = buildSessionTree([treeRow('orphan', 'missing-parent'), treeRow('root')])
+  assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
+    ['orphan', 0], ['root', 0],
+  ])
+})
+
+test('buildSessionTree emits cycle members without indentation or infinite traversal', () => {
+  const twoNode = buildSessionTree([treeRow('a', 'b'), treeRow('b', 'a')])
+  assert.deepEqual(twoNode.map(entry => [entry.row.id, entry.depth]), [['a', 0], ['b', 1]])
+  const self = buildSessionTree([treeRow('self', 'self')])
+  assert.deepEqual(self.map(entry => [entry.row.id, entry.depth]), [['self', 0]])
 })
 
 test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {
@@ -261,9 +309,9 @@ test('picker Esc cancels', async () => {
 
 test('findSessionMatch resolves full ids, session- prefixes, and short ids', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-11111111-2222-3333-4444-555555555555', createdAt: 2, live: false },
-    { id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', createdAt: 3, live: false },
-    { id: 'session-99999999-8888-7777-6666-555555555555', createdAt: 1, live: false },
+    { id: 'session-11111111-2222-3333-4444-555555555555', updatedAt: 2, createdAt: 2, live: false },
+    { id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', updatedAt: 3, createdAt: 3, live: false },
+    { id: 'session-99999999-8888-7777-6666-555555555555', updatedAt: 1, createdAt: 1, live: false },
   ]
   assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
