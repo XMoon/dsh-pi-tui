@@ -7,6 +7,12 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`/plugins`：在 TUI 内管理当前 profile 的插件与 bundle。** 新增的 Plugin Manager 直接调用官方 DSH Plugin Manager，按分区展示：正在提供当前界面的 `dsh-pi-tui`（Current TUI，只读且自保护，不能从自身界面禁用/移除）；能精确关联到 live TUI extension 贡献的包（TUI Extensions）；其余普通 DSH 插件（DSH Plugins）。可查看 bundle 元数据、声明的插件行、启用/只读/可移除状态、兼容性错误与已配置的 registry，并执行启用/禁用、删除（二次确认，且确认与具体包身份绑定）与安装。安装流程先经官方 inspect 展示包信息与所选 registry，再实时显示进度与日志，可安全取消；关闭面板不会取消安装，重新打开会恢复同一请求，丢失响应时按官方 `waitForInstall` 结果核对而不会重复安装。`/settings` 新增 `Plugins  Manage…` 行，按需打开同一个管理界面。
+
+- **`/tasks`：选中后台 Job 可查看非消耗式的实时输出。** Job 详情现在通过官方 Job Controller 的 `follow()` 流展示状态、进度与保留的输出尾部，并在输出被截断时明确提示；该查看是只读预览，不消耗模型的 `job_output` 游标、不影响完成通知、也不写入会话历史。Esc 返回原来的 Task Center，Stop 行为保持不变。
+
 ## [0.4.8] - 2026-09-24
 
 ### 安装与版本对应
