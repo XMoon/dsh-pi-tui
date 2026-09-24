@@ -3423,6 +3423,80 @@ test('a rejecting Host Loader clears the barrier status before the fatal log and
   assert.deepEqual(exitCodes, [1], 'the fatal startup path must exit(1)')
 })
 
+test('a throwing status clear cannot block the fatal teardown or exit(1)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-loader-reject-throw-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const orderedLog: string[] = []
+  // The status output seam throws on the ERASE-LINE write only, so the barrier
+  // reports its wait and then its release fails — the failure the fatal root
+  // must contain.
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+      if (text === '\r\x1b[2K') throw new Error('status stream exploded')
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'loader-reject-throw-session',
+    header: { id: 'loader-reject-throw-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  const exporterFiber = context.plugin(pluginCtx => {
+    pluginCtx.logger.exporter({
+      levels: { default: 2 },
+      export: message => {
+        orderedLog.push(`log:${message.name}:${message.args.map(String).join(' ')}`)
+      },
+    })
+  })
+  await exporterFiber
+  // The discarded startup chain is a terminal boundary: a rejection escaping it
+  // would surface here as an unhandled rejection (and skip exit(1)).
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  life.defer(() => { process.off('unhandledRejection', onUnhandled) })
+  const exitCodes: number[] = []
+  const appExit = (code?: number): void => { exitCodes.push(code ?? 0) }
+  const loader = {
+    await: async (): Promise<void> => { throw new Error('loader exploded') },
+  }
+  fiber = await mountRunner(
+    context,
+    home,
+    harness,
+    { sessionId: resumed.id },
+    { sessionId: resumed.id, startupStatusOutput: statusOutput },
+    appExit,
+    loader,
+  )
+  await settle()
+
+  assert.ok(orderedLog.some(write => write === 'stdout:\r\x1b[2KStarting DSH…'),
+    `the barrier status must still be shown: ${JSON.stringify(orderedLog)}`)
+  assert.ok(orderedLog.some(write => write.startsWith('log:') && write.includes('tui-runner')),
+    `the fatal log must still be written despite the throwing clear: ${JSON.stringify(orderedLog)}`)
+  assert.deepEqual(exitCodes, [1], 'the fatal path must still reach exit(1)')
+  assert.deepEqual(unhandled, [], 'the discarded startup chain must not leak a rejection')
+  assert.equal(probe.apps.length, 0, 'no TUI may mount')
+  assert.equal(harness.resumeSignals.length, 0, 'no Agent may be resumed')
+})
+
 test('the exit resume hint names the Host profileContext profile, not the argv fallback', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-resume-profile-hint-')

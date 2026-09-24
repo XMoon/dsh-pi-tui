@@ -36,15 +36,31 @@ const ERASE_LINE = '\r\x1b[2K'
 export function createStartupStatus(output: StartupStatusOutput): StartupStatus {
   const tty = output.isTTY ?? true
   let shown = false
+  // TOTAL write, deliberately: the output seam has no never-throws contract and
+  // this helper is called from places where a throw is unrecoverable — an
+  // `AbortSignal` listener (Node turns a listener exception into an
+  // `uncaughtException`) and the terminal startup-failure root (a throw there
+  // would skip the logs, the abort, the owner retirement and `exit(1)`). The
+  // status is pure presentation and must never outrank the work it narrates;
+  // a broken stream therefore leaves the row exactly as it is instead of
+  // failing the boot. `shown` keeps the original state semantics: a show marks
+  // the line as owned, a clear releases it.
+  const write = (text: string): void => {
+    try {
+      output.write(text)
+    } catch {
+      // Best effort: a broken status stream is not a startup failure.
+    }
+  }
   return {
     show(message) {
       if (!tty) return
-      output.write(`${ERASE_LINE}${message}`)
+      write(`${ERASE_LINE}${message}`)
       shown = true
     },
     clear() {
       if (!tty || !shown) return
-      output.write(ERASE_LINE)
+      write(ERASE_LINE)
       shown = false
     },
   }
