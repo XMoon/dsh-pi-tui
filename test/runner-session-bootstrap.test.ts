@@ -4117,7 +4117,7 @@ function makeJobsFake(
   type Entry = { id: string; kind: string; label: string; status: string; startedAt: number }
   let entries: Entry[] = initial.map(entry => ({ ...entry }))
   let listFailure: Error | undefined
-  const listeners: Array<() => void> = []
+  const listeners: Array<(event: { type: string }) => void> = []
   const subscribeFilters: unknown[] = []
   let subscribeDisposals = 0
   const registry = {
@@ -4147,9 +4147,11 @@ function makeJobsFake(
     },
     // DSH 0.1.7 JobRegistry unified event seam: the runner subscribes
     // through `events.subscribe(filter, listener)`; the disposer removes
-    // the listener so disposal semantics are observable.
+    // the listener so disposal semantics are observable. Emissions carry
+    // the official JobEvent type vocabulary so the listener's event-type
+    // filtering is exercised exactly as the registry delivers it.
     events: {
-      subscribe: (filter: unknown, listener: () => void): (() => void) => {
+      subscribe: (filter: unknown, listener: (event: { type: string }) => void): (() => void) => {
         subscribeFilters.push(filter)
         listeners.push(listener)
         return () => {
@@ -4161,7 +4163,7 @@ function makeJobsFake(
     },
     setEntries: (next: readonly Entry[]): void => { entries = next.map(entry => ({ ...entry })) },
     setListFailure: (error: Error | undefined): void => { listFailure = error },
-    emit: (): void => { for (const listener of [...listeners]) listener() },
+    emit: (type = 'settled'): void => { for (const listener of [...listeners]) listener({ type }) },
     /** C1 contract probes: exactly-once subscribe/dispose observability. */
     subscribeCount: (): number => subscribeFilters.length,
     disposalCount: (): number => subscribeDisposals,
@@ -4303,6 +4305,88 @@ test('the runner-level Job event subscription is exactly-once and disposed with 
   await settle()
   assert.equal(jobs.disposalCount(), 1, 'a post-disposal emission must not re-subscribe')
   assert.equal(jobs.subscribeCount(), 1, 'a post-disposal emission must not create a new subscription')
+})
+
+test('job output events never trigger Task refreshes; lifecycle events do (rc.1 event vocabulary)', async (t) => {
+  // rc.1 delivers `output` for EVERY ring append of a streaming job. The
+  // unified listener must treat it as pure stream noise — reacting would
+  // turn refreshAgents' catalog work (listDescendants) into a per-chunk
+  // storm, while the upstream Job Controller itself keeps output off the
+  // roster refresh path.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-jobs-output-filter-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+
+  const parent: FakeSession = fakeSession({
+    id: 'jobs-output-filter-parent',
+    header: { id: 'jobs-output-filter-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  let descendantReads = 0
+  const subagents = {
+    listDescendants: async () => {
+      descendantReads += 1
+      return []
+    },
+  }
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  harness.jobs = jobs
+
+  // refreshTasks lands in app.setTasks; count calls through the prototype
+  // to observe exactly which emissions reached the refreshes.
+  const setTasksCalls: number[] = []
+  const originalSetTasks = TuiApp.prototype.setTasks
+  TuiApp.prototype.setTasks = function (tasks: unknown) {
+    setTasksCalls.push((tasks as { id: string }[]).length)
+    return originalSetTasks.call(this, tasks as never)
+  }
+  life.defer(() => { TuiApp.prototype.setTasks = originalSetTasks })
+
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  assert.ok(probe.apps.at(-1), 'the production runner must create a TuiApp')
+  await settle()
+  // The initial seed refresh (+ the subagents-backed catalog refresh).
+  const setTasksBaseline = setTasksCalls.length
+  const descendantBaseline = descendantReads
+  assert.ok(descendantBaseline > 0, 'the mount must have performed the initial catalog refresh')
+
+  // A burst of output events (one per streamed chunk) must reach NEITHER
+  // refresh channel: no task repaint, no catalog read.
+  for (let chunk = 0; chunk < 5; chunk += 1) jobs.emit('output')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(setTasksCalls.length, setTasksBaseline, 'output events must not repaint the Task rows')
+  assert.equal(descendantReads, descendantBaseline, 'output events must not trigger the subagent catalog refresh')
+
+  // Lifecycle vocabulary still refreshes normally: the roster changed and
+  // a settlement implies membership may have moved.
+  jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
+  jobs.emit('settled')
+  await settle()
+  await vt.waitForRender()
+  assert.ok(setTasksCalls.length > setTasksBaseline, 'a settled event must repaint the Task rows')
+  assert.ok(descendantReads > descendantBaseline, 'a settled event must trigger the subagent catalog refresh')
+
+  const baseline2 = setTasksCalls.length
+  const descendants2 = descendantReads
+  jobs.emit('registered')
+  await settle()
+  assert.ok(setTasksCalls.length > baseline2 && descendantReads > descendants2, 'a registered event must refresh both channels')
 })
 
 test('a failed jobs read never blanks the retained Task Browser parent', async (t) => {
