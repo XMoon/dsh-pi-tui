@@ -36,9 +36,20 @@
       # dsh-base layer already mounts it (disabled only without a profile),
       # so this is an explicit lifecycle ordering dependency, never a second
       # package-manager row.
-      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager]
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController]
       config:
         sessionId: ''
+
+    # One background Job's observation stream (P1-B): the official Host
+    # controller wraps `jobs.events` + `jobs.readAt()` into a
+    # NON-CONSUMING follow stream (never `jobs.read()`), so the selected Job
+    # detail can render a live retained-output tail without touching the
+    # model's `job_output` cursor or completion notices. The rc.1 web bundle
+    # mounts this same row; the dsh-base layer does not, so the TUI inserts
+    # it. This is NOT M3: same process, same Host Context, no Client Context,
+    # no Connection, no transport.
+    - id: job-controller
+      name: '@deepseek-ai/dsh-api-job-controller'
 
     # Host-owned workspace membership (`ctx.workspaceRegistry`): D2.4 Direct
     # fork mirrors the official Host rule (use the source's directly owning

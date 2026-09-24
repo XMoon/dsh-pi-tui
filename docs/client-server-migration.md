@@ -381,6 +381,40 @@ backend. P1 must not build a temporary TUI RPC or a TUI-owned follow protocol to
 unlock one UI; if a P1 capability cannot be correct on the Direct path it is
 reclassified, not smuggled in.
 
+### P1-A status — Plugin Manager
+
+`/plugins` (and the lazy `/settings → Plugins  Manage…` submenu) is ONE surface
+over one runner-owned controller: a narrow `PluginManagerPort`, the Direct
+adapter (`src/runtime/direct/plugin-manager-direct.ts`, the only module that
+resolves the official `pluginManager` service), a controller that owns operation
+state, and a rendering-only panel. The inventory is classified into Current TUI
+(exactly `@xmoon76/dsh-pi-tui`, self-protected by DERIVED effective actions —
+never by forging `readOnlyReason`/`removable`), TUI Extensions (only after an
+exact + unique live-owner association, proven through a package-private
+owner→Loader-entry-id projection over the shared `piTuiExtensions` runtime; no
+name heuristics, no duplicate card), and DSH Plugins (everything else). All
+mutations (enable/disable/remove/install) go through the official service; the
+TUI never spawns pnpm, edits `package.json`/patch YAML, or invents final state —
+every operation is followed by a fresh official inventory read.
+
+### P1-B status — selected Job live output
+
+The TUI bundle mounts the official `job-controller` row
+(`@deepseek-ai/dsh-api-job-controller`, the same row the rc.1 web bundle mounts;
+the dsh-base layer does not). The Direct adapter
+(`src/runtime/direct/job-observation-direct.ts`) consumes
+`JobController.follow()`, the official NON-CONSUMING Host observer: upstream
+`packages/api/job-controller/src/observe.ts` reads only
+`JobRegistry.readAt()` and never `JobRegistry.read()`, so it neither advances the
+model `job_output` cursor nor acknowledges a completion notice. The selected Job
+detail renders status/progress plus a bounded retained-output tail, marks an
+official `lossy`/`gapBefore` eviction honestly, and keeps the final snapshot
+readable after settlement. The observer is owned by the viewer (one Job at a
+time) and is aborted on close, session transition, and surface teardown;
+`TaskReadPort` stays status-only. If the `jobController` service is absent, the
+detail degrades to the previous status-only view with an explicit note instead
+of failing.
+
 ## Official seam mapping (DSH 0.1.2-alpha.4) — history, skills, errors, diagnostics
 
 The M2/M3 Remote backend maps to the official seams below (first shipped in

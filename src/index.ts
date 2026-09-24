@@ -216,6 +216,8 @@ import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { DirectSessionArchive } from './runtime/direct/session-archive-direct.ts'
 import { DirectHostCommandPort } from './runtime/direct/host-command-direct.ts'
 import { DirectPluginManagerPort } from './runtime/direct/plugin-manager-direct.ts'
+import { DirectJobObservationPort } from './runtime/direct/job-observation-direct.ts'
+import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
 import { PluginManagerPanel } from './plugin-manager/panel.ts'
 import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
@@ -3713,6 +3715,10 @@ export function apply(ctx: Context, config: Config): void {
       // surface after this teardown.
       jobsEventsDispose?.()
       jobsEventsDispose = undefined
+      // Release the selected-Job follow stream explicitly: TuiApp.dispose()
+      // does not invoke the viewer's onClose, so the observer would otherwise
+      // outlive the surface.
+      activeJobViewerClose?.()
       activeJobViewerClose = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
@@ -7090,6 +7096,10 @@ export function apply(ctx: Context, config: Config): void {
       }),
     })
     disposePluginManagerController = () => pluginManagerController.dispose()
+    // The selected-Job observation seam (P1-B): the official job-controller
+    // row is mounted by this bundle; the Direct adapter is the only module
+    // that touches `ctx.jobController`.
+    const jobObservation = new DirectJobObservationPort(ctx, diag)
     const openPluginManager = (): void => {
       // A second open is a no-op: the panel is already the active surface.
       if (activePluginManagerHost !== undefined) return
@@ -9308,23 +9318,45 @@ export function apply(ctx: Context, config: Config): void {
       // and kill against the owner, on top of the close-on-transition
       // below).
       const ownerSessionId = liveAgent.session.id
-      activeJobViewerClose = app.openOutputViewer({
-        title,
-        initial: snapshot.kind === 'subagent'
-          ? subagentJobViewHint(snapshot.status, snapshot.detail)
-          : jobStatusHint(snapshot.status, snapshot.detail),
-        refresh: () => {
-          if (jobs === undefined) return ''
+      const fallbackText = snapshot.kind === 'subagent'
+        ? subagentJobViewHint(snapshot.status, snapshot.detail)
+        : jobStatusHint(snapshot.status, snapshot.detail)
+      // The selected Job is the ONLY observed Job (P1-B1). The observer is
+      // event-driven at its data source: the official follow stream updates
+      // this local snapshot and the viewer's existing refresh timer merely
+      // repaints it — the tick never reads Host output.
+      let observed: JobObservedSnapshot | undefined
+      let observationError: string | undefined
+      let closeObserver: () => void = () => {}
+      try {
+        closeObserver = jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
+      } catch (error) {
+        // A composition without the official job-controller row (the injected
+        // production row guarantees it) degrades to the status-only detail —
+        // the documented P1-B safety valve — and says so explicitly.
+        observationError = safeErrorMessage(error)
+      }
+      const refreshBody = (): string => {
+        if (observed !== undefined) return formatJobObservation(observed)
+        const current = jobs === undefined ? undefined : (() => {
           try {
-            const current = jobs.get(jobId as JobId, ownerSessionId)
-            return current.kind === 'subagent'
-              ? subagentJobViewHint(current.status, current.detail)
-              : jobStatusHint(current.status, current.detail)
+            return jobs.get(jobId as JobId, ownerSessionId)
           } catch {
             // The job left the registry (or the session switched): freeze.
-            return ''
+            return undefined
           }
-        },
+        })()
+        const base = current === undefined
+          ? fallbackText
+          : current.kind === 'subagent'
+            ? subagentJobViewHint(current.status, current.detail)
+            : jobStatusHint(current.status, current.detail)
+        return observationError === undefined ? base : `${base}\nlive observation unavailable: ${observationError}`
+      }
+      activeJobViewerClose = app.openOutputViewer({
+        title,
+        initial: fallbackText,
+        refresh: refreshBody,
         onStop: () => {
           if (jobs === undefined) return
           try {
@@ -9350,16 +9382,33 @@ export function apply(ctx: Context, config: Config): void {
         // to the parent browser, not to the editor.
         closeHint: 'back',
         onClose: () => {
+          // Closing the viewer always releases the observer (Esc, the parent
+          // browser closing, a session transition, or surface teardown).
+          closeObserver()
           activeJobViewerClose = undefined
           refreshTasks()
         },
       })
     }
+    /**
+     * The Job detail body from the detached observation (never a Host read).
+     * The official controller provides a best-effort retained preview, not an
+     * archival terminal log — say so.
+     */
+    const formatJobObservation = (observed: JobObservedSnapshot): string => {
+      const lines: string[] = [observed.status]
+      if (observed.progress !== undefined) lines.push(`progress: ${observed.progress}`)
+      if (observed.detail !== undefined) lines.push(`detail: ${observed.detail}`)
+      if (observed.gapBefore) lines.push('note: earlier output was evicted before this retained preview')
+      if (observed.error !== undefined) lines.push(`follow error: ${observed.error}`)
+      lines.push('', 'best-effort retained output preview (not a complete transcript):', '', observed.text)
+      return lines.join('\n')
+    }
     /** One-line viewer hint for a job state (never touches the read cursor). */
     const jobStatusHint = (status: string, detail: string | undefined): string => {
       const tail = status === 'running' || status === 'stopping'
-        ? ' — output is delivered to the agent via job_output; viewing never consumes the job\u2019s read cursor'
-        : ` — final output: ask the agent to run job_output in the conversation${detail === undefined ? '' : ` (${detail})`}`
+        ? ' — opening the non-consuming retained-output stream…'
+        : ` — final output is delivered to the agent via job_output${detail === undefined ? '' : ` (${detail})`}`
       return `${status}${tail}`
     }
     refreshPendingInput()
