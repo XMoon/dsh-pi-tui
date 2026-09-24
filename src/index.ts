@@ -9032,17 +9032,32 @@ export function apply(ctx: Context, config: Config): void {
       // would also reclaim it at plugin unload — this makes the surface
       // teardown order explicit).
       //
-      // `output` events are ring APPENDS — one per chunk of a streaming
-      // job — and never change the roster or any status fact the Task
-      // surfaces read (the upstream Job Controller likewise keeps output
-      // streams off the roster refresh path). Reacting to them would turn
-      // refreshAgents' catalog work into a per-chunk storm, so only the
-      // lifecycle vocabulary (registered/progress/stopping/settled/removed)
-      // reaches the refreshes.
+      // Events route by SEMANTICS, mirroring the TaskBrowserRuntime's own
+      // catalog/runtime split (the upstream Job Controller keeps output off
+      // the roster path the same way):
+      // - `output` is a ring APPEND — one per streamed chunk — and changes
+      //   no roster or status fact: ignored entirely.
+      // - `progress` (a producer's live progress line) and `stopping` (a
+      //   kill request acknowledged) change only JobView runtime facts:
+      //   the runtime-only refresh re-projects rows from the cached
+      //   descendant catalog, never re-listing (listDescendants may read
+      //   persistence).
+      // - `registered` / `settled` / `removed` (and any future vocabulary)
+      //   may move Task membership or one-shot subagent lifecycle: the
+      //   full catalog refresh runs.
       jobsEventsDispose = jobs.events.subscribe({ owners: 'scope' }, (event: { type: string }) => {
-        if (event.type === 'output') return
-        refreshTasks()
-        refreshAgents()
+        switch (event.type) {
+          case 'output':
+            return
+          case 'progress':
+          case 'stopping':
+            refreshTasks()
+            refreshAgentRuntimeOnly()
+            return
+          default:
+            refreshTasks()
+            refreshAgents()
+        }
       })
       refreshTasks()
     }

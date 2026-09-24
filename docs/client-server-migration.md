@@ -979,10 +979,24 @@ D2.3 converges Session-local model selection, blank-Session preset selection,
 ordinary fresh create and ordinary open onto the official DSH Host/Client
 contracts. Production remains Direct; the Remote adapters are consumed by
 tests only (the 0.1.6-era same-Host `smoke:remote-d2-lifecycle` smoke was
-retired with the unit and presentation suites carrying the coverage). There
+retired after its semantic scenarios gained adapter-level replacement
+coverage — see the coverage note below). There
 is still no
 `BackendKind='remote'`, no CLI/environment switch, and no production Remote
 Session mount.
+
+Coverage note: the retired D2.3 same-Host harness also exercised real Client
+Context → Gateway → Host Session Controller integration for create/open,
+model selection, and preset selection. Those semantics remain covered by
+adapter contract/unit tests (`remote-session-lifecycle`, `remote-model-port`,
+`remote-preset-port`), but the same-Host integration lane for
+create/open/model/preset is currently absent. This is a known non-blocking
+coverage gap.
+
+Future follow-up: add a focused `smoke:remote-session-lifecycle-parity`
+covering ordinary create, explicit-preset create, open/retain, model select,
+and preset select + locked — without restoring the retired monolithic D2.3
+harness.
 
 - `ModelCatalog` gained one semantic directory read, `loadDirectory()`, matching
   the official `session.modelCatalog()` generation snapshot (deployment
@@ -1092,9 +1106,11 @@ Session mount.
 Validation for this stage: per-adapter contract tests for the Remote model,
 preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; and
 headless model/preset/create/open presentation tests. The 0.1.6-era
-same-Host `smoke:remote-d2-lifecycle` integration smoke was retired with
-that replacement coverage; the boundary gate stays green and
-`packages/pi-tui/**` is unchanged.
+same-Host `smoke:remote-d2-lifecycle` integration smoke was retired after
+its semantic scenarios gained adapter-level replacement coverage; its
+create/open/model/preset same-Host integration layer is not currently
+replaced and remains a documented follow-up. The boundary gate stays green
+and `packages/pi-tui/**` is unchanged.
 
 ## D2.4 status (COMPLETE) — Host-owned fork / rewind convergence
 
@@ -1316,6 +1332,15 @@ turn/end, P3 nonexistent-seq refusal, P4 standalone-tail inclusion, P5
 queued-input exclusion proven through child continuation, P6 lineage,
 P7 subagent ancestor workspace, P8 activation default). The old D2.3-importing
 harness was retired with the 0.1.6-era `dsh-agent-presets` package it named.
+
+## Known coverage follow-ups
+
+Non-blocking coverage gaps with a named owner lane. These are not current
+merge blockers; each records what is absent and the follow-up shape.
+
+| Follow-up | Absent today | Follow-up shape |
+|---|---|---|
+| D2.3 same-Host integration lane | The retired 0.1.6-era `smoke:remote-d2-lifecycle` also proved real Client Context → Gateway → Host Session Controller integration for ordinary create, explicit-preset create, open/retain, model select, and preset select + locked. Adapter contract tests cover those semantics; the same-Host integration layer is not currently replaced. | A focused `smoke:remote-session-lifecycle-parity` covering those five flows, without restoring the retired monolithic D2.3 harness. |
 
 ## Known blockers
 

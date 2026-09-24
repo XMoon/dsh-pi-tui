@@ -4307,14 +4307,15 @@ test('the runner-level Job event subscription is exactly-once and disposed with 
   assert.equal(jobs.subscribeCount(), 1, 'a post-disposal emission must not create a new subscription')
 })
 
-test('job output events never trigger Task refreshes; lifecycle events do (rc.1 event vocabulary)', async (t) => {
-  // rc.1 delivers `output` for EVERY ring append of a streaming job. The
-  // unified listener must treat it as pure stream noise — reacting would
-  // turn refreshAgents' catalog work (listDescendants) into a per-chunk
-  // storm, while the upstream Job Controller itself keeps output off the
-  // roster refresh path.
+test('job events route by semantics: output ignored, progress/stopping runtime-only, membership full (rc.1)', async (t) => {
+  // rc.1 JobEvent semantic routing: `output` (one ring append per streamed
+  // chunk) is pure stream noise; `progress`/`stopping` change only JobView
+  // runtime facts; only the membership vocabulary (registered/settled/
+  // removed) may move the subagent catalog, whose refresh (listDescendants)
+  // can read persistence — so routing matches the TaskBrowserRuntime's own
+  // catalog/runtime split.
   const life = testLifecycle(t)
-  const home = life.tempDir('dsh-pi-tui-jobs-output-filter-')
+  const home = life.tempDir('dsh-pi-tui-jobs-event-routing-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   life.defer(() => {
@@ -4373,20 +4374,32 @@ test('job output events never trigger Task refreshes; lifecycle events do (rc.1 
   assert.equal(setTasksCalls.length, setTasksBaseline, 'output events must not repaint the Task rows')
   assert.equal(descendantReads, descendantBaseline, 'output events must not trigger the subagent catalog refresh')
 
+  // `progress` (a producer's live progress line) and `stopping` (a kill
+  // acknowledged) change only JobView runtime facts: the Task rows repaint
+  // from the runtime-only refresh while the CATALOG (listDescendants —
+  // which may read persistence) stays untouched.
+  for (const type of ['progress', 'stopping'] as const) {
+    const taskBaseline = setTasksCalls.length
+    const catalogBaseline = descendantReads
+    jobs.emit(type)
+    await settle()
+    await vt.waitForRender()
+    assert.ok(setTasksCalls.length > taskBaseline, `a ${type} event must repaint the Task rows`)
+    assert.equal(descendantReads, catalogBaseline, `a ${type} event must NOT trigger the subagent catalog refresh`)
+  }
+
   // Lifecycle vocabulary still refreshes normally: the roster changed and
   // a settlement implies membership may have moved.
   jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
-  jobs.emit('settled')
-  await settle()
-  await vt.waitForRender()
-  assert.ok(setTasksCalls.length > setTasksBaseline, 'a settled event must repaint the Task rows')
-  assert.ok(descendantReads > descendantBaseline, 'a settled event must trigger the subagent catalog refresh')
-
-  const baseline2 = setTasksCalls.length
-  const descendants2 = descendantReads
-  jobs.emit('registered')
-  await settle()
-  assert.ok(setTasksCalls.length > baseline2 && descendantReads > descendants2, 'a registered event must refresh both channels')
+  for (const type of ['settled', 'registered', 'removed'] as const) {
+    const taskBaseline = setTasksCalls.length
+    const catalogBaseline = descendantReads
+    jobs.emit(type)
+    await settle()
+    await vt.waitForRender()
+    assert.ok(setTasksCalls.length > taskBaseline, `a ${type} event must repaint the Task rows`)
+    assert.ok(descendantReads > catalogBaseline, `a ${type} event must trigger the subagent catalog refresh`)
+  }
 })
 
 test('a failed jobs read never blanks the retained Task Browser parent', async (t) => {
