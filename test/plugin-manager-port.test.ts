@@ -517,5 +517,5 @@ test('a protected TUI-module entry is refused with the module wording and never 
   await controller.toggleSelectedCard()
   await tick()
   assert.equal(state.setPlugin.length, 0)
-  assert.match(controller.notice() ?? '', /module of the current TUI package/)
+  assert.match(controller.notice() ?? '', /controlled by the Current TUI composition/)
 })

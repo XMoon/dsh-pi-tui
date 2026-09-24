@@ -273,16 +273,16 @@ export function buildPluginManagerModel(
   }
 
   // PROTECTION-ONLY (never visibility/role): the official identity proof for a
-  // self-owned row whose Loader entryId could not be matched in this snapshot
-  // (the bundle/plugin reads are not one atomic Host snapshot). `PluginInfo.
-  // patchId` is the persistent patch row id; `BundleRowInfo.rowId` is a row the
-  // bundle declares and `BundleInfo.overrides` are the ids its patch CHANGES
-  // (e.g. the base rows `cordis.patch.yml` disables). Equality proves the SAME
-  // logical row, WITHOUT any module/package-name guessing. The TUI bundle's own
-  // patch layer is immutable from its own screen: re-enabling a base row the
-  // bundle disabled would undo its intended composition.
+  // row the Current TUI composition controls. `BundleRowInfo.rowId` is a row the
+  // TUI bundle declares and `BundleInfo.overrides` are the ids its patch CHANGES
+  // (e.g. the base rows `cordis.patch.yml` disables); `PluginInfo.patchId` is
+  // the same persistent patch row id on a live entry. The set is applied to BOTH
+  // bundle rows (a base bundle's `tool-bash` row is controlled by the TUI patch
+  // layer that overrides it) and standalone entries, WITHOUT any module/package
+  // name guessing. The TUI bundle's own composition is immutable from its own
+  // screen: re-enabling a row it disabled would undo that composition.
   const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
-  const selfRowIds = new Set<string>([
+  const selfProtectionIds = new Set<string>([
     ...(selfBundle?.rows ?? []).map(row => row.rowId),
     ...(selfBundle?.overrides ?? []),
   ])
@@ -295,7 +295,9 @@ export function buildPluginManagerModel(
     const isSelf = role === 'current-tui'
     const rows = bundle.rows.map(row => {
       const liveId = row.entryId === undefined ? undefined : liveByEntry.get(String(row.entryId))
-      const selfOwned = isSelf
+      // The self card's own rows AND any row the Current TUI composition
+      // declares/overrides (even inside another bundle, e.g. dsh-base).
+      const selfOwned = isSelf || selfProtectionIds.has(row.rowId)
       return rowView(row, liveId, selfOwned)
     })
     const hostToggle = bundle.readOnlyReason === undefined
@@ -333,7 +335,7 @@ export function buildPluginManagerModel(
     const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
     // Protection-only: proven by the official patch row id, never by a module
     // name. It never changes visibility or role, only the effective toggle.
-    const selfProtected = entry.patchId !== undefined && selfRowIds.has(entry.patchId)
+    const selfProtected = entry.patchId !== undefined && selfProtectionIds.has(entry.patchId)
     const row = entryRowView(entry, selfProtected)
     cards.push(Object.freeze({
       value,
@@ -441,7 +443,7 @@ export function cardDetailRows(
   if (card.role === 'current-tui') {
     rows.push(info('This bundle provides the current TUI and is managed outside this screen.'))
   } else if (card.isSelf) {
-    rows.push(info('This entry is a module of the current TUI package; it is not changed from this screen.'))
+    rows.push(info('This row is controlled by the Current TUI composition; it is not changed from this screen.'))
   }
   if (card.extension !== undefined) {
     const extension = card.extension
