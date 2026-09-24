@@ -1633,55 +1633,11 @@ export function registerTuiCommands(
     return [...byName.values()]
   }
   /**
-   * Client-local preset-selection visibility: the official `agentPresets.list`
-   * roster's `modeSelectionEnabled` deployment policy. PRESENTATION ONLY — the
-   * `/preset` handler stays registered and still fails closed, so a hidden
-   * `/preset` refuses exactly like a visible one (UI visibility is not an
-   * authorization boundary).
-   *
-   * The observed value is OWNER-scoped (Session generation + identity): a
-   * value read for another owner is stale and ignored (unknown => visible), so
-   * a disabled deployment's Session can never hide the affordance for a later
-   * Session, and an unavailable/unknown roster keeps the current presentation.
-   * Reads are request-ordered so a late same-owner read cannot overwrite a
-   * newer authoritative one.
-   */
-  type PresetSelectionOwner = { readonly generation: number; readonly sessionId: string | undefined }
-  let presetSelectionEnabled: boolean | undefined
-  let presetSelectionOwner: PresetSelectionOwner | undefined
-  let presetSelectionRequest = 0
-  /** Register a roster read that feeds the PRESENTATION cache. The token is
-   * taken at START, so a read that merely SETTLES later can never overwrite a
-   * newer one — every reader (probe, typed `/preset`, picker) participates.
-   * Mutation ownership is SEPARATE: an operation that already passed its own
-   * subject/token fences still dispatches even when this cache commit loses. */
-  const beginPresetSelectionRead = (): number => ++presetSelectionRequest
-  const currentPresetOwner = (): PresetSelectionOwner => ({
-    generation: runner.sessionGeneration,
-    sessionId: runner.liveAgent?.session.id,
-  })
-  const samePresetOwner = (left: PresetSelectionOwner, right: PresetSelectionOwner): boolean =>
-    left.generation === right.generation && left.sessionId === right.sessionId
-  /**
    * The TUI-owned `/preset` command IDENTITY — the official
    * discovery/presentation identity (0.1.6 `definitionId`), never an
-   * authorization fact. Visibility is keyed on it so a scoped same-name
-   * `/preset` contributed by a preset/plugin (which selects its own full
-   * descriptor and does not inherit this identity) keeps its own presentation.
+   * authorization fact.
    */
   const TUI_PRESET_COMMAND_DEFINITION_ID = CommandDefinitionId('@xmoon76/dsh-pi-tui/preset')
-  /**
-   * Whether one effective command is visible in the preset-selection surface.
-   * Only the TUI's OWN `/preset` identity honors the Host mode-selection
-   * policy; a same-name command with a DIFFERENT definitionId is semantically
-   * unrelated and stays visible. A value belonging to another owner is
-   * unknown: keep the affordance rather than inherit a stale `false`.
-   */
-  const presetCommandVisible = (command: { readonly definitionId?: string }): boolean => {
-    if (command.definitionId !== TUI_PRESET_COMMAND_DEFINITION_ID) return true
-    if (presetSelectionOwner === undefined || !samePresetOwner(presetSelectionOwner, currentPresetOwner())) return true
-    return presetSelectionEnabled !== false
-  }
   /**
    * One collision notice per contribution IDENTITY and failure GENERATION
    * (the key is dropped when the collision recovers): a new owner reusing a
@@ -1725,7 +1681,6 @@ export function registerTuiCommands(
     const display = options.display === 'none'
       ? []
       : [...mergeContributions(sorted)]
-          .filter(presetCommandVisible)
           .sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
@@ -1850,48 +1805,6 @@ export function registerTuiCommands(
     installCompletionsContained(liveAgent === undefined
       ? mergeGlobalAndSavedScoped()
       : commands.list(liveAgent).map(commandSummaryOf))
-  }
-  /**
-   * Commit one roster read to the PRESENTATION cache while `request` is still
-   * the newest registered read, returning whether it committed. This owns ONLY
-   * the display cache: a `false` return means a later-started presentation read
-   * already owns the cache and the value must not repaint it — it must NEVER
-   * cancel the caller's own user operation. A user mutation decides from the
-   * roster IT read: the official Web keeps `loadGeneration` (presentation) and
-   * `select()` (mutation ownership) separate, and the Host
-   * `agentPresets.select` owns the blank-session/mount/commit authority.
-   */
-  const commitPresetVisibility = (enabled: boolean, owner: PresetSelectionOwner, request: number): boolean => {
-    if (request !== presetSelectionRequest) return false
-    if (presetSelectionOwner !== undefined && samePresetOwner(presetSelectionOwner, owner) && presetSelectionEnabled === enabled) return true
-    presetSelectionEnabled = enabled
-    presetSelectionOwner = owner
-    refreshCompletions()
-    return true
-  }
-  /**
-   * Seed/refresh the presentation capability from the CURRENT owner. The read
-   * is fenced by request order AND owner identity: a roster that settles after
-   * a newer read or a switch must never rewrite the new Session's command
-   * surface. A superseded or aborted read is a cancellation (debug diagnostics
-   * only); any other failure keeps the current presentation and is recorded by
-   * runOwned. A rosterless deployment (`available() === false`) is unknown and
-   * keeps `/preset` visible (its handler still refuses execution).
-   */
-  const refreshPresetSelectionVisibility = (): void => {
-    const presets = runner.catalog.presets
-    if (!presets.available()) return
-    const owner = currentPresetOwner()
-    const request = beginPresetSelectionRead()
-    runOwned('preset selection visibility', async () => {
-      const roster = await presets.roster(runner.signal)
-      if (!samePresetOwner(owner, currentPresetOwner())) return
-      commitPresetVisibility(roster.modeSelectionEnabled, owner, request)
-    }, {
-      diag: runner.diag,
-      sessionId: () => runner.liveAgent?.session.id,
-      isCancellation: (error) => error instanceof SupersededReadError || runner.signal.aborted,
-    })
   }
   // ── registry-change coalescing ─────────────────────────────────────────
   // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
@@ -3670,9 +3583,6 @@ export function registerTuiCommands(
       savedScopedCommands = snapshot.scopedCommands
       installCompletionsContained(mergeGlobalAndSavedScoped())
     })
-    // The command surface follows the CURRENT owner's roster policy; the read
-    // is generation-fenced so a late result cannot rewrite a newer Session.
-    refreshPresetSelectionVisibility()
   }
   /**
    * The revalidating transition (target/owner change): scoped previews clear
@@ -4316,32 +4226,6 @@ export function registerTuiCommands(
         if (rest === '') {
           return { kind: 'success', text: `default preset: ${await displayedDefault()}` }
         }
-        // A saved default is a preset-SELECTION mutation, so the deployment
-        // policy gates it exactly like a selection (dsh-web writes `default`
-        // only while the picker is shown); the read-only `/preset default`
-        // query and `/preset status` stay available. Fenced by the CURRENT
-        // subject + request order like every other roster read.
-        const defaultOwner = { generation: runner.sessionGeneration, sessionId: runner.liveAgent?.session.id }
-        const defaultVisibilityRequest = beginPresetSelectionRead()
-        let defaultRoster
-        try {
-          defaultRoster = await presets.roster(runner.signal)
-        } catch (error) {
-          if (error instanceof SupersededReadError || runner.signal.aborted) return { kind: 'success' }
-          throw error
-        }
-        if (runner.sessionGeneration !== defaultOwner.generation || runner.liveAgent?.session.id !== defaultOwner.sessionId) {
-          // The subject moved during the read: no stale policy notice on the
-          // new surface (v2 §0.2.1).
-          return { kind: 'success' }
-        }
-        // Presentation freshness only: a newer background read may own the
-        // visibility cache, but it must NOT cancel this user mutation — the
-        // policy THIS operation read decides, fail-closed.
-        commitPresetVisibility(defaultRoster.modeSelectionEnabled, defaultOwner, defaultVisibilityRequest)
-        if (!defaultRoster.modeSelectionEnabled) {
-          return { kind: 'error', text: 'preset selection is disabled in this deployment' }
-        }
         // The saved default only affects sessions created from now on. A
         // standing catalog refresh follows ONLY when no higher-precedence
         // override (run-local pending or launch-time --preset) masks the
@@ -4394,21 +4278,6 @@ export function registerTuiCommands(
         const ownerCurrent = (): boolean =>
           runner.sessionGeneration === owner.generation && runner.liveAgent?.session.id === owner.sessionId
         try {
-        const visibilityRequest = beginPresetSelectionRead()
-        const roster = await presets.roster(runner.signal)
-        // Fence after EVERY await: a newer `/preset` operation OR a moved
-        // subject means this one no longer owns the surface — no
-        // policy/rejection notice, no repaint (§0.2.5/§0.3.1/§0.3.3). A Direct
-        // roster can resolve across a `/new`/switch (no Remote generation fence).
-        if (token !== presetOperationToken) return { kind: 'superseded' }
-        if (!ownerCurrent()) return { kind: 'superseded' }
-        // Presentation freshness only: losing the visibility-cache commit to a
-        // newer background read must not cancel this still-current user
-        // operation. The policy THIS operation read decides, fail-closed.
-        commitPresetVisibility(roster.modeSelectionEnabled, owner, visibilityRequest)
-        if (!roster.modeSelectionEnabled) {
-          return { kind: 'rejected', message: 'preset selection is disabled in this deployment' }
-        }
         const agent = runner.liveAgent
         if (agent === undefined) {
           const resolved = await presets.resolve(id, runner.signal)
@@ -4564,7 +4433,6 @@ export function registerTuiCommands(
       const pickerOwnerCurrent = (): boolean =>
         runner.sessionGeneration === pickerGeneration && runner.liveAgent?.session.id === pickerSessionId
       let roster
-      const visibilityRequest = beginPresetSelectionRead()
       try {
         roster = await presets.roster(runner.signal)
       } catch (error) {
@@ -4576,14 +4444,6 @@ export function registerTuiCommands(
         throw error
       }
       if (!pickerOwnerCurrent()) return { kind: 'success' }
-      // The picker IS presentation: it may lose to a newer presentation read
-      // (no stale overlay), unlike a user mutation below.
-      if (!commitPresetVisibility(roster.modeSelectionEnabled, { generation: pickerGeneration, sessionId: pickerSessionId }, visibilityRequest)) {
-        return { kind: 'success' }
-      }
-      if (!roster.modeSelectionEnabled) {
-        return { kind: 'error', text: 'preset selection is disabled in this deployment' }
-      }
       if (roster.presets.length === 0) return { kind: 'success', text: 'no agent presets configured' }
       const defaultId = roster.defaultId ?? await displayedDefault()
       // Re-check AFTER the displayedDefault await too: a Session switch during
@@ -5189,7 +5049,6 @@ export function registerTuiCommands(
         { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs locally without recording', currentValue: '' },
         { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
         ...commands.list(runner.liveAgent as unknown as Agent)
-          .filter(presetCommandVisible)
           .map(command => ({
             id: `cmd-${command.name}`,
             label: `/${command.name}`,

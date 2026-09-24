@@ -138,7 +138,7 @@ test('model catalog separates global default from live Session selection', async
     },
   }
   const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    llm: availableLlm({ resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next }),
     agentDefaultModel: {
       currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
       saveSelection: async (next: unknown) => { savedDefault = next },
@@ -164,129 +164,6 @@ test('model catalog separates global default from live Session selection', async
   })
 })
 
-test('overlapping default writes reassert the newest choice after stale completion', async () => {
-  let rejectFirst!: (error: Error) => void
-  const calls: string[] = []
-  const first = new Promise<never>((_resolve, reject) => { rejectFirst = reject })
-  const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
-      saveSelection: (next: { model: string }) => {
-        calls.push(next.model)
-        return next.model === 'old' ? first : Promise.resolve()
-      },
-    },
-  }), () => undefined).models
-
-  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
-  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
-  await latest
-  rejectFirst(new Error('stale write failed'))
-  const staleOutcome = await stale
-  assert.equal(staleOutcome.kind, 'indeterminate', 'a failed default write settles indeterminate, never a rejection')
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(calls.at(-1), 'new', 'the stale completion must not leave the global default at old')
-})
-
-test('a stale SUCCESSFUL write still reasserts the newest choice', async () => {
-  let resolveFirst!: () => void
-  const calls: string[] = []
-  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
-  const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
-      saveSelection: (next: { model: string }) => {
-        calls.push(next.model)
-        return next.model === 'old' ? first : Promise.resolve()
-      },
-    },
-  }), () => undefined).models
-
-  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
-  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
-  await latest
-  resolveFirst() // the stale write SUCCEEDS after the newer one
-  await stale
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(calls.at(-1), 'new', 'a stale success must not leave the global default at old')
-})
-
-test('a selection started during the correction is reasserted after it', async () => {
-  let resolveFirst!: () => void
-  let resolveCorrection!: () => void
-  const calls: string[] = []
-  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
-  let correction: Promise<void> | undefined
-  const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
-      saveSelection: (next: { model: string }) => {
-        calls.push(next.model)
-        if (next.model === 'old') return first
-        // The third write is the fencing correction for 'new': hold it so a
-        // newer selection can start while the correction is in flight.
-        if (calls.length === 3) {
-          correction = new Promise<void>((resolve) => { resolveCorrection = resolve })
-          return correction
-        }
-        return Promise.resolve()
-      },
-    },
-  }), () => undefined).models
-
-  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
-  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
-  await latest
-  resolveFirst() // the stale write completes; its fence starts the held correction
-  // Bounded microtask flush (never a fixed timer): the correction write must
-  // have been launched before the newer selection starts.
-  for (let i = 0; i < 16 && calls.length < 3; i += 1) await Promise.resolve()
-  assert.equal(calls.at(-1), 'new', 'the correction for the newest value must be in flight')
-  const newest = models.saveDefaultSelection({ provider: 'p', model: 'newest' })
-  await newest
-  resolveCorrection() // the held correction completes
-  await stale // the stale promise now INCLUDES its awaited correction
-  await Promise.resolve()
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(calls.at(-1), 'newest', 'a selection started during the correction must be reasserted after it')
-})
-
-test('a failed fencing correction is reported through the diagnostic sink', async () => {
-  let resolveFirst!: () => void
-  const calls: string[] = []
-  const warnings: string[] = []
-  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
-  const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
-      saveSelection: (next: { model: string }) => {
-        calls.push(next.model)
-        if (next.model === 'old') return first
-        // The third write is the fencing correction for 'new': make it fail.
-        if (calls.length === 3) return Promise.reject(new Error('correction write failed'))
-        return Promise.resolve()
-      },
-    },
-  }), () => undefined, undefined, { warn: (message: string) => { warnings.push(message) } }).models
-
-  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
-  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
-  await latest
-  resolveFirst() // the stale write completes; its fence starts the correction
-  await stale
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(warnings.length, 1, 'the failed correction must be reported, never silently swallowed')
-  assert.match(warnings[0]!, /correction failed/u)
-})
-
 test('a global-default save failure does not erase a durable live Session choice', async () => {
   const appended: unknown[] = []
   let liveSelection: { provider: string; model: string } = { provider: 'old-provider', model: 'old-model' }
@@ -304,7 +181,7 @@ test('a global-default save failure does not erase a durable live Session choice
     },
   }
   const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    llm: availableLlm({ resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next }),
     agentDefaultModel: {
       currentSelection: () => ({ provider: 'global', model: 'default' }),
       saveSelection: async () => { throw new Error('quota exceeded') },
@@ -327,7 +204,7 @@ test('a failed durable append never becomes the Agent selection', async () => {
     selectForNextRequest: () => { throw new Error('selectForNextRequest must not run') },
   }
   const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    llm: availableLlm({ resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next }),
     agentDefaultModel: {
       currentSelection: () => ({ provider: 'global', model: 'default' }),
       saveSelection: async () => {},
@@ -338,87 +215,6 @@ test('a failed durable append never becomes the Agent selection', async () => {
   assert.equal(outcome.kind, 'rejected')
   assert.deepEqual(models.sessionSelection('session-live'), { provider: 'old-provider', model: 'old-model' },
     'a failed append must leave the Agent selection untouched')
-})
-
-test('a failed selection is never resurrected by the fencing correction', async () => {
-  let resolveFirst!: () => void
-  let resolveCorrection!: () => void
-  const calls: string[] = []
-  const first = new Promise<void>((resolve) => { resolveFirst = resolve })
-  let correction: Promise<void> | undefined
-  const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
-      saveSelection: (next: { model: string }) => {
-        calls.push(next.model)
-        if (next.model === 'old') return first
-        if (next.model === 'new') {
-          // The second 'new' write is the fencing correction: hold it.
-          if (calls.filter(call => call === 'new').length === 2) {
-            correction = new Promise<void>((resolve) => { resolveCorrection = resolve })
-            return correction
-          }
-          return Promise.resolve()
-        }
-        // 'newest' (the failed choice) always fails.
-        return Promise.reject(new Error('quota exceeded'))
-      },
-    },
-  }), () => undefined).models
-
-  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' })
-  const latest = models.saveDefaultSelection({ provider: 'p', model: 'new' })
-  await latest
-  resolveFirst() // the stale write completes; its fence starts the held correction
-  // Bounded microtask flush: wait until the held correction has been launched.
-  for (let i = 0; i < 16 && calls.filter(call => call === 'new').length < 2; i += 1) await Promise.resolve()
-  assert.equal(calls.at(-1), 'new', 'the correction for the newest committed value must be in flight')
-  const newestOutcome = await models.saveDefaultSelection({ provider: 'p', model: 'newest' })
-  assert.equal(newestOutcome.kind, 'indeterminate', 'a failed default write settles indeterminate')
-  resolveCorrection() // the held correction completes
-  await stale // the stale promise now INCLUDES its awaited correction
-  await Promise.resolve()
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(calls.at(-1), 'new',
-    'a failed selection must never be resurrected by the correction: the persistent target stays the newest committed value')
-})
-
-test('a stale success after a failed newer attempt still reasserts the newest committed value', async () => {
-  let resolveA!: () => void
-  let resolveB!: () => void
-  const calls: string[] = []
-  const a = new Promise<void>((resolve) => { resolveA = resolve })
-  const b = new Promise<void>((resolve) => { resolveB = resolve })
-  const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'global', model: calls.at(-1) ?? 'default' }),
-      saveSelection: (next: { model: string }) => {
-        calls.push(next.model)
-        if (next.model === 'old') return a
-        if (next.model === 'new') return b
-        // 'newest' (C) always fails.
-        return Promise.reject(new Error('quota exceeded'))
-      },
-    },
-  }), () => undefined).models
-
-  const stale = models.saveDefaultSelection({ provider: 'p', model: 'old' }) // A gen1
-  const mid = models.saveDefaultSelection({ provider: 'p', model: 'new' }) // B gen2
-  const failed = models.saveDefaultSelection({ provider: 'p', model: 'newest' }) // C gen3
-  const failedOutcome = await failed // C fails first
-  assert.equal(failedOutcome.kind, 'indeterminate')
-  resolveB() // B succeeds while C's generation is current
-  await mid
-  resolveA() // A succeeds LAST, overwriting the store with the stale value
-  await stale
-  await Promise.resolve()
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(calls.at(-1), 'new',
-    'a stale success after a failed newer attempt must still reassert the newest committed value (B), never the stale A')
 })
 
 test('catalog DTOs are DETACHED — mutating a returned value never aliases Host data', async () => {
@@ -481,7 +277,7 @@ test('catalog DTOs are DETACHED — mutating a returned value never aliases Host
 test('presets degrade to unavailable without a roster service', async () => {
   const presets = port({}).presets
   assert.equal(presets.available(), false)
-  assert.deepEqual(await presets.roster(), { presets: [], modeSelectionEnabled: false })
+  assert.deepEqual(await presets.roster(), { presets: [] })
   assert.deepEqual(await presets.resolve('standard'), {}, 'rosterless resolve yields no preset identity')
   assert.deepEqual(await presets.resolve('code'), {}, 'an ordinary id is never special in a rosterless deployment')
   assert.equal(presets.defaultId(), undefined)
@@ -495,7 +291,6 @@ test('presets roster/resolve/defaultId return detached roster DTOs', async () =>
           { id: 'standard', isDefault: true },
           { id: 'code', name: 'PTC', broken: 'x' },
         ],
-        modeSelectionEnabled: true,
       }),
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
@@ -509,29 +304,10 @@ test('presets roster/resolve/defaultId return detached roster DTOs', async () =>
       { id: 'code', name: 'PTC', broken: 'x' },
     ],
     defaultId: 'standard',
-    modeSelectionEnabled: true,
   })
   assert.deepEqual(await presets.resolve(undefined), { id: 'standard' }, 'concrete id only, no setup callback')
   assert.deepEqual(await presets.resolve('code'), { id: 'code' }, 'a legal custom code id resolves as itself')
   assert.equal(presets.defaultId(), 'standard')
-})
-
-test('presets roster carries the Host mode-selection policy', async () => {
-  const presets = port({
-    agentPresets: {
-      remoteExportList: async () => ({
-        presets: [{ id: 'standard', isDefault: true }],
-        modeSelectionEnabled: false,
-      }),
-      resolve: async (id?: string) => preset(id ?? 'standard'),
-      get defaultId() { return 'standard' },
-    },
-  }).presets
-  assert.deepEqual(await presets.roster(), {
-    presets: [{ id: 'standard' }],
-    defaultId: 'standard',
-    modeSelectionEnabled: false,
-  })
 })
 
 test('presets selectSessionPreset maps the official blank-session select', async () => {
@@ -579,7 +355,7 @@ test('presets treats a declared code id as an ordinary preset — never rewritte
   const resolved: Array<string | undefined> = []
   const presets = port({
     agentPresets: {
-      remoteExportList: async () => ({ presets: [{ id: 'code', isDefault: true }], modeSelectionEnabled: true }),
+      remoteExportList: async () => ({ presets: [{ id: 'code', isDefault: true }] }),
       resolve: async (id?: string) => {
         resolved.push(id)
         if (id === 'code' || id === undefined) return preset('code')
@@ -598,7 +374,7 @@ test('presets treats a declared code id as an ordinary preset — never rewritte
 test('presets resolve refuses a declared-but-broken preset with the official invalid code', async () => {
   const presets = port({
     agentPresets: {
-      remoteExportList: async () => ({ presets: [{ id: 'broken-one', isDefault: false, broken: 'missing plugin' }], modeSelectionEnabled: true }),
+      remoteExportList: async () => ({ presets: [{ id: 'broken-one', isDefault: false, broken: 'missing plugin' }] }),
       // Official semantics: resolve RETURNS a broken row (only mount/retain
       // throws); the TUI selectability seam must still refuse it.
       resolve: async (id?: string) => ({ id: id ?? 'broken-one', broken: 'preset failed to mount: missing plugin' }),
@@ -771,25 +547,89 @@ function modelOwnerDouble(): { owner: {
   }
 }
 
-test('selectSessionModel resolves through the Host call config and refuses an unavailable model before any commit', async () => {
-  const { owner, appended } = modelOwnerDouble()
-  let resolvedWith: unknown
-  const models = new DirectCatalogPort(host({
-    llm: {
-      listProviders: () => [],
-      listModels: async () => [],
-      resolveModelInfo: async () => ({}),
-      resolveCallConfig: async (request: unknown) => { resolvedWith = request; throw new Error('unknown route') },
-      discoverModels: async () => [],
-      listConfigurableProviders: () => [],
-    },
+/** The rc.2 exact-availability admission double: every id these tests select is
+ *  currently advertised. The admission itself has its own regressions. */
+function availableLlm(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    listProviders: () => [
+      { id: 'p', name: 'Provider P' },
+      { id: 'new-provider', name: 'Provider New' },
+    ],
+    listModels: async () => [
+      { id: 'm' }, { id: 'm1' }, { id: 'new-model' }, { id: 'old-model' },
+    ],
+    resolveModelInfo: async () => ({}),
+    discoverModels: async () => [],
+    listConfigurableProviders: () => [],
+    ...overrides,
+  }
+}
+
+function modelDouble(overrides: Record<string, unknown> = {}): DirectCatalogPort {
+  return new DirectCatalogPort(host({
+    llm: availableLlm(overrides),
     agentDefaultModel: {
       currentSelection: () => ({ provider: 'p', model: 'm' }),
       saveSelection: async () => {},
     },
+  }), () => liveAgent)
+}
+
+test('selectSessionModel refuses a provider that is not currently advertised, before normalization or commit', async () => {
+  const { owner, appended } = modelOwnerDouble()
+  let resolveCalls = 0
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({ resolveCallConfig: async (next: unknown) => { resolveCalls += 1; return next } }),
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }), saveSelection: async () => {} },
   }), () => liveAgent, owner).models
-  const { outcome } = await models.selectSessionModel('session-live', { provider: 'p', model: 'nope', reasoningEffort: 'low' })
-  assert.deepEqual(resolvedWith, { provider: 'p', model: 'nope', reasoningEffort: 'low' },
+  const { outcome } = await models.selectSessionModel('session-live', { provider: 'ghost', model: 'm' })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') assert.equal(outcome.error.code, 'session/model-unavailable')
+  assert.equal(resolveCalls, 0, 'an unavailable provider is refused before call-config normalization')
+  assert.deepEqual(appended, [], 'an unavailable provider is refused before the durable append')
+})
+
+test('selectSessionModel refuses an exact model missing from the current list, before normalization or commit', async () => {
+  const { owner, appended } = modelOwnerDouble()
+  let resolveCalls = 0
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({ resolveCallConfig: async (next: unknown) => { resolveCalls += 1; return next } }),
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }), saveSelection: async () => {} },
+  }), () => liveAgent, owner).models
+  const { outcome } = await models.selectSessionModel('session-live', { provider: 'p', model: 'nope' })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') {
+    assert.equal(outcome.error.code, 'session/model-unavailable')
+    assert.match(outcome.error.message, /not available/)
+  }
+  assert.equal(resolveCalls, 0, 'an unavailable model is refused before call-config normalization')
+  assert.deepEqual(appended, [])
+})
+
+test('selectSessionModel refuses with the safe error text when the availability lookup fails', async () => {
+  const { owner, appended } = modelOwnerDouble()
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({ listModels: async () => { throw new Error('registry exploded') } }),
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }), saveSelection: async () => {} },
+  }), () => liveAgent, owner).models
+  const { outcome } = await models.selectSessionModel('session-live', { provider: 'p', model: 'm1' })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') {
+    assert.equal(outcome.error.code, 'session/model-unavailable')
+    assert.match(outcome.error.message, /registry exploded/)
+  }
+  assert.deepEqual(appended, [])
+})
+
+test('selectSessionModel refuses a call-config rejection before any commit', async () => {
+  const { owner, appended } = modelOwnerDouble()
+  let resolvedWith: unknown
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({ resolveCallConfig: async (request: unknown) => { resolvedWith = request; throw new Error('unknown route') } }),
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }), saveSelection: async () => {} },
+  }), () => liveAgent, owner).models
+  const { outcome } = await models.selectSessionModel('session-live', { provider: 'p', model: 'm1', reasoningEffort: 'low' })
+  assert.deepEqual(resolvedWith, { provider: 'p', model: 'm1', reasoningEffort: 'low' },
     'the Host resolver receives the exact requested selection')
   assert.equal(outcome.kind, 'rejected')
   if (outcome.kind === 'rejected') assert.equal(outcome.error.code, 'session/model-unavailable')
@@ -799,18 +639,8 @@ test('selectSessionModel resolves through the Host call config and refuses an un
 test('selectSessionModel commits the Host-NORMALIZED selection, never the raw request', async () => {
   const { owner, appended } = modelOwnerDouble()
   const models = new DirectCatalogPort(host({
-    llm: {
-      listProviders: () => [],
-      listModels: async () => [],
-      resolveModelInfo: async () => ({}),
-      resolveCallConfig: async () => ({ provider: 'p', model: 'm1', reasoningEffort: 'high' }),
-      discoverModels: async () => [],
-      listConfigurableProviders: () => [],
-    },
-    agentDefaultModel: {
-      currentSelection: () => ({ provider: 'p', model: 'm' }),
-      saveSelection: async () => {},
-    },
+    llm: availableLlm({ resolveCallConfig: async () => ({ provider: 'p', model: 'm1', reasoningEffort: 'high' }) }),
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }), saveSelection: async () => {} },
   }), () => liveAgent, owner).models
   const { outcome } = await models.selectSessionModel('session-live', { provider: 'p', model: 'm1' })
   assert.deepEqual(outcome, { kind: 'committed', value: { provider: 'p', model: 'm1', reasoningEffort: 'high' } })
@@ -820,17 +650,25 @@ test('selectSessionModel commits the Host-NORMALIZED selection, never the raw re
   }], 'the durable append records the Host-normalized selection')
 })
 
-test('selectSessionPreset reports an unrecognized preset failure as indeterminate, not a blind rejection', async () => {
-  const presets = port({
-    agentPresets: {
-      resolve: async (id?: string) => preset(id ?? 'standard'),
-      get defaultId() { return 'standard' },
-      select: async () => { throw new Error('durable append exploded after recompose') },
-    },
-  }).presets
-  const { outcome } = await presets.selectSessionPreset('session-live', 'minimal')
-  assert.equal(outcome.kind, 'indeterminate')
-  if (outcome.kind === 'indeterminate') assert.equal(outcome.error.code, 'agent-preset/select-indeterminate')
+test('Direct selectSessionModel honours an abort during the availability lookup (before the durable append)', async () => {
+  const appended: unknown[] = []
+  const started = deferred<void>()
+  let release!: (value: readonly { id: string }[]) => void
+  const gate = new Promise<readonly { id: string }[]>((resolve) => { release = resolve })
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({ listModels: async () => { started.resolve(); return gate } }),
+    agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => {} },
+  }), () => liveAgent, owner).models
+  const controller = new AbortController()
+  const pending = models.selectSessionModel('session-live', { provider: 'p', model: 'm' }, controller.signal)
+  await started.promise
+  controller.abort()
+  release([{ id: 'm' }])
+  const result = await pending
+  assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'cancelled' } },
+    'an abort during the availability lookup provably did not commit')
+  assert.deepEqual(appended, [])
 })
 
 test('Direct selectSessionModel honours an abort during normalization (before the durable append)', async () => {
@@ -844,7 +682,7 @@ test('Direct selectSessionModel honours an abort during normalization (before th
     selectForNextRequest: () => {},
   }
   const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async () => gate, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    llm: availableLlm({ resolveCallConfig: async () => gate }),
     agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => {} },
   }), () => liveAgent, owner).models
   const controller = new AbortController()
@@ -859,9 +697,7 @@ test('Direct selectSessionModel honours an abort during normalization (before th
 })
 
 test('Direct selectSessionModel reports cancelled for an already-aborted signal', async () => {
-  const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: unknown) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-  }), () => liveAgent).models
+  const models = modelDouble().models
   const controller = new AbortController()
   controller.abort()
   const result = await models.selectSessionModel('session-live', { provider: 'p', model: 'm' }, controller.signal)
@@ -870,7 +706,7 @@ test('Direct selectSessionModel reports cancelled for an already-aborted signal'
 
 test('Direct selectSessionPreset reports cancelled for an already-aborted signal', async () => {
   const presets = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: unknown) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    llm: availableLlm({ resolveCallConfig: async (next: unknown) => next }),
   }), () => liveAgent).presets
   const controller = new AbortController()
   controller.abort()
@@ -878,19 +714,95 @@ test('Direct selectSessionPreset reports cancelled for an already-aborted signal
   assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'cancelled' } })
 })
 
-test('Direct saveDefaultSelection settles committed for the official Promise<void> success', async () => {
+test('Direct saveDefaultSelection delegates exactly once and settles committed for the official Promise<void> success', async () => {
   // The pinned official `agentDefaultModel.saveSelection` resolves `void`; a
   // fulfilled write is a commit and must NOT be mis-settled as indeterminate.
-  let saved: unknown
+  const saves: unknown[] = []
   const models = new DirectCatalogPort(host({
     agentDefaultModel: {
       currentSelection: () => ({ provider: 'p', model: 'm0' }),
-      saveSelection: async (next: unknown) => { saved = next },
+      saveSelection: async (next: unknown) => { saves.push(next) },
     },
   }), () => undefined).models
   const outcome = await models.saveDefaultSelection({ provider: 'p', model: 'm1' })
   assert.deepEqual(outcome, { kind: 'committed', value: undefined })
-  assert.deepEqual(saved, { provider: 'p', model: 'm1' })
+  assert.deepEqual(saves, [{ provider: 'p', model: 'm1' }],
+    'the TUI delegates the write once and never re-asserts a correction')
+})
+
+test('Direct saveDefaultSelection settles indeterminate on a save failure and issues no correction', async () => {
+  const saves: unknown[] = []
+  const models = new DirectCatalogPort(host({
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'p', model: 'm0' }),
+      saveSelection: async (next: unknown) => { saves.push(next); throw new Error('quota exceeded') },
+    },
+  }), () => undefined).models
+  const outcome = await models.saveDefaultSelection({ provider: 'p', model: 'm1' })
+  assert.equal(outcome.kind, 'indeterminate')
+  if (outcome.kind === 'indeterminate') assert.match(outcome.error.message, /quota exceeded/)
+  assert.equal(saves.length, 1, 'rc.2 owns the save ordering; the TUI issues one write only')
+})
+
+test('Direct saveDefaultSelection rejects an invalid selection without touching the service', async () => {
+  let saves = 0
+  const models = new DirectCatalogPort(host({
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'p', model: 'm0' }),
+      saveSelection: async () => { saves += 1 },
+    },
+  }), () => undefined).models
+  const outcome = await models.saveDefaultSelection({ provider: '', model: '' })
+  assert.equal(outcome.kind, 'rejected')
+  assert.equal(saves, 0)
+})
+
+test('a Session model selection returns before a blocked default save settles', async () => {
+  const appended: unknown[] = []
+  const saved: unknown[] = []
+  let releaseDefault!: () => void
+  const defaultGate = new Promise<void>((resolve) => { releaseDefault = resolve })
+  const saveStarted = deferred<void>()
+  const warnings: string[] = []
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({ resolveCallConfig: async (next: unknown) => next }),
+    agentDefaultModel: {
+      currentSelection: () => undefined,
+      saveSelection: async (next: unknown) => { saved.push(next); saveStarted.resolve(); await defaultGate },
+    },
+  }), () => liveAgent, owner, { warn: (message: string) => { warnings.push(message) } }).models
+  const selecting = models.selectSessionModel('session-live', { provider: 'p', model: 'm1' })
+  const result = await selecting
+  assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'committed', value: { provider: 'p', model: 'm1' } } },
+    'the Session selection returns while the default save is still pending')
+  assert.deepEqual(appended, [{ provider: 'p', model: 'm1' }])
+  await saveStarted.promise
+  assert.deepEqual(saved, [{ provider: 'p', model: 'm1' }],
+    'the background save receives the exact normalized selection')
+  releaseDefault()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(warnings, [], 'a successful background save reports nothing')
+})
+
+test('a background default save failure is diagnosed and never changes the committed Session outcome', async () => {
+  const appended: unknown[] = []
+  const warnings: string[] = []
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({ resolveCallConfig: async (next: unknown) => next }),
+    agentDefaultModel: {
+      currentSelection: () => undefined,
+      saveSelection: async () => { throw new Error('quota exceeded') },
+    },
+  }), () => liveAgent, owner, { warn: (message: string) => { warnings.push(message) } }).models
+  const { outcome } = await models.selectSessionModel('session-live', { provider: 'p', model: 'm1' })
+  assert.deepEqual(outcome, { kind: 'committed', value: { provider: 'p', model: 'm1' } },
+    'a failed best-effort default save never rejects the Session selection')
+  assert.deepEqual(appended, [{ provider: 'p', model: 'm1' }])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(warnings.some(message => /model default save/.test(message)),
+    'the detached default-save rejection is diagnosed, never silently swallowed')
 })
 
 test('Direct loadDirectory aborts after the Host awaits (never publishes a success DTO)', async () => {
@@ -921,7 +833,7 @@ test('Direct roster aborts after the Host await (never opens on a cancelled read
   const gate = new Promise<void>((resolve) => { release = resolve })
   const presets = new DirectCatalogPort(host({
     agentPresets: {
-      remoteExportList: async () => { started.resolve(); await gate; return { presets: [], modeSelectionEnabled: true } },
+      remoteExportList: async () => { started.resolve(); await gate; return { presets: [] } },
     },
   }), () => undefined).presets
   const controller = new AbortController()
@@ -964,10 +876,7 @@ test('Direct selectSessionModel reports cancelled (not rejected) when aborted wh
   const appended: unknown[] = []
   const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
   const models = new DirectCatalogPort(host({
-    llm: {
-      resolveCallConfig: async () => { started.resolve(); await gate; throw new Error('route gone') },
-      listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [],
-    },
+    llm: availableLlm({ resolveCallConfig: async () => { started.resolve(); await gate; throw new Error('route gone') } }),
     agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => {} },
   }), () => liveAgent, owner).models
   const controller = new AbortController()
@@ -982,14 +891,15 @@ test('Direct selectSessionModel reports cancelled (not rejected) when aborted wh
 })
 
 test('Direct selectSessionModel reports committed + superseded when aborted after the durable commit', async () => {
+  const appended: unknown[] = []
+  const saved: unknown[] = []
+  const saveStarted = deferred<void>()
   let release!: () => void
   const gate = new Promise<void>((resolve) => { release = resolve })
-  const saveStarted = deferred<void>()
-  const appended: unknown[] = []
   const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
   const models = new DirectCatalogPort(host({
-    llm: { resolveCallConfig: async (next: unknown) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
-    agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => { saveStarted.resolve(); await gate } },
+    llm: availableLlm({ resolveCallConfig: async (next: unknown) => next }),
+    agentDefaultModel: { currentSelection: () => undefined, saveSelection: async (next: unknown) => { saved.push(next); saveStarted.resolve(); await gate } },
   }), () => liveAgent, owner).models
   const controller = new AbortController()
   const pending = models.selectSessionModel('session-live', { provider: 'p', model: 'm1' }, controller.signal)
@@ -1000,6 +910,7 @@ test('Direct selectSessionModel reports committed + superseded when aborted afte
   assert.deepEqual(appended, [{ provider: 'p', model: 'm1' }], 'the durable append already committed')
   assert.equal(result.outcome.kind, 'committed', 'a post-commit abort keeps the settlement')
   assert.equal(result.ownership, 'superseded', 'but loses local ownership')
+  assert.deepEqual(saved, [{ provider: 'p', model: 'm1' }])
 })
 
 test('Direct selectSessionPreset reports committed + superseded when aborted after the Host switch', async () => {
