@@ -1,6 +1,8 @@
 /**
  * The selected-Job observation semantic port (P1-B): detached presentation
- * facts about ONE intentionally viewed background Job.
+ * facts about ONE intentionally viewed JobRegistry row (any listed Job —
+ * handed-out background work, or foreground shell work while it is still
+ * registered and observable).
  *
  * The official `@deepseek-ai/dsh-api-job-controller` owns the non-consuming
  * follow semantics (gap awareness, settlement, abort); this port carries only

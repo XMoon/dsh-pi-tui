@@ -100,11 +100,16 @@ export interface ActivityStatus {
   readonly phase: RunPhase
   readonly busy: boolean
   readonly queuedCount: number
-  /** Running background jobs. */
+  /** Active job records the registry currently lists for the subject
+   * session. DSH 0.1.7 may temporarily register foreground shell work
+   * here while it is observable/stoppable. */
   readonly taskCount: number
   /** Running child agents. */
   readonly childAgentCount: number
-  /** Total job records currently available, including terminal records. */
+  /** Job records the registry currently lists for the session, including
+   * retained terminal records. NOT a lifetime session total: it shrinks
+   * when upstream removes a record (e.g. a collected foreground shell
+   * job). */
   readonly taskTotalCount?: number
   /** Total durable child-agent records currently available. */
   readonly childAgentTotalCount?: number

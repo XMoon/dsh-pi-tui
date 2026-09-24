@@ -174,13 +174,25 @@ History results include the Prompt, working directory, timestamp, and Session in
 
 Regular `↑` / `↓` history recall is still available for recent input.
 
-### Subagents and background tasks
+### Subagents and the Task Center
 
-`/tasks` opens the full Task Center for all background work in the current
-Session; the Footer's `↓` opens the lightweight Quick Tasks view for running work.
-Selecting a background Job opens a detail with the official non-consuming live
+`/tasks` opens the full Task Center, showing the work the current Session's
+Job Registry / Subagent catalog still tracks; the Footer's `↓` opens the
+lightweight Quick Tasks view for the current active work. Selecting a Job
+opens a detail with the official non-consuming live
 output preview (status, progress and the retained output tail); it never consumes
 the model's `job_output` cursor and never becomes session history.
+
+Task Center is a live tracked/control projection, not an execution-history
+list. `ACTIVE` / `TRACKED` are presentation scopes: `ACTIVE` shows only the
+currently active items, `TRACKED` shows everything the current authority
+still lists. DSH `0.1.7` temporarily registers a Job while an ordinary
+foreground `bash` / `pwsh` command runs, so it can be observed and stopped
+from the Task Center; if the command finishes inside the foreground wait,
+DSH removes that temporary record and the final result stays in the
+Transcript's tool card. Explicit `run_in_background: true` jobs (and jobs
+promoted to the background after a foreground timeout) remain visible in
+`TRACKED` after completion as long as the Job Registry keeps their record.
 
 `/plugins` opens the active profile's Plugin Manager: installed bundles and
 plugins are grouped into Current TUI / TUI Extensions / DSH Plugins, with
@@ -203,14 +215,14 @@ The browser distinguishes:
 * `one-shot`
 * running / inactive
 * nested descendants
-* background Jobs
+* Job Registry rows (including running foreground shell work)
 
 The Footer's `↓` opens Quick Tasks as a lightweight browsing view: it only
 supports arrow navigation, left/right expand/collapse, `Tab` type cycling,
 `Enter` open, and `Esc` close. The bottom “Open Task Center” row opens the full
 Task Center.
 
-The full Task Center additionally offers `A` to toggle Active / All, `/` search,
+The full Task Center additionally offers `A` to toggle Active / Tracked, `/` search,
 `Tab` / `Shift+Tab` to cycle types in both directions, `S` to stop the selected
 task after confirmation, and `R` to refresh/retry. Quick Tasks consumes only the
 whitelist above; every other keystroke is a no-op that never enters search, stop

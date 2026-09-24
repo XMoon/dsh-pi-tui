@@ -1191,7 +1191,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     const active = real.filter(isTaskItemActive).length
     const done = real.filter(item => item.status === 'completed').length
     const failed = real.filter(item => isTaskItemFailure(item.status)).length
-    const chips = [`[${this.scope.toUpperCase()}]`]
+    // Presentation vocabulary only: internal `all` renders as TRACKED —
+    // every row the current Task Center authority (DSH JobRegistry +
+    // subagent catalog) still lists — never a session history total. The
+    // internal scope/state contract stays `active`/`all`.
+    const scopeLabel = this.scope === 'all' ? 'TRACKED' : 'ACTIVE'
+    const chips = [`[${scopeLabel}]`]
     if (this.activeType !== null) chips.push(`[${this.activeType}]`)
     if (this.getFilter() !== '') chips.push(`[search: ${this.getFilter()}]`)
     const stats = [`${active} active`]

@@ -16977,15 +16977,16 @@ export class TuiApp {
   }
 
   /**
-   * Replace the background-job snapshot used by the footer badge. The
+   * Replace the JobRegistry snapshot used by the footer badge. The
    * runtime-backed caller supplies terminal records too; the rich summary
-   * separates active and total counts. Non-empty active/attention sets arm
-   * the footer ↓ Task Center trigger.
+   * separates active and tracked counts (the tracked denominator is the
+   * registry's CURRENT roster, never a session lifetime total).
+   * Non-empty active/attention sets arm the footer ↓ Task Center trigger.
    * @param tasks - job records (id + label + lifecycle status), empty to hide.
    */
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
-    // In RICH mode the running/total counts come ONLY from the runtime's
+    // In RICH mode the active/tracked counts come ONLY from the runtime's
     // commitSummary (setTaskSummary) — never derived from whatever list a
     // caller happens to pass here: the badge callback may legitimately
     // receive a subset (e.g. running-only) and length-based derivation

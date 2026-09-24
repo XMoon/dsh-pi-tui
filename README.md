@@ -167,9 +167,11 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 普通的 `↑` / `↓` 仍用于快速浏览最近输入。
 
-### Subagent 与后台任务
+### Subagent 与 Task Center
 
-`/tasks` 打开完整 Task Center（当前 Session 的所有后台工作）；Footer 的 `↓` 直接打开轻量 Quick Tasks（只看正在运行的工作）。选中后台 Job 后，详情会显示官方非消耗式的实时输出预览（状态、进度与保留的输出尾部），不会消耗模型的 `job_output` 游标，也不写入会话历史。
+`/tasks` 打开完整 Task Center，显示当前 Session 中仍由 Job Registry / Subagent catalog 跟踪的工作；Footer 的 `↓` 打开轻量 Quick Tasks，只看当前活动（active）工作。选中 Job 后，详情会显示官方非消耗式的实时输出预览（状态、进度与保留的输出尾部），不会消耗模型的 `job_output` 游标，也不写入会话历史。
+
+Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前活动项，`TRACKED` 显示当前跟踪源（Job Registry / Subagent catalog）仍列出的全部项；`TRACKED` 不是 Session 执行历史。DSH `0.1.7` 会在普通前台 `bash` / `pwsh` 执行期间临时注册 Job，使其可以在 Task Center 中观察和停止；如果命令在前台等待内完成，DSH 会移除该临时记录，最终结果仍保留在 Transcript 的 tool card 中。显式 `run_in_background: true` 或被提升为后台的 Job 在完成后，只要 Job Registry 继续保留其记录，就仍可在 `TRACKED` 中查看。
 
 `/plugins` 打开当前 profile 的 Plugin Manager：按 Current TUI / TUI Extensions / DSH Plugins 分区查看已安装的 bundle 与插件，并执行启用/禁用、删除与安装；正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 中的 `Plugins  Manage…` 按需打开同一界面。
 
@@ -188,11 +190,11 @@ main
 * `one-shot`
 * running / inactive
 * nested descendant
-* 后台 Job
+* Job Registry 跟踪的 Job（含运行中的前台 shell）
 
 Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导航、左右展开/折叠、`Tab` 类型过滤、`Enter` 打开和 `Esc` 关闭。底部 “Open Task Center” 行可进入完整 Task Center。
 
-完整 Task Center 额外提供 `A` 切换 Active / All、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick Tasks 只消费上述白名单按键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
+完整 Task Center 额外提供 `A` 切换 Active / Tracked、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick Tasks 只消费上述白名单按键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
 
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 
