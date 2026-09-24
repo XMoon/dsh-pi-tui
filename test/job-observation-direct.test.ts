@@ -19,10 +19,20 @@ import { createDiag } from '../src/diag.ts'
 
 const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 
+type JobFrame = {
+  readonly id: string
+  readonly kind: string
+  readonly label: string
+  readonly status: string
+  readonly progress?: string
+  readonly detail?: string
+  readonly output: { readonly earliest: number; readonly total: number }
+}
+
 type Frame =
-  | { readonly type: 'opened'; readonly job: { id: string; kind: string; label: string; status: string; progress?: string; detail?: string }; readonly from: number }
+  | { readonly type: 'opened'; readonly job: JobFrame; readonly from: number }
   | { readonly type: 'output'; readonly chunks: readonly { text: string; gapBefore?: true }[]; readonly next: number; readonly lossy?: true }
-  | { readonly type: 'status'; readonly job: { id: string; kind: string; label: string; status: string; progress?: string; detail?: string } }
+  | { readonly type: 'status'; readonly job: JobFrame }
 
 function service(frames: readonly Frame[], behavior: { reject?: Error } = {}): {
   get: (name: string) => unknown
@@ -48,10 +58,10 @@ async function flush(times = 6): Promise<void> {
 
 test('maps opened/output/status frames into a detached snapshot', async () => {
   const host = service([
-    { type: 'opened', job: { id: 'job-1', kind: 'bash', label: 'build', status: 'running' }, from: 0 },
+    { type: 'opened', job: { id: 'job-1', kind: 'bash', label: 'build', status: 'running', output: { earliest: 0, total: 0 } }, from: 0 },
     { type: 'output', chunks: [{ text: 'line one\n' }], next: 9 },
     { type: 'output', chunks: [{ text: 'line two\n', gapBefore: true }], next: 18, lossy: true },
-    { type: 'status', job: { id: 'job-1', kind: 'bash', label: 'build', status: 'completed', detail: 'exit 0' } },
+    { type: 'status', job: { id: 'job-1', kind: 'bash', label: 'build', status: 'completed', detail: 'exit 0', output: { earliest: 0, total: 0 } } },
   ])
   const port = new DirectJobObservationPort(host, diag)
   const seen: JobObservedSnapshot[] = []
@@ -71,7 +81,7 @@ test('maps opened/output/status frames into a detached snapshot', async () => {
 
 test('a follow failure is surfaced while the last good snapshot is retained', async () => {
   const host = service([
-    { type: 'opened', job: { id: 'job-2', kind: 'bash', label: 'run', status: 'running' }, from: 0 },
+    { type: 'opened', job: { id: 'job-2', kind: 'bash', label: 'run', status: 'running', output: { earliest: 0, total: 0 } }, from: 0 },
     { type: 'output', chunks: [{ text: 'partial' }], next: 7 },
   ], { reject: new Error('stream broke') })
   const port = new DirectJobObservationPort(host, diag)
@@ -88,7 +98,7 @@ test('closing the observer aborts the official stream and ignores late frames', 
   let release: (() => void) | undefined
   const controller = {
     follow: (_request: unknown, signal: AbortSignal) => (async function* () {
-      yield { type: 'opened', job: { id: 'job-3', kind: 'bash', label: 'x', status: 'running' }, from: 0 }
+      yield { type: 'opened', job: { id: 'job-3', kind: 'bash', label: 'x', status: 'running', output: { earliest: 0, total: 0 } }, from: 0 }
       await new Promise<void>(resolve => { release = resolve })
       if (signal.aborted) return
       yield { type: 'output', chunks: [{ text: 'late' }], next: 4 }
@@ -109,6 +119,37 @@ test('closing the observer aborts the official stream and ignores late frames', 
 test('a missing jobController service fails loud', () => {
   const port = new DirectJobObservationPort({ get: () => undefined }, diag)
   assert.throws(() => port.open('s', 'j', () => {}), /jobController service unavailable/)
+})
+
+test('output already evicted before the viewer opened is reported as a gap', async () => {
+  // The official observer starts at `output.earliest`; when that is above 0
+  // the earlier bytes were evicted BEFORE this viewer opened and no later
+  // `lossy` frame reports it.
+  const host = service([
+    { type: 'opened', job: { id: 'job-5', kind: 'bash', label: 'trimmed', status: 'running', output: { earliest: 4096, total: 8192 } }, from: 4096 },
+    { type: 'output', chunks: [{ text: 'retained tail' }], next: 8192 },
+    { type: 'status', job: { id: 'job-5', kind: 'bash', label: 'trimmed', status: 'completed', output: { earliest: 4096, total: 8192 } } },
+  ])
+  const port = new DirectJobObservationPort(host, diag)
+  const seen: JobObservedSnapshot[] = []
+  port.open('s', 'job-5', snapshot => seen.push(snapshot))
+  await flush()
+  const final = seen[seen.length - 1]!
+  assert.equal(final.text, 'retained tail')
+  assert.equal(final.gapBefore, true, 'the pre-viewer retention loss must be reported')
+})
+
+test('a job that starts at offset 0 reports no gap', async () => {
+  const host = service([
+    { type: 'opened', job: { id: 'job-6', kind: 'bash', label: 'fresh', status: 'running', output: { earliest: 0, total: 7 } }, from: 0 },
+    { type: 'output', chunks: [{ text: 'all here' }], next: 7 },
+    { type: 'status', job: { id: 'job-6', kind: 'bash', label: 'fresh', status: 'completed', output: { earliest: 0, total: 7 } } },
+  ])
+  const port = new DirectJobObservationPort(host, diag)
+  const seen: JobObservedSnapshot[] = []
+  port.open('s', 'job-6', snapshot => seen.push(snapshot))
+  await flush()
+  assert.equal(seen[seen.length - 1]!.gapBefore, false)
 })
 
 /**
@@ -140,14 +181,14 @@ test('observing never advances the model job_output cursor', async () => {
   const controller = {
     follow: (request: { jobId: unknown }, signal: AbortSignal) => (async function* () {
       let cursor = 0
-      yield { type: 'opened', job: { id: String(request.jobId), kind: 'bash', label: 'j', status: 'running' }, from: cursor }
+      yield { type: 'opened', job: { id: String(request.jobId), kind: 'bash', label: 'j', status: 'running', output: { earliest: 0, total: 0 } }, from: cursor }
       while (!signal.aborted) {
         const read = readAt(cursor)
         if (read.chunks.length > 0) {
           yield { type: 'output', chunks: read.chunks.map(chunk => ({ text: chunk.text })), next: read.next }
           cursor = read.next
         }
-        yield { type: 'status', job: { id: String(request.jobId), kind: 'bash', label: 'j', status: 'completed' } }
+        yield { type: 'status', job: { id: String(request.jobId), kind: 'bash', label: 'j', status: 'completed', output: { earliest: total, total } } }
         return
       }
     })(),

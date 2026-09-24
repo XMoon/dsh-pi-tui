@@ -75,19 +75,44 @@ test('SELF_BUNDLE always classifies as current-tui, even with a matching observa
     [observation({ ownerName: SELF_BUNDLE, entryId: SELF_BUNDLE })],
   )
   assert.equal(claims.get(bundleValue(SELF_BUNDLE))?.role, 'current-tui')
-  assert.equal(claims.get(bundleValue(SELF_BUNDLE))?.observation, undefined)
+  assert.equal(claims.get(bundleValue(SELF_BUNDLE))?.extension, undefined)
 })
 
-test('an exact + unique entryId association classifies a TUI extension', () => {
+test('a proven Loader entryId association classifies a TUI extension', () => {
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', identities: ['my-ext', 'e-ext'] }]),
     [observation({ owner: '9:my-ext', ownerName: 'my-ext', entryId: 'e-ext' })],
   )
   assert.equal(claims.get(bundleValue('my-ext'))?.role, 'tui-extension')
-  assert.equal(claims.get(bundleValue('my-ext'))?.observation?.entryId, 'e-ext')
+  assert.deepEqual([...claims.get(bundleValue('my-ext'))!.extension!.entryIds], ['e-ext'])
 })
 
-test('an ambiguous owner (claimed by two cards) classifies neither', () => {
+test('an observation WITHOUT a proven entryId never classifies, even when its owner name equals the package', () => {
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', identities: ['my-ext', 'e-ext'] }]),
+    [observation({ owner: '9:my-ext', ownerName: 'my-ext' })],
+  )
+  assert.equal(claims.get(bundleValue('my-ext'))?.role, 'dsh-plugin')
+  assert.equal(claims.get(bundleValue('my-ext'))?.extension, undefined)
+})
+
+test('two proven entryIds of ONE bundle aggregate into one TUI extension card', () => {
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue('foo'), bundleName: 'foo', identities: ['foo', 'e-a', 'e-b'] }]),
+    [
+      observation({ owner: '1:foo-a', ownerName: 'foo-a', entryId: 'e-a', contributionKinds: ['chrome.footer.item'], contributionCount: 1 }),
+      observation({ owner: '1:foo-b', ownerName: 'foo-b', entryId: 'e-b', contributionKinds: ['command'], contributionCount: 2, usesAdvancedCapability: true }),
+    ],
+  )
+  const classification = claims.get(bundleValue('foo'))!
+  assert.equal(classification.role, 'tui-extension')
+  assert.deepEqual([...classification.extension!.entryIds], ['e-a', 'e-b'])
+  assert.deepEqual([...classification.extension!.contributionKinds], ['chrome.footer.item', 'command'])
+  assert.equal(classification.extension!.contributionCount, 3)
+  assert.equal(classification.extension!.usesAdvancedCapability, true)
+})
+
+test('an ambiguous entryId (claimed by two cards) classifies neither', () => {
   const claims = classifyPluginPackages(
     inputs([
       { key: bundleValue('a'), bundleName: 'a', identities: ['e-shared'] },
@@ -158,7 +183,7 @@ test('model sections are ordered Current TUI → TUI Extensions → DSH Plugins,
   assert.equal(ordinary.canRemove, true)
 
   const extension = model.tuiExtensions[0]!
-  assert.equal(extension.observation?.entryId, 'e-ext')
+  assert.deepEqual([...extension.extension!.entryIds], ['e-ext'])
   // A TUI extension uses the SAME official mutation authority.
   assert.equal(extension.canToggle, true)
   assert.equal(extension.rows[0]!.canToggle, true)

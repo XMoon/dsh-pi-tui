@@ -4,14 +4,16 @@
  * system and without name heuristics.
  *
  * Rules (plan §4.1):
- *  1. exact `SELF_BUNDLE`                         → current-tui
- *  2. exact + UNIQUE live extension-owner match   → tui-extension
- *  3. otherwise                                   → dsh-plugin
+ *  1. exact `SELF_BUNDLE`                              → current-tui
+ *  2. ≥1 observation whose Loader `entryId` is owned   → tui-extension
+ *     by exactly this one card
+ *  3. otherwise                                        → dsh-plugin
  *
- * A false negative is acceptable; a false positive is not. "Exact" means
- * whole-identity equality against a Live extension owner name (never a
- * substring / prefix / "contains tui" heuristic); "unique" means the matched
- * observation is not claimed by any other package card.
+ * A false negative is acceptable; a false positive is not. Association is by
+ * the PROVEN Loader entry id only — an observation without one is never used,
+ * however its owner name happens to read. Multiple proven observations of the
+ * same card aggregate into one extension fact set; an `entryId` claimed by
+ * zero or several cards classifies none of them.
  *
  * @module @xmoon76/dsh-pi-tui/plugin-manager/classify
  */
@@ -30,55 +32,89 @@ export interface PluginClassificationInput {
   readonly key: string
   /** The bundle package name, when the card is a bundle. */
   readonly bundleName?: string
-  /** Exact module specifiers / Loader entry ids the official record exposes. */
+  /** Exact Loader entry ids / module specifiers the official record exposes. */
   readonly identities: readonly string[]
+}
+
+/** Aggregated, provable TUI-extension facts for one card. */
+export interface TuiExtensionFacts {
+  /** The Loader entry ids that are proven to belong to this card. */
+  readonly entryIds: readonly string[]
+  readonly contributionKinds: readonly string[]
+  readonly contributionCount: number
+  readonly health: 'active' | 'failed' | 'mixed'
+  readonly usesAdvancedCapability: boolean
+  readonly usesUnstableCapability: boolean
 }
 
 /** The resolved role of one package card. */
 export interface PluginPackageClassification {
   readonly role: PluginPresentationRole
-  readonly observation?: TuiExtensionObservation
+  /** Present only with `tui-extension`. */
+  readonly extension?: TuiExtensionFacts
 }
 
-/** One exact owner association candidate: the Loader entry id when proven,
- * otherwise the whole-identity owner name (never a substring/prefix match). */
-function matchesOwner(identities: ReadonlySet<string>, observation: TuiExtensionObservation): boolean {
-  if (observation.entryId !== undefined && identities.has(observation.entryId)) return true
-  return identities.has(observation.ownerName) || identities.has(observation.owner)
+/** Aggregate several proven observations of ONE card into detached facts. */
+function aggregate(observations: readonly TuiExtensionObservation[]): TuiExtensionFacts {
+  const entryIds = new Set<string>()
+  const kinds = new Set<string>()
+  let contributionCount = 0
+  let failed = 0
+  let active = 0
+  let advanced = false
+  let unstable = false
+  for (const observation of observations) {
+    if (observation.entryId !== undefined) entryIds.add(observation.entryId)
+    for (const kind of observation.contributionKinds) kinds.add(kind)
+    contributionCount += observation.contributionCount
+    if (observation.health === 'active') active += 1
+    else if (observation.health === 'failed') failed += 1
+    else { active += 1; failed += 1 }
+    if (observation.usesAdvancedCapability) advanced = true
+    if (observation.usesUnstableCapability) unstable = true
+  }
+  return Object.freeze({
+    entryIds: Object.freeze([...entryIds].sort()),
+    contributionKinds: Object.freeze([...kinds].sort()),
+    contributionCount,
+    health: failed === 0 ? 'active' : active === 0 ? 'failed' : 'mixed',
+    usesAdvancedCapability: advanced,
+    usesUnstableCapability: unstable,
+  })
 }
 
 /**
- * Classify every package card, enforcing GLOBAL uniqueness: an observation
- * claimed by more than one card classifies none of them (ambiguous identity
- * falls back to `dsh-plugin`, never a guess).
+ * Classify every package card. Association requires a PROVEN Loader entry id
+ * that belongs to exactly one card; otherwise the card stays `dsh-plugin`.
  */
 export function classifyPluginPackages(
   inputs: readonly PluginClassificationInput[],
   observations: readonly TuiExtensionObservation[],
 ): ReadonlyMap<string, PluginPackageClassification> {
+  // observation → the single card that owns its proven entry id.
+  const perCard = new Map<string, TuiExtensionObservation[]>()
+  for (const observation of observations) {
+    if (observation.entryId === undefined) continue
+    const owners = inputs.filter(input => input.identities.includes(observation.entryId!))
+    if (owners.length !== 1) continue
+    const key = owners[0]!.key
+    const list = perCard.get(key)
+    if (list === undefined) perCard.set(key, [observation])
+    else list.push(observation)
+  }
+
   const out = new Map<string, PluginPackageClassification>()
-  const claimed = new Map<string, string[]>()
   for (const input of inputs) {
     if (input.bundleName === SELF_BUNDLE) {
       out.set(input.key, { role: 'current-tui' })
       continue
     }
-    const identities = new Set(input.identities.filter(identity => identity !== ''))
-    const matches = observations.filter(observation => matchesOwner(identities, observation))
-    if (matches.length !== 1) {
+    const owned = perCard.get(input.key)
+    if (owned === undefined || owned.length === 0) {
       out.set(input.key, { role: 'dsh-plugin' })
       continue
     }
-    const observation = matches[0]!
-    const owners = claimed.get(observation.owner) ?? []
-    owners.push(input.key)
-    claimed.set(observation.owner, owners)
-    out.set(input.key, { role: 'tui-extension', observation })
-  }
-  // Drop every ambiguous claim: one live owner may decorate at most one card.
-  for (const keys of claimed.values()) {
-    if (keys.length < 2) continue
-    for (const key of keys) out.set(key, { role: 'dsh-plugin' })
+    out.set(input.key, { role: 'tui-extension', extension: aggregate(owned) })
   }
   return out
 }

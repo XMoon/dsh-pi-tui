@@ -30,6 +30,10 @@ interface JobViewLike {
   readonly status: string
   readonly progress?: string
   readonly detail?: string
+  readonly output: {
+    readonly earliest: number
+    readonly total: number
+  }
 }
 
 interface JobChunkLike {
@@ -105,9 +109,12 @@ export class DirectJobObservationPort implements JobObservationPort {
       for await (const frame of service.follow({ sessionId, jobId }, abort.signal)) {
         if (abort.signal.aborted) return
         if (frame.type === 'opened') {
-          gap = false
+          // The official observer starts at `job.output.earliest`; when that
+          // is above 0 the earlier output was already evicted by retention
+          // BEFORE this viewer opened, and no later `lossy` frame will say so.
+          gap = frame.job.output.earliest > 0
           current = frame.job
-          emit()
+          emit({ gapBefore: gap })
           continue
         }
         if (frame.type === 'output') {

@@ -93,3 +93,75 @@ test('the install dialog renders the spec field, registry and then the inspectio
   panel.handleInput('\r') // inspect with an empty spec → message
   assert.match(strip(panel.render(90).join('\n')), /Enter a package spec first/)
 })
+
+test('a long list keeps the selected row visible (selection-aware viewport)', async () => {
+  const plugins = Array.from({ length: 40 }, (_, index) => ({
+    entryId: `e-${index}`,
+    moduleName: `plugin-${String(index).padStart(2, '0')}`,
+    enabled: true,
+    fiberPhase: 'active',
+    patchId: `p-${index}`,
+  }))
+  const longPort: PluginManagerPort = {
+    ...port(),
+    snapshot: async () => ({
+      bundles: [],
+      plugins,
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+  }
+  const controller = new PluginManagerController(longPort, {
+    requestRender: () => {},
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }, { observations: () => [] })
+  const panel = new PluginManagerPanel(controller, () => {})
+  panel.setMaxRows(10)
+  controller.open('direct-command')
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+  const assertSelectedVisible = (): void => {
+    const value = controller.selectedValue()
+    const row = controller.rows().find(candidate => candidate.value === value)
+    assert.ok(row !== undefined)
+    const label = strip(row.label).replace(/…$/, '').trim().slice(0, 12)
+    const rendered = panel.render(80)
+    const view = strip(rendered.join('\n'))
+    assert.ok(view.includes(label), `selected "${label}" must stay visible:\n${view}`)
+    assert.ok(rendered.length <= 10, 'the frame must respect maxRows')
+  }
+
+  assertSelectedVisible()
+  for (let i = 0; i < 60; i += 1) {
+    panel.handleInput('\x1b[B')
+    assertSelectedVisible()
+  }
+  // The very end (an action row) is reachable and visible.
+  assert.equal(controller.selectedValue(), 'action:close')
+  for (let i = 0; i < 60; i += 1) {
+    panel.handleInput('\x1b[A')
+    assertSelectedVisible()
+  }
+  assert.equal(controller.selectedValue(), 'entry:e-0')
+  const clipped = strip(panel.render(80).join('\n'))
+  assert.match(clipped, /↓ more/)
+})
+
+test('an external dispose notifies the host exactly once and never closes it', async () => {
+  const { controller } = await ready()
+  let disposed = 0
+  const panel = new PluginManagerPanel(controller, () => {}, { onDispose: () => { disposed += 1 } })
+  // A surface-level teardown (Settings parent hidden) disposes the panel
+  // without invoking any user close path.
+  panel.dispose()
+  panel.dispose()
+  assert.equal(disposed, 1, 'onDispose fires exactly once')
+  // The panel is inert afterwards.
+  panel.handleInput('\r')
+  assert.equal(disposed, 1)
+})

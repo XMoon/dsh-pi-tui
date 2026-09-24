@@ -25,7 +25,7 @@ import type {
 } from '../runtime/plugin-manager-port.ts'
 import type { PluginPackageClassification, PluginPresentationRole } from './classify.ts'
 import { SELF_BUNDLE } from './classify.ts'
-import type { TuiExtensionObservation } from './extension-inventory.ts'
+import type { TuiExtensionFacts } from './classify.ts'
 
 /** One declared/live plugin row of a package card. */
 export interface PluginRowView {
@@ -63,7 +63,7 @@ export interface PluginCardView {
   readonly error?: PluginErrorFact
   readonly rows: readonly PluginRowView[]
   readonly overrides: readonly string[]
-  readonly observation?: TuiExtensionObservation
+  readonly extension?: TuiExtensionFacts
   /** Effective bundle capability = Host capability ∩ Current-TUI safety. */
   readonly canToggle: boolean
   readonly canRemove: boolean
@@ -170,9 +170,9 @@ function cardTone(card: PluginCardView): PluginManagerRow['tone'] {
 function cardSecondary(card: PluginCardView): string | undefined {
   const text = card.title ?? card.description
   const flags: string[] = [roleLabel(card.role)]
-  if (card.role === 'tui-extension' && card.observation !== undefined) {
-    flags.push(`${card.observation.contributionCount} contribution${card.observation.contributionCount === 1 ? '' : 's'}`)
-    flags.push(card.observation.health)
+  if (card.role === 'tui-extension' && card.extension !== undefined) {
+    flags.push(`${card.extension.contributionCount} contribution${card.extension.contributionCount === 1 ? '' : 's'}`)
+    flags.push(card.extension.health)
   }
   if (!card.installed) flags.push('provided')
   if (card.optional) flags.push('optional')
@@ -300,7 +300,7 @@ export function buildPluginManagerModel(
       ...(bundle.error === undefined ? {} : { error: bundle.error }),
       rows: Object.freeze(rows),
       overrides: Object.freeze([...bundle.overrides]),
-      ...(claim?.observation === undefined ? {} : { observation: claim.observation }),
+      ...(claim?.extension === undefined ? {} : { extension: claim.extension }),
       canToggle: hostToggle && !isSelf,
       canRemove: hostRemove && !isSelf,
       isSelf,
@@ -334,7 +334,7 @@ export function buildPluginManagerModel(
       ...(entry.readOnlyReason === undefined ? {} : { readOnlyReason: entry.readOnlyReason }),
       rows: Object.freeze([row]),
       overrides: Object.freeze([]),
-      ...(claim?.observation === undefined ? {} : { observation: claim.observation }),
+      ...(claim?.extension === undefined ? {} : { extension: claim.extension }),
       canToggle: selfModule ? false : row.canToggle,
       canRemove: false,
       isSelf: selfModule,
@@ -426,12 +426,13 @@ export function cardDetailRows(
   if (card.role === 'current-tui') {
     rows.push(info('This bundle provides the current TUI and is managed outside this screen.'))
   }
-  if (card.observation !== undefined) {
-    const observation = card.observation
-    rows.push(info('TUI contributions', `${observation.contributionCount} · ${observation.health}`))
-    rows.push(info('Contribution kinds', observation.contributionKinds.join(', ')))
-    if (observation.usesAdvancedCapability) rows.push(info('Capability use', 'Uses Advanced capability'))
-    if (observation.usesUnstableCapability) rows.push(info('Capability use', 'Uses Unstable capability'))
+  if (card.extension !== undefined) {
+    const extension = card.extension
+    rows.push(info('TUI contributions', `${extension.contributionCount} · ${extension.health}`))
+    rows.push(info('Contribution kinds', extension.contributionKinds.join(', ')))
+    rows.push(info('Proven entries', extension.entryIds.join(', ')))
+    if (extension.usesAdvancedCapability) rows.push(info('Capability use', 'Uses Advanced capability'))
+    if (extension.usesUnstableCapability) rows.push(info('Capability use', 'Uses Unstable capability'))
   }
   if (card.rows.length > 0) {
     rows.push(info('Plugin rows'))
