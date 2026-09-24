@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * D1.1 integration smoke over the published 0.1.7-alpha.2 official Client
+ * D1.1 integration smoke over the published 0.1.7-rc.1 official Client
  * faces.
  *
  * The browser-facing Client packages are module-loader chunks rather than

@@ -26,7 +26,8 @@ import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -123,7 +124,8 @@ async function createHost() {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
 
-  await ctx.inject(SessionController.inject, controllerCtx => {
+  await ctx.plugin(LocalFileSystem)
+    await ctx.inject(SessionController.inject, controllerCtx => {
     new SessionController(controllerCtx, { nativeOpen: false })
   })
   await ctx.plugin(hostCtx => {
@@ -217,6 +219,9 @@ async function waitFor(description, predicate, timeoutMs = 5_000) {
 
 function hostTransport(host) {
   const shared = host.ctx.get('connection').createSharedFetchHandler('/api')
+  /** The client stream carrier contract passes an optional uplink; the Host
+   * wire face always takes one, so an absent uplink is an empty one. */
+  async function* emptyUplink() {}
   return {
     ownsHost: true,
     fetch(input, init) {
@@ -225,9 +230,10 @@ function hostTransport(host) {
         : new Request(new URL(String(input), 'http://dsh-authority.local'), init)
       return shared.fetch(request)
     },
-    openStream(endpoint, payload, signal) {
+    openStream(endpoint, payload, signal, uplink) {
       return (async function* () {
-        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, signal)
+        // Wire face: (endpoint, payload, uplink, peer, signal).
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), undefined, signal)
       })()
     },
   }

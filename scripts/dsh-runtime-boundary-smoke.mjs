@@ -2,8 +2,9 @@
 /**
  * Verify the npm/DSH runtime boundary with a real candidate tarball and a
  * published below-floor runtime. The candidate must fail on the unsupported
- * runtime. The startup row names the 0.1.6-alpha.2 floor and suggests the
- * recommended published npm 0.1.6-alpha.2 upgrade target.
+ * runtime. The startup row names the current matrix floor and suggests the
+ * recommended published npm upgrade target (both derived from
+ * src/dsh-compat-matrix.json, currently the 0.1.7-rc.1 floor).
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -126,8 +127,9 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 }
 
 // Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the published
-// npm 0.1.6-alpha.2 floor is rejected. The exact prerelease boundary is tested
-// by startup.test.ts because only the 0.1.1 line is installed by this smoke.
+// npm floor (currently 0.1.7-rc.1, derived from the compat matrix) is
+// rejected. The exact prerelease boundary is tested by startup.test.ts
+// because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {
   if (semver.lt(oldVersion, TARGET_DSH_VERSION)) {
     return {
@@ -174,6 +176,17 @@ function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION, expectedBu
   // before the advisory startup notice gets to print. In that case the raw
   // import boundary is the expected evidence; do not make message ordering a
   // release requirement.
+  // A below-floor runtime that predates the declarative preset registry
+  // cannot even LOAD the profile: its own bundle loader reads
+  // `dsh.bundle.patch` as a single string and crashes on the array form the
+  // candidate ships. That crash IS the below-floor rejection for such
+  // runtimes — the candidate never starts on them, which is the contract —
+  // so it is accepted as a third recognized rejection mechanism.
+  const oldLoaderRejectedArrayPatch = output.includes('ERR_INVALID_ARG_TYPE')
+    && output.includes('dsh-app-boot')
+    && output.includes('loadProfile')
+    && /"path" argument must be of type string/u.test(output)
+  if (oldLoaderRejectedArrayPatch) return
   if (!RAW_BOUNDARY_ERROR.test(output) || !EXPECTED_BOUNDARY_IMPORT.test(output)) {
     throw new Error(`unsupported runtime failed without either advisory guidance or an expected TUI/DSH import boundary:\n${output}`)
   }

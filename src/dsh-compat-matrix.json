@@ -14,10 +14,10 @@
   ],
   "current": {
     "since": "0.4.8-alpha.1",
-    "requires": "DeepSeek Harness 0.1.7-alpha.2 or later",
-    "upgradeDsh": "0.1.7-alpha.2",
-    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2",
-    "guidance": "This 0.4.8-alpha.1 line is validated with the published DeepSeek Harness 0.1.7-alpha.2 distribution; see docs/dsh-compatibility.md."
+    "requires": "DeepSeek Harness 0.1.7-rc.1 or later",
+    "upgradeDsh": "0.1.7-rc.1",
+    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1",
+    "guidance": "This 0.4.8-alpha.1 line is validated with the published DeepSeek Harness 0.1.7-rc.1 distribution; see docs/dsh-compatibility.md."
   },
   "floor": {
     "below": "0.1.0-rc.8",
@@ -113,10 +113,10 @@
       ]
     },
     {
-      "dshFrom": "0.1.7-alpha.2",
+      "dshFrom": "0.1.7-rc.1",
       "tui": "0.4.8-alpha.1",
       "versions": [
-        "0.1.7-alpha.2"
+        "0.1.7-rc.1"
       ]
     }
   ]

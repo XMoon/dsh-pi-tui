@@ -20,7 +20,8 @@ import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -169,6 +170,7 @@ async function createHost() {
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
+  await ctx.plugin(LocalFileSystem)
   await ctx.inject(SessionController.inject, controllerCtx => {
     new SessionController(controllerCtx, { nativeOpen: false })
   })
@@ -200,6 +202,9 @@ async function createHost() {
 }
 
 function hostTransport(host) {
+  /** The client stream carrier contract passes an optional uplink; the Host
+   * wire face always takes one, so an absent uplink is an empty one. */
+  async function* emptyUplink() {}
   const shared = host.ctx.get('connection').createSharedFetchHandler('/api')
   return {
     ownsHost: true,
@@ -209,9 +214,10 @@ function hostTransport(host) {
         : new Request(new URL(String(input), 'http://dsh-presentation-parity.local'), init)
       return shared.fetch(request)
     },
-    openStream(endpoint, payload, signal) {
+    openStream(endpoint, payload, signal, uplink) {
       return (async function* () {
-        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, signal)
+        // Wire face: (endpoint, payload, uplink, peer, signal).
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), undefined, signal)
       })()
     },
   }
@@ -326,27 +332,30 @@ async function main() {
     assert.equal(rawInitialWindow.hasMore, true, 'fixture did not produce a paged Client tail')
     const rawHasClosingAssistant = rawInitialDurableEvents.some(event => event.seq === boundaryAssistant.seq)
     const rawHasPreClosingDelivery = rawInitialDurableEvents.some(event => event.seq === boundaryDelivery.seq)
+    // rc.1 turn-aligned opening windows: the Client's follow snapshot cuts
+    // at a turn boundary, so including the boundary assistant necessarily
+    // includes its WHOLE leading turn — the 0.1.6-era mid-turn cut (delivery
+    // excluded while the assistant stayed in) is gone upstream.
     assert.equal(rawHasClosingAssistant, true, 'raw initial page did not include the boundary assistant')
-    assert.equal(rawHasPreClosingDelivery, false, 'raw initial page unexpectedly included the preceding delivery')
-    const partialLeadingTurn = boundaryDelivery.seq < rawInitialFirstSeq
-      && rawInitialFirstSeq <= boundaryAssistant.seq
-      && rawHasClosingAssistant
-      && !rawHasPreClosingDelivery
-    assert.equal(partialLeadingTurn, true, 'fixture did not reproduce a leading partial turn')
+    assert.equal(rawHasPreClosingDelivery, true, 'raw initial page dropped the boundary turn\x27s own delivery declaration')
+    const rawLeadingIsTurnStart = rawInitialDurableEvents[0]?.type === 'turn/start'
+    assert.equal(rawLeadingIsTurnStart, true, 'rc.1 opening window must be turn-aligned')
+    const completeLeadingTurn = rawLeadingIsTurnStart && rawHasClosingAssistant && rawHasPreClosingDelivery
+    assert.equal(completeLeadingTurn, true, 'fixture did not reproduce a complete leading turn')
 
     let remoteSnapshot = await remote.read('presentation-session')
     assert.ok(remoteSnapshot !== undefined)
     assert.equal(remoteSnapshot.liveInputs.length, 2, 'fixture did not retain the live transient baseline')
     const remoteHasClosingAssistant = remoteSnapshot.durableEvents.some(event => event.seq === boundaryAssistant.seq)
     const remoteHasPreClosingDelivery = remoteSnapshot.durableEvents.some(event => event.seq === boundaryDelivery.seq)
-    // This assertion intentionally records the current official contract gap:
-    // the adapter exposes the message-bounded page without guessing at turn
-    // completeness or prefetching unbounded history.
+    // The official leading-turn completeness gap CLOSED with the rc.1
+    // turn-aligned opening window: the reader's initial page now carries the
+    // whole leading turn (delivery declaration included) with no prefetching.
     assert.equal(remoteHasClosingAssistant, true, 'Remote reader lost the boundary assistant')
-    assert.equal(remoteHasPreClosingDelivery, false, 'boundary fixture no longer reproduces the contract gap')
+    assert.equal(remoteHasPreClosingDelivery, true, 'Remote reader dropped the boundary turn\x27s own delivery declaration')
     const readerInitialFirstSeq = remoteSnapshot.durableEvents[0]?.seq
     const readerInitialLastSeq = remoteSnapshot.durableEvents.at(-1)?.seq
-    const presentationSkips = partialLeadingTurn ? ['presentation.leadingTurnCompleteness'] : []
+    const presentationSkips = []
 
     let comparisons = 0
     let deliveredTail
@@ -413,7 +422,7 @@ async function main() {
       readerInitialLastSeq,
       readerHasClosingAssistant: remoteHasClosingAssistant,
       readerHasPreClosingDelivery: remoteHasPreClosingDelivery,
-      partialTurnReproduced: partialLeadingTurn,
+      completeLeadingTurnReproduced: completeLeadingTurn,
     }))
   } finally {
     shadow?.dispose()
