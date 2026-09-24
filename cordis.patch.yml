@@ -89,6 +89,39 @@
       config:
         default: standard
 
+    # Production hardening for per-session preset composition. A live Agent
+    # whose standing preset generation disappears (the DSH registry owns that
+    # lifetime; the TUI must not remount/reparent/recreate an Agent) would
+    # otherwise keep addressing the model with only its Agent-own rows — the
+    # observed failure mode was a request whose tool list had collapsed to
+    # `subagent` alone, with no error anywhere. This official companion turns
+    # that into a loud, early failure at the next prompt assembly instead.
+    #
+    # The allowlist is deliberate and minimal: this bundle introduces exactly
+    # ONE production invariant, so a future layer shipping another invariant
+    # companion cannot silently enable itself here. The companion's own
+    # `/invariant` entry declares `inject = ['invariants']`; no second
+    # dependency management is written here.
+    #
+    # DEPENDENCY CONTRACT: `@deepseek-ai/dsh-invariants` is a COMPOSITION row
+    # resolved by the dsh Host (the package ships inside the dsh installation),
+    # not a module-graph peer — exactly like `@deepseek-ai/dsh-agent-preset`,
+    # which the same rule keeps in devDependencies. It therefore carries an
+    # exact devDependency pin for the real-mount tests and deliberately NO
+    # peerDependency: `scripts/naming-gate.mjs` rejects a `@deepseek-ai/*` peer
+    # that `src/` never imports as a dead peer, and a phantom peer would invite
+    # duplicate in-box copies in the profile. The companion subpath below is
+    # covered by the registry's own runtime peer.
+    - id: invariants
+      name: '@deepseek-ai/dsh-invariants'
+      config:
+        enabled: true
+        package_allowlist:
+          - '^@deepseek-ai/dsh-agent-preset-registry$'
+
+    - id: agent-preset-registry-invariant
+      name: '@deepseek-ai/dsh-agent-preset-registry/invariant'
+
     # The official standard preset composes its `subagent` tool with
     # `modelSelectionSettings: true`, which injects this Host-owned setting
     # service — the row is required for the standard composition to mount.
