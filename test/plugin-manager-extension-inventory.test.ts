@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { extensionOwnerName, observeTuiExtensions } from '../src/plugin-manager/extension-inventory.ts'
+import { observeTuiExtensions } from '../src/plugin-manager/extension-inventory.ts'
 
 test('aggregates contributions per owner with health and capability use', () => {
   const observations = observeTuiExtensions({
@@ -20,7 +20,7 @@ test('aggregates contributions per owner with health and capability use', () => 
     ],
     ownerEntryIds: () => new Map([['1:alpha', 'entry-alpha']]),
   })
-  assert.deepEqual(observations.map(item => item.ownerName), ['alpha', 'beta', 'gamma'])
+  assert.deepEqual(observations.map(item => item.owner), ['1:alpha', '2:beta', '3:gamma'])
   const alpha = observations[0]!
   assert.equal(alpha.contributionCount, 2)
   assert.deepEqual([...alpha.contributionKinds], ['chrome.footer.item', 'chrome.header.badge'])
@@ -31,9 +31,4 @@ test('aggregates contributions per owner with health and capability use', () => 
   assert.equal(observations[2]!.usesUnstableCapability, true)
   assert.equal(observations[2]!.health, 'failed')
   assert.ok(Object.isFrozen(observations[0]))
-})
-
-test('extensionOwnerName strips only the uid prefix', () => {
-  assert.equal(extensionOwnerName('12:@scope/pkg'), '@scope/pkg')
-  assert.equal(extensionOwnerName('plain'), 'plain')
 })

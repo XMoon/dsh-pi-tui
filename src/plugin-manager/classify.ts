@@ -26,14 +26,16 @@ export const SELF_BUNDLE = '@xmoon76/dsh-pi-tui'
 /** The three presentation roles; management authority is unaffected. */
 export type PluginPresentationRole = 'current-tui' | 'tui-extension' | 'dsh-plugin'
 
-/** The exact identities one managed package card exposes to association. */
+/** The proven Loader entry ids one managed package card exposes. Module
+ * specifiers are deliberately NOT part of this set: only a proven entry id is
+ * ownership proof. */
 export interface PluginClassificationInput {
   /** Stable card key (the model's own identity). */
   readonly key: string
   /** The bundle package name, when the card is a bundle. */
   readonly bundleName?: string
-  /** Exact Loader entry ids / module specifiers the official record exposes. */
-  readonly identities: readonly string[]
+  /** ONLY the proven Loader entry ids (`row.entryId` / `entry.entryId`). */
+  readonly entryIds: readonly string[]
 }
 
 /** Aggregated, provable TUI-extension facts for one card. */
@@ -95,7 +97,7 @@ export function classifyPluginPackages(
   const perCard = new Map<string, TuiExtensionObservation[]>()
   for (const observation of observations) {
     if (observation.entryId === undefined) continue
-    const owners = inputs.filter(input => input.identities.includes(observation.entryId!))
+    const owners = inputs.filter(input => input.entryIds.includes(observation.entryId!))
     if (owners.length !== 1) continue
     const key = owners[0]!.key
     const list = perCard.get(key)

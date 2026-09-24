@@ -223,32 +223,43 @@ export class PluginManagerPanel implements Component, Focusable {
    */
   private windowLines(lines: readonly string[], selectedLine: number | undefined, limit: number): string[] {
     if (lines.length <= limit) return [...lines]
-    const headerCount = 2
-    const available = Math.max(1, limit - headerCount - 1)
+    // Reserve the hint and as much header as the grant allows; the body then
+    // gets whatever remains. On a tiny grant the header/hint give way first,
+    // and the indicators are suppressed rather than overflowing the frame.
+    const hintCount = limit >= 2 ? 1 : 0
+    const headerCount = Math.min(2, Math.max(0, limit - hintCount - 1))
+    const available = Math.max(1, limit - headerCount - hintCount)
     const header = lines.slice(0, headerCount)
-    const hint = lines[lines.length - 1]!
-    const body = lines.slice(headerCount, lines.length - 1)
+    const trailing = hintCount === 0 ? undefined : lines[lines.length - 1]
+    const body = lines.slice(headerCount, lines.length - hintCount)
     const selectedBody = selectedLine === undefined ? 0 : Math.max(0, selectedLine - headerCount)
-    let budget = available
     const startFor = (rows: number): number => {
       const centered = selectedBody - Math.floor(rows / 2)
       return Math.min(Math.max(0, centered), Math.max(0, body.length - rows))
     }
+    let budget = available
     let start = startFor(budget)
     let top = start > 0
     let bottom = start + budget < body.length
-    // Reserve rows for the indicators so the frame never exceeds the budget.
+    // Shrink the body until the indicators fit, then drop them entirely if the
+    // tiny grant cannot hold them (so the frame NEVER exceeds `limit`).
     while (budget > 1 && budget + (top ? 1 : 0) + (bottom ? 1 : 0) > available) {
       budget -= 1
       start = startFor(budget)
       top = start > 0
       bottom = start + budget < body.length
     }
+    if (budget + (top ? 1 : 0) + (bottom ? 1 : 0) > available) {
+      top = false
+      bottom = false
+      budget = available
+      start = startFor(budget)
+    }
     const out = [...header]
     if (top) out.push(color.textDim('  ↑ more'))
     out.push(...body.slice(start, start + budget))
     if (bottom) out.push(color.textDim('  ↓ more'))
-    out.push(hint)
+    if (trailing !== undefined) out.push(trailing)
     return out
   }
 

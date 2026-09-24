@@ -150,6 +150,13 @@ test('a long list keeps the selected row visible (selection-aware viewport)', as
   assert.equal(controller.selectedValue(), 'entry:e-0')
   const clipped = strip(panel.render(80).join('\n'))
   assert.match(clipped, /↓ more/)
+
+  // A very short grant must never overflow: the frame is clamped (indicators
+  // suppressed) even at maxRows 1..6.
+  for (let rows = 1; rows <= 6; rows += 1) {
+    panel.setMaxRows(rows)
+    assert.ok(panel.render(80).length <= rows, `maxRows ${rows} must not overflow`)
+  }
 })
 
 test('an external dispose notifies the host exactly once and never closes it', async () => {
