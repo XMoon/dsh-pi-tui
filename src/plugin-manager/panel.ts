@@ -40,10 +40,18 @@ export class PluginManagerPanel implements Component, Focusable {
   private installFocus: 'spec' | 'registry' = 'spec'
   private registryIndex = 0
   private customRegistry = false
+  /** Fired once when the owning surface disposes this panel (any hide path). */
+  private readonly onDispose: (() => void) | undefined
+  private disposeNotified = false
 
-  constructor(controller: PluginManagerController, requestRender: () => void) {
+  constructor(
+    controller: PluginManagerController,
+    requestRender: () => void,
+    options: { readonly onDispose?: () => void } = {},
+  ) {
     this.controller = controller
     this.requestRender = requestRender
+    this.onDispose = options.onDispose
     this.registryInput.setValue('')
   }
 
@@ -70,6 +78,12 @@ export class PluginManagerPanel implements Component, Focusable {
     this.disposed = true
     this.specInput.focused = false
     this.registryInput.focused = false
+    // A surface-level teardown (e.g. the Settings parent overlay being hidden)
+    // disposes the panel WITHOUT invoking its close path. Notify exactly once
+    // so the runner can drop its active-host reference.
+    if (this.disposeNotified) return
+    this.disposeNotified = true
+    this.onDispose?.()
   }
 
   handleInput(data: string): void {
@@ -195,21 +209,54 @@ export class PluginManagerPanel implements Component, Focusable {
     // hardware cursor without a keyboard event first).
     this.syncInputFocus()
     const install = this.controller.installView()
-    const lines = install === undefined
+    const rendered = install === undefined
       ? this.renderList(safeWidth)
       : this.renderInstall(safeWidth, install)
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
-    if (lines.length <= limit) return lines
-    // Keep the header and the hint visible; clip the middle.
-    const head = lines.slice(0, 1)
-    const tail = lines.slice(lines.length - (limit - 1))
-    return [...head, ...tail]
+    return this.windowLines(rendered.lines, rendered.selectedLine, limit)
   }
 
-  private renderList(width: number): string[] {
+  /**
+   * Selection-aware viewport: the header (title + blank) and the hint stay
+   * fixed, while the body scrolls so the SELECTED row is always visible. When
+   * content is clipped, `↑ more` / `↓ more` mark the hidden rows.
+   */
+  private windowLines(lines: readonly string[], selectedLine: number | undefined, limit: number): string[] {
+    if (lines.length <= limit) return [...lines]
+    const headerCount = 2
+    const available = Math.max(1, limit - headerCount - 1)
+    const header = lines.slice(0, headerCount)
+    const hint = lines[lines.length - 1]!
+    const body = lines.slice(headerCount, lines.length - 1)
+    const selectedBody = selectedLine === undefined ? 0 : Math.max(0, selectedLine - headerCount)
+    let budget = available
+    const startFor = (rows: number): number => {
+      const centered = selectedBody - Math.floor(rows / 2)
+      return Math.min(Math.max(0, centered), Math.max(0, body.length - rows))
+    }
+    let start = startFor(budget)
+    let top = start > 0
+    let bottom = start + budget < body.length
+    // Reserve rows for the indicators so the frame never exceeds the budget.
+    while (budget > 1 && budget + (top ? 1 : 0) + (bottom ? 1 : 0) > available) {
+      budget -= 1
+      start = startFor(budget)
+      top = start > 0
+      bottom = start + budget < body.length
+    }
+    const out = [...header]
+    if (top) out.push(color.textDim('  ↑ more'))
+    out.push(...body.slice(start, start + budget))
+    if (bottom) out.push(color.textDim('  ↓ more'))
+    out.push(hint)
+    return out
+  }
+
+  private renderList(width: number): { lines: string[]; selectedLine: number | undefined } {
     const rows = this.controller.rows()
     const selected = this.controller.selectedValue()
     const lines: string[] = []
+    let selectedLine: number | undefined
     lines.push(color.textStrong(truncateToWidth(this.controller.title(), width, '…')))
     lines.push('')
     for (const row of rows) {
@@ -218,6 +265,7 @@ export class PluginManagerPanel implements Component, Focusable {
         continue
       }
       const isSelected = row.selectable && selected !== undefined && row.value === selected
+      if (isSelected) selectedLine = lines.length
       const marker = row.selectable ? (isSelected ? color.accent('▸ ') : '  ') : '  '
       const label = row.kind === 'info' ? color.textMuted(truncateToWidth(row.label, Math.max(1, width - 2), '…'))
         : tone(truncateToWidth(row.label, Math.max(1, width - 2), '…'), row.tone)
@@ -241,10 +289,10 @@ export class PluginManagerPanel implements Component, Focusable {
     }
     lines.push('')
     lines.push(color.textDim(truncateToWidth(this.controller.hint(), width, '…')))
-    return lines
+    return { lines, selectedLine }
   }
 
-  private renderInstall(width: number, install: PluginInstallView): string[] {
+  private renderInstall(width: number, install: PluginInstallView): { lines: string[]; selectedLine: undefined } {
     const lines: string[] = []
     lines.push(color.textStrong(truncateToWidth(this.controller.title(), width, '…')))
     lines.push('')
@@ -263,13 +311,13 @@ export class PluginManagerPanel implements Component, Focusable {
       lines.push('')
       if (install.message !== undefined) lines.push(color.warning(truncateToWidth(install.message, width, '…')))
       lines.push(color.textDim(truncateToWidth('Tab switch field · ↑↓ choose registry · Enter inspect · Esc close', width, '…')))
-      return lines
+      return { lines, selectedLine: undefined }
     }
     if (install.phase === 'inspecting') {
       lines.push(color.textDim(truncateToWidth(`Inspecting ${install.spec}…`, width, '…')))
       lines.push('')
       lines.push(color.textDim(truncateToWidth('Esc back', width, '…')))
-      return lines
+      return { lines, selectedLine: undefined }
     }
     if (install.phase === 'confirm') {
       const inspection = install.inspection
@@ -290,7 +338,7 @@ export class PluginManagerPanel implements Component, Focusable {
         lines.push('')
         lines.push(color.textDim(truncateToWidth('Esc edit', width, '…')))
       }
-      return lines
+      return { lines, selectedLine: undefined }
     }
     // running / settled
     lines.push(color.textStrong(truncateToWidth(`${install.phase}${install.spec === '' ? '' : ` · ${install.spec}`}`, width, '…')))
@@ -301,6 +349,6 @@ export class PluginManagerPanel implements Component, Focusable {
     const log = install.log.slice(Math.max(0, install.log.length - budget))
     for (const line of log) lines.push(color.textDim(truncateToWidth(line, width, '…')))
     lines.push(color.textDim(truncateToWidth(hint, width, '…')))
-    return lines
+    return { lines, selectedLine: undefined }
   }
 }

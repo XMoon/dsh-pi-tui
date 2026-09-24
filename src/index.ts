@@ -7082,7 +7082,11 @@ export function apply(ctx: Context, config: Config): void {
     // `/settings → Plugins`). The port is the narrow Direct adapter; the
     // presentation classification reads only the shared extension runtime's
     // own health records — never a second inventory or a second manager.
-    let activePluginManagerHost: { readonly close: () => void } | undefined
+    // The active host carries an opaque token so an EXTERNAL teardown (the
+    // Settings parent overlay being hidden/disposed, which never calls the
+    // submenu's `done()`) can release the owner WITHOUT pretending the user
+    // closed it.
+    let activePluginManagerHost: { readonly token: object; readonly close: () => void } | undefined
     const pluginManagerController = new PluginManagerController(backend.pluginManager, {
       requestRender: () => { if (activePluginManagerHost !== undefined) app.requestRender() },
       requestClose: () => activePluginManagerHost?.close(),
@@ -7103,18 +7107,33 @@ export function apply(ctx: Context, config: Config): void {
     const openPluginManager = (): void => {
       // A second open is a no-op: the panel is already the active surface.
       if (activePluginManagerHost !== undefined) return
-      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender())
-      const close = app.openPluginManagerPanel(panel, () => { activePluginManagerHost = undefined })
-      activePluginManagerHost = { close }
+      const token = {}
+      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
+        // Any hide path that disposes the panel (Esc, the returned closer, or
+        // a surface-level teardown) releases this owner exactly once.
+        onDispose: () => { if (activePluginManagerHost?.token === token) activePluginManagerHost = undefined },
+      })
+      const close = app.openPluginManagerPanel(panel, () => {
+        if (activePluginManagerHost?.token === token) activePluginManagerHost = undefined
+      })
+      activePluginManagerHost = { token, close }
       pluginManagerController.open('direct-command')
     }
     /** The `/settings → Plugins` entry: the SAME panel/controller hosted as a
      * lazy SettingsList submenu; `done` returns to the Settings list. */
     const createPluginManagerSubmenu = (done: (selected?: string) => void): Component => {
-      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender())
+      const token = {}
       const previous = activePluginManagerHost
+      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
+        // The Settings parent may dispose this submenu WITHOUT calling `done`
+        // (the fork's lifecycle contract). Release only the OWNER — never
+        // restore navigation or call `done()` while the parent is tearing down.
+        onDispose: () => { if (activePluginManagerHost?.token === token) activePluginManagerHost = previous },
+      })
       activePluginManagerHost = {
+        token,
         close: () => {
+          if (activePluginManagerHost?.token !== token) return
           activePluginManagerHost = previous
           done()
         },
