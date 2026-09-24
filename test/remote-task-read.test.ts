@@ -7,6 +7,7 @@ import {
   type RemoteTaskJobsSource,
   type RemoteTaskSessionsSource,
 } from '../src/runtime/remote/task-read-remote.ts'
+import { DirectTaskReader, type DirectTaskAgent, type DirectTaskChildEntry } from '../src/runtime/direct/task-read-direct.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
 import type { TaskJobEntry, TaskSubagentEntry } from '../src/runtime/task-read-port.ts'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -437,4 +438,182 @@ test('a roster settlement while the watch is retained updates the next read', as
   assert.deepEqual(updated?.jobs, [job('bash-1', 'completed')])
   // Still exactly one watch: the retained roster follows the official source.
   assert.deepEqual(jobs.watchCalls, ['parent'])
+})
+
+test('Direct re-projects child activity from the live Agent registry and reads parent jobs', async () => {
+  const parent: DirectTaskAgent = { status: 'running' }
+  let childStatus = 'idle'
+  const direct = new DirectTaskReader({
+    agentFor: id => id === 'parent' ? parent : id === 'child' ? { status: childStatus } : undefined,
+    subagents: {
+      async listChildren() {
+        return [{ kind: 'child', id: 'child', label: 'Child', mode: 'continuable', activity: 'running', hasChildren: false }]
+      },
+    },
+    jobs: {
+      list(caller) {
+        // DSH 0.1.7 JobRegistry ownership: the caller is the parent
+        // SessionId, never the Agent object.
+        assert.equal(caller, 'parent')
+        return [job('job')]
+      },
+    },
+  })
+
+  const inactive = await direct.readDirectChildren('parent')
+  assert.equal(inactive?.children[0]?.kind, 'child')
+  assert.equal(inactive?.children[0]?.kind === 'child' && inactive.children[0].activity, 'inactive')
+  childStatus = 'running'
+  const active = await direct.readDirectChildren('parent')
+  assert.equal(active?.children[0]?.kind === 'child' && active.children[0].activity, 'running')
+  assert.deepEqual(active?.jobs, [job('job')])
+})
+
+test('a settled continuable child keeps its status and result fields (plan §9.3)', async () => {
+  // The parent settlement notice projection must never make the TUI drop the
+  // child's own task fields: the task read reports the settled child's
+  // mode/activity (status) and label (result metadata) independently.
+  const direct = new DirectTaskReader({
+    agentFor: id => id === 'parent' ? { status: 'idle' } : undefined,
+    subagents: {
+      async listChildren() {
+        return [{ kind: 'child', id: 'child', label: 'Child result', mode: 'continuable', activity: 'inactive', hasChildren: false }]
+      },
+    },
+    jobs: { list: () => [] },
+  })
+  const read = await direct.readDirectChildren('parent')
+  const child = read?.children[0]
+  assert.ok(child !== undefined && child.kind === 'child', 'the settled child must stay a readable row')
+  assert.equal(child.mode, 'continuable', 'the continuable mode must survive settlement')
+  assert.equal(child.activity, 'inactive', 'the settled activity must survive')
+  assert.equal(child.label, 'Child result', 'the child result metadata must survive')
+})
+
+test('Direct passes the parent SessionId to jobs after an awaited listing and fences a vanished parent', async () => {
+  const parent: DirectTaskAgent = { status: 'running' }
+  let parentLive = true
+  let release!: () => void
+  let signalListingStarted!: () => void
+  const listingStarted = new Promise<void>(resolve => { signalListingStarted = resolve })
+  const listingGate = new Promise<void>(resolve => { release = resolve })
+  let jobsReads = 0
+  const direct = new DirectTaskReader({
+    agentFor: id => id === 'parent' && parentLive ? parent : undefined,
+    subagents: {
+      async listChildren() {
+        signalListingStarted()
+        await listingGate
+        return []
+      },
+    },
+    jobs: {
+      list(caller) {
+        jobsReads += 1
+        // DSH 0.1.7 JobRegistry ownership: the caller is the parent
+        // SessionId, never the Agent object — even after the awaited
+        // listing re-resolved the parent Agent.
+        assert.equal(caller, 'parent')
+        return [job('owner-job')]
+      },
+    },
+  })
+
+  // While the official listing is still in flight, the SessionId-owned
+  // jobs read must not have happened: it follows the awaited catalog.
+  const pending = direct.readDirectChildren('parent')
+  await listingStarted
+  assert.equal(jobsReads, 0, 'jobs.list must not run before the listing settles')
+  release()
+  assert.deepEqual((await pending)?.jobs, [job('owner-job')])
+  assert.equal(jobsReads, 1)
+
+  // The parent vanishing WHILE the listing is awaited fences the read at
+  // the post-await availability re-check: no snapshot, no jobs read. The
+  // initial check must have PASSED (the read started), so only the
+  // re-resolution after the await can produce the fence.
+  let releaseAgain!: () => void
+  let signalAgain!: () => void
+  const startedAgain = new Promise<void>(resolve => { signalAgain = resolve })
+  const gateAgain = new Promise<void>(resolve => { releaseAgain = resolve })
+  const directAgain = new DirectTaskReader({
+    agentFor: id => id === 'parent' && parentLive ? parent : undefined,
+    subagents: {
+      async listChildren() {
+        signalAgain()
+        await gateAgain
+        return []
+      },
+    },
+    jobs: {
+      list: () => {
+        jobsReads += 1
+        return [job('must-not-appear')]
+      },
+    },
+  })
+  const pendingAgain = directAgain.readDirectChildren('parent')
+  // The read STARTED with the parent live (initial availability check
+  // passed and the listing is awaited); only NOW does the parent vanish.
+  await startedAgain
+  parentLive = false
+  releaseAgain()
+  assert.equal(await pendingAgain, undefined)
+  assert.equal(jobsReads, 1, 'a parent vanishing during the awaited listing must not produce a jobs read')
+})
+
+test('Direct and Remote expose the SAME read-only DTO for an official unknown-mode child', async () => {
+  // D1 semantic convergence: a historical/descriptor-missing child carries
+  // the official `mode: 'unknown'`. Both readers must present the identical
+  // port DTO (read-only one-shot) — the parity smoke injects official
+  // entries through JS, so this typed test is the contract proof.
+  const generations = generationHarness()
+  const direct = new DirectTaskReader({
+    agentFor: id => id === 'parent' ? { status: 'idle' } : undefined,
+    subagents: {
+      async listChildren() {
+        return [{ id: 'child-unknown', mode: 'unknown' }]
+      },
+    },
+    jobs: { list: () => [] },
+  })
+  const remote = new RemoteTaskReader(
+    sessionsFixture({
+      byId: { parent: { running: false } },
+      projections: { parent: { entries: [{ id: 'child-unknown', createdAt: 10, mode: 'unknown' }], state: 'ready' } },
+    }),
+    jobsFixture({}),
+    generations.source,
+  )
+  const directChild = (await direct.readDirectChildren('parent'))?.children[0]
+  const remoteChild = (await remote.readDirectChildren('parent'))?.children[0]
+  assert.deepEqual(directChild, remoteChild)
+  assert.deepEqual(directChild, { kind: 'child', id: 'child-unknown', mode: 'one-shot', activity: 'inactive', hasChildren: false })
+})
+
+test('Direct maps an official unknown catalog mode to the read-only presentation (Remote parity)', async () => {
+  // The official rc.1 SubagentCatalogEntry vocabulary includes 'unknown'
+  // (descriptor-missing / historical child). The Direct reader must apply
+  // the SAME mapping as the Remote projection reader — the smoke injects
+  // raw official entries through JS, so only this typed test pins the
+  // port contract.
+  const direct = new DirectTaskReader({
+    agentFor: id => id === 'parent' ? { status: 'idle' } : undefined,
+    subagents: {
+      async listChildren() {
+        const unknownChild: DirectTaskChildEntry = { id: 'child-unknown', mode: 'unknown' }
+        const continuableChild: DirectTaskChildEntry = { id: 'child-known', mode: 'continuable', label: 'Known' }
+        return [unknownChild, continuableChild]
+      },
+    },
+    jobs: { list: () => [] },
+  })
+  const read = await direct.readDirectChildren('parent')
+  const unknown = read?.children.find(entry => entry.id === 'child-unknown')
+  const known = read?.children.find(entry => entry.id === 'child-known')
+  assert.ok(unknown !== undefined && unknown.kind === 'child')
+  assert.equal(unknown.kind === 'child' && unknown.mode, 'one-shot',
+    'an unclassified child must map to the read-only presentation, never leak the raw official mode')
+  assert.equal(known?.kind === 'child' && known.mode, 'continuable')
+  assert.equal(known?.kind === 'child' && known.label, 'Known')
 })
