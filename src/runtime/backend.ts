@@ -22,6 +22,7 @@ import type { ConfigPort } from './config-port.ts'
 import type { HostFilePort } from './host-file-port.ts'
 import type { SessionArchivePort } from './session-archive-port.ts'
 import type { HostCommandPort } from './host-command-port.ts'
+import type { PluginManagerPort } from './plugin-manager-port.ts'
 
 /** The transport backends the TUI can run on. `direct` is the only one
  * today; the migration adds opt-in backends milestone by milestone. */
@@ -57,6 +58,8 @@ export interface Backend {
   readonly sessionArchive: SessionArchivePort
   /** The Host command execution domain port (D2.1). */
   readonly hostCommand: HostCommandPort
+  /** The Plugin Manager domain port (P1-A): bundles, plugins, installs. */
+  readonly pluginManager: PluginManagerPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -74,6 +77,7 @@ export function createDirectBackend(
   hostFile: HostFilePort,
   sessionArchive: SessionArchivePort,
   hostCommand: HostCommandPort,
+  pluginManager: PluginManagerPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -89,5 +93,6 @@ export function createDirectBackend(
     hostFile,
     sessionArchive,
     hostCommand,
+    pluginManager,
   }
 }

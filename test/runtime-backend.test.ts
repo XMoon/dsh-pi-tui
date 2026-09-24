@@ -26,6 +26,7 @@ test('the capability vocabulary covers the migration domains', () => {
     'host-file',
     'session-archive',
     'host-command',
+    'plugin-manager',
   ])
 })
 
@@ -152,7 +153,24 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const hostCommand = {
     execute: async () => ({ kind: 'committed' as const, matched: false as const }),
   }
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand)
+  const pluginManager = {
+    snapshot: async () => ({
+      bundles: [],
+      plugins: [],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+    inspect: async () => ({ status: 'refused' as const, problem: 'unknown', reason: 'test' }),
+    setBundleEnabled: async () => ({ changed: false, application: 'applied' as const, stage: 'enable' as const, target: '' }),
+    setPluginEnabled: async () => ({ changed: false, application: 'applied' as const, stage: 'enable' as const, target: '' }),
+    removeBundle: async () => ({ changed: false, application: 'applied' as const, stage: 'remove' as const, target: '' }),
+    startInstall: async () => ({ changed: false, application: 'applied' as const, stage: 'install' as const, target: '' }),
+    waitForInstall: async () => null,
+    cancelInstall: async () => ({ status: 'not-running' as const }),
+    subscribeInstall: () => () => {},
+  }
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)

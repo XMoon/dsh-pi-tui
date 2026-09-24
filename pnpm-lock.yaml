@@ -135,6 +135,9 @@ importers:
       '@deepseek-ai/dsh-plan-mode':
         specifier: 0.1.7-rc.1
         version: 0.1.7-rc.1(695ec0ccd0f8e752c70aaeb0ea105933)
+      '@deepseek-ai/dsh-plugin-manager':
+        specifier: 0.1.7-rc.1
+        version: 0.1.7-rc.1(a9e3fae98a257df0b4c4db33c3b4490a)
       '@deepseek-ai/dsh-remote-mock':
         specifier: 0.1.7-rc.1
         version: 0.1.7-rc.1(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-typert-protocol@0.1.7-rc.1(@deepseek-ai/cordis@4.0.4))

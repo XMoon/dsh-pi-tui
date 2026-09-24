@@ -342,9 +342,15 @@ an in-flight PR. Locality classes:
 
 | Capability | Class | Official DSH authority | P1 action |
 |---|---|---|---|
-| Official Plugin Manager | P1 required | `@deepseek-ai/dsh-plugin-manager` — the `pluginManager` Host service mounted by the dsh-base layer | TUI-native `/plugins` surface through a narrow semantic port + Direct adapter + controller/panel |
+| Official Plugin Manager | P1 required | `@deepseek-ai/dsh-plugin-manager` — the `pluginManager` Host service mounted by the dsh-base layer | ONE TUI-native Plugin Manager surface (port + Direct adapter + one controller/panel) |
+| `/plugins` direct entry | P1 required | same | canonical sessionless entry (never creates/switches a Session) |
+| `/settings → Plugins` entry | P1 required | same | lazy `SettingItem.submenu` row hosting the SAME panel/controller; opening `/settings` alone reads no plugin inventory and there is no second manager |
+| Current TUI classification | P1 required | `SELF_BUNDLE = '@xmoon76/dsh-pi-tui'` | exactly one `Current TUI` card, always wins over extension observations |
+| Current TUI self-protection | P1 required | local surface-safety policy ∩ Host capability | no bundle disable/remove and no self-row enable/disable; derived effective actions, never forged `readOnlyReason`/`removable`; enforced in the controller/action dispatcher as well as the UI |
+| TUI Extension classification | P1 required where identity is provable | internal read-only projection over the shared `piTuiExtensions` runtime | presentation classification only; exact+unique owner association; ambiguous identity falls back to DSH Plugin; no name heuristics; no duplicate card |
+| TUI extension API-tier label | not inferable generically | runtime evidence only | never infer Stable/Advanced/Unstable from the absence of advanced/unstable contributions; only report observed advanced/unstable use as a factual diagnostic |
 | Installed bundle/plugin inspection | P1 required | same (`listBundles` / `listPlugins` / `registries` / `inspect`) | render Host facts exactly; never infer manageability |
-| Bundle/plugin enable/disable | P1 required | same (`setBundleEnabled` / `setPluginEnabled`) | official mutation, then refresh the official inventory |
+| Bundle/plugin enable/disable | P1 required | same (`setBundleEnabled` / `setPluginEnabled`) | official mutation for ordinary manageable targets; current TUI excluded locally |
 | Bundle remove | P1 required | same (`removeBundle`) | confirmed, exact-identity mutation, then refresh |
 | Bundle install | P1 required | same (`installBundle`) | pre-inspect, confirm, official install |
 | Registry selection/fallback visibility | P1 required | same (`registries()`) | show offered/fallback/resolved registries; never retry for the Host |

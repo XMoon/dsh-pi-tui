@@ -32,7 +32,11 @@
       # can fork. The row below is this bundle's own, so the dependency is
       # self-contained and a profile that disables it fails loud instead of
       # silently forking without workspace inheritance.
-      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry]
+      # `pluginManager` is injected for the P1-A Plugin Manager surface: the
+      # dsh-base layer already mounts it (disabled only without a profile),
+      # so this is an explicit lifecycle ordering dependency, never a second
+      # package-manager row.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager]
       config:
         sessionId: ''
 
