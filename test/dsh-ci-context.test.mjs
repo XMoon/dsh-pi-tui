@@ -9,7 +9,7 @@ import {
   resolveDshMode,
 } from '../scripts/dsh-ci-context.mjs'
 
-const nextSha = '00102833dfaee1da9f48a3a8eae9d34005a75218'
+const nextSha = '46a7f68b0922371ce7144b668b90e377d8e799f4'
 const expectedNpmDshVersion = Object.entries(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
 const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.1'
@@ -96,7 +96,7 @@ test('context uses the current DSH target in every mode and exposes the source p
   const { path } = tempModeConfig('source', life)
   const forcedSource = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path })
   assert.equal(forcedSource.mode, 'source')
-  assert.equal(forcedSource.version, '0.1.7-alpha.2')
+  assert.equal(forcedSource.version, '0.1.7-rc.1')
   assert.equal(forcedSource.sourceRef, nextSha)
-  assert.equal(forcedSource.sourceExpectedVersion, '0.1.7-alpha.2')
+  assert.equal(forcedSource.sourceExpectedVersion, '0.1.7-rc.1')
 })
