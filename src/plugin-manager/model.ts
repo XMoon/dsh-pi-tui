@@ -24,6 +24,7 @@ import type {
   PluginRowFact,
 } from '../runtime/plugin-manager-port.ts'
 import type { PluginPackageClassification, PluginPresentationRole } from './classify.ts'
+import { SELF_BUNDLE } from './classify.ts'
 import type { TuiExtensionFacts } from './classify.ts'
 
 /** One declared/live plugin row of a package card. */
@@ -270,6 +271,16 @@ export function buildPluginManagerModel(
     }
   }
 
+  // PROTECTION-ONLY set (never used for visibility or role): a standalone
+  // live entry that imports a module the running TUI bundle owns must not be
+  // toggled from this surface, even when the self-bundle row's Loader id is
+  // unproven. Visibility stays entry-id proof based, so an independent row
+  // that merely shares a module is still shown (a protection false positive
+  // only NARROWS actions, which is safe).
+  const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
+  const selfModuleNames = new Set<string>([SELF_BUNDLE])
+  for (const row of selfBundle?.rows ?? []) selfModuleNames.add(row.moduleName)
+
   const cards: PluginCardView[] = []
   for (const bundle of snapshot.bundles) {
     const value = bundleValue(bundle.name)
@@ -314,7 +325,10 @@ export function buildPluginManagerModel(
     // self BUNDLE card alone. A standalone entry is a TUI extension only when
     // its proven entryId was associated, otherwise an ordinary DSH plugin.
     const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
-    const row = entryRowView(entry, false)
+    // Protection-only: never changes visibility or role, only the effective
+    // toggle capability (and the self-protection notice).
+    const selfProtected = selfModuleNames.has(entry.moduleName)
+    const row = entryRowView(entry, selfProtected)
     cards.push(Object.freeze({
       value,
       source: 'entry' as const,
@@ -332,7 +346,7 @@ export function buildPluginManagerModel(
       ...(claim?.extension === undefined ? {} : { extension: claim.extension }),
       canToggle: row.canToggle,
       canRemove: false,
-      isSelf: false,
+      isSelf: selfProtected,
     }))
   }
 
