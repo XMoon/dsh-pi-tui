@@ -2019,26 +2019,40 @@ export function apply(ctx: Context, config: Config): void {
     // diag stays open until the retirement diagnostics are recorded. The
     // fatal catch reaches this coordinator through retireOwnedSessionRef.
     let retirementPromise: Promise<RetirementReport> | undefined
-    // The exact Agent whose SHUTDOWN cancel already landed. Keyed by Agent
-    // OBJECT identity, never by session id or a boolean: a committed session
-    // transition replaces the current owner, and the new owner must still be
-    // cancelled. A failed cancel is deliberately NOT recorded, so a later
-    // attempt can retry it.
-    let shutdownCancelledAgent: Agent | undefined
-    // ONE exactly-once shutdown cancel. BOTH shutdown cancel sources funnel
+    // The exact Agents whose SHUTDOWN cancel already landed. A WeakSet, not a
+    // single value: one exit can shutdown-cancel more than one owner — the
+    // CURRENT owner is pre-cancelled before `appExit`, and a session transition
+    // or fork that commits afterwards still retires the OLD owner it replaced.
+    // Keyed by Agent OBJECT identity, never by session id, so a committed
+    // transition's NEW owner is still cancelled. A cancel that throws is
+    // deliberately NOT recorded, so a later shutdown-aware path retries it.
+    const shutdownCancelledAgents = new WeakSet<Agent>()
+    // ONE exactly-once shutdown cancel. Every shutdown-aware cancel funnels
     // here:
     //   - `whenIdleOrAbort`'s lifecycle-abort listener, which fires while
     //     `disposeSurface()` aborts the controller and unblocks a transition
     //     parked in its pre/post-commit quiesce;
-    //   - the synchronous exit preparation and the memoized retirement entry.
-    // Without a shared marker those two cancel the SAME Agent twice.
-    // `agent.cancel` is idempotent, but the second call must not land after
-    // the root teardown unregistered the inbox projection — that ordering is
-    // the exact failure this hardening fixes.
+    //   - the synchronous exit preparation and the memoized retirement entry;
+    //   - the transition / fork retirements that can still commit AFTER the exit
+    //     began (via `cancelRetiredOwner` below).
+    // `agent.cancel` is idempotent, but a second call must not land after the
+    // root teardown unregistered the inbox projection — that ordering is the
+    // exact failure this hardening fixes, and it is what makes the cancel phase
+    // report `cannot read inbox state: its projection registration is not
+    // active`.
     const cancelShutdownAgent = (agent: Agent): void => {
-      if (shutdownCancelledAgent === agent) return
+      if (shutdownCancelledAgents.has(agent)) return
       agent.cancel({ kind: 'user' })
-      shutdownCancelledAgent = agent
+      shutdownCancelledAgents.add(agent)
+    }
+    // The cancel phase of a transition / fork retirement. During shutdown it
+    // MUST join the exactly-once set: the owner it retires may already have been
+    // shutdown-cancelled, and a late non-cooperative child create can commit
+    // after `appExit` started the root teardown. Outside shutdown the ordinary
+    // cancel semantics are unchanged — the set is shutdown bookkeeping only.
+    const cancelRetiredOwner = (agent: Agent): void => {
+      if (lifecycleController.signal.aborted) cancelShutdownAgent(agent)
+      else agent.cancel({ kind: 'user' })
     }
     // Synchronous shutdown preparation: cancel the CURRENT Direct owner's work
     // BEFORE the Host tree is torn down. The surface teardown above already
@@ -2055,7 +2069,7 @@ export function apply(ctx: Context, config: Config): void {
     const preCancelOwnedSession = (): void => {
       const agent = liveAgent
       if (agent === undefined) return
-      if (shutdownCancelledAgent === agent) return
+      if (shutdownCancelledAgents.has(agent)) return
       diag.info('retire cancel', { session: agent.session.id })
       try {
         cancelShutdownAgent(agent)
@@ -2087,6 +2101,11 @@ export function apply(ctx: Context, config: Config): void {
         // to retire, the surface teardown is complete.
         const retireParked = async (agent: Agent, handle: AgentHandle): Promise<RetirementReport> =>
           retireDirectOwnedSession({
+            // A parked owner is retired ONLY by this loop, exactly once: it is
+            // never the CURRENT owner, so neither the exit pre-cancel nor the
+            // lifecycle-abort listener can have cancelled it. It therefore keeps
+            // the plain cancel and is deliberately outside
+            // `shutdownCancelledAgents` (see plan §8.7).
             cancel: () => agent.cancel({ kind: 'user' }),
             whenIdle: () => agent.whenIdle(),
             drainDescendants: async () => {
@@ -2114,7 +2133,7 @@ export function apply(ctx: Context, config: Config): void {
               // inbox projection. A DIFFERENT Agent here means a committed
               // transition replaced the owner, and that one must be cancelled
               // now.
-              if (shutdownCancelledAgent === agent) return
+              if (shutdownCancelledAgents.has(agent)) return
               diag.info('retire cancel', { session: agent.session.id })
               cancelShutdownAgent(agent)
             },
@@ -2226,8 +2245,19 @@ export function apply(ctx: Context, config: Config): void {
           // The lifecycle abort IS a shutdown cancel, so it shares the ONE
           // exactly-once path with the exit preparation / retirement entry:
           // otherwise this cancel and the later cancel phase hit the same
-          // Agent twice.
-          cancelShutdownAgent(agent)
+          // Agent twice. The throw is contained INSIDE the listener: an
+          // AbortSignal is a Node EventTarget, so a listener exception never
+          // surfaces to the `abort()` caller (the `disposeSurface()` try/catch
+          // cannot see it) — Node turns it into an uncaughtException instead.
+          // Rejecting this promise instead fails the parked transition
+          // cleanly, and the memoized retirement retries the cancel later
+          // (nothing was recorded, because `cancelShutdownAgent` records only
+          // a successful cancel).
+          try {
+            cancelShutdownAgent(agent)
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)))
+          }
         }
         signal.addEventListener('abort', onAbort, { once: true })
         agent.whenIdle().then(
@@ -2826,7 +2856,7 @@ export function apply(ctx: Context, config: Config): void {
           //    stands.
           if (oldHandle !== undefined && oldAgent !== undefined) {
             const report = await retireDirectOwnedSession({
-              cancel: () => oldAgent.cancel({ kind: 'user' }),
+              cancel: () => cancelRetiredOwner(oldAgent),
               whenIdle: () => oldAgent.whenIdle(),
               drainDescendants: async () => {
                 const subagents = ctx.get('subagents') as {
@@ -3536,7 +3566,7 @@ export function apply(ctx: Context, config: Config): void {
           if (pin !== undefined) pin.state.retirementOwnsRelease = true
           const retirement = retireSourceOwnerAfterSettlement(oldAgent.session.id, async () => {
             const report = await retireDirectOwnedSession({
-              cancel: () => oldAgent.cancel({ kind: 'user' }),
+              cancel: () => cancelRetiredOwner(oldAgent),
               whenIdle: () => oldAgent.whenIdle(),
               drainDescendants: async () => {
                 const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
