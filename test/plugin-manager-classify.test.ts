@@ -354,12 +354,16 @@ test('a base bundle row overridden by the Current TUI bundle is protected in pla
   assert.ok(base !== undefined)
   const toolBash = base.rows.find(entry => entry.entryId === 'include:tool-bash')!
   assert.equal(toolBash.canToggle, false, 'the overridden base row must not be toggleable')
+  assert.equal(toolBash.selfProtected, true)
   const timer = base.rows.find(entry => entry.entryId === 'include:timer')!
   assert.equal(timer.canToggle, true, 'a row the TUI does not override keeps its Host capability')
-  // The overridden row exposes no toggle-row action; the untouched row does.
+  assert.equal(timer.selfProtected, false)
+  // The overridden row exposes no toggle-row action but IS explained; the
+  // untouched row exposes its toggle and no protection note.
   const detail = cardDetailRows(base, model.exemptions)
   assert.ok(!detail.some(row => row.value === 'action:toggle-row:include:tool-bash'))
   assert.ok(detail.some(row => row.value === 'action:toggle-row:include:timer'))
+  assert.ok(detail.some(row => row.secondary?.includes('controlled by the Current TUI composition')))
   // The bundled row never becomes a standalone card.
   const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
   assert.ok(!values.includes(entryValue('include:tool-bash')))

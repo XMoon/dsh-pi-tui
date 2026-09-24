@@ -39,6 +39,8 @@ export interface PluginRowView {
   readonly live: boolean
   readonly patchId?: string
   readonly readOnlyReason?: PluginReadOnlyReason
+  /** Whether the Current-TUI composition controls this row (protection-only). */
+  readonly selfProtected: boolean
   /** Effective capability: an addressable live row that is not self-owned. */
   readonly canToggle: boolean
 }
@@ -228,6 +230,7 @@ function rowView(
     live: live !== undefined,
     ...(live?.patchId === undefined ? {} : { patchId: live.patchId }),
     ...(live?.readOnlyReason === undefined ? {} : { readOnlyReason: live.readOnlyReason }),
+    selfProtected: selfOwned,
     canToggle: addressable && !selfOwned,
   })
 }
@@ -244,6 +247,7 @@ function entryRowView(entry: PluginRowFact, selfOwned: boolean): PluginRowView {
     live: true,
     ...(entry.patchId === undefined ? {} : { patchId: entry.patchId }),
     ...(entry.readOnlyReason === undefined ? {} : { readOnlyReason: entry.readOnlyReason }),
+    selfProtected: selfOwned,
     canToggle: addressable && !selfOwned,
   })
 }
@@ -459,6 +463,9 @@ export function cardDetailRows(
       const text = row.title ?? row.description ?? row.moduleName
       const state = row.live ? `${row.enabled ? 'enabled' : 'disabled'} · ${row.fiberPhase ?? 'no live fiber'}` : 'not live'
       rows.push(info(`  ${row.entryId === '' ? row.moduleName : row.entryId}`, `${text} · ${state}`))
+      if (row.selfProtected && card.role !== 'current-tui') {
+        rows.push(info('    protected', 'controlled by the Current TUI composition'))
+      }
       // An ordinary addressable row offers its own official toggle; a
       // Current-TUI row never does (effective capability is false).
       if (row.canToggle) {
