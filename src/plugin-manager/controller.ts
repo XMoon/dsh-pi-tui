@@ -898,7 +898,7 @@ function rowToggleValueBusy(entryId: string): string {
 function selfRefusal(name: string, role: PluginPresentationRole): string {
   return role === 'current-tui'
     ? `${name} provides the current TUI and cannot be changed from here`
-    : `${name} is a module of the current TUI package and cannot be changed from here`
+    : `${name} is controlled by the Current TUI composition and cannot be changed from here`
 }
 
 function errorMessage(error: unknown): string {

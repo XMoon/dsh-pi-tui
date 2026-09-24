@@ -15,6 +15,7 @@ import type { TuiExtensionObservation } from '../src/plugin-manager/extension-in
 import {
   buildPluginManagerModel,
   bundleValue,
+  cardDetailRows,
   entryValue,
 } from '../src/plugin-manager/model.ts'
 import type { PluginBundleFact, PluginManagerSnapshot, PluginRowFact } from '../src/runtime/plugin-manager-port.ts'
@@ -315,6 +316,53 @@ test('a shared Host package row declared by the self bundle is protected by patc
   // bundle provably declares this row.
   assert.equal(card.canToggle, false)
   assert.equal(card.isSelf, true)
+})
+
+test('a base bundle row overridden by the Current TUI bundle is protected in place', () => {
+  // The REAL inventory shape: an overridden base row (tool-bash) belongs to the
+  // dsh-base bundle card, and the TUI bundle merely lists it in `overrides`.
+  const snap = snapshot(
+    [
+      bundle({
+        name: '@deepseek-ai/dsh-base',
+        rows: [
+          { rowId: 'tool-bash', moduleName: '@deepseek-ai/dsh-tool-bash', entryId: 'include:tool-bash' },
+          { rowId: 'timer', moduleName: '@deepseek-ai/dsh-timer', entryId: 'include:timer' },
+        ],
+      }),
+      bundle({
+        name: SELF_BUNDLE,
+        rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'include:tui-app' }],
+        overrides: ['tool-bash'],
+      }),
+    ],
+    [
+      row({ entryId: 'include:tool-bash', moduleName: '@deepseek-ai/dsh-tool-bash', enabled: false, patchId: 'tool-bash' }),
+      row({ entryId: 'include:timer', moduleName: '@deepseek-ai/dsh-timer', patchId: 'timer' }),
+      row({ entryId: 'include:tui-app', moduleName: SELF_BUNDLE, patchId: 'tui-app' }),
+    ],
+  )
+  const claims = classifyPluginPackages(
+    inputs([
+      { key: bundleValue('@deepseek-ai/dsh-base'), bundleName: '@deepseek-ai/dsh-base', entryIds: ['include:tool-bash', 'include:timer'] },
+      { key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:tui-app'] },
+    ]),
+    [],
+  )
+  const model = buildPluginManagerModel(snap, claims)
+  const base = model.dshPlugins.find(card => card.value === bundleValue('@deepseek-ai/dsh-base'))
+  assert.ok(base !== undefined)
+  const toolBash = base.rows.find(entry => entry.entryId === 'include:tool-bash')!
+  assert.equal(toolBash.canToggle, false, 'the overridden base row must not be toggleable')
+  const timer = base.rows.find(entry => entry.entryId === 'include:timer')!
+  assert.equal(timer.canToggle, true, 'a row the TUI does not override keeps its Host capability')
+  // The overridden row exposes no toggle-row action; the untouched row does.
+  const detail = cardDetailRows(base, model.exemptions)
+  assert.ok(!detail.some(row => row.value === 'action:toggle-row:include:tool-bash'))
+  assert.ok(detail.some(row => row.value === 'action:toggle-row:include:timer'))
+  // The bundled row never becomes a standalone card.
+  const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
+  assert.ok(!values.includes(entryValue('include:tool-bash')))
 })
 
 test('a base row the self bundle overrides is protected by patchId proof', () => {
