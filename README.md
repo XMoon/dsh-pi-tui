@@ -52,12 +52,13 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.4.8`（stable / `@latest`） | `dsh-v0.1.7-rc.1` | 当前稳定版；最低 0.1.7-rc.1 |
+| `0.4.9`（stable / `@latest`） | `dsh-v0.1.7-rc.2` | 当前稳定版；最低 0.1.7-rc.2 |
+| `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.4.8` 的整个 DSH peer floor 统一为
-`>=0.1.7-rc.1`（rc.1 的 preset registry 精确 peer `dsh-agent`，更宽的旧
+不要把稳定线与 `@next` 预发布线混装。`0.4.9` 的整个 DSH peer floor 统一为
+`>=0.1.7-rc.2`（rc.2 的 preset registry 精确 peer `dsh-agent`，更宽的旧
 floor 已无法满足独立 tarball 安装）；旧 runtime 会在正常的不兼容边界以非零状态失败，
 请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
 [兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
@@ -548,7 +549,7 @@ dsh --profile pi-tui-dev
 ### npm 模式（当前 `next`）
 
 当前兼容列车线是 npm 模式：以本 checkout 的 `package.json` 声明、
-lockfile 解析的已发布 `dsh-v0.1.7-rc.1` family 为兼容目标。隔离的 npm
+lockfile 解析的已发布 `dsh-v0.1.7-rc.2` family 为兼容目标。隔离的 npm
 驱动从公共 registry 安装该精确 family，并跑完整 build/test/package 路径：
 
 ```sh

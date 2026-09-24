@@ -4,7 +4,7 @@
  * published below-floor runtime. The candidate must fail on the unsupported
  * runtime. The startup row names the current matrix floor and suggests the
  * recommended published npm upgrade target (both derived from
- * src/dsh-compat-matrix.json, currently the 0.1.7-rc.1 floor).
+ * src/dsh-compat-matrix.json, currently the 0.1.7-rc.2 floor).
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -127,7 +127,7 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 }
 
 // Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the published
-// npm floor (currently 0.1.7-rc.1, derived from the compat matrix) is
+// npm floor (currently 0.1.7-rc.2, derived from the compat matrix) is
 // rejected. The exact prerelease boundary is tested by startup.test.ts
 // because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {

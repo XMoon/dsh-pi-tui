@@ -66,7 +66,7 @@ test('the preset registry row stays the deployment default on the host plane', (
 })
 
 test('dsh-invariants stays a composition row: exact dev pin, deliberately no runtime peer', () => {
-  assert.equal(manifest.devDependencies?.['@deepseek-ai/dsh-invariants'], '0.1.7-rc.1',
+  assert.equal(manifest.devDependencies?.['@deepseek-ai/dsh-invariants'], '0.1.7-rc.2',
     'the development target stays pinned to the exact rc.1 package for the real-mount tests')
   // `@deepseek-ai/dsh-invariants` is named only by cordis.patch.yml — a
   // composition row the dsh Host resolves from its own installation, exactly
@@ -90,7 +90,7 @@ test('the registry still declares the peer that installs dsh-invariants beside i
     new URL(import.meta.resolve('@deepseek-ai/dsh-agent-preset-registry/package.json')),
     'utf8',
   ))
-  assert.equal(registryManifest.peerDependencies?.['@deepseek-ai/dsh-invariants'], '0.1.7-rc.1',
+  assert.equal(registryManifest.peerDependencies?.['@deepseek-ai/dsh-invariants'], '0.1.7-rc.2',
     'the registry must keep declaring dsh-invariants as its own peer (the Host install chain)')
 })
 
