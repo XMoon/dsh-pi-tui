@@ -24,7 +24,6 @@ import type {
   PluginRowFact,
 } from '../runtime/plugin-manager-port.ts'
 import type { PluginPackageClassification, PluginPresentationRole } from './classify.ts'
-import { SELF_BUNDLE } from './classify.ts'
 import type { TuiExtensionFacts } from './classify.ts'
 
 /** One declared/live plugin row of a package card. */
@@ -259,17 +258,17 @@ export function buildPluginManagerModel(
   const liveByEntry = new Map<string, PluginRowFact>()
   for (const entry of snapshot.plugins) liveByEntry.set(entry.entryId, entry)
 
-  // Live entries referenced by any bundle row are NOT standalone cards.
+  // Live entries referenced by any bundle row are NOT standalone cards. This
+  // is the ONLY de-duplication rule and it is entry-id based: a standalone
+  // Loader entry that merely shares a module specifier with a bundle row (e.g.
+  // `@deepseek-ai/dsh-workspace` used by both the TUI bundle and an unrelated
+  // row) is a DIFFERENT entry and must remain visible.
   const bundledEntryIds = new Set<string>()
   for (const bundle of snapshot.bundles) {
     for (const row of bundle.rows) {
       if (row.entryId !== undefined) bundledEntryIds.add(String(row.entryId))
     }
   }
-
-  const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
-  const selfModuleNames = new Set<string>([SELF_BUNDLE])
-  for (const row of selfBundle?.rows ?? []) selfModuleNames.add(row.moduleName)
 
   const cards: PluginCardView[] = []
   for (const bundle of snapshot.bundles) {
@@ -307,19 +306,15 @@ export function buildPluginManagerModel(
     }))
   }
 
-  const selfBundleListed = snapshot.bundles.some(bundle => bundle.name === SELF_BUNDLE)
   for (const entry of snapshot.plugins) {
     if (bundledEntryIds.has(entry.entryId)) continue
-    const selfModule = selfModuleNames.has(entry.moduleName)
-    // When the self bundle IS listed, its card owns the Current TUI section,
-    // so a self-module standalone entry must not duplicate it. If the bundle
-    // is missing from listBundles (an abnormal composition), the entry is the
-    // only self representation and must still appear once, self-protected.
-    if (selfModule && selfBundleListed) continue
     const value = entryValue(entry.entryId)
     const claim = claims.get(value)
-    const role: PluginPresentationRole = selfModule ? 'current-tui' : claim?.role ?? 'dsh-plugin'
-    const row = entryRowView(entry, selfModule)
+    // A standalone entry is NEVER guessed into Current TUI: that role is the
+    // self BUNDLE card alone. A standalone entry is a TUI extension only when
+    // its proven entryId was associated, otherwise an ordinary DSH plugin.
+    const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
+    const row = entryRowView(entry, false)
     cards.push(Object.freeze({
       value,
       source: 'entry' as const,
@@ -335,9 +330,9 @@ export function buildPluginManagerModel(
       rows: Object.freeze([row]),
       overrides: Object.freeze([]),
       ...(claim?.extension === undefined ? {} : { extension: claim.extension }),
-      canToggle: selfModule ? false : row.canToggle,
+      canToggle: row.canToggle,
       canRemove: false,
-      isSelf: selfModule,
+      isSelf: false,
     }))
   }
 
