@@ -30,7 +30,7 @@ import type {
 } from '../runtime/plugin-manager-port.ts'
 import { runDetached } from '../detached.ts'
 import type { Diag } from '../diag.ts'
-import { classifyPluginPackages, type PluginClassificationInput } from './classify.ts'
+import { classifyPluginPackages, type PluginClassificationInput, type PluginPresentationRole } from './classify.ts'
 import type { TuiExtensionObservation } from './extension-inventory.ts'
 import {
   PLUGIN_ACTION,
@@ -613,7 +613,7 @@ export class PluginManagerController {
     // future UI accidentally exposes the action.
     if (!card.canToggle) {
       this.message = card.isSelf
-        ? `${card.name} provides the current TUI and cannot be changed from here`
+        ? selfRefusal(card.name, card.role)
         : `cannot change ${card.name}: ${card.readOnlyReason ?? 'read-only'}`
       this.hooks.requestRender()
       return
@@ -674,7 +674,7 @@ export class PluginManagerController {
     // Destructive + destructive-forbidden cases never open a confirmation.
     if (!card.canRemove) {
       this.message = card.isSelf
-        ? `${card.name} provides the current TUI and cannot be removed from here`
+        ? selfRefusal(card.name, card.role)
         : `cannot remove ${card.name}: ${card.readOnlyReason ?? 'not removable'}`
       this.hooks.requestRender()
       return
@@ -698,7 +698,7 @@ export class PluginManagerController {
       this.confirming = undefined
       this.selected = 0
       this.message = card?.isSelf === true
-        ? `${confirmation.name} provides the current TUI and cannot be removed from here`
+        ? selfRefusal(confirmation.name, card?.role ?? 'dsh-plugin')
         : 'the bundle changed since the confirmation opened; nothing was removed'
       this.hooks.requestRender()
       return
@@ -891,6 +891,14 @@ export class PluginManagerController {
 /** The busy key for one row-level toggle (never the card row's identity). */
 function rowToggleValueBusy(entryId: string): string {
   return `action:toggle-row:${entryId}`
+}
+
+/** The refusal text for a self-protected target: the whole TUI bundle vs one of
+ * its modules (a protected standalone entry is not "the current TUI" itself). */
+function selfRefusal(name: string, role: PluginPresentationRole): string {
+  return role === 'current-tui'
+    ? `${name} provides the current TUI and cannot be changed from here`
+    : `${name} is a module of the current TUI package and cannot be changed from here`
 }
 
 function errorMessage(error: unknown): string {

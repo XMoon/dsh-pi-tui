@@ -255,6 +255,9 @@ test('a bundle row module shared with an unrelated standalone entry never swallo
   const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
   assert.ok(values.includes(entryValue('include:user-workspace')), 'the unrelated workspace entry must stay visible')
   assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:user-workspace')])
+  // A shared HOST package is NOT a TUI module: the independent row stays manageable.
+  assert.equal(model.dshPlugins[0]!.canToggle, true)
+  assert.equal(model.dshPlugins[0]!.isSelf, false)
 })
 
 test('an unproven self-bundle row still self-protects its live module entry (without hiding it)', () => {
