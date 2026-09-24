@@ -2256,7 +2256,14 @@ export function apply(ctx: Context, config: Config): void {
           try {
             cancelShutdownAgent(agent)
           } catch (error) {
-            reject(error instanceof Error ? error : new Error(String(error)))
+            // Reject with the RAW value, exactly like the sibling
+            // `whenIdle()`-rejection path below: ANY formatting step here
+            // (`String(error)`, an unprotected `instanceof`, a `.message` read)
+            // can itself throw for a hostile value — a null-prototype object
+            // has no coercion — and that throw would escape this EventTarget
+            // listener as an uncaughtException, bypassing the containment.
+            // Downstream observation goes through the repo's total formatters.
+            reject(error)
           }
         }
         signal.addEventListener('abort', onAbort, { once: true })

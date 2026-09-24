@@ -832,6 +832,20 @@ test('/fork teardown awaits the command settlement and retires the source exactl
     'teardown must not detach the source Session before its own command/done')
   assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 1,
     'teardown must retire the source owner exactly once')
+  // Exactly-once shutdown cancel across BOTH owners of an in-flight `/fork`.
+  // The source was the CURRENT owner when the shutdown pre-cancelled it, so its
+  // own retirement cancel phase must be a no-op; the child — which the teardown
+  // parks because `cleanedUp` was already set — is cancelled once by the
+  // parked-owner retirement. A second cancel on either owner is the ordering
+  // that can land after the root teardown unregistered the inbox projection.
+  assert.equal(harness.retirementEvents.filter(event => event === `cancel:${source.id}`).length, 1,
+    'teardown must cancel the fork source owner exactly once')
+  const forkedChild = harness.createdSessions.at(-1)
+  assert.ok(forkedChild, 'the in-flight /fork must have created its child Session')
+  assert.equal(harness.retirementEvents.filter(event => event === `cancel:${forkedChild.id}`).length, 1,
+    'teardown must cancel the parked fork child exactly once')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${forkedChild.id}`).length, 1,
+    'teardown must retire the parked fork child exactly once')
 })
 
 test('a rewind-picker fork awaits source retirement before its handoff completes', async (t) => {
@@ -3843,71 +3857,86 @@ test('an interactive exit during a non-cooperative transition create cancels eac
 
 test('a throwing shutdown cancel inside the abort listener is contained and retried, never an uncaught exception', async (t) => {
   const life = testLifecycle(t)
-  const home = life.tempDir('dsh-pi-tui-retire-abort-throw-')
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  life.defer(() => {
-    if (previousHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousHome
-  })
-  const probe = installProbe()
-  life.defer(probe.restore)
-  let context: Context | undefined
-  let fiber: { dispose: () => Promise<unknown> } | undefined
-  life.defer(() => { if (context !== undefined) return disposeContext(context) })
-  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  const resumed: FakeSession = fakeSession({
-    id: 'retire-abort-throw-old',
-    header: { id: 'retire-abort-throw-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('old answer'),
-  })
-  // The FIRST whenIdle (startup resume) settles; the SECOND (the /new
-  // pre-commit quiesce) hangs, so the transition parks in `whenIdleOrAbort`
-  // with its lifecycle-abort listener armed.
-  let idleCalls = 0
-  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
-    idleCalls += 1
-    if (idleCalls > 1) await new Promise<void>(() => {})
-  })
-  context = new Context()
-  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
-  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
-  assert.ok(newHandler, 'the real runner must register the /new transition command')
-  const transition = newHandler()
-  await settle()
-  assert.equal(idleCalls, 2, 'the /new pre-commit quiesce must be awaiting the stuck whenIdle')
+  /** One full shutdown run for the value thrown on the first cancel. */
+  const scenario = async (label: string, thrown: unknown) => {
+    const home = life.tempDir(`dsh-pi-tui-retire-abort-throw-${label}-`)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    life.defer(() => {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    })
+    const probe = installProbe()
+    life.defer(probe.restore)
+    let context: Context | undefined
+    let fiber: { dispose: () => Promise<unknown> } | undefined
+    life.defer(() => { if (context !== undefined) return disposeContext(context) })
+    life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+    const sessionId = `retire-abort-throw-${label}-old`
+    const resumed: FakeSession = fakeSession({
+      id: sessionId,
+      header: { id: sessionId, cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+      events: sessionEvents('old answer'),
+    })
+    // The FIRST whenIdle (startup resume) settles; the SECOND (the /new
+    // pre-commit quiesce) hangs, so the transition parks in `whenIdleOrAbort`
+    // with its lifecycle-abort listener armed.
+    let idleCalls = 0
+    const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
+      idleCalls += 1
+      if (idleCalls > 1) await new Promise<void>(() => {})
+    })
+    context = new Context()
+    fiber = await mountRunner(context, home, harness, { sessionId }, { sessionId })
+    const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+    assert.ok(newHandler, 'the real runner must register the /new transition command')
+    const transition = newHandler()
+    await settle()
+    assert.equal(idleCalls, 2, 'the /new pre-commit quiesce must be awaiting the stuck whenIdle')
 
-  // The FIRST shutdown cancel throws — exactly the
-  // `cannot read inbox state: its projection registration is not active`
-  // failure the hardening exists for. An AbortSignal listener is a Node
-  // EventTarget: an escaping throw would become an uncaughtException that no
-  // `try { disposeSurface() } catch` can see.
-  const liveAgent = (harness.agents as { get(id: string): { cancel(): void } | undefined }).get(resumed.id)
-  assert.ok(liveAgent, 'the resumed session must have a live Agent')
-  const originalCancel = liveAgent.cancel.bind(liveAgent)
-  let cancelAttempts = 0
-  liveAgent.cancel = () => {
-    cancelAttempts += 1
-    if (cancelAttempts === 1) throw new Error('cancel exploded before the projection was torn down')
-    originalCancel()
+    // The FIRST shutdown cancel throws — exactly the
+    // `cannot read inbox state: its projection registration is not active`
+    // failure the hardening exists for. An AbortSignal listener is a Node
+    // EventTarget: an escaping throw would become an uncaughtException that no
+    // `try { disposeSurface() } catch` can see.
+    const liveAgent = (harness.agents as { get(id: string): { cancel(): void } | undefined }).get(sessionId)
+    assert.ok(liveAgent, 'the resumed session must have a live Agent')
+    const originalCancel = liveAgent.cancel.bind(liveAgent)
+    let cancelAttempts = 0
+    liveAgent.cancel = () => {
+      cancelAttempts += 1
+      if (cancelAttempts === 1) throw thrown
+      originalCancel()
+    }
+    const uncaught: unknown[] = []
+    const onUncaught = (error: unknown): void => { uncaught.push(error) }
+    process.on('uncaughtException', onUncaught)
+    life.defer(() => { process.off('uncaughtException', onUncaught) })
+
+    await fiber.dispose()
+    fiber = undefined
+    await transition
+    await settle()
+    return { sessionId, uncaught, cancelAttempts, events: harness.retirementEvents }
   }
-  const uncaught: unknown[] = []
-  const onUncaught = (error: unknown): void => { uncaught.push(error) }
-  process.on('uncaughtException', onUncaught)
-  life.defer(() => { process.off('uncaughtException', onUncaught) })
 
-  await fiber.dispose()
-  fiber = undefined
-  await transition
-  await settle()
-  const events = harness.retirementEvents
-  assert.deepEqual(uncaught.map(error => String(error)), [],
-    'a throwing shutdown cancel must never escape the abort listener')
-  assert.equal(cancelAttempts, 2, 'the failed cancel must be retried by the retirement cancel phase')
-  assert.equal(events.filter(event => event === 'cancel:retire-abort-throw-old').length, 1,
-    'only the successful retry cancels the fake agent')
-  assert.equal(events.filter(event => event === 'dispose:retire-abort-throw-old').length, 1,
-    'the owner must still be disposed exactly once')
+  // A plain Error AND a non-Error value whose coercion itself throws: the
+  // listener must not format the value at all, because ANY formatting step
+  // (`String(value)`, an unprotected `instanceof`, a `.message` read) can throw
+  // for the hostile value and would then escape as an uncaughtException.
+  const hostile: unknown = Object.create(null)
+  for (const [label, thrown] of [
+    ['error', new Error('cancel exploded before the projection was torn down')],
+    ['hostile', hostile],
+  ] as const) {
+    const { sessionId, uncaught, cancelAttempts, events } = await scenario(label, thrown)
+    assert.deepEqual(uncaught, [], `a ${label} shutdown cancel must never escape the abort listener`)
+    assert.equal(cancelAttempts, 2, `the failed ${label} cancel must be retried by the retirement cancel phase`)
+    assert.equal(events.filter(event => event === `cancel:${sessionId}`).length, 1,
+      `only the successful ${label} retry cancels the fake agent`)
+    assert.equal(events.filter(event => event === `dispose:${sessionId}`).length, 1,
+      `the ${label} owner must still be disposed exactly once`)
+  }
 })
 
 test('an interactive exit retires the owned session through the appExit disposal', async (t) => {
