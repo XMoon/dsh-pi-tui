@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/plugins`: manage the active profile's plugins and bundles from the TUI.** The new Plugin Manager drives the official DSH Plugin Manager and lists packages in classified sections: the `dsh-pi-tui` bundle currently providing this surface (Current TUI — read-only and self-protected, so it cannot be disabled/removed from its own screen); packages that are exactly associated with a live TUI extension contribution (TUI Extensions); and every other ordinary DSH plugin (DSH Plugins). It shows bundle metadata, declared plugin rows, enabled/read-only/removable state, compatibility errors and the configured registries, and performs enable/disable, remove (with a confirmation bound to the exact package identity) and install. Installation first runs the official inspect to show the package and the selected registry, then streams progress and logs with safe cancellation; closing the panel never cancels an install, reopening resumes the same request, and a lost response is reconciled through the official `waitForInstall` instead of installing twice. `/settings` gains a `Plugins  Manage…` row that lazily opens the same surface.
+
+- **`/tasks`: open a background Job to see non-consuming live output.** The Job detail now shows status, progress and the retained output tail through the official Job Controller `follow()` stream, and says so explicitly when earlier output was evicted. This is a read-only preview: it never consumes the model's `job_output` cursor, never affects completion notices, and never becomes session history. Esc returns to the same Task Center and Stop behavior is unchanged.
+
 ## [0.4.8] - 2026-09-24
 
 ### Installation and version pairing
