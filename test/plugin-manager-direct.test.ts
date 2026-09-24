@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   DirectPluginManagerPort,
@@ -163,4 +164,20 @@ test('subscribeInstall delivers detached phase/log events and unsubscribes', () 
 test('a missing pluginManager service fails loud, never silently', async () => {
   const port = new DirectPluginManagerPort({ get: () => undefined, on: () => () => {} })
   await assert.rejects(() => port.snapshot(), /pluginManager service unavailable/)
+})
+
+test('the TUI plugin-manager source never touches profile/process internals', () => {
+  // rc.2 owns run/process recovery internally (plan §14.3): the TUI must never
+  // read the run registry, a process group, or the profile lockfile.
+  for (const file of [
+    '../src/plugin-manager/controller.ts',
+    '../src/plugin-manager/host-registry.ts',
+    '../src/runtime/plugin-manager-port.ts',
+    '../src/runtime/direct/plugin-manager-direct.ts',
+  ]) {
+    const source = readFileSync(new URL(file, import.meta.url), 'utf8')
+    for (const token of ['run.json', 'process group', 'pnpm-lock.yaml', '.plugin-manager']) {
+      assert.ok(!source.includes(token), `${file} must not reference ${token}`)
+    }
+  }
 })
