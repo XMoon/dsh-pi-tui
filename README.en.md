@@ -178,6 +178,15 @@ Regular `↑` / `↓` history recall is still available for recent input.
 
 `/tasks` opens the full Task Center for all background work in the current
 Session; the Footer's `↓` opens the lightweight Quick Tasks view for running work.
+Selecting a background Job opens a detail with the official non-consuming live
+output preview (status, progress and the retained output tail); it never consumes
+the model's `job_output` cursor and never becomes session history.
+
+`/plugins` opens the active profile's Plugin Manager: installed bundles and
+plugins are grouped into Current TUI / TUI Extensions / DSH Plugins, with
+enable/disable, remove and install; the `dsh-pi-tui` bundle currently providing
+the surface is read-only and cannot be disabled or removed from its own screen.
+The `Plugins  Manage…` row in `/settings` opens the same surface on demand.
 
 Subagents are shown using their complete lineage, including nested descendants:
 

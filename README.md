@@ -169,7 +169,9 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 ### Subagent 与后台任务
 
-`/tasks` 打开完整 Task Center（当前 Session 的所有后台工作）；Footer 的 `↓` 直接打开轻量 Quick Tasks（只看正在运行的工作）。
+`/tasks` 打开完整 Task Center（当前 Session 的所有后台工作）；Footer 的 `↓` 直接打开轻量 Quick Tasks（只看正在运行的工作）。选中后台 Job 后，详情会显示官方非消耗式的实时输出预览（状态、进度与保留的输出尾部），不会消耗模型的 `job_output` 游标，也不写入会话历史。
+
+`/plugins` 打开当前 profile 的 Plugin Manager：按 Current TUI / TUI Extensions / DSH Plugins 分区查看已安装的 bundle 与插件，并执行启用/禁用、删除与安装；正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 中的 `Plugins  Manage…` 按需打开同一界面。
 
 Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
 

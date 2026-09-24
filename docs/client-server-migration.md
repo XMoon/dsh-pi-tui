@@ -324,6 +324,110 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   client-local UI over Host-owned settings** (the dsh-pi-tui settings
   document via the settings service).
 
+## P1 capability ledger (v0.4.9)
+
+P1 (`v0.4.9`) is the DSH `0.1.7-rc.1` **core user-facing capability
+checkpoint**. The scope below is frozen with the first P1 PR: after it lands,
+a scope change needs an explicit P1.x follow-up rather than quietly expanding
+an in-flight PR. Locality classes:
+
+| Class | Meaning |
+|---|---|
+| P1 required | stable official Host capability with a real TUI user story |
+| already present | inherited behavior the TUI must preserve, not reimplement |
+| experimental | upstream experimental surface; never a `0.4.9` blocker |
+| P2 backlog | useful, deliberately post-`0.4.9` |
+| M3-owned | only correct behind the official Host/Client transport |
+| N/A | Web-only surface with no TUI user story |
+
+| Capability | Class | Official DSH authority | P1 action |
+|---|---|---|---|
+| Official Plugin Manager | P1 required | `@deepseek-ai/dsh-plugin-manager` — the `pluginManager` Host service mounted by the dsh-base layer | ONE TUI-native Plugin Manager surface (port + Direct adapter + one controller/panel) |
+| `/plugins` direct entry | P1 required | same | canonical sessionless entry (never creates/switches a Session) |
+| `/settings → Plugins` entry | P1 required | same | lazy `SettingItem.submenu` row hosting the SAME panel/controller; opening `/settings` alone reads no plugin inventory and there is no second manager |
+| Current TUI classification | P1 required | `SELF_BUNDLE = '@xmoon76/dsh-pi-tui'` | exactly one `Current TUI` card, always wins over extension observations |
+| Current TUI self-protection | P1 required | local surface-safety policy ∩ Host capability | no bundle disable/remove and no self-row enable/disable; derived effective actions, never forged `readOnlyReason`/`removable`; enforced in the controller/action dispatcher as well as the UI |
+| TUI Extension classification | P1 required where identity is provable | internal read-only projection over the shared `piTuiExtensions` runtime | presentation classification only; exact+unique owner association; ambiguous identity falls back to DSH Plugin; no name heuristics; no duplicate card |
+| TUI extension API-tier label | not inferable generically | runtime evidence only | never infer Stable/Advanced/Unstable from the absence of advanced/unstable contributions; only report observed advanced/unstable use as a factual diagnostic |
+| Installed bundle/plugin inspection | P1 required | same (`listBundles` / `listPlugins` / `registries` / `inspect`) | render Host facts exactly; never infer manageability |
+| Bundle/plugin enable/disable | P1 required | same (`setBundleEnabled` / `setPluginEnabled`) | official mutation for ordinary manageable targets; current TUI excluded locally |
+| Bundle remove | P1 required | same (`removeBundle`) | confirmed, exact-identity mutation, then refresh |
+| Bundle install | P1 required | same (`installBundle`) | pre-inspect, confirm, official install |
+| Registry selection/fallback visibility | P1 required | same (`registries()`) | show offered/fallback/resolved registries; never retry for the Host |
+| Install progress/log/cancel | P1 required | same (`plugin-manager/install-state` / `install-log` events, `cancelInstall`) | request-correlated, bounded presentation log tail |
+| Install request recovery | P1 required | same (`waitForInstall(requestId)`) | reconcile an indeterminate result; never auto-retry `installBundle()` |
+| Compatibility refusal diagnostics | P1 required | same (inspect/change compatibility result) | show package/version/required range/current runtime/exemption state; no TUI semver guessing |
+| Exact-version exemption mutation | advanced / non-blocking | same (`listVersionExemptions` / `setVersionExemption`) | diagnostics required; grant/revoke only if it stays a small official action |
+| Job live observation | P1 required **if B0 proof is green** | `@deepseek-ai/dsh-api-job-controller` (`JobController.follow()`) over `@deepseek-ai/dsh-jobs` (`JobRegistry.readAt()`) | official non-consuming Host observer only; a TUI events+`readAt` loop is forbidden |
+| Job gap/loss presentation | P1 required if live view ships | same official follow frames | represent loss honestly; never a full-transcript claim |
+| Job human Stop | already present / preserve | existing Direct job stop path | do not redesign |
+| Task Center roster/search/type/scope/tree | already present / preserve | `TaskReadPort` (status-only) + official subagent catalog | regression baseline |
+| Workflow presentation | already present / converge only | existing Workflow projection | reuse; no new workflow reducer |
+| Tool Preparing | already implemented | official assistant transient events | no P1 work |
+| `AgentPresetRegistry.readDocument()` viewer | P2 backlog | `AgentPresetRegistry.readDocument()` | record only |
+| Agent Team | experimental | `packages/experimental/*` `agentTeam` Session projection | no Team code in P1 |
+| Web work-detail vocabulary | P2 backlog (UX reference) | dsh-web presentation | no Focus/Compact renaming |
+| Remote ClientJobs transport/reconnect | M3-owned | `@deepseek-ai/dsh-api-job-controller/client` `ClientJobs.observe()` over the DSH Connection | do not implement — P1 has no Client Context/Connection/transport |
+| Complete Web Plugin Manager UI parity | N/A | dsh-web React UI | TUI-native UX only |
+| Creator-mode marketplace/discovery | N/A | — | do not implement |
+
+Already-covered behavior this ledger must not reimplement: Task Center confirmed
+Stop, Quick Tasks, the merged Agent/Job roster, Tool Preparing, the Workflow
+transcript model, and the Direct production backend (unchanged).
+
+M3 owns every transport-shaped piece: `ClientJobs` reference-counted observation
+over the DSH Connection, Remote reconnect recovery, and a Remote production
+backend. P1 must not build a temporary TUI RPC or a TUI-owned follow protocol to
+unlock one UI; if a P1 capability cannot be correct on the Direct path it is
+reclassified, not smuggled in.
+
+### P1-A status — Plugin Manager
+
+`/plugins` (and the lazy `/settings → Plugins  Manage…` submenu) is ONE surface
+over one runner-owned controller: a narrow `PluginManagerPort`, the Direct
+adapter (`src/runtime/direct/plugin-manager-direct.ts`, the only module that
+resolves the official `pluginManager` service), a controller that owns operation
+state, and a rendering-only panel. The inventory is classified into Current TUI
+(exactly `@xmoon76/dsh-pi-tui`, self-protected by DERIVED effective actions —
+never by forging `readOnlyReason`/`removable`), TUI Extensions (only after an
+exact + unique live-owner association, proven through a package-private
+owner→Loader-entry-id projection over the shared `piTuiExtensions` runtime; no
+name heuristics, no duplicate card), and DSH Plugins (everything else). Both
+ownership decisions use official identity, never a package/module name: a
+bundle row's `entryId` decides visibility, and a `PluginInfo.patchId` equal to a
+`rowId` the self bundle declares (or an id in its `overrides` — e.g. the base
+rows `cordis.patch.yml` disables) decides the protection-only narrowing, so the
+TUI bundle's own patch layer cannot be undone from its own screen while an
+independent row that merely shares a module specifier stays manageable. All
+mutations (enable/disable/remove/install) go through the official service; the
+TUI never spawns pnpm, edits `package.json`/patch YAML, or invents final state —
+every operation is followed by a fresh official inventory read. The Direct
+adapter imports the official rc.1 types for precision (a devDependency pin);
+because the repo's naming gate requires every `@deepseek-ai/*` import in `src/`
+to be a declared peer, `@deepseek-ai/dsh-plugin-manager` also joins the peer list
+at the unchanged `>=0.1.7-rc.1` floor (the DSH base already ships the package —
+the same pattern as `dsh-jobs`). The extension observation reports only facts the
+shared runtime actually tracks (advanced/unstable capability use is observed
+from the tracked capability slots, so it under-reports rather than infers).
+
+### P1-B status — selected Job live output
+
+The TUI bundle mounts the official `job-controller` row
+(`@deepseek-ai/dsh-api-job-controller`, the same row the rc.1 web bundle mounts;
+the dsh-base layer does not). The Direct adapter
+(`src/runtime/direct/job-observation-direct.ts`) consumes
+`JobController.follow()`, the official NON-CONSUMING Host observer: upstream
+`packages/api/job-controller/src/observe.ts` reads only
+`JobRegistry.readAt()` and never `JobRegistry.read()`, so it neither advances the
+model `job_output` cursor nor acknowledges a completion notice. The selected Job
+detail renders status/progress plus a bounded retained-output tail, marks an
+official `lossy`/`gapBefore` eviction honestly, and keeps the final snapshot
+readable after settlement. The observer is owned by the viewer (one Job at a
+time) and is aborted on close, session transition, and surface teardown;
+`TaskReadPort` stays status-only. If the `jobController` service is absent, the
+detail degrades to the previous status-only view with an explicit note instead
+of failing.
+
 ## Official seam mapping (DSH 0.1.2-alpha.4) — history, skills, errors, diagnostics
 
 The M2/M3 Remote backend maps to the official seams below (first shipped in

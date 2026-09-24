@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/plugins`: manage the active profile's plugins and bundles from the TUI.** The new Plugin Manager drives the official DSH Plugin Manager and lists packages in classified sections: the `dsh-pi-tui` bundle currently providing this surface (Current TUI — read-only and self-protected, so it cannot be disabled/removed from its own screen); packages that are exactly associated with a live TUI extension contribution (TUI Extensions); and every other ordinary DSH plugin (DSH Plugins). It shows bundle metadata, declared plugin rows, enabled/read-only/removable state, compatibility errors and the configured registries, and performs enable/disable, remove (with a confirmation bound to the exact package identity) and install. Installation first runs the official inspect to show the package and the selected registry, then streams progress and logs with safe cancellation; closing the panel never cancels an install, reopening resumes the same request, and a lost response is reconciled through the official `waitForInstall` instead of installing twice. `/settings` gains a `Plugins  Manage…` row that lazily opens the same surface.
+
+- **`/tasks`: open a background Job to see non-consuming live output.** The Job detail now shows status, progress and the retained output tail through the official Job Controller `follow()` stream, and says so explicitly when earlier output was evicted. This is a read-only preview: it never consumes the model's `job_output` cursor, never affects completion notices, and never becomes session history. Esc returns to the same Task Center and Stop behavior is unchanged.
+
+- **Startup no longer looks like a dead terminal: `Starting DSH…` while the Host Loader settles.** When an optional plugin keeps the Host Loader from settling (for example a remote MCP server whose initial connect or `tools/list` never answers), the TUI now writes a single `Starting DSH…` line before it starts waiting and clears it as soon as the Loader settles; non-TTY output stays silent. No timeout, no skipping a pending plugin, no half-composed Agent — the global readiness wait is simply visible.
+
+### Fixed
+
+- **`/quit`, `exit` and Ctrl+C no longer fail retirement with `retire phase failed ... phase=cancel` (`cannot read inbox state: its projection registration is not active`).** An interactive exit now cancels the current Direct Agent's first work synchronously BEFORE requesting `appExit`, so the Host root teardown can no longer unregister the inbox projection ahead of the later cancel; `idle → descendant drain → flush → dispose` still complete inside the watchdog-bounded `appExit` disposal, and the exit never awaits the full Host teardown. The cancel is deduplicated by Agent object identity, so the new Agent of a committed session transition is still cancelled, and a first cancel that throws is not recorded as done — the real retirement retries it.
+
+- **A live Agent that loses its standing preset composition now fails loudly instead of silently addressing the model with a truncated request.** The profile mounts the official `@deepseek-ai/dsh-invariants` registry (enabling exactly the `@deepseek-ai/dsh-agent-preset-registry` check) plus the official `agent-preset-registry/invariant` companion: as soon as a live Agent is no longer joined to any preset, the next prompt assembly fails loud instead of sending a tool list that had collapsed to `subagent` alone. The TUI still does not remount, reparent or recreate an Agent — preset lifetime stays DSH-owned.
+
+- **The exit resume hint no longer names the wrong profile when the TUI was started with the positional `dsh <profile>` form.** The hint used to scrape `process.argv` for `--profile`; under `dsh <name>` the launcher only synthesizes that flag for its own argument parsing and leaves `process.argv` untouched, so the hint fell back to the hardcoded `pi-tui` — wrong for `dsh tui`, `dsh rescue`, or any other non-`pi-tui` profile. It now reads the Host's official `profileContext.name`, which is correct for `--profile <name>`, `--profile=<name>`, `dsh <name>` and `--from-default-profile <name>` alike; only a profile-less mount (tests, an embedded surface) still falls back to the argv scrape.
+
 ## [0.4.8] - 2026-09-24
 
 ### Installation and version pairing

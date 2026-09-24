@@ -143,6 +143,7 @@ import { parseUserKeybindings } from './keybindings/config.ts'
 
 import { normalizedKeyToKeyId } from './keybindings/manager.ts'
 import { Text } from '@xmoon76/pi-tui'
+import type { Component } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
@@ -214,6 +215,13 @@ import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { DirectSessionArchive } from './runtime/direct/session-archive-direct.ts'
 import { DirectHostCommandPort } from './runtime/direct/host-command-direct.ts'
+import { DirectPluginManagerPort } from './runtime/direct/plugin-manager-direct.ts'
+import { DirectJobObservationPort } from './runtime/direct/job-observation-direct.ts'
+import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
+import { PluginManagerController } from './plugin-manager/controller.ts'
+import { PluginManagerHostRegistry, type PluginManagerHostClaim } from './plugin-manager/host-registry.ts'
+import { PluginManagerPanel } from './plugin-manager/panel.ts'
+import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
@@ -423,7 +431,7 @@ const LOCAL_SHELL_TAIL_FLUSH_MS = 200
  */
 export const SESSIONLESS_COMMANDS = new Set([
   'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
-  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings',
+  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
   // `/statusline` is the approved alias of `/footer` (same configurator,
   // other-agent muscle memory) — it rides the same ownership sets, so it
   // executes locally, never steers, and works before any session exists.
@@ -444,7 +452,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  */
 export const LOCAL_COMMANDS = new Set([
   'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
-  'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
+  'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
   // `/statusline` — the approved alias of `/footer` (see its registration
@@ -1284,10 +1292,12 @@ export function dangerCommand(command: string): boolean {
 }
 
 /**
- * The dsh profile this process was launched with (the `--profile` flag),
- * so the exit-time resume hint names the profile the TUI actually runs
- * under. Falls back to `pi-tui` when the flag is absent (the TUI bundle
- * cannot load without a profile, so this is defensive only).
+ * The dsh profile named by the `--profile` flag in `argv`, in both spellings.
+ * This is the ARGV-ONLY fallback: it cannot see the positional `dsh <name>`
+ * launch form, because the launcher consumes that bare name by synthesizing
+ * `['--profile', ...argv]` for its OWN commander parse and leaves
+ * `process.argv` untouched. Prefer {@link hostRunningProfile}, which reads the
+ * Host's profile identity instead of scraping the command line.
  * @param argv - the process argument vector.
  * @param fallback - the default profile.
  */
@@ -1303,12 +1313,42 @@ export function runningProfile(argv: readonly string[] = process.argv, fallback 
   return fallback
 }
 
+/** The one context read {@link hostRunningProfile} needs (a cordis Context satisfies it). */
+export interface ProfileContextReadLike {
+  get(name: string): unknown
+}
+
+/**
+ * The profile this process actually runs — the official Host
+ * `profileContext.name` when it is composed, else {@link runningProfile}'s
+ * argv scrape.
+ *
+ * `profileContext.name` is the launcher's own profile identity, so it is
+ * correct for EVERY launch form: `--profile <name>`, `--profile=<name>`, the
+ * positional `dsh <name>`, and `--from-default-profile <name>`. The argv
+ * scrape only knows the flag form, which is why it is the fallback for a
+ * profile-less mount (tests, an embedded surface) rather than the primary
+ * source.
+ * @param ctx - the plugin context (or any structural `get`-only stand-in).
+ * @param argv - the process argument vector for the fallback path.
+ * @param fallback - the default profile for the fallback path.
+ * @returns the running profile name.
+ */
+export function hostRunningProfile(
+  ctx: ProfileContextReadLike,
+  argv: readonly string[] = process.argv,
+  fallback = 'pi-tui',
+): string {
+  const name = (ctx.get('profileContext') as { readonly name?: string } | undefined)?.name
+  return name ?? runningProfile(argv, fallback)
+}
+
 /**
  * The interactive-quit resume hint (pi parity): `dsh --profile <p>
  * --session <id>`, printed after the terminal restores so the user can
  * re-enter the session later. Returns undefined when there is no session
  * to resume (deferred start never created one).
- * @param profile - the running profile ({@link runningProfile}).
+ * @param profile - the running profile ({@link hostRunningProfile}).
  * @param sessionId - the live session id.
  * @returns the resume command line, or undefined without a session.
  */
@@ -1815,6 +1855,22 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  // Pre-mount startup status: ONE instance for the whole pre-mount barrier,
+  // created in the RUNNER scope BEFORE the async startup root because the
+  // FIRST thing the surface waits on is the Host Loader settling — the
+  // global readiness barrier below. A stalled optional row (an MCP server
+  // whose initial connect or `tools/list` never answers) otherwise leaves a
+  // blank terminal that reads as a dead TUI. Pure presentation: it owns no
+  // lifecycle state, never starts timers, and every teardown path (abort
+  // signal, resume failure, success-before-mount, fatal catch) clears it —
+  // see src/startup-status.ts. The later `Resuming session…` /
+  // `Preparing conversation…` stages reuse THIS object.
+  const startupStatus = createStartupStatus(config.startupStatusOutput ?? {
+    isTTY: process.stdout.isTTY === true,
+    write: (text) => process.stdout.write(text),
+  })
+  lifecycleController.signal.addEventListener('abort', () => startupStatus.clear(), { once: true })
+
   // The Direct owner slots are hoisted to the RUNNER scope (outside the
   // startup IIFE) so the terminal-total fatal catch can see whether a
   // Direct owner exists; the memoized retirement coordinator itself stays
@@ -1834,7 +1890,20 @@ export function apply(ctx: Context, config: Config): void {
     startup.markSurfaceMounted?.()
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
-    await ctx.get('loader')?.await()
+    // The wait is unbounded and must stay unbounded (no TUI timeout, no
+    // skipping a pending row, no half-composed Agent): the only thing this
+    // layer owes the user is that the wait is VISIBLE.
+    startupStatus.show('Starting DSH…')
+    try {
+      await ctx.get('loader')?.await()
+    } finally {
+      // The barrier owns the terminal row only while it is waiting: release it
+      // on EVERY exit, including a rejected Loader. Leaving it up would let the
+      // fatal log land on the same row (`Starting DSH…[tui] … ERROR fatal …`)
+      // and the later clear would then erase part of that error line — a TTY
+      // shares one cursor between stdout and stderr.
+      startupStatus.clear()
+    }
     if (lifecycleController.signal.aborted) {
       // Pre-mount unload before any Agent existed: nothing to retire; close
       // the diagnostics handle (the early cancellation disposer no longer
@@ -1958,26 +2027,79 @@ export function apply(ctx: Context, config: Config): void {
     // diag stays open until the retirement diagnostics are recorded. The
     // fatal catch reaches this coordinator through retireOwnedSessionRef.
     let retirementPromise: Promise<RetirementReport> | undefined
+    // The exact Agents whose SHUTDOWN cancel already landed. A WeakSet, not a
+    // single value: one exit can shutdown-cancel more than one owner — the
+    // CURRENT owner is pre-cancelled before `appExit`, and a session transition
+    // or fork that commits afterwards still retires the OLD owner it replaced.
+    // Keyed by Agent OBJECT identity, never by session id, so a committed
+    // transition's NEW owner is still cancelled. A cancel that throws is
+    // deliberately NOT recorded, so a later shutdown-aware path retries it.
+    const shutdownCancelledAgents = new WeakSet<Agent>()
+    // ONE exactly-once shutdown cancel. Every shutdown-aware cancel funnels
+    // here:
+    //   - `whenIdleOrAbort`'s lifecycle-abort listener, which fires while
+    //     `disposeSurface()` aborts the controller and unblocks a transition
+    //     parked in its pre/post-commit quiesce;
+    //   - the synchronous exit preparation and the memoized retirement entry;
+    //   - the transition / fork retirements that can still commit AFTER the exit
+    //     began (via `cancelRetiredOwner` below).
+    // `agent.cancel` is idempotent, but a second call must not land after the
+    // root teardown unregistered the inbox projection — that ordering is the
+    // exact failure this hardening fixes, and it is what makes the cancel phase
+    // report `cannot read inbox state: its projection registration is not
+    // active`.
+    const cancelShutdownAgent = (agent: Agent): void => {
+      if (shutdownCancelledAgents.has(agent)) return
+      agent.cancel({ kind: 'user' })
+      shutdownCancelledAgents.add(agent)
+    }
+    // The cancel phase of a transition / fork retirement. During shutdown it
+    // MUST join the exactly-once set: the owner it retires may already have been
+    // shutdown-cancelled, and a late non-cooperative child create can commit
+    // after `appExit` started the root teardown. Outside shutdown the ordinary
+    // cancel semantics are unchanged — the set is shutdown bookkeeping only.
+    const cancelRetiredOwner = (agent: Agent): void => {
+      if (lifecycleController.signal.aborted) cancelShutdownAgent(agent)
+      else agent.cancel({ kind: 'user' })
+    }
+    // Synchronous shutdown preparation: cancel the CURRENT Direct owner's work
+    // BEFORE the Host tree is torn down. The surface teardown above already
+    // aborted the runner lifecycle, but a plain interactive exit reaches the
+    // appExit disposal through `transitionGate.run(...)`, which schedules its
+    // task on a promise continuation — so the root teardown could unregister
+    // the inbox projection before the retirement's async cancel phase ran
+    // (`phase=cancel ... projection registration is not active`). This is ONLY
+    // the first cancel: it never awaits idle, drains descendants, flushes, or
+    // disposes a handle, and the full retirement stays inside the
+    // appExit-bounded disposal. `cancelShutdownAgent` makes it exactly-once
+    // with the lifecycle-abort cancel, so the later cancel phase is a no-op
+    // for the same Agent.
+    const preCancelOwnedSession = (): void => {
+      const agent = liveAgent
+      if (agent === undefined) return
+      if (shutdownCancelledAgents.has(agent)) return
+      diag.info('retire cancel', { session: agent.session.id })
+      try {
+        cancelShutdownAgent(agent)
+      } catch (error) {
+        // Do NOT mark success: the appExit-disposal cancel phase must retry.
+        // A failure here must never throw into the exit controller — appExit
+        // has to follow regardless.
+        diag.error('retire pre-cancel failed', {
+          session: agent.session.id,
+          error: safeErrorMessage(error),
+        })
+      }
+    }
     const retireOwnedSession = (): Promise<RetirementReport> => {
       if (retirementPromise !== undefined) return retirementPromise
+      // Every entry (interactive exit, HMR unload, fatal teardown) shares the
+      // ONE synchronous pre-cancel before the memoized retirement is created:
+      // the interactive exit controller has no hook for HMR/fatal, and
+      // duplicating the cancel there is exactly the twin-track divergence that
+      // makes exactly-once hard to prove.
+      preCancelOwnedSession()
       retirementPromise = (async (): Promise<RetirementReport> => {
-        // If a session transition is queued or in flight, its pre-commit
-        // `whenIdle()` does not observe the lifecycle signal: cancel the
-        // CURRENT owner's work so the transition settles instead of waiting
-        // for the LLM (the appExit watchdog would otherwise force-exit
-        // without an ordered retirement). Keyed on `pending` (queued OR
-        // running), not `busy`: a queued-but-not-started transition is about
-        // to quiesce the old agent, and the pre-cancel must fire before the
-        // task starts. This pre-cancel is a DELIBERATE extra cancel on the
-        // transition path only: `agent.cancel` is idempotent (re-cancelling
-        // an already cancelled agent is a no-op), so the retirement's own
-        // cancel phase — the single cancel on the ordinary (no-transition)
-        // path — may run again on the same owner without changing the
-        // outcome. The tests assert the ordinary path cancels exactly once
-        // and the transition path cancels at least once.
-        if (transitionGate?.pending === true) {
-          liveAgent?.cancel({ kind: 'user' })
-        }
         // The CURRENT Direct owner is read INSIDE the gate task, not at
         // call time: an exit that lands while a session transition is
         // committing must retire the NEW current owner (the old owner's
@@ -1987,6 +2109,11 @@ export function apply(ctx: Context, config: Config): void {
         // to retire, the surface teardown is complete.
         const retireParked = async (agent: Agent, handle: AgentHandle): Promise<RetirementReport> =>
           retireDirectOwnedSession({
+            // A parked owner is retired ONLY by this loop, exactly once: it is
+            // never the CURRENT owner, so neither the exit pre-cancel nor the
+            // lifecycle-abort listener can have cancelled it. It therefore keeps
+            // the plain cancel and is deliberately outside
+            // `shutdownCancelledAgents` (see plan §8.7).
             cancel: () => agent.cancel({ kind: 'user' }),
             whenIdle: () => agent.whenIdle(),
             drainDescendants: async () => {
@@ -2005,8 +2132,18 @@ export function apply(ctx: Context, config: Config): void {
           diag.info('retire start', { session: agent.session.id })
           const report = await retireDirectOwnedSession({
             cancel: () => {
+              // The exactly-once shutdown cancel already covered THIS exact
+              // Agent (the ordinary interactive path, or the lifecycle-abort
+              // listener that unblocked a parked quiesce). Re-cancelling is
+              // idempotent, but skipping it keeps every shutdown path at
+              // exactly one cancel and — more importantly — keeps the second
+              // cancel from landing after the root teardown unregistered the
+              // inbox projection. A DIFFERENT Agent here means a committed
+              // transition replaced the owner, and that one must be cancelled
+              // now.
+              if (shutdownCancelledAgents.has(agent)) return
               diag.info('retire cancel', { session: agent.session.id })
-              agent.cancel({ kind: 'user' })
+              cancelShutdownAgent(agent)
             },
             whenIdle: async () => {
               diag.info('retire idle', { session: agent.session.id })
@@ -2105,7 +2242,7 @@ export function apply(ctx: Context, config: Config): void {
     // ordered retirement would never run.
     const whenIdleOrAbort = async (agent: Agent, signal: AbortSignal): Promise<boolean> => {
       if (signal.aborted) {
-        agent.cancel({ kind: 'user' })
+        cancelShutdownAgent(agent)
         await agent.whenIdle()
         return true
       }
@@ -2113,7 +2250,29 @@ export function apply(ctx: Context, config: Config): void {
       await new Promise<void>((resolve, reject) => {
         const onAbort = (): void => {
           aborted = true
-          agent.cancel({ kind: 'user' })
+          // The lifecycle abort IS a shutdown cancel, so it shares the ONE
+          // exactly-once path with the exit preparation / retirement entry:
+          // otherwise this cancel and the later cancel phase hit the same
+          // Agent twice. The throw is contained INSIDE the listener: an
+          // AbortSignal is a Node EventTarget, so a listener exception never
+          // surfaces to the `abort()` caller (the `disposeSurface()` try/catch
+          // cannot see it) — Node turns it into an uncaughtException instead.
+          // Rejecting this promise instead fails the parked transition
+          // cleanly, and the memoized retirement retries the cancel later
+          // (nothing was recorded, because `cancelShutdownAgent` records only
+          // a successful cancel).
+          try {
+            cancelShutdownAgent(agent)
+          } catch (error) {
+            // Reject with the RAW value, exactly like the sibling
+            // `whenIdle()`-rejection path below: ANY formatting step here
+            // (`String(error)`, an unprotected `instanceof`, a `.message` read)
+            // can itself throw for a hostile value — a null-prototype object
+            // has no coercion — and that throw would escape this EventTarget
+            // listener as an uncaughtException, bypassing the containment.
+            // Downstream observation goes through the repo's total formatters.
+            reject(error)
+          }
         }
         signal.addEventListener('abort', onAbort, { once: true })
         agent.whenIdle().then(
@@ -2308,7 +2467,14 @@ export function apply(ctx: Context, config: Config): void {
       new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectSessionArchive(ctx),
       new DirectHostCommandPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectPluginManagerPort(ctx),
     )
+
+    // The Plugin Manager operation owner OUTLIVES the panel (plan §17): a
+    // closed `/plugins` never cancels an active install. It is wired once the
+    // extension read seam exists (below); teardown disposes its install-event
+    // subscription through this holder.
+    let disposePluginManagerController: (() => void) | undefined
 
     // Whole-document settings writes must not copy a project-layer
     // footerCustomItems value into the USER section. The config port is the
@@ -2387,19 +2553,10 @@ export function apply(ctx: Context, config: Config): void {
     // cross-process writer authority — the TUI's physical owner.lock /
     // lease / cooling stack is removed legacy.
     let resumeFailure: string | undefined
-    // Pre-mount startup status (explicit resume only): the resume
-    // transaction (preflight, DSH resume) and the whenIdle/catalog
-    // barrier run BEFORE the TUI mounts — a single-line TTY hint keeps
-    // the blank terminal from reading as a hang. Pure presentation: it
-    // never owns lifecycle state, and every teardown path (success,
-    // resume reject, abort/signal, HMR unload, startup exception) clears
-    // it — the abort listener covers the teardown paths, the explicit
-    // clear covers the success path.
-    const startupStatus = createStartupStatus(config.startupStatusOutput ?? {
-      isTTY: process.stdout.isTTY === true,
-      write: (text) => process.stdout.write(text),
-    })
-    lifecycleController.signal.addEventListener('abort', () => startupStatus.clear(), { once: true })
+    // The explicit-resume stage reuses the RUNNER-scope `startupStatus`
+    // created before the Loader barrier (see the top of applyRunner): the
+    // status object is already armed with the abort clear, and the
+    // `Starting DSH…` line was cleared as soon as the Loader settled.
     let handle: SessionHandle | undefined
     // The cancellation branch below belongs only to the pre-publication
     // lifecycle await. Once resume resolves, its creation-only signal no
@@ -2714,7 +2871,7 @@ export function apply(ctx: Context, config: Config): void {
           //    stands.
           if (oldHandle !== undefined && oldAgent !== undefined) {
             const report = await retireDirectOwnedSession({
-              cancel: () => oldAgent.cancel({ kind: 'user' }),
+              cancel: () => cancelRetiredOwner(oldAgent),
               whenIdle: () => oldAgent.whenIdle(),
               drainDescendants: async () => {
                 const subagents = ctx.get('subagents') as {
@@ -3202,6 +3359,8 @@ export function apply(ctx: Context, config: Config): void {
       readonly renderers: import('./renderer-registry.ts').RendererRegistry
       readonly editors: import('./editor-registry.ts').EditorRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
+      /** INTERNAL owner → owning Loader entry id projection (P1-A1.4). */
+      _ownerEntryIds(): ReadonlyMap<string, string>
       // The REF protocol: capture the identity at INVOCATION START and
       // report settlements against the captured ref — never the live
       // registry (an HMR reload may replace the id with a new owner by
@@ -3422,7 +3581,7 @@ export function apply(ctx: Context, config: Config): void {
           if (pin !== undefined) pin.state.retirementOwnsRelease = true
           const retirement = retireSourceOwnerAfterSettlement(oldAgent.session.id, async () => {
             const report = await retireDirectOwnedSession({
-              cancel: () => oldAgent.cancel({ kind: 'user' }),
+              cancel: () => cancelRetiredOwner(oldAgent),
               whenIdle: () => oldAgent.whenIdle(),
               drainDescendants: async () => {
                 const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
@@ -3663,6 +3822,9 @@ export function apply(ctx: Context, config: Config): void {
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
+      // Release the Plugin Manager install-event subscription. This never
+      // cancels a Host install: only the official cancel action does that.
+      disposePluginManagerController?.()
       // PR D2: cancel the deferred initial context measure — a stale
       // callback must never measure/repaint into the disposed surface.
       cancelDeferredContextMeasure?.()
@@ -3696,6 +3858,10 @@ export function apply(ctx: Context, config: Config): void {
       // surface after this teardown.
       jobsEventsDispose?.()
       jobsEventsDispose = undefined
+      // Release the selected-Job follow stream explicitly: TuiApp.dispose()
+      // does not invoke the viewer's onClose, so the observer would otherwise
+      // outlive the surface.
+      activeJobViewerClose?.()
       activeJobViewerClose = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
@@ -3722,18 +3888,24 @@ export function apply(ctx: Context, config: Config): void {
     }
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): latch once → dispose/restore the Client surface →
-    // resume-hint policy → request appExit. A later request while one is
-    // in flight is a no-op (createExitController latches), so a command
-    // plus a key can never double-cleanup or double-exit. The Direct
-    // owned-session retirement is NOT awaited here: it runs inside the
-    // application-tree disposal that appExit starts, under the DSH
-    // process-shutdown watchdog (see docs/concurrency.md).
+    // synchronously pre-cancel the exact current Direct owner → resume-hint
+    // policy → request appExit. A later request while one is in flight is a
+    // no-op (createExitController latches), so a command plus a key can never
+    // double-cleanup or double-exit. Only the FIRST cancel is brought forward;
+    // the full retirement (idle → descendants → flush → dispose) is still NOT
+    // awaited here — it runs inside the application-tree disposal that appExit
+    // starts, under the DSH process-shutdown watchdog (see docs/concurrency.md).
     const { requestExit } = createExitController({
       diag,
       cleanup: disposeSurface,
+      prepareRetirement: preCancelOwnedSession,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
-        const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
+        // The Host's profileContext names the profile for EVERY launch form,
+        // including the positional `dsh <name>` (see hostRunningProfile): the
+        // argv scrape alone would answer the pi-tui fallback there and hand the
+        // user a resume command for the wrong profile.
+        const resume = resumeCommand(hostRunningProfile(ctx), liveAgent?.session.id ?? '')
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
       },
       exit,
@@ -7054,6 +7226,58 @@ export function apply(ctx: Context, config: Config): void {
     // before the first frame (no stale scrollback line after mount).
     if (lifecycleController.signal.aborted) return
     startupStatus.clear()
+    // ── Plugin Manager (P1-A) ──────────────────────────────────────────────
+    // ONE controller/panel for both entries (`/plugins` and
+    // `/settings → Plugins`). The port is the narrow Direct adapter; the
+    // presentation classification reads only the shared extension runtime's
+    // own health records — never a second inventory or a second manager.
+    // The token-owned registry distinguishes a normal close from an external
+    // Settings teardown (see its module header).
+    const pluginManagerHosts = new PluginManagerHostRegistry()
+    const pluginManagerController = new PluginManagerController(backend.pluginManager, {
+      requestRender: () => { if (pluginManagerHosts.isOpen()) app.requestRender() },
+      requestClose: () => pluginManagerHosts.closeActive(),
+      notify: (message, kind) => app.notify(message, kind),
+      isOpen: () => pluginManagerHosts.isOpen(),
+      diag,
+    }, {
+      observations: () => extensionService === undefined ? [] : observeTuiExtensions({
+        healthSnapshot: () => extensionService!._ledger().healthSnapshot(),
+        ownerEntryIds: () => extensionService!._ownerEntryIds(),
+      }),
+    })
+    disposePluginManagerController = () => pluginManagerController.dispose()
+    // The selected-Job observation seam (P1-B): the official job-controller
+    // row is mounted by this bundle; the Direct adapter is the only module
+    // that touches `ctx.jobController`.
+    const jobObservation = new DirectJobObservationPort(ctx, diag)
+    const openPluginManager = (): void => {
+      // A second open is a no-op: the panel is already the active surface.
+      if (pluginManagerHosts.isOpen()) return
+      let close: () => void = () => {}
+      const claim = pluginManagerHosts.claim(() => close())
+      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
+        // Any hide path that disposes the panel releases this owner exactly
+        // once (a normal close and an external teardown are the same here).
+        onDispose: () => claim.releaseExternally(),
+      })
+      close = app.openPluginManagerPanel(panel, () => claim.releaseExternally())
+      pluginManagerController.open('direct-command')
+    }
+    /** The `/settings → Plugins` entry: the SAME panel/controller hosted as a
+     * lazy SettingsList submenu; `done` returns to the Settings list. */
+    const createPluginManagerSubmenu = (done: (selected?: string) => void): Component => {
+      let claim: PluginManagerHostClaim | undefined
+      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
+        // The Settings parent may dispose this submenu WITHOUT calling `done`
+        // (the fork's lifecycle contract): release only the OWNER.
+        onDispose: () => claim?.releaseExternally(),
+      })
+      // The user close path returns to Settings; an external teardown must not.
+      claim = pluginManagerHosts.claim(() => claim?.closeNormally(), done)
+      pluginManagerController.open('settings-submenu')
+      return panel
+    }
     app = startProcessTui({
       // ONE submission entry: the request (the Enter gesture, the
       // accelerated chord, or the explicit queue action) rides along — the
@@ -9170,11 +9394,12 @@ export function apply(ctx: Context, config: Config): void {
       refreshAgents()
     }
     /**
-     * Open one job from the task browser: a bash job shows a STATUS viewer
-     * (never the output — the job's single read cursor belongs to the agent's
-     * job_output; consuming it from the UI would leave the model an
-     * incomplete result and could swallow the completion notice); a subagent
-     * job shows the status viewer with a /tasks hint. The job record
+     * Open one job from the task browser: an ordinary Job opens the detail
+     * viewer, which shows a NON-CONSUMING live output preview through the
+     * official JobController.follow() stream (never `jobs.read()`), so it can
+     * never leave the model an incomplete `job_output` result or swallow the
+     * completion notice; a subagent job whose stable child session id is
+     * unknown shows the same Job detail with a /tasks hint. The job record
      * carries no child session id, so label/order/time heuristics cannot
      * distinguish a background child from a same-label foreground one-shot;
      * the task browser therefore never opens a transcript by guess.
@@ -9226,9 +9451,12 @@ export function apply(ctx: Context, config: Config): void {
       return 'keep-open'
     }
     /**
-     * Status-only viewer for one job (never touches the read cursor). The
-     * subagent variant appends the /tasks hint because a transcript
-     * cannot always be matched; the bash variant is pure status.
+     * Selected-Job detail viewer. It opens one official non-consuming
+     * observation stream for exactly this Job and repaints the latest local
+     * snapshot on the viewer's timer (the tick never reads Host output). The
+     * subagent variant appends the /tasks hint because a transcript cannot
+     * always be matched. If the jobController service is absent the detail
+     * degrades to the status-only view with an explicit note.
      */
     const openJobStatusViewer = (
       jobId: string,
@@ -9250,23 +9478,45 @@ export function apply(ctx: Context, config: Config): void {
       // and kill against the owner, on top of the close-on-transition
       // below).
       const ownerSessionId = liveAgent.session.id
-      activeJobViewerClose = app.openOutputViewer({
-        title,
-        initial: snapshot.kind === 'subagent'
-          ? subagentJobViewHint(snapshot.status, snapshot.detail)
-          : jobStatusHint(snapshot.status, snapshot.detail),
-        refresh: () => {
-          if (jobs === undefined) return ''
+      const fallbackText = snapshot.kind === 'subagent'
+        ? subagentJobViewHint(snapshot.status, snapshot.detail)
+        : jobStatusHint(snapshot.status, snapshot.detail)
+      // The selected Job is the ONLY observed Job (P1-B1). The observer is
+      // event-driven at its data source: the official follow stream updates
+      // this local snapshot and the viewer's existing refresh timer merely
+      // repaints it — the tick never reads Host output.
+      let observed: JobObservedSnapshot | undefined
+      let observationError: string | undefined
+      let closeObserver: () => void = () => {}
+      try {
+        closeObserver = jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
+      } catch (error) {
+        // A composition without the official job-controller row (the injected
+        // production row guarantees it) degrades to the status-only detail —
+        // the documented P1-B safety valve — and says so explicitly.
+        observationError = safeErrorMessage(error)
+      }
+      const refreshBody = (): string => {
+        if (observed !== undefined) return formatJobObservation(observed)
+        const current = jobs === undefined ? undefined : (() => {
           try {
-            const current = jobs.get(jobId as JobId, ownerSessionId)
-            return current.kind === 'subagent'
-              ? subagentJobViewHint(current.status, current.detail)
-              : jobStatusHint(current.status, current.detail)
+            return jobs.get(jobId as JobId, ownerSessionId)
           } catch {
             // The job left the registry (or the session switched): freeze.
-            return ''
+            return undefined
           }
-        },
+        })()
+        const base = current === undefined
+          ? fallbackText
+          : current.kind === 'subagent'
+            ? subagentJobViewHint(current.status, current.detail)
+            : jobStatusHint(current.status, current.detail)
+        return observationError === undefined ? base : `${base}\nlive observation unavailable: ${observationError}`
+      }
+      activeJobViewerClose = app.openOutputViewer({
+        title,
+        initial: fallbackText,
+        refresh: refreshBody,
         onStop: () => {
           if (jobs === undefined) return
           try {
@@ -9292,16 +9542,33 @@ export function apply(ctx: Context, config: Config): void {
         // to the parent browser, not to the editor.
         closeHint: 'back',
         onClose: () => {
+          // Closing the viewer always releases the observer (Esc, the parent
+          // browser closing, a session transition, or surface teardown).
+          closeObserver()
           activeJobViewerClose = undefined
           refreshTasks()
         },
       })
     }
+    /**
+     * The Job detail body from the detached observation (never a Host read).
+     * The official controller provides a best-effort retained preview, not an
+     * archival terminal log — say so.
+     */
+    const formatJobObservation = (observed: JobObservedSnapshot): string => {
+      const lines: string[] = [observed.status]
+      if (observed.progress !== undefined) lines.push(`progress: ${observed.progress}`)
+      if (observed.detail !== undefined) lines.push(`detail: ${observed.detail}`)
+      if (observed.gapBefore) lines.push('note: earlier output was evicted before this retained preview')
+      if (observed.error !== undefined) lines.push(`follow error: ${observed.error}`)
+      lines.push('', 'best-effort retained output preview (not a complete transcript):', '', observed.text)
+      return lines.join('\n')
+    }
     /** One-line viewer hint for a job state (never touches the read cursor). */
     const jobStatusHint = (status: string, detail: string | undefined): string => {
       const tail = status === 'running' || status === 'stopping'
-        ? ' — output is delivered to the agent via job_output; viewing never consumes the job\u2019s read cursor'
-        : ` — final output: ask the agent to run job_output in the conversation${detail === undefined ? '' : ` (${detail})`}`
+        ? ' — opening the non-consuming retained-output stream…'
+        : ` — final output is delivered to the agent via job_output${detail === undefined ? '' : ` (${detail})`}`
       return `${status}${tail}`
     }
     refreshPendingInput()
@@ -9886,6 +10153,10 @@ export function apply(ctx: Context, config: Config): void {
       // it opens the FULL browser explicitly.
       openTasksBrowser: () => openTasksBrowser('full'),
       openRewindPicker,
+      // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
+      // NOT session-owned: it never creates or switches a Session.
+      openPluginManager,
+      createPluginManagerSubmenu,
       // The transition write fence: agent-write entry points (plain
       // submits, steers, skill invocations, shell submits) refuse while a
       // transition is in flight (quiesce → commit) — the old agent may be
@@ -10434,6 +10705,24 @@ export function apply(ctx: Context, config: Config): void {
     // protected, so a hostile rejection or a throwing dependency can never
     // skip the teardown or leak a rejection from this discarded chain.
     const message = safeErrorMessage(error)
+    // Release the shared terminal row BEFORE the first log line. The pre-mount
+    // status owns the current row, and a TTY shares one cursor between stdout
+    // and stderr: logging first would append the failure to `Starting DSH…`
+    // (or `Resuming session…`/`Preparing conversation…`), and the abort
+    // listener's later clear would then erase part of that error line. This is
+    // the same "clear the status, then write the log" rule the resume-failure
+    // path already follows; here it also covers a body failure that threw
+    // before its own stage cleanup ran.
+    // Contained like every other step of this terminal root: the status writer
+    // is an injected output seam with NO never-throws contract (and the Loader
+    // barrier's own `finally` clear can land here too), so a throwing clear must
+    // not reject this discarded `.catch` chain — that would skip the logs, the
+    // abort, the owner retirement and `exit(1)`.
+    try {
+      startupStatus.clear()
+    } catch {
+      // A broken status stream must not block the teardown.
+    }
     try {
       ctx.logger.error(`tui-runner: ${message}`)
     } catch {
@@ -10446,8 +10735,8 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Startup failure: cancel every in-flight lifecycle load, then tear
     // down. (The runner-internal cleanup() never ran — the body threw.)
-    // The pre-mount status line is cleared by the lifecycle abort
-    // listener registered at startup (idempotent).
+    // The pre-mount status line has already been cleared above; the lifecycle
+    // abort listener's clear is idempotent.
     // Terminal focus reporting (CSI ? 1004) may already be enabled when
     // the body threw AFTER the TUI mount — disable it here so the mode
     // never leaks into the shell on the startup-failure path either

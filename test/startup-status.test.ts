@@ -87,3 +87,70 @@ test('isTTY defaults to true when the output does not declare it', () => {
   status.show('Resuming session…')
   assert.deepEqual(writes, ['\r\x1b[2KResuming session…'])
 })
+
+test('a throwing show is contained and still claims the row', () => {
+  // The seam has no never-throws contract, and the helper is called from an
+  // AbortSignal listener and the terminal startup-failure root, where a throw
+  // would become an uncaughtException or block teardown/exit.
+  const writes: string[] = []
+  let healthy = false
+  const status = createStartupStatus({
+    isTTY: true,
+    write: (text) => {
+      writes.push(text)
+      if (!healthy) throw new Error('stream exploded')
+    },
+  })
+  assert.doesNotThrow(() => status.show('Starting DSH…'), 'show must contain a throwing write')
+  healthy = true
+  assert.doesNotThrow(() => status.clear(), 'clear must contain a throwing write')
+  assert.deepEqual(writes, ['\r\x1b[2KStarting DSH…', '\r\x1b[2K'],
+    'the failed show still claimed the row, so the clear erases it')
+})
+
+test('a one-off erase failure is retried within the same clear', () => {
+  const writes: string[] = []
+  let eraseAttempts = 0
+  const status = createStartupStatus({
+    isTTY: true,
+    write: (text) => {
+      writes.push(text)
+      // Fail the FIRST erase only: the retry must actually land.
+      if (text === '\r\x1b[2K' && (eraseAttempts += 1) === 1) throw new Error('erase exploded once')
+    },
+  })
+  status.show('Starting DSH…')
+  assert.doesNotThrow(() => status.clear(), 'the failed erase is still contained')
+  assert.deepEqual(writes, ['\r\x1b[2KStarting DSH…', '\r\x1b[2K', '\r\x1b[2K'],
+    'the retry must land before clear() returns, i.e. before the caller logs')
+  // The row was released, so a later clear does not touch it again.
+  status.clear()
+  assert.equal(writes.length, 3, 'a released row is not erased again')
+})
+
+test('an exhausted erase disables the instance so no later clear touches the log line', () => {
+  const writes: string[] = []
+  let healthy = false
+  let eraseAttempts = 0
+  const status = createStartupStatus({
+    isTTY: true,
+    write: (text) => {
+      writes.push(text)
+      if (!healthy && text === '\r\x1b[2K') {
+        eraseAttempts += 1
+        throw new Error('erase exploded')
+      }
+    },
+  })
+  status.show('Starting DSH…')
+  assert.doesNotThrow(() => status.clear(), 'an exhausted clear is still contained')
+  assert.equal(eraseAttempts, 2, 'the bounded retry is two attempts, never a spin')
+
+  // The stream recovers AFTER the caller wrote its failure line: the instance
+  // gave up on the row and must not erase that line.
+  healthy = true
+  status.clear()
+  status.show('Preparing conversation…')
+  assert.deepEqual(writes, ['\r\x1b[2KStarting DSH…', '\r\x1b[2K', '\r\x1b[2K'],
+    'a disabled instance never writes again')
+})

@@ -62,6 +62,8 @@ export const HOST_SERVICES = [
   'planMode',
   'sandboxPolicy',
   'shell',
+  'pluginManager',
+  'jobController',
 ]
 
 const SERVICE_ALT = HOST_SERVICES.join('|')

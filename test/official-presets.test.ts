@@ -20,6 +20,10 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import AgentPreset from '@deepseek-ai/dsh-agent-preset'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import InvariantRegistry from '@deepseek-ai/dsh-invariants'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import * as presetInvariant from '@deepseek-ai/dsh-agent-preset-registry/invariant'
 
 const OFFICIAL_IDS = ['standard', 'ptc', 'minimal', 'cordis'] as const
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -148,6 +152,80 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
 async function dispose(fibers: readonly { dispose(): unknown }[]): Promise<void> {
   await Promise.allSettled(fibers.map(fiber => Promise.resolve(fiber.dispose())))
 }
+
+/** The SHIPPED `invariants` row config, read from the bundle patch so the
+ * behavior test cannot drift from what production actually mounts. */
+function shippedInvariantsConfig(): Record<string, unknown> {
+  const document = parse(readFileSync(join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')) as
+    | Array<{ insert?: Array<{ id?: string; config?: Record<string, unknown> }> }>
+    | undefined
+  const row = (document ?? []).flatMap(entry => entry?.insert ?? []).find(candidate => candidate.id === 'invariants')
+  assert.ok(row?.config !== undefined, 'the bundle patch must declare the invariants row with its config')
+  return row.config
+}
+
+/**
+ * The hardening contract, exercised with the real DSH packages and the
+ * SHIPPED allowlist config: a live Agent that joined no preset must fail
+ * prompt assembly loudly (instead of silently addressing the model with an
+ * empty plane), while a Host/cold read with no Agent stays exempt.
+ */
+test('the shipped invariant allowlist fails a preset-less Agent at prompt assembly', async () => {
+  const ctx = new Context()
+  const loader = ctx.plugin(Loader)
+  await loader
+  ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
+  const projectionsFiber = ctx.plugin(SessionProjectionRegistry)
+  await projectionsFiber
+  const promptFiber = ctx.plugin(SystemPrompt, { personaPrefix: '' })
+  await promptFiber
+  const registryFiber = ctx.plugin(AgentPresetRegistry, { default: 'standard' })
+  await registryFiber
+  const invariantsFiber = ctx.plugin(InvariantRegistry, shippedInvariantsConfig() as never)
+  await invariantsFiber
+  const companionFiber = ctx.plugin({ apply: presetInvariant.apply, inject: presetInvariant.inject })
+  await companionFiber
+  const fibers = [companionFiber, invariantsFiber, registryFiber, promptFiber, projectionsFiber, loader]
+  try {
+    const systemPrompt = ctx.get('systemPrompt')
+    assert.ok(systemPrompt !== undefined, 'the system prompt service must be composed')
+    // A joinable preset keeps the positive control honest: the failure below
+    // must come from the MISSING join, not from an unusable roster.
+    await ctx.agentPresets.register({ id: 'standard', plugins: [] })
+
+    const joinedKey = {}
+    // The invariant reads exactly two things off an assemble context: the
+    // Agent's identity and its scoped `ctx`. A structural stand-in is enough
+    // here, and it keeps this test independent of the full Agent runtime.
+    const joined = { id: 'joined-agent', ctx: createScope(ctx, joinedKey).ctx }
+    await ctx.agentPresets.mount(joined.ctx, 'standard')
+    await assert.doesNotReject(
+      systemPrompt.assemble({ agent: joined as never, scope: joinedKey }),
+      'an Agent joined to the standing preset must assemble normally',
+    )
+
+    const bareKey = {}
+    const bare = { id: 'bare-agent', ctx: createScope(ctx, bareKey).ctx }
+    await assert.rejects(
+      systemPrompt.assemble({ agent: bare as never, scope: bareKey }),
+      (error: Error) => {
+        assert.match(error.message, /without joining any agent preset/,
+          'the official invariant must name the exact failure')
+        assert.match(error.message, /bare-agent/, 'the failing Agent must be identified')
+        return true
+      },
+    )
+
+    // A Host-only / cold-scope read carries no Agent and stays outside the
+    // check (documented exemption): it must not throw.
+    const coldKey = {}
+    createScope(ctx, coldKey)
+    await assert.doesNotReject(systemPrompt.assemble({ scope: coldKey }),
+      'a cold scoped read with no Agent is not an unjoined-Agent failure')
+  } finally {
+    await dispose(fibers)
+  }
+})
 
 test('the local declarative patches compose the official roster through the real registry', async () => {
   const ctx = new Context()

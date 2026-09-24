@@ -344,6 +344,13 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   private readonly batcher: InvalidateBatcher
   private readonly hostVersion: string
   /**
+   * INTERNAL owner → owning Loader entry id projection (P1-A1.4): recorded at
+   * every contribution registration from the caller fiber's Loader entry. It
+   * is read only by the Plugin Manager presentation classification and never
+   * exposes a Cordis object.
+   */
+  private readonly ownerEntryIds = new Map<string, string>()
+  /**
    * P1-1: the CURRENT surface's render sink (attached by the runner once
    * per surface generation). Registry invalidations (ledger, commands,
    * themes, autocomplete, settings, keybindings, renderers, editors) all
@@ -802,6 +809,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // would conflate two anonymous plugins into one owner).
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const stableOwner = slot === 'chrome.footer.item' ? caller.fiber.name : undefined
     // The chrome.footer.item canonical key is ext:<owner>/<id> — the
     // owner's `/` (an npm scoped plugin name) is percent-ENCODED in the
@@ -871,6 +879,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerCommand(contribution: TuiCommandContribution): TuiCommandHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const outcome = this.commands.register(contribution, owner)
     if (outcome.kind === 'conflict') {
       const detail = outcome.nearSynonym === undefined
@@ -913,6 +922,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerTheme(contribution: TuiThemeContribution): TuiThemeHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     // The plugin's STABLE owner name (the nearest named ancestor's display
     // name — 'root' for anonymous plugins): the source-qualified
     // SELECTABLE value `plugin:<stableOwner>/<id>` is what the runner
@@ -1023,6 +1033,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerAutocomplete(contribution: AutocompleteProviderContribution): AutocompleteHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.autocomplete.register(contribution, owner)
     this.trackRegistryHealth('autocomplete', contribution.id, owner)
     let dispose: () => void
@@ -1053,6 +1064,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerSetting(contribution: TuiSettingContribution): TuiSettingHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.settings.register(contribution, owner)
     this.trackRegistryHealth('setting', contribution.id, owner)
     let dispose: () => void
@@ -1087,6 +1099,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerKeybinding(contribution: TuiKeybindingContribution): TuiKeybindingHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.keybindings.register(contribution, owner)
     this.trackRegistryHealth('keybinding', contribution.id, owner)
     let dispose: () => void
@@ -1118,6 +1131,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerMessageRenderer(contribution: TuiMessageRendererContribution): TuiRendererHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.renderers.registerMessageRenderer(contribution, owner)
     // P1-08: the renderer registry is NOT the ledger — track its health
     // slot explicitly so /status can observe failed/recovered states.
@@ -1150,6 +1164,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerToolRenderer(contribution: TuiToolRendererContribution): TuiRendererHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.renderers.registerToolRenderer(contribution, owner)
     // P1-08: track the renderer's health slot (see registerMessageRenderer).
     this.ledger.trackHealth('transcript.tool.renderer', contribution.id, owner)
@@ -1253,6 +1268,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   registerEditor(contribution: EditorContribution): EditorHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.editors.register(contribution, owner)
     this.trackRegistryHealth('editor', contribution.id, owner)
     let dispose: () => void
@@ -1281,6 +1297,29 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     return this.ledger
   }
 
+  /**
+   * INTERNAL read-only projection (P1-A1.4): owner → owning Loader entry id.
+   * The Plugin Manager surface uses it to associate a live TUI extension
+   * contribution with the official PluginManager entry that loaded it,
+   * exactly and without name guessing. It is NOT a second inventory, NOT an
+   * authority, and NEVER part of the public Extension API.
+   */
+  _ownerEntryIds(): ReadonlyMap<string, string> {
+    return this.ownerEntryIds
+  }
+
+  /**
+   * Record the owning Loader entry id of one contribution owner. The Loader
+   * stamps `fiber.entry = fiber.parent[Entry.key]` at import time, so a
+   * plugin loaded from a composition row carries the exact id the official
+   * plugin inventory reports as `entryId`. A fiber with no Loader entry
+   * (a programmatically created context) records nothing and falls back.
+   */
+  private recordOwnerEntry(owner: string, fiber: { readonly entry?: { readonly id?: unknown } }): void {
+    const id = fiber.entry?.id
+    if (typeof id === 'string' && id !== '') this.ownerEntryIds.set(owner, id)
+  }
+
   // ── Phase 2: the ADVANCED seam (consumed by `extensions/advanced`) ──────
 
   /**
@@ -1293,6 +1332,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   _advancedCaptureInput(spec: AdvancedInputCaptureSpec): AdvancedInputCaptureHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.advancedInputs.register(spec, owner)
     let dispose: () => void
     try {
@@ -1573,6 +1613,7 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
   _unstableCaptureRaw(spec: UnstableRawInputSpec): UnstableRawInputHandle {
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
+    this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.unstableInputs.register(spec, owner)
     let dispose: () => void
     try {

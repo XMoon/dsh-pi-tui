@@ -81,6 +81,12 @@
   "runtime/direct/host-command-direct.ts": [
     "commands"
   ],
+  "runtime/direct/plugin-manager-direct.ts": [
+    "pluginManager"
+  ],
+  "runtime/direct/job-observation-direct.ts": [
+    "jobController"
+  ],
   "runtime/direct/session-writer-direct.ts": [
     "sessionTitle"
   ],
