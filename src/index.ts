@@ -1823,6 +1823,22 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  // Pre-mount startup status: ONE instance for the whole pre-mount barrier,
+  // created in the RUNNER scope BEFORE the async startup root because the
+  // FIRST thing the surface waits on is the Host Loader settling — the
+  // global readiness barrier below. A stalled optional row (an MCP server
+  // whose initial connect or `tools/list` never answers) otherwise leaves a
+  // blank terminal that reads as a dead TUI. Pure presentation: it owns no
+  // lifecycle state, never starts timers, and every teardown path (abort
+  // signal, resume failure, success-before-mount, fatal catch) clears it —
+  // see src/startup-status.ts. The later `Resuming session…` /
+  // `Preparing conversation…` stages reuse THIS object.
+  const startupStatus = createStartupStatus(config.startupStatusOutput ?? {
+    isTTY: process.stdout.isTTY === true,
+    write: (text) => process.stdout.write(text),
+  })
+  lifecycleController.signal.addEventListener('abort', () => startupStatus.clear(), { once: true })
+
   // The Direct owner slots are hoisted to the RUNNER scope (outside the
   // startup IIFE) so the terminal-total fatal catch can see whether a
   // Direct owner exists; the memoized retirement coordinator itself stays
@@ -1842,7 +1858,12 @@ export function apply(ctx: Context, config: Config): void {
     startup.markSurfaceMounted?.()
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
+    // The wait is unbounded and must stay unbounded (no TUI timeout, no
+    // skipping a pending row, no half-composed Agent): the only thing this
+    // layer owes the user is that the wait is VISIBLE.
+    startupStatus.show('Starting DSH…')
     await ctx.get('loader')?.await()
+    startupStatus.clear()
     if (lifecycleController.signal.aborted) {
       // Pre-mount unload before any Agent existed: nothing to retire; close
       // the diagnostics handle (the early cancellation disposer no longer
@@ -2402,19 +2423,10 @@ export function apply(ctx: Context, config: Config): void {
     // cross-process writer authority — the TUI's physical owner.lock /
     // lease / cooling stack is removed legacy.
     let resumeFailure: string | undefined
-    // Pre-mount startup status (explicit resume only): the resume
-    // transaction (preflight, DSH resume) and the whenIdle/catalog
-    // barrier run BEFORE the TUI mounts — a single-line TTY hint keeps
-    // the blank terminal from reading as a hang. Pure presentation: it
-    // never owns lifecycle state, and every teardown path (success,
-    // resume reject, abort/signal, HMR unload, startup exception) clears
-    // it — the abort listener covers the teardown paths, the explicit
-    // clear covers the success path.
-    const startupStatus = createStartupStatus(config.startupStatusOutput ?? {
-      isTTY: process.stdout.isTTY === true,
-      write: (text) => process.stdout.write(text),
-    })
-    lifecycleController.signal.addEventListener('abort', () => startupStatus.clear(), { once: true })
+    // The explicit-resume stage reuses the RUNNER-scope `startupStatus`
+    // created before the Loader barrier (see the top of applyRunner): the
+    // status object is already armed with the abort clear, and the
+    // `Starting DSH…` line was cleared as soon as the Loader settled.
     let handle: SessionHandle | undefined
     // The cancellation branch below belongs only to the pre-publication
     // lifecycle await. Once resume resolves, its creation-only signal no

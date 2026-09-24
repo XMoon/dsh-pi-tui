@@ -2790,7 +2790,7 @@ test('a FAILED attempt clears its streaming tool previews (durable settlement an
     'an abandoned end clears the step\'s previews with the transient attempt')
 })
 
-test('explicit cold resume shows the pre-mount status and clears it before mount; fresh start stays silent', async (t) => {
+test('the Loader barrier shows Starting DSH… then clears; explicit cold resume continues with the resume status', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-startup-status-')
   const previousHome = process.env.DSH_HOME
@@ -2834,6 +2834,18 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   const resumeHarness = makeHarness(home, resumed)
   resumeContext = new Context()
   resumeFiber = await mountRunner(resumeContext, home, resumeHarness, { sessionId: resumed.id }, { sessionId: resumed.id, startupStatusOutput: statusOutput })
+  // The FIRST pre-mount status is the Loader barrier: it must be written
+  // BEFORE the barrier resolves and cleared immediately after, so a stalled
+  // optional row is visible instead of a dead blank terminal.
+  const startingWrites = orderedLog
+    .filter(write => write.startsWith('stdout:') && (write.includes('Starting DSH…') || write === 'stdout:\r\x1b[2K'))
+    .map(write => write.slice('stdout:'.length))
+  assert.ok(startingWrites.some(write => write.includes('Starting DSH…')),
+    `the Loader barrier must show Starting DSH…: ${JSON.stringify(startingWrites)}`)
+  const startIndex = startingWrites.findIndex(write => write.includes('Starting DSH…'))
+  const startClearIndex = startingWrites.findIndex((write, index) => index > startIndex && write === '\r\x1b[2K')
+  assert.ok(startClearIndex > startIndex,
+    `Starting DSH… must be cleared after the Loader settles: ${JSON.stringify(startingWrites)}`)
   const statusWrites = orderedLog
     .filter(write => write.startsWith('stdout:') && (write.includes('Resuming session') || write.includes('Preparing conversation') || write === 'stdout:\r\x1b[2K'))
     .map(write => write.slice('stdout:'.length))
@@ -2861,13 +2873,19 @@ test('explicit cold resume shows the pre-mount status and clears it before mount
   resumeFiber = undefined
   resumeContext = undefined
 
-  // A fresh (deferred) start must not emit the resume status.
+  // A fresh (deferred) start shows ONLY the Loader barrier status: it must
+  // never emit the resume/preparing stages, and the barrier line must not
+  // survive into the mounted surface.
   orderedLog.length = 0
   const deferredHarness = makeHarness(home)
   deferredContext = new Context()
   deferredFiber = await mountRunner(deferredContext, home, deferredHarness, {}, { startupStatusOutput: statusOutput })
-  assert.ok(!orderedLog.some(write => write.includes('Resuming session')),
-    `a fresh start must stay silent: ${JSON.stringify(orderedLog)}`)
+  assert.ok(orderedLog.some(write => write === 'stdout:\r\x1b[2KStarting DSH…'),
+    `a fresh start must show the Loader barrier status: ${JSON.stringify(orderedLog)}`)
+  assert.ok(orderedLog.some(write => write === 'stdout:\r\x1b[2K'),
+    `the Loader barrier status must be cleared: ${JSON.stringify(orderedLog)}`)
+  assert.ok(!orderedLog.some(write => write.includes('Resuming session') || write.includes('Preparing conversation')),
+    `a fresh start must not emit the resume/preparing stages: ${JSON.stringify(orderedLog)}`)
 
   await deferredFiber.dispose()
   await disposeContext(deferredContext)
@@ -3148,7 +3166,7 @@ test('an emitted skills/change reaches the runner catalog refresh for the curren
   )
 })
 
-test('a fresh start with a FAILING preset resolution stays silent (no Preparing status)', async (t) => {
+test('a fresh start with a FAILING preset resolution shows only the Loader barrier status', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fresh-preset-fail-')
   const previousHome = process.env.DSH_HOME
@@ -3173,8 +3191,8 @@ test('a fresh start with a FAILING preset resolution stays silent (no Preparing 
   // Deferred start (no sessionId) with a BROKEN agentPresets roster:
   // every compose throws (the launch-preset fallback AND the default
   // fallback), so the catalog block's catch runs. The failure path
-  // must NOT re-arm the startup status — a fresh start never shows
-  // any status, on the happy path OR the failure path.
+  // must NOT re-arm the startup status: the Loader barrier line was
+  // already cleared, and no resume/preparing stage may appear.
   const harness = makeHarness(home)
   context = new Context()
   context.provide('agentPresets', {
@@ -3182,11 +3200,143 @@ test('a fresh start with a FAILING preset resolution stays silent (no Preparing 
     resolve: async () => { throw new Error('roster broken') },
   } as never)
   fiber = await mountRunner(context, home, harness, {}, { startupStatusOutput: statusOutput })
+  assert.ok(orderedLog.some(write => write === 'stdout:\r\x1b[2KStarting DSH…'),
+    `the Loader barrier status is shown once on this path too: ${JSON.stringify(orderedLog)}`)
   assert.ok(!orderedLog.some(write => write.includes('Resuming session') || write.includes('Preparing conversation')),
     `a fresh start with a failing preset must not show any startup status: ${JSON.stringify(orderedLog)}`)
   // The TUI still mounts (degraded — the failure is a one-shot warn).
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must still create a TuiApp')
+})
+
+test('a stalled Host Loader keeps Starting DSH… on screen with no surface and no Agent', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-loader-barrier-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const orderedLog: string[] = []
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  // A controllable Host Loader: the readiness barrier parks here until the
+  // test releases it, exactly like a remote MCP row whose initial connect or
+  // `tools/list` never answers.
+  let loaderAwaited = false
+  let releaseLoader!: () => void
+  const loaderGate = new Promise<void>(resolve => { releaseLoader = resolve })
+  const loader = {
+    await: async (): Promise<void> => {
+      loaderAwaited = true
+      await loaderGate
+    },
+  }
+  const resumed: FakeSession = fakeSession({
+    id: 'loader-barrier-session',
+    header: { id: 'loader-barrier-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  fiber = await mountRunner(
+    context,
+    home,
+    harness,
+    { sessionId: resumed.id },
+    { sessionId: resumed.id, startupStatusOutput: statusOutput },
+    () => {},
+    loader,
+  )
+  // The barrier is parked: the status owns the line and NOTHING downstream
+  // of the barrier may have started.
+  assert.equal(loaderAwaited, true, 'the runner must await the Host Loader before creating an Agent')
+  assert.deepEqual(orderedLog, ['stdout:\r\x1b[2KStarting DSH…'],
+    `Starting DSH… must be the only output while the Loader stalls: ${JSON.stringify(orderedLog)}`)
+  assert.equal(probe.apps.length, 0, 'the TUI must not mount while the Loader is pending')
+  assert.equal(harness.resumeSignals.length, 0, 'no Agent may be resumed while the Loader is pending')
+  assert.equal(harness.createdSessions.length, 0, 'no Agent may be created while the Loader is pending')
+
+  // The Loader settles: the line clears and the ordinary startup continues.
+  releaseLoader()
+  await settle()
+  assert.equal(orderedLog[0], 'stdout:\r\x1b[2KStarting DSH…')
+  assert.equal(orderedLog[1], 'stdout:\r\x1b[2K', 'the barrier line must clear as soon as the Loader settles')
+  assert.equal(harness.resumeSignals.length, 1, 'the resume must proceed after the Loader settles')
+  assert.equal(probe.apps.length, 1, 'the TUI must mount after the Loader settles')
+})
+
+test('an abort while the Host Loader is still pending clears the barrier status and never mounts', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-loader-abort-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const orderedLog: string[] = []
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  let releaseLoader!: () => void
+  const loaderGate = new Promise<void>(resolve => { releaseLoader = resolve })
+  const loader = { await: async (): Promise<void> => { await loaderGate } }
+  const resumed: FakeSession = fakeSession({
+    id: 'loader-abort-session',
+    header: { id: 'loader-abort-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  fiber = await mountRunner(
+    context,
+    home,
+    harness,
+    { sessionId: resumed.id },
+    { sessionId: resumed.id, startupStatusOutput: statusOutput },
+    () => {},
+    loader,
+  )
+  assert.deepEqual(orderedLog, ['stdout:\r\x1b[2KStarting DSH…'],
+    `the barrier line must be the only output while the Loader stalls: ${JSON.stringify(orderedLog)}`)
+
+  // Teardown while the barrier is parked (HMR unload / early exit): the
+  // lifecycle abort must clear the pre-mount line so no stale status survives
+  // into whatever owns the terminal next, and no Agent may be created.
+  await disposeContext(context)
+  context = undefined
+  fiber = undefined
+  assert.equal(orderedLog.at(-1), 'stdout:\r\x1b[2K',
+    `the abort must clear the barrier status line: ${JSON.stringify(orderedLog)}`)
+
+  // Release the parked barrier so the startup root observes the abort and
+  // returns without mounting anything.
+  releaseLoader()
+  await settle()
+  assert.equal(probe.apps.length, 0, 'an aborted startup must not mount a TUI')
+  assert.equal(harness.resumeSignals.length, 0, 'an aborted startup must not resume an Agent')
+  assert.equal(harness.createdSessions.length, 0, 'an aborted startup must not create an Agent')
 })
 
 test('an invalid --preset on a healthy resumed session never degrades the resume', async (t) => {
