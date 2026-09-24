@@ -3565,6 +3565,127 @@ test('a transiently failing status erase is retried before the fatal log', async
   assert.equal(probe.apps.length, 0, 'no TUI may mount')
 })
 
+test('a one-off erase failure on the resume-failure path is retried before the warning', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-resume-fail-retry-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const orderedLog: string[] = []
+  let resumingStage = false
+  let resumeEraseAttempts = 0
+  let injected = false
+  // Fail the FIRST erase of the resume stage only. That clear is immediately
+  // followed by `ctx.logger.warn`/`diag.error`, so the retry must land inside
+  // the clear and therefore BEFORE the warning.
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+      if (text.includes('Resuming session')) resumingStage = true
+      if (resumingStage && text === '\r\x1b[2K') {
+        resumeEraseAttempts += 1
+        if (!injected) {
+          injected = true
+          throw new Error('erase exploded once')
+        }
+      }
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const failed: FakeSession = fakeSession({
+    id: 'resume-fail-retry-session',
+    header: { id: 'resume-fail-retry-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('failed resume history'),
+  })
+  const harness = makeHarness(
+    home,
+    failed,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Error('boom'),
+  )
+  context = new Context()
+  const exporterFiber = context.plugin(pluginCtx => {
+    pluginCtx.logger.exporter({
+      levels: { default: 2 },
+      export: message => {
+        orderedLog.push(`log:${message.name}:${message.args.map(String).join(' ')}`)
+      },
+    })
+  })
+  await exporterFiber
+  fiber = await mountRunner(context, home, harness, { sessionId: failed.id }, { sessionId: failed.id, startupStatusOutput: statusOutput })
+  await settle()
+
+  const warnIndex = orderedLog.findIndex(write => write.startsWith('log:') && write.includes('resume') && write.includes('failed'))
+  const landedEraseIndex = orderedLog
+    .map((write, index) => write === 'stdout:\r\x1b[2K' ? index : -1)
+    .filter(index => index >= 0)
+    .at(-1)
+  assert.equal(resumeEraseAttempts, 2, `the failed resume-stage erase must be retried: ${JSON.stringify(orderedLog)}`)
+  assert.ok(warnIndex >= 0, `the resume failure must still be logged: ${JSON.stringify(orderedLog)}`)
+  assert.ok(landedEraseIndex !== undefined && landedEraseIndex < warnIndex,
+    `the retried erase must land BEFORE the resume-failure warning: ${JSON.stringify(orderedLog)}`)
+})
+
+test('a fresh-start preset failure never re-touches the status row the barrier released', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-preset-fail-row-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const orderedLog: string[] = []
+  const statusWrites: string[] = []
+  // Every write is recorded; an erase would be visible here. The point of the
+  // test is that the failure paths emit NONE.
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+      statusWrites.push(text)
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  // Deferred start (no sessionId) with a BROKEN agentPresets roster: the
+  // preset-resolution failure and the cold catalog read both take their
+  // failure branch. Measured: `Preparing conversation…` is never shown on this
+  // path, and the Loader barrier's `finally` already released the row, so every
+  // later `clear()` is a `!shown` no-op — it must not emit an erase that could
+  // damage the failure log's line.
+  const harness = makeHarness(home)
+  context = new Context()
+  context.provide('agentPresets', {
+    defaultId: 'standard',
+    resolve: async () => { throw new Error('roster broken') },
+  } as never)
+  fiber = await mountRunner(context, home, harness, {}, { startupStatusOutput: statusOutput })
+  await settle()
+  assert.ok(probe.apps.at(-1), 'a degraded-but-mounted surface is expected on this path')
+  assert.deepEqual(statusWrites, ['\r\x1b[2KStarting DSH…', '\r\x1b[2K'],
+    `the barrier owns the row and the failure paths must not touch it: ${JSON.stringify(orderedLog)}`)
+})
+
 test('the exit resume hint names the Host profileContext profile, not the argv fallback', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-resume-profile-hint-')
