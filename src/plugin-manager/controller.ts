@@ -767,18 +767,14 @@ export class PluginManagerController {
       inputs.push({
         key: bundleValue(bundle.name),
         bundleName: bundle.name,
-        identities: [
-          bundle.name,
-          ...bundle.rows.flatMap(row => [
-            row.moduleName,
-            ...(row.entryId === undefined ? [] : [String(row.entryId)]),
-          ]),
-        ],
+        // ONLY proven Loader entry ids: a module specifier is not ownership
+        // proof and must never satisfy the association.
+        entryIds: bundle.rows.flatMap(row => row.entryId === undefined ? [] : [String(row.entryId)]),
       })
     }
     for (const entry of snapshot.plugins) {
       if (bundledEntryIds.has(entry.entryId)) continue
-      inputs.push({ key: entryValue(entry.entryId), identities: [entry.moduleName, entry.entryId] })
+      inputs.push({ key: entryValue(entry.entryId), entryIds: [entry.entryId] })
     }
     const claims = classifyPluginPackages(inputs, observations)
     return buildPluginManagerModel(snapshot, claims)

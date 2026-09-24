@@ -35,8 +35,6 @@ export interface TuiExtensionObservationSource {
 export interface TuiExtensionObservation {
   /** The UID-qualified live owner (`<uid>:<name>`). */
   readonly owner: string
-  /** The HMR-stable owner name (the fiber name, without the uid). */
-  readonly ownerName: string
   /**
    * The owning Loader entry id, when the runtime could prove it: the EXACT
    * key the official PluginManager reports as `entryId`. Absent → the owner
@@ -57,19 +55,12 @@ const UNSTABLE_PREFIX = 'unstable.'
 
 interface Aggregation {
   owner: string
-  ownerName: string
   kinds: Set<string>
   count: number
   failed: number
   active: number
   advanced: boolean
   unstable: boolean
-}
-
-/** The HMR-stable name of a UID-qualified owner (`uid:name` → `name`). */
-export function extensionOwnerName(owner: string): string {
-  const separator = owner.indexOf(':')
-  return separator === -1 ? owner : owner.slice(separator + 1)
 }
 
 /**
@@ -87,7 +78,6 @@ export function observeTuiExtensions(
     if (entry === undefined) {
       entry = {
         owner: record.owner,
-        ownerName: extensionOwnerName(record.owner),
         kinds: new Set(),
         count: 0,
         failed: 0,
@@ -110,7 +100,6 @@ export function observeTuiExtensions(
       const entryId = entryIds?.get(entry.owner)
       return Object.freeze({
         owner: entry.owner,
-        ownerName: entry.ownerName,
         ...(entryId === undefined ? {} : { entryId }),
         contributionKinds: Object.freeze([...entry.kinds].sort()),
         contributionCount: entry.count,
