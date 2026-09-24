@@ -8018,9 +8018,16 @@ export function apply(ctx: Context, config: Config): void {
           },
         })
       },
-      // ↓ with an empty editor: the Quick Tasks browser over BOTH
-      // background surfaces. Job rows (bash + background one-shot subagent
-      // jobs) are status-only: the bash output read cursor belongs to the
+      // ↓ with an empty editor: the Quick Tasks browser. Task Center
+      // merges the JobRegistry roster with the subagent descendant
+      // catalog. The JobRegistry may include provisional foreground shell
+      // work while it is running; if DSH removes that record after the
+      // foreground result is collected, the row leaves the Task Center
+      // with the registry (the Transcript tool card is the foreground
+      // history authority), while handed-out background jobs that remain
+      // in jobs.list() stay available in TRACKED after settlement. Job
+      // rows (shell + background one-shot subagent jobs) are status-only:
+      // the bash output read cursor belongs to the
       // model's job_output and a subagent job record carries no child
       // session id, so Enter opens the status viewer (never the output).
       // Subagent rows (live children from the subagent registry) deliver no
@@ -8403,8 +8410,14 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    // ↓ with an empty editor: the task browser over BOTH background
-    // surfaces. Job rows (bash + background one-shot subagent jobs) are
+    // ↓ with an empty editor: the task browser over the JobRegistry roster
+    // merged with the subagent descendant catalog. The registry may
+    // include provisional foreground shell work while it runs; when DSH
+    // removes that record after the foreground result is collected, the
+    // row leaves the Task Center with the registry (the Transcript tool
+    // card keeps the execution history), while handed-out background jobs
+    // that remain in jobs.list() stay available in TRACKED after
+    // settlement. Job rows (shell + background one-shot subagent jobs) are
     // status-only: the bash output read cursor belongs to the model's
     // job_output and a subagent job record carries no child session id, so
     // Enter opens the status viewer (never the output). Subagent rows (live
@@ -9182,8 +9195,10 @@ export function apply(ctx: Context, config: Config): void {
     // in the deferred branch below), so a resumed session never paints a
     // temporary empty stats projection.
     // The persistent dock's task lines + the footer badge follow the
-    // background-job registry: every change refreshes the active-task
-    // snapshot (no polling). `refreshTasks` is hoisted so the task browser
+    // JobRegistry roster (membership authority — it may temporarily list
+    // foreground shell work, and rows leave when DSH removes them): every
+    // change refreshes the active-task snapshot (no polling).
+    // `refreshTasks` is hoisted so the task browser
     // (openJobView, defined earlier in this closure) can refresh the badge
     // after stop/close.
     let refreshTasks: () => void = () => {}
@@ -9216,9 +9231,13 @@ export function apply(ctx: Context, config: Config): void {
         if (cleanedUp) return
         let snapshots: ReturnType<NonNullable<typeof jobs>['list']>
         try {
-          // Keep terminal records in the catalog. Active/total separation is
-          // a presentation fact; dropping completed/failed jobs here made
-          // Full Task Center history and failure attention impossible. Job
+          // Keep terminal records in the catalog — the registry IS the
+          // membership authority, and TRACKED is its current roster (not a
+          // session history): retained terminal rows stay, upstream
+          // `remove()`d rows leave. Active/tracked separation is a
+          // presentation fact; dropping completed/failed jobs here made
+          // the full Task Center's tracked rows and failure attention
+          // impossible. Job
           // ownership is the Session id; without a live agent the registry
           // read is the unowned-only view (caller omitted).
           snapshots = jobs.list(liveAgent?.session.id)
@@ -9663,7 +9682,8 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatusCheap()
       refreshPendingInput()
       scheduleInitialContextMeasure(agent)
-      // Repaint both background channels: the dock/badge are owner-fenced,
+      // Repaint both task channels (the JobRegistry roster + the subagent
+      // catalog): the dock/badge are owner-fenced,
       // and a session switch must not leave the previous session's tasks
       // or subagents on screen until the next registry event.
       refreshTasks()

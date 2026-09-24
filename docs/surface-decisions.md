@@ -1257,7 +1257,7 @@ fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
 ## Task Center uses one catalog with two presentation surfaces
 
 Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
-Task Center in All scope. Both surfaces consume the same durable preorder and
+Task Center in Tracked scope. Both surfaces consume the same durable preorder and
 runtime projection. Scope, type, search, selection, and disclosure are
 presentation state, so promoting Quick to Full never reorders or deduplicates
 rows and Esc can restore the prior context. Their keyboard ownership is
@@ -1274,6 +1274,32 @@ row is opened; until then the footer keeps a failure marker and the ↓ affordan
 The stop action is a confirmed, capability-gated dispatch: continuable running
 children use their durable direct parent authority, while running jobs use the
 public job kill API. The browser never reads job output.
+
+The Task Center is a live tracked/control projection, not an
+execution-history list. Invariants (DSH `0.1.7` JobRegistry contract):
+
+1. **Authority** — job rows are the current `jobs.list(sessionId)`
+   projection and subagent rows the current descendant catalog; the TUI keeps
+   no job tombstones or history cache.
+2. **Presentation scopes** — internal `active` renders as `ACTIVE`,
+   internal `all` renders as `TRACKED`. The internal `TaskScope` union and
+   persisted view state keep `active | all`; only the label changed.
+3. **Foreground shell** — rc.1 may temporarily register foreground
+   `bash`/`pwsh` work while it runs; after a direct foreground completion
+   upstream may `remove()` the record, and the row leaves the Task Center
+   with the registry. The Transcript is the foreground execution history.
+4. **Background handed-out jobs** — a terminal record stays visible in
+   TRACKED as long as the registry retains it.
+5. **No inference** — `JobView` carries no handed-out/provisional bit, and
+   the TUI never guesses provenance from kind, tool args, Transcript cards,
+   or timing.
+6. **Transitions** — Quick defaults to Active; direct `/tasks` defaults to
+   Tracked; Quick→Full preserves Active; `A` toggles Active ↔ Tracked
+   (presentation only).
+7. **Footer denominator** — the job denominator is the current tracked
+   roster (preferred density says `tracked jobs`), not a session lifetime
+   total; it may shrink when upstream removes a record. Compact density
+   keeps the bare `1/3j` form.
 
 ## Long user messages collapse at the presentation layer only
 

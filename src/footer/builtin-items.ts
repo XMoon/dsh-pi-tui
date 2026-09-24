@@ -124,12 +124,12 @@ const modelItem: FooterItemDefinition = {
 /**
  * The Task Center badge. Legacy snapshots (which predate totals) retain the
  * old wording for embedders; the runtime-backed snapshot uses independent
- * running/total job and agent counts and a persistent failure marker.
+ * active/tracked job and agent counts and a persistent failure marker.
  */
 const tasksItem: FooterItemDefinition = {
   id: 'tasks',
   label: 'Tasks',
-  description: 'The Task Center running/total badge with failure attention and the ↓ view hint.',
+  description: 'The Task Center active/tracked badge with failure attention and the ↓ view hint.',
   defaultZone: 'left',
   defaultImportance: 85,
   formats: ['badge'],
@@ -186,11 +186,15 @@ const tasksItem: FooterItemDefinition = {
     if (failed > 0) parts.push(`! ${failed} failed`)
     if (tasks > 0 && agents > 0) {
       parts.push(`● ${agents}/${totalAgents} agents`)
-      parts.push(`${tasks}/${totalJobs} jobs`)
+      // `tracked` names the denominator: the registry's CURRENT roster,
+      // never a session lifetime total (it shrinks when DSH removes a
+      // record, e.g. a collected foreground shell job). Compact density
+      // keeps the bare `1/3j` form — its whole point is minimal width.
+      parts.push(`${tasks}/${totalJobs} tracked jobs`)
     } else if (agents > 0) {
       parts.push(`● ${agents}/${totalAgents} agents`)
     } else if (tasks > 0) {
-      parts.push(`● ${tasks}/${totalJobs} jobs`)
+      parts.push(`● ${tasks}/${totalJobs} tracked jobs`)
     }
     return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone }] }
   },

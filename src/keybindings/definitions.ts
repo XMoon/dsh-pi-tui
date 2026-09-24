@@ -385,7 +385,7 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'tasks.scope.toggle': {
     id: 'tasks.scope.toggle',
     defaultKeys: ['a'],
-    description: 'Toggle Active and All task scope',
+    description: 'Toggle Active and Tracked task scope',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,

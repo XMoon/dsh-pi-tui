@@ -5186,6 +5186,75 @@ test('job events route by semantics: output ignored, progress/stopping runtime-o
   }
 })
 
+test('Task Center membership follows the registry: settlement retains, removal disappears (rc.1)', async (t) => {
+  // DSH 0.1.7 foreground shell contract in the OPEN full Task Center: a
+  // `settled` event with the record RETAINED (a handed-out background
+  // job) keeps the row visible as completed, while the authoritative
+  // registry removal makes the row leave with the registry. The TUI keeps
+  // no tombstone — `removed` IS the membership change.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-membership-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-membership-parent',
+    header: { id: 'task-membership-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  // Jobs-only session: refreshTasks is the browser's only refresh channel.
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+
+  // Open the full Task Center on a direct /tasks (tracked scope).
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be the only overlay')
+  assert.ok(view().includes('build'), `the running job row must be visible:\n${view()}`)
+
+  // Retained settlement: the registry keeps the terminal record (a
+  // handed-out background job) — the row must STAY and show completed.
+  jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
+  jobs.emit('settled')
+  await settle()
+  await vt.waitForRender()
+  const settledView = view()
+  assert.ok(settledView.includes('build'), `a retained settlement must keep the row:\n${settledView}`)
+  assert.ok(settledView.includes('completed'), `the retained row must show its terminal status:\n${settledView}`)
+
+  // Authoritative removal: the registry drops the record (e.g. a
+  // provisional foreground shell collected by its direct result) — the
+  // row must leave the open Task Center with the registry.
+  jobs.setEntries([])
+  jobs.emit('removed')
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!view().includes('build'),
+    `an authoritative removal must remove the row from the open Task Center:\n${view()}`)
+})
+
 test('a failed jobs read never blanks the retained Task Browser parent', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-task-read-failure-')

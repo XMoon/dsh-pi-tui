@@ -20,11 +20,14 @@ function snapshot(): StatusSnapshot {
   return value as StatusSnapshot
 }
 
-test('Task Center footer shows separate running/total counts and failure attention', () => {
+test('Task Center footer shows active/tracked job counts and failure attention', () => {
   const item = registry.get('tasks')!
   const segment = item.render(snapshot(), ref, 'preferred', context)
   assert.ok(segment)
-  assert.equal(plain(renderSpans(segment.spans)), '[! 1 failed · ● 2/7 agents · 1/3 jobs · ↓ view]')
+  assert.equal(plain(renderSpans(segment.spans)), '[! 1 failed · ● 2/7 agents · 1/3 tracked jobs · ↓ view]')
+  // Compact density keeps the bare `1/3j` form — its whole point is
+  // minimal footer width; the preferred wording and docs carry the
+  // tracked semantics.
   const compact = item.render(snapshot(), ref, 'compact', context)
   assert.ok(compact)
   assert.equal(plain(renderSpans(compact.spans)), '[!1·●2/7a·1/3j·↓]')
@@ -42,7 +45,7 @@ test('Task Center footer renders only the ACTIVE kinds (PR review polish)', () =
   assert.equal(render(snap => {
     snap.activity.taskCount = 1
     snap.activity.taskTotalCount = 3
-  }), '[● 1/3 jobs · ↓ view]')
+  }), '[● 1/3 tracked jobs · ↓ view]')
   assert.equal(render(snap => {
     snap.activity.taskCount = 1
     snap.activity.taskTotalCount = 3
