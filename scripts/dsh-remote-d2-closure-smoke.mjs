@@ -7,9 +7,15 @@
  * (queue/steer/edit/remove/cancel/rename through the official SessionFace,
  * host-command admission, subagent prompt/interrupt, durable-inbox
  * recovery) are covered by the remote-session-writer, remote-host-command,
- * remote-subagent-port, and remote-pending-input-reader unit suites, and
- * the closure keeps proving lifecycle and fork/rewind parity through the
- * current d2.4 smoke.
+ * remote-subagent-port, and remote-pending-input-reader unit suites.
+ *
+ * The retired D2.3 create/open/model/preset same-Host integration harness
+ * is NOT replaced by this closure: its semantic contracts are covered by
+ * adapter tests (remote-session-lifecycle / remote-model-port /
+ * remote-preset-port), and restoring a focused same-Host lifecycle parity
+ * smoke is a documented follow-up in docs/client-server-migration.md
+ * (Known coverage follow-ups). This closure proves only the D2.4
+ * fork/rewind parity scenarios.
  *
  * @module dsh-remote-d2-closure-smoke
  */
@@ -20,7 +26,7 @@ import { dirname, resolve } from 'node:path'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PROOFS = [
-  ['D2.3/D2.4 lifecycle and fork/rewind parity', 'scripts/dsh-remote-d2.4-fork-parity-smoke.mjs'],
+  ['D2.4 fork/rewind parity', 'scripts/dsh-remote-d2.4-fork-parity-smoke.mjs'],
 ]
 
 function main() {
