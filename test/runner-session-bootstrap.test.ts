@@ -3353,6 +3353,76 @@ test('an abort while the Host Loader is still pending clears the barrier status 
   assert.equal(harness.createdSessions.length, 0, 'an aborted startup must not create an Agent')
 })
 
+test('a rejecting Host Loader clears the barrier status before the fatal log and never mounts', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-loader-reject-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  // Status writes and the cordis fatal log share ONE ordered log: a TTY shares
+  // one cursor between stdout and stderr, so the order is the contract.
+  const orderedLog: string[] = []
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'loader-reject-session',
+    header: { id: 'loader-reject-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  const exporterFiber = context.plugin(pluginCtx => {
+    pluginCtx.logger.exporter({
+      levels: { default: 2 },
+      export: message => {
+        orderedLog.push(`log:${message.name}:${message.args.map(String).join(' ')}`)
+      },
+    })
+  })
+  await exporterFiber
+  const exitCodes: number[] = []
+  const appExit = (code?: number): void => { exitCodes.push(code ?? 0) }
+  const loader = {
+    await: async (): Promise<void> => { throw new Error('loader exploded') },
+  }
+  fiber = await mountRunner(
+    context,
+    home,
+    harness,
+    { sessionId: resumed.id },
+    { sessionId: resumed.id, startupStatusOutput: statusOutput },
+    appExit,
+    loader,
+  )
+  await settle()
+
+  const shownIndex = orderedLog.findIndex(write => write === 'stdout:\r\x1b[2KStarting DSH…')
+  const clearIndex = orderedLog.findIndex((write, index) => index > shownIndex && write === 'stdout:\r\x1b[2K')
+  const logIndex = orderedLog.findIndex(write => write.startsWith('log:') && write.includes('tui-runner'))
+  assert.ok(shownIndex >= 0, `the barrier status must be shown: ${JSON.stringify(orderedLog)}`)
+  assert.ok(clearIndex > shownIndex,
+    `a rejected Loader must still clear the barrier line: ${JSON.stringify(orderedLog)}`)
+  assert.ok(logIndex > clearIndex,
+    `the fatal log must be written only AFTER the barrier line is cleared: ${JSON.stringify(orderedLog)}`)
+  assert.equal(probe.apps.length, 0, 'a fatal loader rejection must not mount a TUI')
+  assert.equal(harness.resumeSignals.length, 0, 'the resume must never start after a rejected Loader')
+  assert.equal(harness.createdSessions.length, 0, 'no Agent may be created after a rejected Loader')
+  assert.deepEqual(exitCodes, [1], 'the fatal startup path must exit(1)')
+})
+
 test('the exit resume hint names the Host profileContext profile, not the argv fallback', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-resume-profile-hint-')
