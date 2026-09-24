@@ -54,16 +54,18 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.6` (published `@latest`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable line; rc.1 minimum, rc.2 compatible |
-| `0.4.7-alpha.2` (published) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
-| Current compatibility-train line (this checkout; version `0.4.8-alpha.1`) | `dsh-v0.1.7-rc.1` | Current train line; the released `0.4.7-alpha.2` below is the fallback TUI for a 0.1.6-alpha.2 runtime |
+| `0.4.8` (stable / `@latest`) | `dsh-v0.1.7-rc.1` | Current stable line; 0.1.7-rc.1 minimum |
+| `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
+| `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and prerelease lines. The current checkout unifies its
+Do not mix the stable and `@next` prerelease lines. The `0.4.8` line unifies its
 whole DSH peer floor at `>=0.1.7-rc.1` (the rc.1 preset registry peers
 `dsh-agent` exactly, so a wider legacy floor no longer satisfies a standalone
-tarball install); older runtimes fail at the normal incompatible-runtime boundary. The startup notice is best-effort rather than a
-Loader startup-order guarantee. See the [full historical compatibility matrix](docs/dsh-compatibility.md)
-for official-tag pairings and fallback commands, and see the [latest `next`
+tarball install); older runtimes fail at the normal incompatible-runtime
+boundary, so install the paired TUI line from the table above. The startup notice
+is best-effort rather than a Loader startup-order guarantee. See the [full
+historical compatibility matrix](docs/dsh-compatibility.md) for official-tag
+pairings and fallback commands, and see the [latest `next`
 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for the current
 integration status.
 

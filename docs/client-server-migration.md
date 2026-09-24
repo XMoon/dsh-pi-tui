@@ -1242,7 +1242,7 @@ adapter/lifetime mapping and adds no migration milestone (no D2.5).
 - `session/writer-held` (details `{ sessionId }`) is a proven pre-commit refusal:
   it settles `rejected` with actionable holder-recovery guidance, preserved
   details, a preserved draft, and no retry, takeover, or forced resume.
-- The version identity of this line is `0.4.7-alpha.2`. The published
+- The version identity of this line is `0.4.8`. The published
   `0.4.7-alpha.1` keeps its own alpha.1 contract: an `dsh-v0.1.6-alpha.1`
   runtime still pairs with that bundle, and it stays the startup notice's
   fallback for that runtime.
@@ -1363,10 +1363,11 @@ merge blockers; each records what is absent and the follow-up shape.
 Harness versions below the current floor. Experimental Remote dependencies must
 never enter its static import graph — load the selected backend via dynamic
 import in a `runtime/backend-loader` module. The current line requires DSH
-`>=0.1.6-alpha.2`; `HARNESS_COMPAT` maps every older official tag to its
-historically compatible TUI line (the `0.1.6-alpha.1` runtime falls back to the
-published `0.4.7-alpha.1` bundle, the `0.1.5-rc.1`/`rc.2` family to `0.4.6`) and
-supplies the exact npm upgrade command. There is no old/new runtime
+`>=0.1.7-rc.1`; `HARNESS_COMPAT` maps every older official tag to its
+historically compatible TUI line (the `0.1.6-alpha.2` runtime falls back to the
+published `0.4.7-alpha.2` bundle, `0.1.6-alpha.1` to `0.4.7-alpha.1`, and the
+`0.1.5-rc.1`/`rc.2` family to `0.4.6`) and supplies the exact npm upgrade
+command. There is no old/new runtime
 capability-detection branch, and future versions are not rejected without a
 confirmed break.
 
