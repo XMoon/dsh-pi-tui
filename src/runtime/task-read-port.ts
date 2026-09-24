@@ -23,7 +23,8 @@ export type TaskSubagentEntry =
     readonly reason: 'corrupt' | 'unsupported' | 'unavailable'
   }
 
-/** Status-only facts from one official background-job snapshot. */
+/** Status-only facts from one official JobRegistry snapshot (the roster
+ * may include foreground shell work while it is still registered). */
 export interface TaskJobEntry {
   readonly id: string
   readonly kind: string

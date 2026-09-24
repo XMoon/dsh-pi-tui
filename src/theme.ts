@@ -420,7 +420,7 @@ export const selectListTheme: SearchablePickerTheme = {
 }
 
 /**
- * Status-dot colour for a background-job status (dsh-web StateDot parity:
+ * Status-dot colour for a job status (dsh-web StateDot parity:
  * running = ongoing/primary, stopping/killed = warning, completed = done/dim,
  * failed/timed-out/lost = error). Unknown statuses fall back to the
  * muted token so a future wire status never crashes the renderer.
