@@ -230,8 +230,10 @@ test('Current TUI is the self BUNDLE card only; a same-module standalone entry s
   // The row owned by the self bundle is inside that card…
   assert.ok(model.currentTui[0]!.rows.some(entry => entry.entryId === 'include:tui-app'))
   // …while the independent same-module entry remains its own DSH Plugin card.
+  // It stays VISIBLE (ownership is entry-id proof), but it is PROTECTED
+  // because it imports the TUI package itself.
   assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:other')])
-  assert.equal(model.dshPlugins[0]!.canToggle, true)
+  assert.equal(model.dshPlugins[0]!.canToggle, false)
 })
 
 test('a bundle row module shared with an unrelated standalone entry never swallows it', () => {
@@ -253,6 +255,42 @@ test('a bundle row module shared with an unrelated standalone entry never swallo
   const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
   assert.ok(values.includes(entryValue('include:user-workspace')), 'the unrelated workspace entry must stay visible')
   assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:user-workspace')])
+})
+
+test('an unproven self-bundle row still self-protects its live module entry (without hiding it)', () => {
+  // The self-bundle row exposes NO entryId (abnormal composition), so the live
+  // entry cannot be excluded by id. It must stay VISIBLE but never toggleable.
+  const snap = snapshot(
+    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
+    [row({ entryId: 'include:builtins', moduleName: `${SELF_BUNDLE}/builtins`, patchId: 'builtins' })],
+  )
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    [observation({ owner: '1:builtins', entryId: 'include:builtins' })],
+  )
+  const model = buildPluginManagerModel(snap, claims)
+  const card = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins]
+    .find(candidate => candidate.value === entryValue('include:builtins'))
+  assert.ok(card !== undefined, 'the entry must stay visible')
+  assert.equal(card.canToggle, false, 'a self-module entry must never be toggleable')
+  assert.equal(card.isSelf, true)
+  assert.equal(card.rows[0]!.canToggle, false)
+})
+
+test('a standalone entry unrelated to the self modules keeps its toggle', () => {
+  const snap = snapshot(
+    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
+    [row({ entryId: 'include:other', moduleName: 'unrelated-plugin', patchId: 'other' })],
+  )
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    [],
+  )
+  const model = buildPluginManagerModel(snap, claims)
+  const card = model.dshPlugins.find(candidate => candidate.value === entryValue('include:other'))
+  assert.ok(card !== undefined)
+  assert.equal(card.canToggle, true)
+  assert.equal(card.isSelf, false)
 })
 
 test('without the self bundle there is no Current TUI card and no guessed fallback', () => {
