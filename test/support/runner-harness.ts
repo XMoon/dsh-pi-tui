@@ -436,6 +436,10 @@ export async function mountRunner(
    * exercise the fullscreen surface pass it explicitly. */
   config: Record<string, unknown> = {},
   appExit: () => void = () => {},
+  /** Host Loader stand-in for the pre-mount readiness barrier. Defaults to an
+   * already-settled barrier; tests that exercise the startup-status behavior
+   * inject a controllable one to hold the barrier open. */
+  loader: { await(): Promise<unknown> } = { await: async () => {} },
 ) {
   ctx.provide('appExit', appExit)
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
@@ -449,7 +453,7 @@ export async function mountRunner(
   if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
   if (harness.jobs !== undefined) ctx.provide('jobs', harness.jobs as never)
   if (harness.shell !== undefined) ctx.provide('shell', harness.shell as never)
-  ctx.provide('loader', { await: async () => {} } as never)
+  ctx.provide('loader', loader as never)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off', ...config } as never)))
   await fiber
   await settle()
