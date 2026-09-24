@@ -642,7 +642,9 @@ export class PluginManagerController {
     const row = card?.rows.find(candidate => candidate.entryId === entryId)
     if (row === undefined) return
     if (!row.canToggle) {
-      this.message = `cannot change ${entryId}: ${row.readOnlyReason ?? 'not addressable'}`
+      this.message = row.selfProtected
+        ? `${entryId} is controlled by the Current TUI composition and cannot be changed from here`
+        : `cannot change ${entryId}: ${row.readOnlyReason ?? 'not addressable'}`
       this.hooks.requestRender()
       return
     }
