@@ -106,3 +106,26 @@ test('a throwing output seam is contained: the status never fails a boot', () =>
   // ATTEMPTS the erase (both writes were attempted above).
   assert.deepEqual(writes, ['\r\x1b[2KStarting DSH…', '\r\x1b[2K'])
 })
+
+test('a failed erase keeps the row owned so the next clear retries it', () => {
+  const writes: string[] = []
+  let eraseAttempts = 0
+  const status = createStartupStatus({
+    isTTY: true,
+    write: (text) => {
+      writes.push(text)
+      // Fail the FIRST erase only: the retry must actually land.
+      if (text === '\r\x1b[2K' && (eraseAttempts += 1) === 1) throw new Error('erase exploded')
+    },
+  })
+  status.show('Starting DSH…')
+  assert.doesNotThrow(() => status.clear(), 'the failed erase is still contained')
+  assert.deepEqual(writes, ['\r\x1b[2KStarting DSH…', '\r\x1b[2K'], 'the first erase was attempted')
+
+  // The row is still owned: the next clear retries the erase...
+  status.clear()
+  assert.equal(writes.filter(text => text === '\r\x1b[2K').length, 2, 'the erase must be retried')
+  // ...and only a landed erase releases it.
+  status.clear()
+  assert.equal(writes.filter(text => text === '\r\x1b[2K').length, 2, 'a released row is not erased again')
+})

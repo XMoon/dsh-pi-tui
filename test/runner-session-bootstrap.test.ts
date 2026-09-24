@@ -3497,6 +3497,74 @@ test('a throwing status clear cannot block the fatal teardown or exit(1)', async
   assert.equal(harness.resumeSignals.length, 0, 'no Agent may be resumed')
 })
 
+test('a transiently failing status erase is retried before the fatal log', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-loader-reject-retry-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const orderedLog: string[] = []
+  let eraseAttempts = 0
+  // The FIRST erase fails (the barrier's own clear); the retry — the fatal
+  // root's clear — must actually land BEFORE the log line is written.
+  const statusOutput = {
+    isTTY: true,
+    write: (text: string) => {
+      orderedLog.push(`stdout:${text}`)
+      if (text === '\r\x1b[2K' && (eraseAttempts += 1) === 1) throw new Error('erase exploded once')
+    },
+  }
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'loader-reject-retry-session',
+    header: { id: 'loader-reject-retry-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  const exporterFiber = context.plugin(pluginCtx => {
+    pluginCtx.logger.exporter({
+      levels: { default: 2 },
+      export: message => {
+        orderedLog.push(`log:${message.name}:${message.args.map(String).join(' ')}`)
+      },
+    })
+  })
+  await exporterFiber
+  const exitCodes: number[] = []
+  const appExit = (code?: number): void => { exitCodes.push(code ?? 0) }
+  const loader = {
+    await: async (): Promise<void> => { throw new Error('loader exploded') },
+  }
+  fiber = await mountRunner(
+    context,
+    home,
+    harness,
+    { sessionId: resumed.id },
+    { sessionId: resumed.id, startupStatusOutput: statusOutput },
+    appExit,
+    loader,
+  )
+  await settle()
+
+  const logIndex = orderedLog.findIndex(write => write.startsWith('log:') && write.includes('tui-runner'))
+  const lastEraseIndex = orderedLog.map((write, index) => write === 'stdout:\r\x1b[2K' ? index : -1).filter(index => index >= 0).at(-1)
+  assert.equal(eraseAttempts, 2, `the failed erase must be retried: ${JSON.stringify(orderedLog)}`)
+  assert.ok(logIndex >= 0, `the fatal log must still be written: ${JSON.stringify(orderedLog)}`)
+  assert.ok(lastEraseIndex !== undefined && lastEraseIndex < logIndex,
+    `the retried erase must land BEFORE the fatal log: ${JSON.stringify(orderedLog)}`)
+  assert.deepEqual(exitCodes, [1], 'the fatal path must still reach exit(1)')
+  assert.equal(probe.apps.length, 0, 'no TUI may mount')
+})
+
 test('the exit resume hint names the Host profileContext profile, not the argv fallback', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-resume-profile-hint-')
