@@ -139,6 +139,9 @@ export class PluginManagerController {
   private model: PluginManagerModel = EMPTY_MODEL
   private state: 'loading' | 'ready' | 'error' = 'loading'
   private error: string | undefined
+  /** The exact notice text of the last failed inventory read, so a later
+   * successful read can clear it without clobbering an operation message. */
+  private refreshErrorMessage: string | undefined
   private entryHost: PluginManagerEntryHost = 'direct-command'
   private mode: PluginManagerMode = 'list'
   private selected = 0
@@ -489,28 +492,28 @@ export class PluginManagerController {
     const active = this.install
     if (active === undefined || active.phase !== 'confirm') return
     if (active.inspection?.status !== 'accepted') return
-    const epoch = ++this.installEpoch
     active.phase = 'starting'
     active.message = undefined
     this.hooks.requestRender()
     const requestId = active.requestId
-    this.run('plugin manager install', () => this.performInstall(requestId, epoch))
+    this.run('plugin manager install', () => this.performInstall(requestId))
   }
 
   /** Dispatch installBundle and settle it; an indeterminate failure recovers
    * through the official waitForInstall and NEVER retries the install. */
-  private async performInstall(requestId: string, epoch: number): Promise<void> {
+  private async performInstall(requestId: string): Promise<void> {
     const active = this.install
     if (active === undefined || active.requestId !== requestId) return
+    let outcome: PluginChangeFact
     try {
-      const outcome = await this.port.startInstall({
+      // ONLY the dispatch is the failure domain: a throw from SETTLEMENT is a
+      // programming error, never an indeterminate Host outcome.
+      outcome = await this.port.startInstall({
         requestId,
         spec: active.spec,
         registry: active.registry,
         enabled: true,
       })
-      if (this.disposed) return
-      this.settleInstall(requestId, outcome)
     } catch (error) {
       if (this.disposed) return
       // The Host may already have accepted the request: recover through the
@@ -533,7 +536,10 @@ export class PluginManagerController {
       this.run('plugin manager read', () => this.read())
       this.hooks.requestRender()
       if (!this.hooks.isOpen()) this.hooks.notify('plugin install outcome unknown; inventory refreshed', 'error')
+      return
     }
+    if (this.disposed) return
+    this.settleInstall(requestId, outcome)
   }
 
   /** Stop an active installation; only valid before the Host starts applying. */
@@ -792,6 +798,11 @@ export class PluginManagerController {
       this.model = this.buildModel(snapshot)
       this.state = 'ready'
       this.error = undefined
+      // Clear only the read-failure notice (never an operation outcome the
+      // caller just set), so a successful read — refresh key OR action row —
+      // never leaves a stale "refresh failed: …" on screen.
+      if (this.message === this.refreshErrorMessage) this.message = undefined
+      this.refreshErrorMessage = undefined
       this.clampSelection()
       this.hooks.requestRender()
     } catch (error) {
@@ -800,7 +811,8 @@ export class PluginManagerController {
       // A failed refresh keeps the last good snapshot (plan §A1.6).
       this.state = 'error'
       this.error = errorMessage(error)
-      this.message = `refresh failed: ${this.error}`
+      this.refreshErrorMessage = `refresh failed: ${this.error}`
+      this.message = this.refreshErrorMessage
       this.hooks.requestRender()
     }
   }

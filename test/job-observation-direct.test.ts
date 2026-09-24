@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { DirectJobObservationPort } from '../src/runtime/direct/job-observation-direct.ts'
 import type { JobObservedSnapshot } from '../src/runtime/job-observation-port.ts'
@@ -158,6 +159,18 @@ test('observing never advances the model job_output cursor', async () => {
 
   assert.equal(a[a.length - 1]!.text, chunks.join(''))
   assert.equal(b[b.length - 1]!.text, chunks.join(''))
+  // Observing used the non-consuming readAt path only: the model's consuming
+  // read was never invoked, so its cursor is still at the start.
+  assert.equal(modelCursor, 0)
   // The model's own consuming read still receives every unread byte.
   assert.equal(modelRead(), chunks.join(''))
+  assert.equal(modelCursor, total)
+})
+
+test('the pi-tui composition mounts the official job-controller row and injects both P1 services', () => {
+  const yml = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  assert.match(yml, /- id: job-controller\r?\n\s+name: '@deepseek-ai\/dsh-api-job-controller'/)
+  assert.match(yml, /inject: \[tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController\]/)
+  // No second plugin-manager row: the base layer already mounts it.
+  assert.equal((yml.match(/- id: plugin-manager\b/g) ?? []).length, 0)
 })

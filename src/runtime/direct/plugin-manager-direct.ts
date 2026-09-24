@@ -208,7 +208,6 @@ function detachLog(chunk: PluginInstallLogChunk): PluginInstallLogFact {
     jobId: chunk.jobId,
     stream: chunk.stream,
     text: chunk.text,
-    ...(chunk.exitCode === undefined ? {} : { exitCode: chunk.exitCode }),
   })
 }
 

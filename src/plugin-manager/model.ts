@@ -307,17 +307,19 @@ export function buildPluginManagerModel(
     }))
   }
 
+  const selfBundleListed = snapshot.bundles.some(bundle => bundle.name === SELF_BUNDLE)
   for (const entry of snapshot.plugins) {
     if (bundledEntryIds.has(entry.entryId)) continue
-    // A standalone entry that imports the current TUI package is part of the
-    // same surface, not a second manageable card: it must never create a
-    // duplicate Current TUI section (the self bundle card above already owns
-    // the section).
-    if (selfModuleNames.has(entry.moduleName)) continue
+    const selfModule = selfModuleNames.has(entry.moduleName)
+    // When the self bundle IS listed, its card owns the Current TUI section,
+    // so a self-module standalone entry must not duplicate it. If the bundle
+    // is missing from listBundles (an abnormal composition), the entry is the
+    // only self representation and must still appear once, self-protected.
+    if (selfModule && selfBundleListed) continue
     const value = entryValue(entry.entryId)
     const claim = claims.get(value)
-    const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
-    const row = entryRowView(entry, false)
+    const role: PluginPresentationRole = selfModule ? 'current-tui' : claim?.role ?? 'dsh-plugin'
+    const row = entryRowView(entry, selfModule)
     cards.push(Object.freeze({
       value,
       source: 'entry' as const,
@@ -333,9 +335,9 @@ export function buildPluginManagerModel(
       rows: Object.freeze([row]),
       overrides: Object.freeze([]),
       ...(claim?.observation === undefined ? {} : { observation: claim.observation }),
-      canToggle: row.canToggle,
+      canToggle: selfModule ? false : row.canToggle,
       canRemove: false,
-      isSelf: false,
+      isSelf: selfModule,
     }))
   }
 

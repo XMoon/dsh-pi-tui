@@ -165,8 +165,6 @@ export interface PluginInstallLogFact {
   readonly jobId: string
   readonly stream: 'stdout' | 'stderr'
   readonly text: string
-  /** Present on a run's last chunk: pnpm's exit code, null when it had none. */
-  readonly exitCode?: number | null
 }
 
 /** An official install event, discriminated so the controller filters by kind. */
