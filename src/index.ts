@@ -208,10 +208,10 @@ import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import {
   runFirstSessionCommit,
   runForkCommit,
-  runGenerationBump,
   runOrdinaryCommit,
   runResumeCommit,
 } from './app/session/commit-order.ts'
+import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import { type DirectOwnerPoolLike } from './runtime/direct/session-lifecycle-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -1920,54 +1920,11 @@ export function apply(ctx: Context, config: Config): void {
     // owner is created: a startup failure after the resume must join the
     // SAME memoized retirement, never a second direct teardown that could
     // race the DSH agent-loop owner disposer.
-    const transitionGate = new SessionTransitionGate()
-    const operationBarrier = new SessionOperationBarrier()
+    const ownership = createSessionOwnershipCore({
+      isSurfaceDisposed: () => cleanedUp,
+      resetForGeneration: () => resetForGeneration(),
+    })
     const parkedDirectOwners = new Map<string, AgentHandle>()
-    // Session owners whose retirement is IN FLIGHT, keyed by session id. A
-    // reopen (`/resume`, `/sessions`) must follow that release: the persistence
-    // write claim is exclusive, and the retirement's `dispose` is what closes
-    // it. The release is registered the moment a fork QUEUES the retirement, so
-    // a reopen admitted in the window before the retirement starts still waits.
-    const pendingOwnerReleases = new Map<string, Set<Promise<void>>>()
-    /** Register a pending release for one session; returns the resolver the
-     *  retirement calls when it has finished. */
-    const beginOwnerRelease = (sessionId: string): () => void => {
-      let resolve!: () => void
-      const promise = new Promise<void>(settle => { resolve = settle })
-      const releases = pendingOwnerReleases.get(sessionId) ?? new Set<Promise<void>>()
-      releases.add(promise)
-      pendingOwnerReleases.set(sessionId, releases)
-      return () => {
-        releases.delete(promise)
-        if (releases.size === 0) pendingOwnerReleases.delete(sessionId)
-        resolve()
-      }
-    }
-    const waitForOwnerRelease = async (sessionId: string): Promise<void> => {
-      // Loop: another release for the same id may be registered while waiting.
-      while (true) {
-        const releases = pendingOwnerReleases.get(sessionId)
-        if (releases === undefined || releases.size === 0) return
-        await Promise.allSettled([...releases])
-      }
-    }
-    /** Admission-time pin for one `/fork` source. It is held from the moment the
-     *  fork is admitted — before the child is even created — and released when
-     *  the fork settles AND, if it committed, after the source owner's
-     *  retirement finishes. While it is held, an open/resume of that session
-     *  waits for the release instead of resuming a live, lease-held owner. */
-    const beginForkSourcePin = (sessionId: string): { state: { retirementOwnsRelease: boolean }; release: () => void } => {
-      const finish = beginOwnerRelease(sessionId)
-      const state = { released: false, retirementOwnsRelease: false }
-      return {
-        state,
-        release: (): void => {
-          if (state.released) return
-          state.released = true
-          finish()
-        },
-      }
-    }
     const directOwnerPool: DirectOwnerPoolLike = {
       claim: sessionId => {
         const handle = parkedDirectOwners.get(sessionId)
@@ -1980,9 +1937,8 @@ export function apply(ctx: Context, config: Config): void {
         if (previous !== undefined && previous !== handle) throw new Error(`duplicate parked Direct owner for session "${sessionId}"`)
         parkedDirectOwners.set(sessionId, handle)
       },
-      waitForRelease: waitForOwnerRelease,
+      waitForRelease: ownership.waitForOwnerRelease,
     }
-    let navigationEpoch = 0
     const pendingForks = new Set<Promise<unknown>>()
     // In-flight work whose settlement is reachable only from a later callback,
     // so teardown must await it explicitly: a command execution (INCLUDING the
@@ -2060,7 +2016,7 @@ export function apply(ctx: Context, config: Config): void {
     // Synchronous shutdown preparation: cancel the CURRENT Direct owner's work
     // BEFORE the Host tree is torn down. The surface teardown above already
     // aborted the runner lifecycle, but a plain interactive exit reaches the
-    // appExit disposal through `transitionGate.run(...)`, which schedules its
+    // appExit disposal through `ownership.gate.run(...)`, which schedules its
     // task on a promise continuation — so the root teardown could unregister
     // the inbox projection before the retirement's async cancel phase ran
     // (`phase=cancel ... projection registration is not active`). This is ONLY
@@ -2204,7 +2160,7 @@ export function apply(ctx: Context, config: Config): void {
           // context it touches is gone.
           while (pendingSettlementWork.size > 0) await Promise.allSettled([...pendingSettlementWork])
           while (pendingSourceRetirements.size > 0) await Promise.allSettled([...pendingSourceRetirements])
-          return await transitionGate.run(() => operationBarrier.runTransition(async () => {
+          return await ownership.gate.run(() => ownership.barrier.runTransition(async () => {
             const current = await retire()
             const failures = [...current.failures]
             for (const [sessionId, parked] of parkedDirectOwners) {
@@ -2836,7 +2792,7 @@ export function apply(ctx: Context, config: Config): void {
 // (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
 // the exact extraction the transition commit uses.
     const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
-      navigationEpoch += 1
+      ownership.bumpNavigationEpoch()
       const from = liveAgent?.session.id
       const opening = beginOpening(steps.target.id)
       const oldHandle = liveHandle
@@ -2871,7 +2827,7 @@ export function apply(ctx: Context, config: Config): void {
             settlePendingQueueRecalls,
             settleLocalSubmitAck,
             resetSubmitLatency: () => submitLatencyTracker.reset(),
-            bumpGeneration: bumpSessionGeneration,
+            bumpGeneration: ownership.bumpGeneration,
             publishOwner: (owner) => {
               liveHandle = ownerHandleOf(owner) as AgentHandle | undefined
               liveAgent = directAgentOf(owner) as Agent
@@ -2968,8 +2924,8 @@ export function apply(ctx: Context, config: Config): void {
      * session-transition gate, so it can never interleave with another
      * ordinary transition (the single-writer rule). */
     const switchSession = (sessionId: string): Promise<string | undefined> => {
-      navigationEpoch += 1
-      return transitionGate.run(() => operationBarrier.runTransition(async () => {
+      ownership.bumpNavigationEpoch()
+      return ownership.gate.run(() => ownership.barrier.runTransition(async () => {
         try {
           return await switchSessionLocked(sessionId)
         } finally {
@@ -3330,12 +3286,12 @@ export function apply(ctx: Context, config: Config): void {
     // a no-op (a stale deferred measurement can never commit).
     let cancelDeferredContextMeasure: (() => void) | undefined
     const scheduleInitialContextMeasure = (agent: Agent): void => {
-      const generation = sessionGeneration
+      const generation = ownership.generation()
       const sessionId = agent.session.id
       cancelDeferredContextMeasure?.()
       cancelDeferredContextMeasure = deferInitialContextMeasure(
         (callback) => setImmediate(callback),
-        () => generation === sessionGeneration && liveAgent?.session.id === sessionId,
+        () => generation === ownership.generation() && liveAgent?.session.id === sessionId,
         () => {
           // Bind the captured session BEFORE the dirty guard: on a cold
           // resume the coordinator is still UNBOUND (reads as not dirty),
@@ -3568,8 +3524,8 @@ export function apply(ctx: Context, config: Config): void {
     const forkNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
       isRewindIdentityCurrent({
         sessionId: liveAgent?.session.id,
-        generation: sessionGeneration,
-        navigationEpoch,
+        generation: ownership.generation(),
+        navigationEpoch: ownership.navigationEpoch(),
       }, expected)
     const adoptFork = async (
       handle: SessionHandle,
@@ -3579,7 +3535,7 @@ export function apply(ctx: Context, config: Config): void {
     ): Promise<boolean> => {
       let adopted = false
       try {
-        await transitionGate.run(() => operationBarrier.runTransition(async () => {
+        await ownership.gate.run(() => ownership.barrier.runTransition(async () => {
         if (cleanedUp || !forkNavigationCurrent(expected)) {
           parkForkOwner(handle)
           return
@@ -3598,7 +3554,7 @@ export function apply(ctx: Context, config: Config): void {
           settlePendingQueueRecalls,
           settleLocalSubmitAck,
           resetSubmitLatency: () => submitLatencyTracker.reset(),
-          bumpGeneration: bumpSessionGeneration,
+          bumpGeneration: ownership.bumpGeneration,
           publishOwner: () => {
             liveAgent = nextAgent
             liveHandle = nextHandle
@@ -3674,8 +3630,8 @@ export function apply(ctx: Context, config: Config): void {
       // claiming a fresh operation epoch; A → B → A must not revive A's row.
       const before = {
         sessionId: liveAgent?.session.id,
-        generation: sessionGeneration,
-        navigationEpoch,
+        generation: ownership.generation(),
+        navigationEpoch: ownership.navigationEpoch(),
       }
       const pickerCurrent = pickerIdentity === undefined || isRewindIdentityCurrent(before, pickerIdentity)
       const expectedSessionId = pickerIdentity?.sessionId ?? before.sessionId
@@ -3687,12 +3643,12 @@ export function apply(ctx: Context, config: Config): void {
       const expected: RewindLiveIdentity = {
         sessionId: expectedSessionId,
         generation: pickerIdentity?.generation ?? before.generation,
-        navigationEpoch: ++navigationEpoch,
+        navigationEpoch: ownership.bumpNavigationEpoch(),
       }
       // Pin the source for the WHOLE fork (from admission, before the child is
       // created): an open/resume of it must wait until the fork settles and, if
       // it committed, until the source owner has been retired.
-      const pin = beginForkSourcePin(sourceSessionId)
+      const pin = ownership.beginForkSourcePin(sourceSessionId)
       let settleFork!: () => void
       let forkedHandle: SessionHandle | undefined
       const pending = new Promise<void>(resolve => { settleFork = resolve })
@@ -3753,15 +3709,15 @@ export function apply(ctx: Context, config: Config): void {
       localShellController?.abort()
       const agent = liveAgent
       if (agent === undefined) return
-      const generation = sessionGeneration
-      runOwned('agent interrupt', () => operationBarrier.runWriter(
+      const generation = ownership.generation()
+      runOwned('agent interrupt', () => ownership.barrier.runWriter(
         agent.session.id,
         () => interruptAgent(agent, backend.sessionWriter),
       ), {
         diag,
         sessionId: () => liveAgent?.session.id,
         onResult: (outcome) => {
-          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) return
+          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) return
           if (outcome.kind === 'committed' || outcome.kind === 'cancelled') return
           const message = outcome.kind === 'rejected'
             ? outcome.error.message
@@ -3773,7 +3729,7 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(message, 'error')
         },
         onError: (error) => {
-          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) return
+          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) return
           app.notify(safeErrorMessage(error), 'error')
         },
       })
@@ -4015,7 +3971,7 @@ export function apply(ctx: Context, config: Config): void {
       // command runs must not post the output into the new session (the
       // switch already cleared the card; the notify explains what happened).
       // switch already cleared the card; the notify explains what happened).
-      const generationAtRun = sessionGeneration
+      const generationAtRun = ownership.generation()
       localShellController?.abort()
       localShellController = new AbortController()
       const localSignal = localShellController.signal
@@ -4052,7 +4008,7 @@ export function apply(ctx: Context, config: Config): void {
         // submitShellResult's own re-validation. The ack row (armed at the
         // gesture) is TERMINAL here: nothing will be written for the old
         // session.
-        if (sessionGeneration !== generationAtRun) {
+        if (ownership.generation() !== generationAtRun) {
           shellTerminalAck('shell submit skipped after a session switch')
           app.notify('the session changed while the command ran — the output was not submitted', 'error')
           return
@@ -4063,7 +4019,7 @@ export function apply(ctx: Context, config: Config): void {
         submitLatencyTracker.mark(liveAgent?.session.id, 'dispatch')
         runOwned('shell submit', () => submitShellResult({
           currentAgent: () => liveAgent as unknown as ShellSubmitAgentLike | undefined,
-          currentGeneration: () => sessionGeneration,
+          currentGeneration: () => ownership.generation(),
           notify: (message, kind) => {
             if (cleanedUp) return
             app.notify(message, kind)
@@ -4072,8 +4028,8 @@ export function apply(ctx: Context, config: Config): void {
           // The session-transition write fence (review round 4): while a
           // transition is in flight the followup would target a session
           // that is about to be retired.
-          fence: () => transitionGate.busy || cleanedUp,
-          barrier: operationBarrier,
+          fence: () => ownership.gate.busy || cleanedUp,
+          barrier: ownership.barrier,
           fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
           writer: backend.sessionWriter,
           createMessage: (text) => createUserMessage({
@@ -4693,7 +4649,6 @@ export function apply(ctx: Context, config: Config): void {
     // expansion overrides. Pending question/approval dialogs settle through
     // their own abort signals — the disposed agent aborts them — so they
     // need no explicit teardown here.
-    let sessionGeneration = 0
     /** EVERY in-flight sessionless `/model` global-default write (the pure
      *  `DefaultWriteBarrier`): the Direct adapter intentionally allows
      *  overlapping writes, so an older write can still be settling — and
@@ -4715,7 +4670,7 @@ export function apply(ctx: Context, config: Config): void {
         pendingModelSelection = undefined
         return
       }
-      pendingModelSelection = { generation: sessionGeneration, selection, token: token ?? 0, status }
+      pendingModelSelection = { generation: ownership.generation(), selection, token: token ?? 0, status }
     }
     /** The owned in-flight marker for the CURRENT generation (status included),
      *  so the footer can distinguish `selecting…` from an explicit `unconfirmed`
@@ -4729,7 +4684,7 @@ export function apply(ctx: Context, config: Config): void {
     const currentModelSelectionMarker = ():
       { readonly selection: ModelSelection; readonly status: 'pending' | 'unresolved' } | undefined => {
       if (liveAgent !== undefined) {
-        return pendingModelSelection !== undefined && pendingModelSelection.generation === sessionGeneration
+        return pendingModelSelection !== undefined && pendingModelSelection.generation === ownership.generation()
           ? { selection: pendingModelSelection.selection, status: pendingModelSelection.status }
           : undefined
       }
@@ -4822,12 +4777,6 @@ export function apply(ctx: Context, config: Config): void {
         refreshStatusCheap()
       })
     }
-    const bumpSessionGeneration = (): number => runGenerationBump({
-      isSurfaceDisposed: () => cleanedUp,
-      get: () => sessionGeneration,
-      set: (next) => { sessionGeneration = next },
-      reset: resetForGeneration,
-    })
     // PR D1 P1: while the search overlay is open the transcript keeps
     // changing (settlements, read-group reflow, new messages), so Next/Prev
     // must never jump with a stale candidate list or a stale turn. This
@@ -5582,7 +5531,7 @@ export function apply(ctx: Context, config: Config): void {
       // waits behind an earlier submit. A later session must never inherit
       // an old submission merely because the FIFO turn became available.
       const submittedAgent = liveAgent
-      const submittedGeneration = sessionGeneration
+      const submittedGeneration = ownership.generation()
       let submitTurnTransferred = false
       // Local submit acknowledgement (plan D): the row appears NOW —
       // before any session create / admission / command work — because
@@ -5742,7 +5691,7 @@ export function apply(ctx: Context, config: Config): void {
               if (submittedAgent !== undefined && !sessionUnchanged(
                 { agent: submittedAgent, generation: submittedGeneration },
                 liveAgent,
-                sessionGeneration,
+                ownership.generation(),
               )) return undefined
               await ensureSession()
               if (cleanedUp) return undefined
@@ -5753,7 +5702,7 @@ export function apply(ctx: Context, config: Config): void {
               if (submittedAgent !== undefined && !sessionUnchanged(
                 { agent: submittedAgent, generation: submittedGeneration },
                 liveAgent,
-                sessionGeneration,
+                ownership.generation(),
               )) return
               persistHistory(sessionId)
             },
@@ -5771,7 +5720,7 @@ export function apply(ctx: Context, config: Config): void {
           if (submittedAgent !== undefined && !sessionUnchanged(
             { agent: submittedAgent, generation: submittedGeneration },
             liveAgent,
-            sessionGeneration,
+            ownership.generation(),
           )) {
             const merged = mergeDraft(app.getDraft(), text)
             app.setEditorText(merged)
@@ -5785,11 +5734,11 @@ export function apply(ctx: Context, config: Config): void {
         // Capture THIS agent's session identity so the write below can
         // never target a session a switch already left behind (the async
         // admission below yields).
-        const generation = sessionGeneration
+        const generation = ownership.generation()
         // TOCTOU re-validation: the session must still be the exact one the
         // identity was captured from, or the submission is aborted for a
         // retry against the new session.
-        if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+        if (!sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
           settleLocalSubmission(submitRequestId)
@@ -5872,7 +5821,7 @@ export function apply(ctx: Context, config: Config): void {
           // switch — once a transition is in flight, executing the command
           // would write an agent that is about to be retired (review
           // round 27). Refuse and restore the draft instead.
-          if (transitionGate.busy) {
+          if (ownership.gate.busy) {
             fallbackPin()
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
             settleLocalSubmission(submitRequestId)
@@ -5947,7 +5896,7 @@ export function apply(ctx: Context, config: Config): void {
                       : { kind: 'committed', matched: true, execution } as const
                    })
                 }
-                return operationBarrier.runWriter(agent.session.id, () => backend.hostCommand.execute({
+                return ownership.barrier.runWriter(agent.session.id, () => backend.hostCommand.execute({
                   sessionId: agent.session.id,
                   line: toggled,
                   attachments: submittedAttachments,
@@ -6044,7 +5993,7 @@ export function apply(ctx: Context, config: Config): void {
               // the session moved on while the command ran, restore the
               // draft instead of posting into a session the user has left.
               if (execution === undefined) {
-                if (sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+                if (sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
                   // The fallback is a REAL submission: prepare (admit
                   // images when present) and follow up — an owned workflow
                   // so a failed image admission restores the draft instead
@@ -6071,7 +6020,7 @@ export function apply(ctx: Context, config: Config): void {
                       // during a transition is refused (convergence plan
                       // phase 3).
                       try {
-                        await operationBarrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
+                        await ownership.barrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
                           agent,
                           draftHasImages(text, draftImages),
                           async () => {
@@ -6095,7 +6044,7 @@ export function apply(ctx: Context, config: Config): void {
                           if (cleanedUp) return
                           // Re-check the captured session identity AFTER the
                           // async admission (the guard-window rule, AGENTS.md).
-                          if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+                          if (!sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
                             const merged = mergeDraft(app.getDraft(), text)
                             app.setEditorText(merged)
                             settleLocalSubmission(submitRequestId)
@@ -6273,7 +6222,7 @@ export function apply(ctx: Context, config: Config): void {
         // this writer to drain; a writer entering during a transition is
         // refused.
         try {
-          await operationBarrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
+          await ownership.barrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
             agent,
             draftHasImages(text, draftImages),
             async () => {
@@ -6294,7 +6243,7 @@ export function apply(ctx: Context, config: Config): void {
             if (cleanedUp) return
             // Re-check the captured session identity AFTER the async
             // admission (the guard-window rule, AGENTS.md).
-            if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
+            if (!sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
               const merged = mergeDraft(app.getDraft(), text)
               app.setEditorText(merged)
               settleLocalSubmission(submitRequestId)
@@ -6540,7 +6489,7 @@ export function apply(ctx: Context, config: Config): void {
       // deferred-start operation. A later session must never receive this
       // gesture's prepared input or history row.
       const submittedAgent = liveAgent
-      const submittedGeneration = sessionGeneration
+      const submittedGeneration = ownership.generation()
       // The steered draft's correlation identity, minted before the first
       // asynchronous preparation await. An EXISTING session installs its local
       // steering echo right now (the editor just cleared); a deferred start
@@ -6607,7 +6556,7 @@ export function apply(ctx: Context, config: Config): void {
             if (submittedAgent !== undefined && !sessionUnchanged(
               { agent: submittedAgent, generation: submittedGeneration },
               liveAgent,
-              sessionGeneration,
+              ownership.generation(),
             )) return undefined
             return liveAgent?.session.id
           },
@@ -6616,7 +6565,7 @@ export function apply(ctx: Context, config: Config): void {
             if (submittedAgent !== undefined && !sessionUnchanged(
               { agent: submittedAgent, generation: submittedGeneration },
               liveAgent,
-              sessionGeneration,
+              ownership.generation(),
             )) return
             persistHistory?.(sessionId)
           },
@@ -6625,7 +6574,7 @@ export function apply(ctx: Context, config: Config): void {
         if (submittedAgent !== undefined && !sessionUnchanged(
           { agent: submittedAgent, generation: submittedGeneration },
           liveAgent,
-          sessionGeneration,
+          ownership.generation(),
         )) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
@@ -6647,7 +6596,7 @@ export function apply(ctx: Context, config: Config): void {
         // first await; for deferred start it is captured immediately after
         // creation and before message admission.
         const agentForSteer = submittedAgent ?? liveAgent
-        const generationForSteer = submittedAgent === undefined ? sessionGeneration : submittedGeneration
+        const generationForSteer = submittedAgent === undefined ? ownership.generation() : submittedGeneration
         // A deferred start now has its session identity: resolve the gesture's
         // delivery mode and install the local echo before the async admission
         // await.
@@ -6683,7 +6632,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!sessionUnchanged(
           { agent: agentForSteer, generation: generationForSteer },
           liveAgent,
-          sessionGeneration,
+          ownership.generation(),
         )) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
@@ -6721,8 +6670,8 @@ export function apply(ctx: Context, config: Config): void {
           // flight (quiesce → commit) the old agent may be woken again —
           // a steer in that window would target a session that is about
           // to be retired (the two-writers race, review round 4).
-          fence: () => transitionGate.busy || cleanedUp,
-          barrier: operationBarrier,
+          fence: () => ownership.gate.busy || cleanedUp,
+          barrier: ownership.barrier,
           fenceNotice: () => 'a session transition is in progress — try again in a moment',
           createDraft: () => prepared,
           staleNotice: () => 'the queue or session changed while sending — try again',
@@ -7363,9 +7312,9 @@ export function apply(ctx: Context, config: Config): void {
         // discard the result if the user switched sessions meanwhile — a
         // late paste must never stage into the NEW session's draft
         // (round-5 finding 2).
-        const pasteGeneration = sessionGeneration
+        const pasteGeneration = ownership.generation()
         runOwned('clipboard paste', () => readClipboardImage(runClipboardCommand, clipboardEnv).then((result) => {
-          if (cleanedUp || sessionGeneration !== pasteGeneration) return
+          if (cleanedUp || ownership.generation() !== pasteGeneration) return
           if (result.kind === 'image') {
             // Attach-time prune (review finding 2): placeholders deleted or
             // Ctrl+C-cleared since the last attach must not hold their
@@ -7811,7 +7760,7 @@ export function apply(ctx: Context, config: Config): void {
       onDequeue: () => {
         if (cleanedUp || viewing !== undefined || liveAgent === undefined) return
         const queuedAgent = liveAgent
-        const queuedGeneration = sessionGeneration
+        const queuedGeneration = ownership.generation()
         const pending = backend.pendingInputReader.snapshot(queuedAgent.session.id)
         if (pending === undefined) return
         const queued = pending.items
@@ -7903,7 +7852,7 @@ export function apply(ctx: Context, config: Config): void {
               if (cleanedUp || !sessionUnchanged(
                 { agent: queuedAgent, generation: queuedGeneration },
                 liveAgent,
-                sessionGeneration,
+                ownership.generation(),
               )) {
                 discardStaged()
                 releaseRecalled()
@@ -7922,7 +7871,7 @@ export function apply(ctx: Context, config: Config): void {
         // Remove each pulled-back occurrence through the official single-item queue mutation,
         // FIFO admission keeps pending input behind it; confirmed removals are reflected only
         // after each settlement.
-        runOwned('queue pull-back', () => operationBarrier.runWriter(queuedAgent.session.id, async () => {
+        runOwned('queue pull-back', () => ownership.barrier.runWriter(queuedAgent.session.id, async () => {
           try {
             if (cleanedUp) {
               for (const entry of staged) {
@@ -7934,7 +7883,7 @@ export function apply(ctx: Context, config: Config): void {
             if (!sessionUnchanged(
               { agent: queuedAgent, generation: queuedGeneration },
               liveAgent,
-              sessionGeneration,
+              ownership.generation(),
             )) {
               discardStaged()
               app.notify('the session changed while pulling messages back — try again', 'info')
@@ -7958,7 +7907,7 @@ export function apply(ctx: Context, config: Config): void {
             // than touching the disposed app; in particular, an indeterminate
             // removal must never discard the only local representation.
             if (cleanedUp) return
-            if (transitionGate.pending || operationBarrier.inTransition) {
+            if (ownership.gate.pending || ownership.barrier.inTransition) {
               const preserveCount = outcome.kind === 'committed' || outcome.kind === 'indeterminate'
                 ? recalledEntries.length
                 : settledRemovals
@@ -8004,7 +7953,7 @@ export function apply(ctx: Context, config: Config): void {
               discardStaged()
               throw error
             }
-            if (transitionGate.pending || operationBarrier.inTransition) {
+            if (ownership.gate.pending || ownership.barrier.inTransition) {
               if (!draftApplied) {
                 deferRecalledToTransition(isCancellation(error) ? settledRemovals : recalledEntries.length)
               }
@@ -8020,7 +7969,7 @@ export function apply(ctx: Context, config: Config): void {
             if (!sessionUnchanged(
               { agent: queuedAgent, generation: queuedGeneration },
               liveAgent,
-              sessionGeneration,
+              ownership.generation(),
             )) {
               discardStaged()
               failureKind = 'stale'
@@ -8186,7 +8135,7 @@ export function apply(ctx: Context, config: Config): void {
             fenceNotice: () => 'the child viewer changed while steering — try again',
             pendingInputReader: backend.pendingInputReader,
             writer: backend.sessionWriter,
-            barrier: operationBarrier,
+            barrier: ownership.barrier,
           }, submit.text, { draftHasPayload: false }), {
             diag,
             sessionId: () => directRuntime.queueAgentFor(submit.childSessionId)?.session.id,
@@ -8519,7 +8468,7 @@ export function apply(ctx: Context, config: Config): void {
       // generation/session AT dispatch against values captured AT dispatch
       // (as in an earlier revision) could never fail — the intent must be
       // bound to the browser that hosted the confirmation (PR review P1).
-      const browserGeneration = sessionGeneration
+      const browserGeneration = ownership.generation()
       const browserSession = liveAgent
       const browserToken = {}
       activeTaskBrowserToken = browserToken
@@ -8607,7 +8556,7 @@ export function apply(ctx: Context, config: Config): void {
         // pending) must never be stopped by the stale confirmation — the
         // captured browser values, not the dispatch-time values, are the
         // comparison side that can actually fail.
-        if (sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
+        if (ownership.generation() !== browserGeneration || liveAgent !== browserSession) return
         if (row.kind === 'subagent') {
           if (!isSubagentRowInterruptible(row)) return
           // Re-read the live driver at confirmation time; the panel row is
@@ -8616,7 +8565,7 @@ export function apply(ctx: Context, config: Config): void {
           // The interrupt authority names the child's DURABLE DIRECT parent;
           // deep descendants must not be addressed through the main root.
           const interruptParent = subagentInterruptParent(row, browserSession.session.id) as SessionId
-          runOwned('subagent interrupt', () => operationBarrier.runWriter(
+          runOwned('subagent interrupt', () => ownership.barrier.runWriter(
             browserSession.session.id,
             () => backend.subagent.interrupt({
               parentSessionId: interruptParent,
@@ -8627,7 +8576,7 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => browserSession.session.id,
             onResult: (outcome) => {
-              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
+              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || ownership.generation() !== browserGeneration || liveAgent !== browserSession) return
               if (outcome.kind === 'committed') {
                 app.notify(`stopping ${row.label}`, 'info')
                 return
@@ -8647,7 +8596,7 @@ export function apply(ctx: Context, config: Config): void {
               app.notify(`could not stop ${row.label}: ${reason}`, 'error')
             },
             onError: (error) => {
-              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
+              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || ownership.generation() !== browserGeneration || liveAgent !== browserSession) return
               app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
             },
           })
@@ -9398,7 +9347,7 @@ export function apply(ctx: Context, config: Config): void {
       taskRuntime = new TaskBrowserRuntime({
         // The session fence key: generation + session id, captured when a
         // refresh starts and re-checked after the async listing.
-        currentKey: () => cleanedUp || liveAgent === undefined ? undefined : `${sessionGeneration}:${liveAgent.session.id}`,
+        currentKey: () => cleanedUp || liveAgent === undefined ? undefined : `${ownership.generation()}:${liveAgent.session.id}`,
         listDescendants: () => {
           const sessionId = liveAgent?.session.id
           return sessionId === undefined ? Promise.resolve([]) : subagents.listDescendants(sessionId)
@@ -9407,7 +9356,7 @@ export function apply(ctx: Context, config: Config): void {
         // commit, so a job settlement repaints an open browser too.
         readJobs: () => {
           if (jobs === undefined || liveAgent === undefined) return []
-          const key = `${sessionGeneration}:${liveAgent.session.id}`
+          const key = `${ownership.generation()}:${liveAgent.session.id}`
           try {
             const rows = jobs.list(liveAgent.session.id)
             jobSnapshot = { key, rows }
@@ -9783,7 +9732,7 @@ export function apply(ctx: Context, config: Config): void {
       // The first-session creation is a session transition too: it runs
       // inside the single-writer gate so it can never interleave with a
       // an ordinary session transition that is already in flight.
-      creating = transitionGate.run(() => operationBarrier.runTransition(async () => {
+      creating = ownership.gate.run(() => ownership.barrier.runTransition(async () => {
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
         // The first-session creation follows the same transaction shape as
@@ -9850,7 +9799,7 @@ export function apply(ctx: Context, config: Config): void {
             return createdAgent.id
           },
           setCompletionOwner,
-          bumpGeneration: bumpSessionGeneration,
+          bumpGeneration: ownership.bumpGeneration,
           // Post-create initialization is best-effort: the child is committed,
           // so failures are recorded, never a fallback (the same
           // retire-warn-only semantics as every other transition).
@@ -9950,7 +9899,7 @@ export function apply(ctx: Context, config: Config): void {
         if (refresh === undefined) return undefined
         const target = liveAgent === undefined
           ? { kind: 'preset', presetId: pendingPreset ?? launchPreset } as const
-          : { kind: 'agent', key: sessionGeneration } as const
+          : { kind: 'agent', key: ownership.generation() } as const
         return refresh({
           source: 'invalidation',
           target,
@@ -10053,8 +10002,8 @@ export function apply(ctx: Context, config: Config): void {
       const sourceId = source.session.id
       const pickerIdentity: RewindLiveIdentity = {
         sessionId: sourceId,
-        generation: sessionGeneration,
-        navigationEpoch,
+        generation: ownership.generation(),
+        navigationEpoch: ownership.navigationEpoch(),
       }
       app.openPicker(
         candidates.map(rewindPickerItem),
@@ -10209,7 +10158,7 @@ export function apply(ctx: Context, config: Config): void {
        * whole surface. */
       sessionCwd,
       signal,
-      get sessionGeneration() { return sessionGeneration },
+      get sessionGeneration() { return ownership.generation() },
       progressUpdatesState,
       responseStyleState,
       /** Canonical display surface: /display and /focus compatibility both
@@ -10255,14 +10204,14 @@ export function apply(ctx: Context, config: Config): void {
       // submits, steers, skill invocations, shell submits) refuse while a
       // transition is in flight (quiesce → commit) — the old agent may be
       // woken again between whenIdle and the retire.
-      sessionTransitionPending: () => transitionGate.busy,
+      sessionTransitionPending: () => ownership.gate.busy,
       // The single-writer session-transition gate: ordinary /new and
       // command-side switches run create AND commit inside one exclusive
       // section via this seam. Host fork dispatch is outside this FIFO;
       // forked-child adoption and rewind navigation use their own gated
       // adoption path.
       withSessionTransition: <T>(task: () => Promise<T> | T) =>
-        transitionGate.run(() => operationBarrier.runTransition(async () => {
+        ownership.gate.run(() => ownership.barrier.runTransition(async () => {
           try {
             return await task()
           } finally {
@@ -10272,7 +10221,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         })),
       withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
-        operationBarrier.runWriter(sessionId, async () => task()),
+        ownership.barrier.runWriter(sessionId, async () => task()),
       withPromptAdmission: <T>(agent: unknown, line: string, task: () => Promise<T> | T) =>
         directRuntime.withPromptAdmission(agent as Agent, draftHasImages(line, draftImages), async () => task()),
       enterView,
@@ -10331,7 +10280,7 @@ export function apply(ctx: Context, config: Config): void {
       if (refresh === undefined) return
       await refresh({
         source: 'live-session',
-        target: { kind: 'agent', key: sessionGeneration },
+        target: { kind: 'agent', key: ownership.generation() },
         agent,
       })
     }
