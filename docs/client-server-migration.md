@@ -437,7 +437,7 @@ The `0.4.9` line adapts the already-completed P1 product to published DSH
 |---|---|---|
 | Preset chooser-policy removal (`modeSelectionEnabled`) | ADAPTED | the DTO/Direct/Remote/command policy layer is deleted; `/preset` is a normal command over the official registry |
 | Model exact-availability admission + background default save | ADAPTED | the Direct Session write admits the current provider/model, commits, then returns while the official default save runs detached |
-| Dynamic tool enablement in an already-live Session | ADAPTED | official `developer/message` tool updates are tolerated by the fold/projections; live Plugin Manager enablement is proven end to end |
+| Dynamic tool enablement in an already-live Session | ADAPTED | official `developer/message` tool updates are tolerated by the fold/projections, and the Agent-loop tool-registry change is proven against a real Session; Plugin Manager bundle/plugin-row toggles in an installed profile report the official rc.2 `restart-required` outcome (no silent hot-apply claim) |
 | Interrupted Plugin Manager operation recovery | INHERITED + integration proof | the TUI still owns request-id start/wait/cancel only; rc.2 owns run/process recovery |
 | Registry/mirror install improvements | INHERITED | existing install-source/registry presentation regressions |
 | Long tool-output fix | INHERITED | long multibyte tool-result regression over the real fold/search/export path |
