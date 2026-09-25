@@ -213,7 +213,7 @@ import {
 } from './app/session/commit-order.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
-import type { SessionSubject } from './app/session/subject.ts'
+import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
@@ -258,7 +258,6 @@ import { buildPendingPresentation } from './pending-presentation.ts'
 import { DirectSubmissionPresentation, type SubmissionPresentationSource } from './submission-presentation.ts'
 import { SubmitLatencyTracker } from './submit-latency.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
-import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 // The tokenMeter service merge for context-pressure measurement.
 import type {} from '@deepseek-ai/dsh-token-meter'
 
@@ -2117,14 +2116,21 @@ export function apply(ctx: Context, config: Config): void {
       return owner !== undefined && directRuntime.owners.attachmentOf(owner)?.agent === candidate
     }
     /**
+     * The Direct attachment of one opaque owner: the runner IS the Direct
+     * composition root, and the session layer only ever hands it an `OwnerRef`.
+     */
+    const directAgentOfOwner = (owner: SessionOwnerRef): Agent | undefined =>
+      directRuntime.owners.attachmentOf(owner)?.agent
+    /**
      * The BOUND session runtime (A2 plan §1.1 phase 3): the session layer owns
-     * the retirement coordination; the runner supplies the user-facing reporting
-     * and the in-flight-work view (the ledgers move into the runtime with the
-     * fork / command-settlement flows in 3b-3 / 3b-5).
+     * the session orchestration; the runner supplies the surface operations, the
+     * user-facing reporting and the in-flight-work view (the ledgers move into
+     * the runtime with the fork / command-settlement flows in 3b-3 / 3b-5).
      */
     const sessionRuntime = bindSessionRuntime(ownership, {
       owners: directRuntime.owners,
       retirement: directRuntime.retirement,
+      lifecycleSignal: lifecycleController.signal,
       surface: {
         warnRetirement: (report) => {
           // The SEMANTIC outcome decides the wording; the backend's phase labels
@@ -2139,6 +2145,31 @@ export function apply(ctx: Context, config: Config): void {
         },
         warnRetirementSkipped: (reason) => {
           safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement was skipped (${reason}) — the session may not have been closed cleanly\n`)
+        },
+        isSurfaceDisposed: () => cleanedUp,
+        beginOpening: (sessionId) => beginOpening(sessionId),
+        clearOpening: (token) => clearOpening(token as OpeningToken),
+        settlePendingQueueRecalls: (committed) => settlePendingQueueRecalls(committed),
+        settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
+        resetSubmitLatency: () => submitLatencyTracker.reset(),
+        setCompletionOwner: (identity) => setCompletionOwner(identity),
+        initLiveSession: (owner) => {
+          const agent = directAgentOfOwner(owner)
+          if (agent === undefined) throw new Error('initLiveSession requires a Direct owner attachment')
+          return initLiveSession(agent)
+        },
+        refreshLiveCatalog: (owner) => {
+          const agent = directAgentOfOwner(owner)
+          if (agent === undefined) throw new Error('refreshLiveCatalog requires a Direct owner attachment')
+          return refreshLiveCatalog(agent)
+        },
+        reportSwitch: (from, to) => {
+          const agent = directAgentOfOwner(to)
+          diag.info('switch ok', {
+            from: from ?? '(none)',
+            to: agent?.session.id,
+            seq: agent === undefined ? undefined : Number(agent.session.seq),
+          })
         },
       },
       pendingWork: {
@@ -2596,126 +2627,6 @@ export function apply(ctx: Context, config: Config): void {
 // transition agent/handle extraction lives in runtime/session-lifecycle-port.ts
 // (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
 // the exact extraction the transition commit uses.
-    const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
-      ownership.bumpNavigationEpoch()
-      const from = agentNow()?.session.id
-      const opening = beginOpening(steps.target.id)
-      const oldOwner = ownership.owner()
-      const oldAttachment = oldOwner === undefined ? undefined : directRuntime.owners.attachmentOf(oldOwner)
-      const oldHandle = oldAttachment?.handle as AgentHandle | undefined
-      const oldAgent = oldAttachment?.agent
-      let transitionCommitted = false
-      return runTransitionTo<T>({
-        quiesceOld: async () => {
-          const owner = ownership.owner()
-          if (owner === undefined) return
-          // QUIESCE first: after whenIdle the old agent can no longer
-          // produce turn events, so the final flush below is truly final.
-          // (A /new while the agent is busy now WAITS for the
-          // current activity instead of aborting it — the deliberate
-          // product semantics, see docs/concurrency.md.) The wait is
-          // abort-aware: an exit during the quiesce cancels the CURRENT
-          // agent (which may be a NEW owner committed by an earlier queued
-          // transition), so the transition settles instead of hanging past
-          // the appExit watchdog.
-          await directRuntime.retirement.whenIdleOrAbort(owner, lifecycleController.signal)
-          // Final flush before the switch. The DSH SessionWriteLease
-          // (kernel flock) is the only cross-process writer authority, so
-          // no TUI-side lock bookkeeping is needed around the flush. The
-          // owner is re-read AFTER the quiesce (the abort path may have
-          // swapped it), matching the pre-cutover live read.
-          const flushOwner = ownership.owner()
-          if (flushOwner === undefined) return
-          await directRuntime.retirement.flush(flushOwner)
-        },
-        commit: (next) => {
-          transitionCommitted = true
-          // The commit ORDER is fixed by `runOrdinaryCommit` (A2 plan §4A): the
-          // generation reset runs BEFORE the new owner is published, so it
-          // observes the OLD owner; a disposed surface still publishes the late
-          // child for retirement but touches nothing else.
-          runOrdinaryCommit({
-            isSurfaceDisposed: () => cleanedUp,
-            settlePendingQueueRecalls,
-            settleLocalSubmitAck,
-            resetSubmitLatency: () => submitLatencyTracker.reset(),
-            bumpGeneration: ownership.bumpGeneration,
-            publishOwner: (owner) => {
-              const nextOwner = directRuntime.owners.fromHandle(owner as SessionHandle)
-              if (nextOwner === undefined) throw new Error('ordinary transition published a handle without a Direct owner')
-              ownership.setCurrentOwner(nextOwner, directRuntime.owners.sessionId(nextOwner))
-              return directRuntime.owners.completionIdentity(nextOwner)
-            },
-            setCompletionOwner,
-          }, next)
-        },
-        retireOld: async (next) => {
-          const retired: string[] = []
-          // 1. Retire the OLD owner through the retirement port (which owns the
-          //    official close order). The pre-commit quiesce already idled +
-          //    flushed; this post-commit pass covers the window where the old
-          //    agent was re-woken by a Host-side continuation, establishes the
-          //    final durability boundary, and releases the old handle. Every
-          //    phase failure is contained — the committed child always stands.
-          if (oldOwner !== undefined && oldHandle !== undefined && oldAgent !== undefined) {
-            const report = await directRuntime.retirement.retire(oldOwner, 'transition')
-            for (const failure of report.failures) {
-              // A failed dispose means the old session may still have
-              // writers; the child stays current and the failure is
-              // recorded (the DSH SessionWriteLease still guards the
-              // session cross-process).
-              retired.push(`old ${failure.phase}: ${failure.error}`)
-            }
-          }
-          try {
-            // The child quiesce is abort-aware too: an exit during this
-            // post-commit phase (with further transitions queued) must
-            // cancel the NEW owner instead of hanging past the watchdog.
-            // When the lifecycle aborted, the surface is already disposed
-            // and the retirement takes over: skip the surface
-            // initialization below (it would repaint into the disposed
-            // app) and let the committed child stand.
-            const nextOwner = directRuntime.owners.fromHandle(next as SessionHandle)
-            if (nextOwner === undefined) throw new Error('committed transition child has no Direct owner')
-            const aborted = await directRuntime.retirement.whenIdleOrAbort(nextOwner, lifecycleController.signal)
-            if (aborted) {
-              retired.push('child quiesce aborted by lifecycle')
-              return
-            }
-          } catch (error) {
-            retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
-          }
-          try {
-            await initLiveSession(directAgentOf(next) as Agent)
-          } catch (error) {
-            retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
-          }
-          // The new owner's catalog refresh is AWAITED before the switch is
-          // reported: the old wrappers became revalidating transitions at
-          // the target change, and the report must not precede the new
-          // catalog (a failed attempt still returns a successful switch —
-          // the coordinator warns and the transition commands keep
-          // re-validating).
-          try {
-            await refreshLiveCatalog(directAgentOf(next) as Agent)
-          } catch (error) {
-            retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
-          }
-          clearOpening(opening)
-          if (retired.length > 0) {
-            diag.error('transition retire failed (child committed)', { to: (directAgentOf(next) as Agent).session.id, failures: retired })
-          }
-          diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: Number((directAgentOf(next) as Agent).session.seq) })
-        },
-        recordFailure: (phase, error) => {
-          diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
-          clearOpening(opening)
-        },
-      }, steps).finally(() => {
-        if (!transitionCommitted) settlePendingQueueRecalls(false)
-        clearOpening(opening)
-      })
-    }
 
     /** Hand the TUI over to another persisted session. Never throws: every
      * failure (unknown session, broken log, preset mount) returns an error
@@ -2756,7 +2667,7 @@ export function apply(ctx: Context, config: Config): void {
         // composition; the cross-backend open request carries only the
         // Session identity (D2.3 convergence).
         if (lifecycleController.signal.aborted) return undefined
-        const result = await transitionTo({
+        const result = await sessionRuntime.transitionTo({
           target: { id: sessionId },
           // A rejected open leaves the target untouched: no pin, no retry —
           // the CURRENT session stays live and the user can retry the switch.
@@ -9950,7 +9861,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       switchSession,
       forkSession,
-      transitionTo,
+      transitionTo: (steps) => sessionRuntime.transitionTo(steps),
       currentPreset,
       sessionBlank,
       // PR D2: the command surface's generic refresh is UI-only (a

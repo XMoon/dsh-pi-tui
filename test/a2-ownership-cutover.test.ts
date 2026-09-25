@@ -40,17 +40,19 @@ test('the ownership core is the single state owner', () => {
 
 test('the current owner is published only through the Direct registry into the core slot', () => {
   // One publish site per commit shape, each resolving the owner from the handle
-  // that shape actually owns.
+  // that shape actually owns. The ordinary transition lives in the bound runtime.
   assert.ok(indexSource.includes('const nextOwner = resumed === undefined ? undefined : directRuntime.owners.fromHandle(resumed)'),
     'resume publication goes through the registry')
-  assert.ok(indexSource.includes('const nextOwner = directRuntime.owners.fromHandle(owner as SessionHandle)'),
-    'ordinary-transition publication goes through the registry')
   assert.ok(indexSource.includes('const nextOwner = directRuntime.owners.fromHandle(handle)'),
     'fork publication goes through the registry')
   assert.ok(indexSource.includes('const nextOwner = directRuntime.owners.fromHandle(created)'),
     'first-session publication goes through the registry')
-  const publishes = indexSource.match(/ownership\.setCurrentOwner\(nextOwner, /g) ?? []
-  assert.equal(publishes.length, 4, `expected exactly the 4 commit publishes, saw ${publishes.length}`)
+  assert.ok(sessionRuntimeSource.includes('const nextOwner = deps.owners.fromHandle(owner as SessionHandle)'),
+    'ordinary-transition publication goes through the registry (bound runtime)')
+  const indexPublishes = indexSource.match(/ownership\.setCurrentOwner\(nextOwner, /g) ?? []
+  assert.equal(indexPublishes.length, 3, `expected the three runner publish sites, saw ${indexPublishes.length}`)
+  const runtimePublishes = sessionRuntimeSource.match(/core\.setCurrentOwner\(nextOwner, /g) ?? []
+  assert.equal(runtimePublishes.length, 1, `expected the ordinary publish in the runtime, saw ${runtimePublishes.length}`)
   assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
   assert.ok(indexSource.includes('const handleNow = (): AgentHandle | undefined =>'),
