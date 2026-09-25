@@ -465,7 +465,7 @@ test('the runner wires agent/status to the membership-gated RUNTIME-only refresh
   // The handler must route to the runtime-only refresh — a re-listing
   // here would defeat the whole split (and the membership gate).
   const marker = "ctx.on('agent/status', ({ agent, status }) => {"
-  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 500)
+  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 900)
   assert.ok(handler.includes('refreshAgentRuntimeOnly()'),
     'agent/status must refresh RUNTIME only, never refreshAgents()')
   assert.ok(!handler.includes('refreshAgents()'),
@@ -527,16 +527,16 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
   // browser OPENED, never against values captured at dispatch — a
   // dispatch-time capture can never differ from the current state, so the
   // real protection is binding the intent to the opening surface.
-  assert.ok(handler.includes('ownership.generation() !== browserGeneration || liveAgent !== browserSession'),
-    'the dispatch must compare the current generation/session against the OPEN-time capture')
+  assert.ok(handler.includes('!captureMatches(browserSubject)'),
+    'the dispatch must compare the CURRENT ownership subject against the OPEN-time capture')
   assert.ok(handler.includes('activeTaskBrowserToken !== actionBrowserToken'),
     'a delayed result must not notify after the browser surface has been replaced or closed')
   const openMarker = 'const openTasksBrowser = ('
-  const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 1200)
-  assert.ok(openHead.includes('const browserGeneration = ownership.generation()'),
-    'the browser must capture the generation at open')
-  assert.ok(openHead.includes('const browserSession = liveAgent'),
-    'the browser must capture the live agent at open')
+  const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 2400)
+  assert.ok(openHead.includes('const browserSubject = ownership.captureSubject()'),
+    'the browser must capture the ownership subject (owner + generation) at open')
+  assert.ok(openHead.includes('const browserSession = agentNow()'),
+    'the browser must capture the live Direct attachment at open')
   assert.ok(openHead.includes('const browserToken = {}'),
     'the browser must capture a surface token for delayed action results')
   assert.ok(!handler.includes('actionGeneration'),

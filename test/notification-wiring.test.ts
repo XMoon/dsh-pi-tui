@@ -31,7 +31,7 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
   const occurrences = indexSource.split('completionController.onAgentStatus').length - 1
   assert.equal(occurrences, 1, 'exactly one feed path — agent/status')
   const marker = "ctx.on('agent/status', ({ agent, status }) => {"
-  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 500)
+  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 900)
   assert.ok(handler.includes('completionController.onAgentStatus(agent.id, status)'),
     'the agent/status handler must route the main agent to the controller')
   assert.ok(handler.includes('if (taskRuntime?.has(agent.id) !== true) return'),

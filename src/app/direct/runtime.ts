@@ -16,9 +16,10 @@
  *
  * This is the approved zone for Direct coupling (`ctx` forwarding and the
  * `@deepseek-ai/dsh-agent` identity type). It deliberately holds NO mutable
- * current-session truth: `getLiveAgent` / `getViewedQueueAgent` are live getters
- * into the session runtime's authority (A2 moves that authority into
- * `app/session`), never copied state.
+ * current-session truth: `currentDirectAttachment()` projects the ownership
+ * core's current owner through this module's registry and
+ * `getViewedQueueAgent()` is a live getter into the session runtime's authority
+ * (A2 moves that authority into `app/session`), never copied state.
  * @module @xmoon76/dsh-pi-tui/app/direct/runtime
  */
 
@@ -103,8 +104,6 @@ export interface DirectApplicationRuntimeDeps {
     installSelection: (agentCtx: unknown, agent: Agent) => void,
     presetId?: string,
   ) => Promise<CompositionLike>
-  /** The exact current Direct attachment; MUST read live state, never a snapshot. */
-  readonly getLiveAgent: () => Agent | undefined
   /** The interactive continuable child currently viewed, if any (live record). */
   readonly getViewedQueueAgent: () => DirectViewedQueueAgent | undefined
   /** The registered Host Agent for a session id (exact identity comparison). */
@@ -158,7 +157,9 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     deps.compose(installSessionModelSelection, presetId)
 
   const agentFor = (sessionId: string): Agent | undefined => {
-    const live = deps.getLiveAgent()
+    // The registry projects the ownership core's CURRENT owner; the runtime
+    // never holds a second current-agent truth.
+    const live = owners.currentDirectAttachment()
     return live?.session.id === sessionId ? live : undefined
   }
 
@@ -168,7 +169,7 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
   // agentFor, so resolving a child here cannot bypass SubagentPort's
   // parent-authorized prompt path.
   const queueAgentFor = (sessionId: string): Agent | undefined => {
-    const live = deps.getLiveAgent()
+    const live = owners.currentDirectAttachment()
     if (live?.session.id === sessionId) return live
     const viewed = deps.getViewedQueueAgent()
     if (viewed === undefined || viewed.childSessionId !== sessionId) return undefined

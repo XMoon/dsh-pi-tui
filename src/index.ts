@@ -212,6 +212,7 @@ import {
   runResumeCommit,
 } from './app/session/commit-order.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
+import type { SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
@@ -1872,9 +1873,14 @@ export function apply(ctx: Context, config: Config): void {
   // and is exposed to the fatal catch through a ref assigned once the
   // coordinator is defined. The fatal catch treats an unassigned slot as
   // "no owner".
-  let liveAgent: Agent | undefined
-  let liveHandle: AgentHandle | undefined
   let retireOwnedSessionRef: (() => Promise<RetirementReport>) | undefined
+  /**
+   * Whether a current Direct owner (agent + handle) exists, for the fatal catch
+   * below. The ownership core lives INSIDE the async root, so the catch reads it
+   * through this ref (the same visibility the old outer
+   * `liveAgent`/`liveHandle` declarations had).
+   */
+  let currentOwnerPresentRef: (() => boolean) | undefined
 
   void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
     // The TUI required surface is committed to running: synchronous init
@@ -2010,7 +2016,7 @@ export function apply(ctx: Context, config: Config): void {
     // with the lifecycle-abort cancel, so the later cancel phase is a no-op
     // for the same Agent.
     const preCancelOwnedSession = (): void => {
-      const agent = liveAgent
+      const agent = agentNow()
       if (agent === undefined) return
       if (shutdownCancelledAgents.has(agent)) return
       diag.info('retire cancel', { session: agent.session.id })
@@ -2059,8 +2065,13 @@ export function apply(ctx: Context, config: Config): void {
             disposeOwner: () => handle.dispose(),
           })
         const retire = async (): Promise<RetirementReport> => {
-          const agent = liveAgent
-          const handle = liveHandle
+          // Re-read the CURRENT owner INSIDE the gate (A2 plan §4.1): a
+          // transition committed while the shutdown waited must be the one
+          // retired, never a pre-cancelled capture.
+          const owner = ownership.owner()
+          const attachment = owner === undefined ? undefined : directRuntime.owners.attachmentOf(owner)
+          const agent = attachment?.agent
+          const handle = attachment?.handle as AgentHandle | undefined
           if (agent === undefined || handle === undefined) {
             return { failures: [] }
           }
@@ -2328,7 +2339,6 @@ export function apply(ctx: Context, config: Config): void {
       // runtime's Agent-scoped model-selection install.
       compose: (installSelection, presetId) =>
         composeAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState),
-      getLiveAgent: () => liveAgent,
       getViewedQueueAgent: () => viewedQueueAgent,
       registeredAgentFor: sessionId => agents.get(SessionId(sessionId)),
       resolvers: {
@@ -2337,6 +2347,34 @@ export function apply(ctx: Context, config: Config): void {
         flushSession: async session => { await sessions.flush(session as never) },
       },
     })
+    /**
+     * The Direct attachment of the CURRENT owner (A2 transitional projection):
+     * a DERIVED read of the ownership core through the Direct registry, never a
+     * stored second current-agent truth. Direct DATA/OPERATION reads only —
+     * identity/currentness goes through the ownership subject.
+     */
+    const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()
+    /** The Direct owner handle of the CURRENT owner (retirement/teardown only). */
+    const handleNow = (): AgentHandle | undefined => {
+      const owner = ownership.owner()
+      return owner === undefined ? undefined : directRuntime.owners.handleOf(owner) as AgentHandle | undefined
+    }
+    currentOwnerPresentRef = (): boolean => ownership.owner() !== undefined && handleNow() !== undefined
+    /**
+     * Whether the ownership subject captured at ADMISSION is still the CURRENT
+     * one (exact owner + generation). `captureSubject()` is undefined for a
+     * sessionless capture, which must match a still-sessionless slot.
+     */
+    const captureMatches = (subject: SessionSubject | undefined): boolean =>
+      subject === undefined ? ownership.owner() === undefined : ownership.isSubjectCurrent(subject)
+    /**
+     * Whether one exact Direct Agent object IS the current owner: the ownership
+     * core is the identity authority, the registry resolves its attachment.
+     */
+    const isCurrentOwnerAgent = (candidate: Agent): boolean => {
+      const owner = ownership.owner()
+      return owner !== undefined && directRuntime.owners.attachmentOf(owner)?.agent === candidate
+    }
     // The semantic backend (server/client migration): the TUI consumes
     // Host domains through narrow ports, never ctx.* directly. Direct is the
     // only backend today; remote/wire adapters join in later milestones
@@ -2379,20 +2417,20 @@ export function apply(ctx: Context, config: Config): void {
     /** TUI-only facade; this ref is NEVER installed into an Agent context. */
     const selected: ModelSelectionRef = {
       get current(): ModelSelection | undefined {
-        return liveAgent === undefined
+        return agentNow() === undefined
           ? defaultIntent.intent ?? (defaultModel.currentSelection() as ModelSelection | undefined)
-          : directRuntime.modelSelections.current(liveAgent)
+          : directRuntime.modelSelections.current(agentNow())
       },
       set current(next: ModelSelection | undefined) {
         // The facade write path: a live Session routes to its own selection
         // (in-memory; the durable commit belongs to the catalog port), a
         // sessionless surface records the default intent. /model uses the
         // runner's explicit setDefaultIntent for the durable path.
-        if (liveAgent === undefined) {
+        if (agentNow() === undefined) {
           setDefaultIntent(next)
           return
         }
-        directRuntime.modelSelections.setCurrent(liveAgent, next)
+        directRuntime.modelSelections.setCurrent(agentNow(), next)
       },
       assembled: undefined,
     }
@@ -2584,13 +2622,14 @@ export function apply(ctx: Context, config: Config): void {
     const resumeQuiesce = runResumeCommit({
       publishOwner: (owner) => {
         const resumed = owner as SessionHandle | undefined
-        liveHandle = resumed?.direct?.ownerHandle as AgentHandle | undefined
-        liveAgent = resumed?.direct?.agent as Agent | undefined
-        return liveAgent?.id
+        const nextOwner = resumed === undefined ? undefined : directRuntime.owners.fromHandle(resumed)
+        ownership.setCurrentOwner(nextOwner, nextOwner === undefined ? undefined : directRuntime.owners.sessionId(nextOwner))
+        return nextOwner === undefined ? undefined : directRuntime.owners.completionIdentity(nextOwner)
       },
       setCompletionOwner,
       preMountQuiesce: () => {
-        if (liveAgent === undefined) return undefined
+        const agent = agentNow()
+        if (agent === undefined) return undefined
         // The resume transaction succeeded; the remaining pre-mount wait is
         // the conversation preparation (whenIdle + the catalog ready
         // barrier) — the second status stage replaces the first in place
@@ -2604,7 +2643,7 @@ export function apply(ctx: Context, config: Config): void {
         // just-created owner would never be retired. Cancel the agent on
         // abort so whenIdle settles, then the pre-mount abort path below
         // retires the owner.
-        return whenIdleOrAbort(liveAgent, lifecycleController.signal)
+        return whenIdleOrAbort(agent, lifecycleController.signal)
       },
     }, handle)
     if (resumeQuiesce !== undefined) await resumeQuiesce
@@ -2627,7 +2666,7 @@ export function apply(ctx: Context, config: Config): void {
       // inside resolveColdSkillTarget if that is broken too), and
       // ensureSession surfaces the preset failure on the first input.
       let effectivePresetId: string | undefined
-      if (liveAgent === undefined) {
+      if (agentNow() === undefined) {
         // Only a deferred/fresh start resolves the LAUNCH preset. A live
         // resumed agent already runs its recorded composition, so resolving
         // `--preset` here would spuriously degrade a healthy resume when the
@@ -2645,7 +2684,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       const resolution = await resolveInitialCatalog({
-        liveAgent,
+        liveAgent: agentNow(),
         presetId: effectivePresetId,
         signal: lifecycleController.signal,
         ctx: ctx as unknown as SurfaceCatalogContext,
@@ -2661,29 +2700,31 @@ export function apply(ctx: Context, config: Config): void {
     }
     /** The preset the live agent runs on, when the deployment composes one. */
     const currentPreset = (): string | undefined => {
-      if (liveAgent === undefined) return undefined
+      const agent = agentNow()
+      if (agent === undefined) return undefined
       const presets = ctx.get('agentPresets') as {
         composedPreset?: (agentCtx: unknown) => unknown
       } | undefined
       if (typeof presets?.composedPreset === 'function') {
         try {
-          const composed = presets.composedPreset(liveAgent.ctx)
+          const composed = presets.composedPreset(agent.ctx)
           if (typeof composed === 'string') return composed
         } catch {
           // During teardown, fall back to the DSH projection read below.
         }
       }
-      return sessionPresetOf(ctx, liveAgent.session)
+      return sessionPresetOf(ctx, agent.session)
     }
     /** The Host turn-boundary authority's blank state for the live Session —
      *  the SAME projection the official `agentPresets.select` re-check reads.
      *  Never derived from the TUI transcript. */
     const sessionBlank = (): boolean | undefined => {
-      if (liveAgent === undefined) return undefined
+      const agent = agentNow()
+      if (agent === undefined) return undefined
       // The Host-authoritative blank read lives BEHIND the semantic Session
       // reader port (v2 §0.6): the runner no longer knows the Direct
       // projection name or the turn-boundary reducer.
-      return backend.sessionReader.blank(liveAgent.session.id)
+      return backend.sessionReader.blank(agent.session.id)
     }
     // Incremental fold state for the live session's log; reset on switch. A
     // resumed session is hydrated only by initLiveSession below, so startup
@@ -2734,16 +2775,17 @@ export function apply(ctx: Context, config: Config): void {
     /** Repaint the welcome card from the live agent's current facts. Re-read
      * on every call so a still-blank session's preset switch shows up. */
     const updateWelcomeCard = (): void => {
-      if (liveAgent === undefined) {
+      const agent = agentNow()
+      if (agent === undefined) {
         app.setWelcomeIdle(true)
         return
       }
       const current = selected.current
-      const provider = current?.provider ?? liveAgent.options.provider
-      const model = current?.model ?? liveAgent.options.model
+      const provider = current?.provider ?? agent.options.provider
+      const model = current?.model ?? agent.options.model
       app.setWelcomeCard({
         cwd: sessionCwd(),
-        sessionId: liveAgent.session.id,
+        sessionId: agent.session.id,
         model: `${provider}/${model}`,
         version: versionDisplay(),
         ...currentPreset() === undefined ? {} : { preset: currentPreset() },
@@ -2779,14 +2821,17 @@ export function apply(ctx: Context, config: Config): void {
 // the exact extraction the transition commit uses.
     const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
       ownership.bumpNavigationEpoch()
-      const from = liveAgent?.session.id
+      const from = agentNow()?.session.id
       const opening = beginOpening(steps.target.id)
-      const oldHandle = liveHandle
-      const oldAgent = liveAgent
+      const oldOwner = ownership.owner()
+      const oldAttachment = oldOwner === undefined ? undefined : directRuntime.owners.attachmentOf(oldOwner)
+      const oldHandle = oldAttachment?.handle as AgentHandle | undefined
+      const oldAgent = oldAttachment?.agent
       let transitionCommitted = false
       return runTransitionTo<T>({
         quiesceOld: async () => {
-          if (liveAgent === undefined) return
+          const agent = agentNow()
+          if (agent === undefined) return
           // QUIESCE first: after whenIdle the old agent can no longer
           // produce turn events, so the final flush below is truly final.
           // (A /new while the agent is busy now WAITS for the
@@ -2796,11 +2841,13 @@ export function apply(ctx: Context, config: Config): void {
           // agent (which may be a NEW owner committed by an earlier queued
           // transition), so the transition settles instead of hanging past
           // the appExit watchdog.
-          await whenIdleOrAbort(liveAgent, lifecycleController.signal)
+          await whenIdleOrAbort(agent, lifecycleController.signal)
           // Final flush before the switch. The DSH SessionWriteLease
           // (kernel flock) is the only cross-process writer authority, so
           // no TUI-side lock bookkeeping is needed around the flush.
-          await sessions.flush(liveAgent.session)
+          const flushAgent = agentNow()
+          if (flushAgent === undefined) return
+          await sessions.flush(flushAgent.session)
         },
         commit: (next) => {
           transitionCommitted = true
@@ -2815,9 +2862,10 @@ export function apply(ctx: Context, config: Config): void {
             resetSubmitLatency: () => submitLatencyTracker.reset(),
             bumpGeneration: ownership.bumpGeneration,
             publishOwner: (owner) => {
-              liveHandle = ownerHandleOf(owner) as AgentHandle | undefined
-              liveAgent = directAgentOf(owner) as Agent
-              return liveAgent.id
+              const nextOwner = directRuntime.owners.fromHandle(owner as SessionHandle)
+              if (nextOwner === undefined) throw new Error('ordinary transition published a handle without a Direct owner')
+              ownership.setCurrentOwner(nextOwner, directRuntime.owners.sessionId(nextOwner))
+              return directRuntime.owners.completionIdentity(nextOwner)
             },
             setCompletionOwner,
           }, next)
@@ -2924,7 +2972,7 @@ export function apply(ctx: Context, config: Config): void {
 
     const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
       // A switch INTO the session we are already on is a no-op.
-      if (liveAgent !== undefined && liveAgent.session.id === sessionId) {
+      if (ownership.currentSessionId() === sessionId) {
         return 'already on this session'
       }
       // Draft cleanup happens ONLY after the switch committed (the
@@ -2996,7 +3044,7 @@ export function apply(ctx: Context, config: Config): void {
      * shell command executes where the completions suggest files; `cwd`
      * (the process cwd) stays for launch-relative concerns (/export paths).
      */
-    const sessionCwd = (): string => liveAgent?.session.header.cwd ?? cwd
+    const sessionCwd = (): string => agentNow()?.session.header.cwd ?? cwd
     /**
      * Derive + write the terminal window title from the CURRENT surface
      * identity (the title policy in terminal-title.ts): session
@@ -3058,12 +3106,13 @@ export function apply(ctx: Context, config: Config): void {
       // surface that is the persisted Host default, NOT the optimistic intent
       // (which is shown only by the marker below). Otherwise a pending
       // sessionless save would paint m1 as both base and pending.
-      const selection = liveAgent === undefined
+      const agent = agentNow()
+      const selection = agent === undefined
         ? (defaultModel.currentSelection() as ModelSelection | undefined)
-        : directRuntime.modelSelections.current(liveAgent)
+        : directRuntime.modelSelections.current(agent)
       const base = selection !== undefined
         ? labelOf(selection)
-        : liveAgent === undefined ? 'no model' : `${liveAgent.options.provider}/${liveAgent.options.model}`
+        : agent === undefined ? 'no model' : `${agent.options.provider}/${agent.options.model}`
       const marker = currentModelSelectionMarker()
       if (marker === undefined) return base
       const pendingLabel = labelOf(marker.selection)
@@ -3080,6 +3129,7 @@ export function apply(ctx: Context, config: Config): void {
      * permission, NOT plan). */
     const deriveCompositionStatus = (): CompositionStatus => {
       const selection = selected.current
+      const agent = agentNow()
       const model = selection !== undefined
         ? {
             provider: selection.provider,
@@ -3087,12 +3137,12 @@ export function apply(ctx: Context, config: Config): void {
             displayName: selection.model,
             ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
           }
-        : liveAgent === undefined || liveAgent.options.provider === undefined || liveAgent.options.model === undefined
+        : agent === undefined || agent.options.provider === undefined || agent.options.model === undefined
           ? undefined
           : {
-              provider: liveAgent.options.provider,
-              id: liveAgent.options.model,
-              displayName: liveAgent.options.model,
+              provider: agent.options.provider,
+              id: agent.options.model,
+              displayName: agent.options.model,
             }
       const preset = currentPreset()
       return {
@@ -3143,7 +3193,7 @@ export function apply(ctx: Context, config: Config): void {
       // the parent's measurement on the child's stats (same rule as before
       // the split); the legacy setStatus field keeps carrying the parent's
       // cached value exactly like the old path.
-      const contextTokens = contextMeasurement.valueFor(liveAgent?.session.id)
+      const contextTokens = contextMeasurement.valueFor(agentNow()?.session.id)
       // The footer's [yolo]/[workspace-write]/[read-only]/[custom] mode badge
       // rides the effective preset (derived from the sandbox+approval knob
       // folds).
@@ -3178,11 +3228,11 @@ export function apply(ctx: Context, config: Config): void {
               sandboxPolicy: ctx.get('sandboxPolicy'),
               approval: ctx.get('approval'),
             },
-            liveAgent?.session,
+            agentNow()?.session,
           )
         : {}
       const collaboration = viewing === undefined
-        ? { plan: derivePlanStatus(ctx.get('planMode'), liveAgent, ctx.get('sessionProjections'), liveAgent?.session) }
+        ? { plan: derivePlanStatus(ctx.get('planMode'), agentNow(), ctx.get('sessionProjections'), agentNow()?.session) }
         : { plan: { effective: false } }
       const workspace = deriveWorkspaceStatus(displayCwd)
       const usage = usageFromStats(viewing?.stats.snapshot() ?? stats, viewing === undefined ? contextTokens : undefined)
@@ -3218,7 +3268,7 @@ export function apply(ctx: Context, config: Config): void {
         // and syncExtensionState would publish a STALE permission to the
         // extension snapshot (a state transition where the permission
         // preset service or the live agent is momentarily gone).
-        permission: deriveRunnerPermission(permission, liveAgent),
+        permission: deriveRunnerPermission(permission, agentNow()),
         // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
         // TuiApp merge keeps old fields otherwise, and the session
         // switch / cold-resume window before the deferred measurement
@@ -3241,7 +3291,7 @@ export function apply(ctx: Context, config: Config): void {
     // falls back — never a dialog, never a stale foreign session value
     // (the coordinator is session-bound).
     const refreshContextMeasurement = (_reason: ContextMeasureReason): void => {
-      const session = liveAgent?.session
+      const session = agentNow()?.session
       if (session === undefined) return
       contextMeasurement.bind(session.id)
       contextMeasurement.measure(session.id, (id) => backend.sessionReader.measureContext(id))
@@ -3255,7 +3305,7 @@ export function apply(ctx: Context, config: Config): void {
     // surface bypassed the cache and could duplicate the deferred initial
     // measurement).
     const forceContextMeasurement = (): number | undefined => {
-      const session = liveAgent?.session
+      const session = agentNow()?.session
       if (session === undefined) return undefined
       contextMeasurement.bind(session.id)
       contextMeasurement.markDirty()
@@ -3277,7 +3327,7 @@ export function apply(ctx: Context, config: Config): void {
       cancelDeferredContextMeasure?.()
       cancelDeferredContextMeasure = deferInitialContextMeasure(
         (callback) => setImmediate(callback),
-        () => generation === ownership.generation() && liveAgent?.session.id === sessionId,
+        () => generation === ownership.generation() && ownership.currentSessionId() === sessionId,
         () => {
           // Bind the captured session BEFORE the dirty guard: on a cold
           // resume the coordinator is still UNBOUND (reads as not dirty),
@@ -3392,8 +3442,9 @@ export function apply(ctx: Context, config: Config): void {
     // degrade to generic cards rather than fail the render.
     const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined
     const present = toolPresenterFrom(name => {
-      if (liveAgent === undefined) return undefined
-      return tools?.get(name, liveAgent)
+      const agent = agentNow()
+      if (agent === undefined) return undefined
+      return tools?.get(name, agent)
     })
     // Stable signal snapshot of the runner-owned lifecycle controller.
     const signal = lifecycleController.signal
@@ -3508,11 +3559,7 @@ export function apply(ctx: Context, config: Config): void {
       if (owner !== undefined) directRuntime.ownerPool.park(owner)
     }
     const forkNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
-      isRewindIdentityCurrent({
-        sessionId: liveAgent?.session.id,
-        generation: ownership.generation(),
-        navigationEpoch: ownership.navigationEpoch(),
-      }, expected)
+      isRewindIdentityCurrent(ownership.captureNavigationIdentity(), expected)
     const adoptFork = async (
       handle: SessionHandle,
       expected: RewindLiveIdentity,
@@ -3526,11 +3573,15 @@ export function apply(ctx: Context, config: Config): void {
           parkForkOwner(handle)
           return
         }
-        const oldAgent = liveAgent
-        const oldHandle = liveHandle
-        const nextAgent = directAgentOf(handle) as Agent | undefined
-        const nextHandle = ownerHandleOf(handle) as AgentHandle | undefined
-        if (nextAgent === undefined || nextHandle === undefined) {
+        const oldOwner = ownership.owner()
+        const oldAttachment = oldOwner === undefined ? undefined : directRuntime.owners.attachmentOf(oldOwner)
+        const oldAgent = oldAttachment?.agent
+        const oldHandle = oldAttachment?.handle as AgentHandle | undefined
+        const nextOwner = directRuntime.owners.fromHandle(handle)
+        const nextAttachment = nextOwner === undefined ? undefined : directRuntime.owners.attachmentOf(nextOwner)
+        const nextAgent = nextAttachment?.agent
+        const nextHandle = nextAttachment?.handle as AgentHandle | undefined
+        if (nextOwner === undefined || nextAgent === undefined || nextHandle === undefined) {
           throw new Error(`forked session "${handle.session.id}" has no Direct owner`)
         }
         // The fork-adoption commit ORDER is fixed by `runForkCommit`
@@ -3542,9 +3593,8 @@ export function apply(ctx: Context, config: Config): void {
           resetSubmitLatency: () => submitLatencyTracker.reset(),
           bumpGeneration: ownership.bumpGeneration,
           publishOwner: () => {
-            liveAgent = nextAgent
-            liveHandle = nextHandle
-            return nextAgent.id
+            ownership.setCurrentOwner(nextOwner, nextAgent.session.id)
+            return directRuntime.owners.completionIdentity(nextOwner)
           },
           setCompletionOwner,
         }, nextAgent)
@@ -3614,11 +3664,7 @@ export function apply(ctx: Context, config: Config): void {
       // A rewind picker captures identity BEFORE its overlay can yield to a
       // newer navigation. Validate that capture against the live surface before
       // claiming a fresh operation epoch; A → B → A must not revive A's row.
-      const before = {
-        sessionId: liveAgent?.session.id,
-        generation: ownership.generation(),
-        navigationEpoch: ownership.navigationEpoch(),
-      }
+      const before = ownership.captureNavigationIdentity()
       const pickerCurrent = pickerIdentity === undefined || isRewindIdentityCurrent(before, pickerIdentity)
       const expectedSessionId = pickerIdentity?.sessionId ?? before.sessionId
       // Reject an obsolete picker before consuming an epoch. A stale A picker
@@ -3693,7 +3739,7 @@ export function apply(ctx: Context, config: Config): void {
     const interruptLiveAgent = (): void => {
       if (cleanedUp) return
       localShellController?.abort()
-      const agent = liveAgent
+      const agent = agentNow()
       if (agent === undefined) return
       const generation = ownership.generation()
       runOwned('agent interrupt', () => ownership.barrier.runWriter(
@@ -3701,9 +3747,9 @@ export function apply(ctx: Context, config: Config): void {
         () => interruptAgent(agent, backend.sessionWriter),
       ), {
         diag,
-        sessionId: () => liveAgent?.session.id,
+        sessionId: () => agentNow()?.session.id,
         onResult: (outcome) => {
-          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) return
+          if (cleanedUp || !sessionUnchanged({ agent, generation }, agentNow(), ownership.generation())) return
           if (outcome.kind === 'committed' || outcome.kind === 'cancelled') return
           const message = outcome.kind === 'rejected'
             ? outcome.error.message
@@ -3715,7 +3761,7 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(message, 'error')
         },
         onError: (error) => {
-          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) return
+          if (cleanedUp || !sessionUnchanged({ agent, generation }, agentNow(), ownership.generation())) return
           app.notify(safeErrorMessage(error), 'error')
         },
       })
@@ -3884,7 +3930,7 @@ export function apply(ctx: Context, config: Config): void {
         // including the positional `dsh <name>` (see hostRunningProfile): the
         // argv scrape alone would answer the pi-tui fallback there and hand the
         // user a resume command for the wrong profile.
-        const resume = resumeCommand(hostRunningProfile(ctx), liveAgent?.session.id ?? '')
+        const resume = resumeCommand(hostRunningProfile(ctx), agentNow()?.session.id ?? '')
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
       },
       exit,
@@ -3900,7 +3946,7 @@ export function apply(ctx: Context, config: Config): void {
       // all defined by this point — the resume that produced the live
       // agent ran after them). Without a live owner there is nothing to
       // retire; close the diagnostics handle either way (idempotent).
-      if (liveAgent !== undefined || liveHandle !== undefined || directRuntime.hasParkedOwners() || pendingForks.size > 0) {
+      if (ownership.owner() !== undefined || directRuntime.hasParkedOwners() || pendingForks.size > 0) {
         await retireOwnedSession()
       } else {
         diag.dispose()
@@ -4002,9 +4048,9 @@ export function apply(ctx: Context, config: Config): void {
         const submitted = formatShellSubmitText(command, result)
         // T1 BEFORE the dispatch: same ordering rule as the Enter path —
         // the ack row keeps waiting for the authoritative event (plan D).
-        submitLatencyTracker.mark(liveAgent?.session.id, 'dispatch')
+        submitLatencyTracker.mark(agentNow()?.session.id, 'dispatch')
         runOwned('shell submit', () => submitShellResult({
-          currentAgent: () => liveAgent as unknown as ShellSubmitAgentLike | undefined,
+          currentAgent: () => agentNow() as unknown as ShellSubmitAgentLike | undefined,
           currentGeneration: () => ownership.generation(),
           notify: (message, kind) => {
             if (cleanedUp) return
@@ -4032,14 +4078,14 @@ export function apply(ctx: Context, config: Config): void {
           },
         }, submitted), {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
           // A stalled shell submit (stale identity / transition fence /
           // no agent) wrote nothing: terminal — the pending row must not
           // outlive the submission (plan D exit enumeration).
           onResult: (outcome) => {
             if (cleanedUp) return
             if (outcome !== 'ok') shellTerminalAck(`shell submit ${outcome}`)
-            else if (liveAgent === undefined) shellTerminalAck('shell submit without an agent')
+            else if (agentNow() === undefined) shellTerminalAck('shell submit without an agent')
           },
           // runOwned routes cancellations EXCLUSIVELY here: a
           // cancellation-shaped rejection from the write bypasses
@@ -4137,7 +4183,7 @@ export function apply(ctx: Context, config: Config): void {
           return execution.result()
         }, {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
           isCancellation: () => localSignal.aborted,
           onResult: (result) => {
             releaseController()
@@ -4355,7 +4401,7 @@ export function apply(ctx: Context, config: Config): void {
         && current !== undefined
         && current.mode === 'continuable'
         && current.access === 'interactive-direct-child'
-        && current.parentSessionId === liveAgent?.session.id
+        && current.parentSessionId === ownership.currentSessionId()
         && agent.session.id === current.id
         && agent.session.header.parentSession === current.parentSessionId) {
         viewedQueueAgent = { parentSessionId: current.parentSessionId, childSessionId: current.id, agent }
@@ -4375,7 +4421,7 @@ export function apply(ctx: Context, config: Config): void {
           ? viewer.id
           : undefined
       }
-      return liveAgent?.session.id
+      return agentNow()?.session.id
     }
     /** The display text of one client-local submission echo: the draft text
      * with its attachment placeholders expanded to compact markers, so an
@@ -4669,7 +4715,7 @@ export function apply(ctx: Context, config: Config): void {
      *  no second marker to diverge from the tracker. */
     const currentModelSelectionMarker = ():
       { readonly selection: ModelSelection; readonly status: 'pending' | 'unresolved' } | undefined => {
-      if (liveAgent !== undefined) {
+      if (agentNow() !== undefined) {
         return pendingModelSelection !== undefined && pendingModelSelection.generation === ownership.generation()
           ? { selection: pendingModelSelection.selection, status: pendingModelSelection.status }
           : undefined
@@ -5236,9 +5282,9 @@ export function apply(ctx: Context, config: Config): void {
      * the newer row (or reset its latency timeline).
      */
     const acceptLocalSubmitAck = (): number => {
-      const detail: SubmitPendingDetail = liveAgent?.status === 'running' ? 'queued' : 'submit'
+      const detail: SubmitPendingDetail = agentNow()?.status === 'running' ? 'queued' : 'submit'
       const token = acceptSubmitAck(localSubmitAck, { detail, now: Date.now() })
-      submitLatencyTracker.accept(liveAgent?.session.id)
+      submitLatencyTracker.accept(agentNow()?.session.id)
       app.setSubmitPending(detail)
       return token
      }
@@ -5337,7 +5383,7 @@ export function apply(ctx: Context, config: Config): void {
       // A followup/steer against an EXISTING session is not a session
       // creation failure — "could not start a session" would mislead
       // (review finding).
-      const prefix = liveAgent === undefined ? 'could not start a session' : 'submission failed'
+      const prefix = agentNow() === undefined ? 'could not start a session' : 'submission failed'
       app.notify(`${prefix}: ${message}`, 'error')
     }
     /** The image submission surface (plan §13): the live attachment/llm
@@ -5350,19 +5396,20 @@ export function apply(ctx: Context, config: Config): void {
       llm: ctx.get('llm') as PrepareInputDeps['llm'],
       // Send-time `@`-file canonicalization through the Host-file port
       // (migration M1.10): the live session's workspace is the scope.
-      canonicalizeMentions: (text) => backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: liveAgent?.session.id ?? '' }, text),
+      canonicalizeMentions: (text) => backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: agentNow()?.session.id ?? '' }, text),
       sessionCwd: () => sessionCwd(),
       currentModel: () => {
         // The AUTHORITATIVE model for the next step is the mutable
         // selection's `current` (/model writes it; prompt assembly reads
-        // it) — never `liveAgent.options`, which holds the agent's launch
+        // it) — never `agentNow().options`, which holds the agent's launch
         // configuration and does not move on /model (review finding 1).
         const current = selected.current
         if (current !== undefined) return { provider: current.provider, model: current.model }
         // No selection assembled yet (pre-/model or a sessionless start):
         // fall back to the agent's launch options as the best known pair.
-        if (liveAgent === undefined) return undefined
-        const { provider, model } = liveAgent.options
+        const agent = agentNow()
+        if (agent === undefined) return undefined
+        const { provider, model } = agent.options
         return provider === undefined || model === undefined ? undefined : { provider, model }
       },
     }
@@ -5516,8 +5563,9 @@ export function apply(ctx: Context, config: Config): void {
       // Admission identity is captured synchronously, before this gesture
       // waits behind an earlier submit. A later session must never inherit
       // an old submission merely because the FIFO turn became available.
-      const submittedAgent = liveAgent
+      const submittedAgent = agentNow()
       const submittedGeneration = ownership.generation()
+      const submittedSubject = ownership.captureSubject()
       let submitTurnTransferred = false
       // Local submit acknowledgement (plan D): the row appears NOW —
       // before any session create / admission / command work — because
@@ -5674,27 +5722,19 @@ export function apply(ctx: Context, config: Config): void {
           // persists a row without a sessionId.
           await persistAfterSession(
             async () => {
-              if (submittedAgent !== undefined && !sessionUnchanged(
-                { agent: submittedAgent, generation: submittedGeneration },
-                liveAgent,
-                ownership.generation(),
-              )) return undefined
+              if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return undefined
               await ensureSession()
               if (cleanedUp) return undefined
-              return liveAgent?.session.id
+              return agentNow()?.session.id
             },
             (sessionId) => {
               if (cleanedUp) return
-              if (submittedAgent !== undefined && !sessionUnchanged(
-                { agent: submittedAgent, generation: submittedGeneration },
-                liveAgent,
-                ownership.generation(),
-              )) return
+              if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return
               persistHistory(sessionId)
             },
           )
           if (cleanedUp) return
-          const agent = liveAgent
+          const agent = agentNow()
           if (agent === undefined) {
             // Nothing can be written (degraded resolve after a successful
             // creation): the wait ends here with NO write — the pending
@@ -5703,11 +5743,7 @@ export function apply(ctx: Context, config: Config): void {
             settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
             return
           }
-          if (submittedAgent !== undefined && !sessionUnchanged(
-            { agent: submittedAgent, generation: submittedGeneration },
-            liveAgent,
-            ownership.generation(),
-          )) {
+          if (submittedAgent !== undefined && !captureMatches(submittedSubject)) {
             const merged = mergeDraft(app.getDraft(), text)
             app.setEditorText(merged)
             settleLocalSubmission(submitRequestId)
@@ -5721,10 +5757,11 @@ export function apply(ctx: Context, config: Config): void {
         // never target a session a switch already left behind (the async
         // admission below yields).
         const generation = ownership.generation()
+        const sessionSubject = ownership.captureSubject()
         // TOCTOU re-validation: the session must still be the exact one the
         // identity was captured from, or the submission is aborted for a
         // retry against the new session.
-        if (!sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
+        if (!captureMatches(sessionSubject)) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
           settleLocalSubmission(submitRequestId)
@@ -5735,7 +5772,7 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         // From here on the CAPTURED agent is used — never the mutable
-        // liveAgent: writing through a re-read closure variable could
+        // agentNow(): writing through a re-read closure variable could
         // target a session the identity check did not see (a switch
         // between the check and the write).
         const commands = ctx.get('commands')
@@ -5979,7 +6016,7 @@ export function apply(ctx: Context, config: Config): void {
               // the session moved on while the command ran, restore the
               // draft instead of posting into a session the user has left.
               if (execution === undefined) {
-                if (sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
+                if (captureMatches(sessionSubject)) {
                   // The fallback is a REAL submission: prepare (admit
                   // images when present) and follow up — an owned workflow
                   // so a failed image admission restores the draft instead
@@ -6030,7 +6067,7 @@ export function apply(ctx: Context, config: Config): void {
                           if (cleanedUp) return
                           // Re-check the captured session identity AFTER the
                           // async admission (the guard-window rule, AGENTS.md).
-                          if (!sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
+                          if (!captureMatches(sessionSubject)) {
                             const merged = mergeDraft(app.getDraft(), text)
                             app.setEditorText(merged)
                             settleLocalSubmission(submitRequestId)
@@ -6229,7 +6266,7 @@ export function apply(ctx: Context, config: Config): void {
             if (cleanedUp) return
             // Re-check the captured session identity AFTER the async
             // admission (the guard-window rule, AGENTS.md).
-            if (!sessionUnchanged({ agent, generation }, liveAgent, ownership.generation())) {
+            if (!captureMatches(sessionSubject)) {
               const merged = mergeDraft(app.getDraft(), text)
               app.setEditorText(merged)
               settleLocalSubmission(submitRequestId)
@@ -6277,7 +6314,7 @@ export function apply(ctx: Context, config: Config): void {
         restore: (t) => restoreSubmissionDraft(t),
       }, text), {
         diag,
-        sessionId: () => liveAgent?.session.id,
+        sessionId: () => agentNow()?.session.id,
         // The flow restored the editor; this sink settles the gesture's
         // ack (token-scoped) and only notifies.
         onError: (error) => {
@@ -6356,14 +6393,14 @@ export function apply(ctx: Context, config: Config): void {
       // needed for the EXECUTION. The row follows the call site's identity
       // (sessionless commands write an unscoped row; a local command inside
       // a live session carries that session id).
-      persistHistory(historySessionIdFor(historyKind, liveAgent?.session.id))
+      persistHistory(historySessionIdFor(historyKind, agentNow()?.session.id))
       // An owned workflow: the result decides the notify, the failure lands
       // in diagnostics — runOwned (AGENTS.md), never a bare void. The
       // handler may be a SYNC implementation, so the factory must run inside
       // runOwned (a sync throw would otherwise escape before the entry).
       runOwned('local command', () => handler(invocation), {
         diag,
-        sessionId: () => liveAgent?.session.id,
+        sessionId: () => agentNow()?.session.id,
         onResult: (result) => {
           if (cleanedUp) return
           if (result !== undefined && result.kind === 'error') {
@@ -6433,19 +6470,20 @@ export function apply(ctx: Context, config: Config): void {
       // any runOwned / ensureSession work — the deferred-start contract
       // (an empty Ctrl+S must never create the session). The decision is
       // the steerHasPayload pure function (headless-pinned).
-      const pendingForGate = liveAgent === undefined
+      const pendingAgent = agentNow()
+      const pendingForGate = pendingAgent === undefined
         ? undefined
-        : backend.pendingInputReader.snapshot(liveAgent.session.id)
+        : backend.pendingInputReader.snapshot(pendingAgent.session.id)
       // An unavailable projection is not an empty queue. Let steerAll report
       // that stale read unless this is the draft-only policy, which never
       // depends on queue state.
-      if (pendingForGate !== undefined || liveAgent === undefined || onlyDraft) {
+      if (pendingForGate !== undefined || agentNow() === undefined || onlyDraft) {
         if (!steerHasPayload(draftHasPayload, {
           onlyDraft,
           queuedCount: pendingForGate === undefined
             ? 0
             : pendingForGate.items.filter(item => item.placement === 'queued').length,
-          liveAgent: liveAgent !== undefined,
+          liveAgent: agentNow() !== undefined,
         })) {
           // A parked next-step steering occurrence is not a lost message — the
           // official contract leaves it in the inbox until the next wake — but
@@ -6474,8 +6512,9 @@ export function apply(ctx: Context, config: Config): void {
       // Capture the session identity before the first awaited preparation or
       // deferred-start operation. A later session must never receive this
       // gesture's prepared input or history row.
-      const submittedAgent = liveAgent
+      const submittedAgent = agentNow()
       const submittedGeneration = ownership.generation()
+      const submittedSubject = ownership.captureSubject()
       // The steered draft's correlation identity, minted before the first
       // asynchronous preparation await. An EXISTING session installs its local
       // steering echo right now (the editor just cleared); a deferred start
@@ -6539,29 +6578,17 @@ export function apply(ctx: Context, config: Config): void {
           async () => {
             await ensureSession()
             if (cleanedUp) return undefined
-            if (submittedAgent !== undefined && !sessionUnchanged(
-              { agent: submittedAgent, generation: submittedGeneration },
-              liveAgent,
-              ownership.generation(),
-            )) return undefined
-            return liveAgent?.session.id
+            if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return undefined
+            return agentNow()?.session.id
           },
           (sessionId) => {
             if (cleanedUp) return
-            if (submittedAgent !== undefined && !sessionUnchanged(
-              { agent: submittedAgent, generation: submittedGeneration },
-              liveAgent,
-              ownership.generation(),
-            )) return
+            if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return
             persistHistory?.(sessionId)
           },
         )
         if (cleanedUp) return
-        if (submittedAgent !== undefined && !sessionUnchanged(
-          { agent: submittedAgent, generation: submittedGeneration },
-          liveAgent,
-          ownership.generation(),
-        )) {
+        if (submittedAgent !== undefined && !captureMatches(submittedSubject)) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
           settleLocalSubmission(steerRequestId)
@@ -6571,7 +6598,8 @@ export function apply(ctx: Context, config: Config): void {
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
           return
         }
-        if (liveAgent === undefined) {
+        const steerAgent = agentNow()
+        if (steerAgent === undefined) {
           // Nothing can be sent (degraded resolve after a successful
           // creation): the ack row must not outlive the submission.
           settleLocalSubmission(steerRequestId)
@@ -6581,8 +6609,9 @@ export function apply(ctx: Context, config: Config): void {
         // For an existing session this is the identity captured before the
         // first await; for deferred start it is captured immediately after
         // creation and before message admission.
-        const agentForSteer = submittedAgent ?? liveAgent
+        const agentForSteer = submittedAgent ?? steerAgent
         const generationForSteer = submittedAgent === undefined ? ownership.generation() : submittedGeneration
+        const steerSubject = submittedAgent === undefined ? ownership.captureSubject() : submittedSubject
         // A deferred start now has its session identity: resolve the gesture's
         // delivery mode and install the local echo before the async admission
         // await.
@@ -6615,11 +6644,7 @@ export function apply(ctx: Context, config: Config): void {
         // Re-check the identity after async admission, before entering the
         // writer barrier. A session switch during preparation must restore
         // the original draft instead of retargeting the new session.
-        if (!sessionUnchanged(
-          { agent: agentForSteer, generation: generationForSteer },
-          liveAgent,
-          ownership.generation(),
-        )) {
+        if (!captureMatches(steerSubject)) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
           settleLocalSubmission(steerRequestId)
@@ -6703,7 +6728,7 @@ export function apply(ctx: Context, config: Config): void {
         },
       }, text), {
         diag,
-        sessionId: () => liveAgent?.session.id,
+        sessionId: () => agentNow()?.session.id,
         // The flow restored the editor; this sink settles the gesture's
         // ack (token-scoped) and only notifies.
         onError: (error) => {
@@ -6904,7 +6929,7 @@ export function apply(ctx: Context, config: Config): void {
           // `!!` runs purely locally with NO session write (pi's
           // excluded-from-context escape hatch) — the row is sessionless
           // (Current directory / All directories, never Current session).
-          persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
+          persistHistory(historySessionIdFor('sessionless', agentNow()?.session.id))
           runLocalShell(text, undefined)
         } else if (shellCommandOf(text) !== '') {
           // Local submit acknowledgement (plan D), armed AT THE GESTURE —
@@ -6921,11 +6946,11 @@ export function apply(ctx: Context, config: Config): void {
           // (the deferred-start gate), so a `!` line that creates the
           // session carries its id.
           runOwned('contextual shell', () => ensureSession().then(() => {
-            persistHistory(historySessionIdFor('agent-facing', liveAgent?.session.id))
+            persistHistory(historySessionIdFor('agent-facing', agentNow()?.session.id))
             runLocalShell(text, shellAckToken)
           }), {
             diag,
-            sessionId: () => liveAgent?.session.id,
+            sessionId: () => agentNow()?.session.id,
             onError: (error) => {
               // The session create failed: nothing will be written — the
               // ack row armed at the gesture is TERMINAL here (plan D).
@@ -6945,7 +6970,7 @@ export function apply(ctx: Context, config: Config): void {
           })
         } else {
           // A bare `!` (no command) is a no-op — sessionless.
-          persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
+          persistHistory(historySessionIdFor('sessionless', agentNow()?.session.id))
         }
         return
       }
@@ -7006,7 +7031,7 @@ export function apply(ctx: Context, config: Config): void {
       // their own busy semantics (Host commands, client commands) ignore it.
       const delivery: SubmitDelivery = request === 'explicit-queue'
         ? 'queue'
-        : resolveSubmitDelivery(parsed, liveAgent?.status === 'running', request, tuiSettings?.get().busyEnter)
+        : resolveSubmitDelivery(parsed, agentNow()?.status === 'running', request, tuiSettings?.get().busyEnter)
       // NAMESPACE ORDER (DSH client command contribution parity):
       //   1. host command claim (the closed host catalog always wins);
       //   2. client command contribution (client-owned behavior);
@@ -7061,7 +7086,7 @@ export function apply(ctx: Context, config: Config): void {
           runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
           return
         }
-        if (liveAgent !== undefined) {
+        if (agentNow() !== undefined) {
           runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
           return
         }
@@ -7078,7 +7103,7 @@ export function apply(ctx: Context, config: Config): void {
           reserve: (draft) => pinDraftAttachments(draft, draftImages, draftFiles),
           run: async () => {
             await ensureSession()
-            if (cleanedUp || liveAgent === undefined) return
+            if (cleanedUp || agentNow() === undefined) return
             // AUTHORITY RE-CHECK after the session exists: the deferred start
             // commits a session whose scoped catalog the standing view could
             // not see, and the skill catalog may load with it. A live HOST
@@ -7109,7 +7134,7 @@ export function apply(ctx: Context, config: Config): void {
           restore: (draft) => restoreSubmissionDraft(draft),
         }, text), {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
           onError: (error) => {
             if (cleanedUp) return
             // The flow restored the editor BEFORE the reservation released;
@@ -7125,10 +7150,10 @@ export function apply(ctx: Context, config: Config): void {
       // none); with a live agent it dispatches through the session's command
       // service, but the persist closure still supplies undefined.
       if (parsed !== undefined && isSessionless) {
-        if (liveAgent === undefined) {
+        if (agentNow() === undefined) {
           runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
         } else {
-          dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id)), delivery)
+          dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', agentNow()?.session.id)), delivery)
         }
         return
       }
@@ -7328,7 +7353,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         }), {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
           onError: (error) => {
             if (cleanedUp) return
             app.notify(safeErrorMessage(error), 'error')
@@ -7338,7 +7363,7 @@ export function apply(ctx: Context, config: Config): void {
       // The owned-task entry for UI-layer one-shot flows (the external
       // editor): runOwned with the runner's diag pre-attached.
       runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
-        runOwned(label, task, { ...options, diag, sessionId: () => liveAgent?.session.id })
+        runOwned(label, task, { ...options, diag, sessionId: () => agentNow()?.session.id })
       },
       onExit: () => {
         // Keyboard exit requests route through the SAME exit orchestration as
@@ -7416,16 +7441,17 @@ export function apply(ctx: Context, config: Config): void {
             break
           }
           case 'cycle-permission': {
-            if (liveAgent === undefined) break
+            const agent = agentNow()
+            if (agent === undefined) break
             const permission = ctx.get('permissionPresets')
             if (permission === undefined) break
             const names = permission.names
             if (names.length === 0) break
-            const current = (permission as { current(session: unknown): string }).current(liveAgent.session)
+            const current = (permission as { current(session: unknown): string }).current(agent.session)
             const index = names.indexOf(current)
             const next = names[(index + 1) % names.length] ?? names[0]
             if (next === undefined || next === current) break
-            permission.set(liveAgent.session, next)
+            permission.set(agent.session, next)
             app.notify(next === 'danger-full-access'
               ? `⚠ ${next} — no approvals`
               : `permission: ${next}`,
@@ -7723,16 +7749,17 @@ export function apply(ctx: Context, config: Config): void {
       // preset (plain switches notify in the dim info style) and an immediate
       // footer refresh.
       onCyclePermission: () => {
-        if (liveAgent === undefined) return
+        const agent = agentNow()
+        if (agent === undefined) return
         const permission = ctx.get('permissionPresets')
         if (permission === undefined) return
         const names = permission.names
         if (names.length === 0) return
-        const current = (permission as { current(session: unknown): string }).current(liveAgent.session)
+        const current = (permission as { current(session: unknown): string }).current(agent.session)
         const index = names.indexOf(current)
         const next = names[(index + 1) % names.length] ?? names[0]
         if (next === undefined || next === current) return
-        permission.set(liveAgent.session, next)
+        permission.set(agent.session, next)
         app.notify(next === 'danger-full-access'
           ? `⚠ ${next} — no approvals`
           : `permission: ${next}`,
@@ -7744,9 +7771,9 @@ export function apply(ctx: Context, config: Config): void {
       // into the editor draft. The gesture is disabled in every viewer so it
       // cannot mutate a hidden main or child queue.
       onDequeue: () => {
-        if (cleanedUp || viewing !== undefined || liveAgent === undefined) return
-        const queuedAgent = liveAgent
-        const queuedGeneration = ownership.generation()
+        const queuedAgent = agentNow()
+        if (cleanedUp || viewing !== undefined || queuedAgent === undefined) return
+        const queuedSubject = ownership.captureSubject()
         const pending = backend.pendingInputReader.snapshot(queuedAgent.session.id)
         if (pending === undefined) return
         const queued = pending.items
@@ -7835,11 +7862,7 @@ export function apply(ctx: Context, config: Config): void {
               releaseRecalled()
             },
             abort: () => {
-              if (cleanedUp || !sessionUnchanged(
-                { agent: queuedAgent, generation: queuedGeneration },
-                liveAgent,
-                ownership.generation(),
-              )) {
+              if (cleanedUp || !captureMatches(queuedSubject)) {
                 discardStaged()
                 releaseRecalled()
                 return
@@ -7866,11 +7889,7 @@ export function apply(ctx: Context, config: Config): void {
               }
               return
             }
-            if (!sessionUnchanged(
-              { agent: queuedAgent, generation: queuedGeneration },
-              liveAgent,
-              ownership.generation(),
-            )) {
+            if (!captureMatches(queuedSubject)) {
               discardStaged()
               app.notify('the session changed while pulling messages back — try again', 'info')
               return
@@ -7952,11 +7971,7 @@ export function apply(ctx: Context, config: Config): void {
               failureKind = 'transition'
               throw error
             }
-            if (!sessionUnchanged(
-              { agent: queuedAgent, generation: queuedGeneration },
-              liveAgent,
-              ownership.generation(),
-            )) {
+            if (!captureMatches(queuedSubject)) {
               discardStaged()
               failureKind = 'stale'
               throw error
@@ -7994,7 +8009,7 @@ export function apply(ctx: Context, config: Config): void {
           if (!deferredToTransition) releaseRecalled()
         }), {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
           onError: (_error) => {
             if (cleanedUp) return
             if (failureKind === 'transition') {
@@ -8094,7 +8109,7 @@ export function apply(ctx: Context, config: Config): void {
               && current.parentSessionId === submit.parentSessionId
               && current.mode === 'continuable'
               && current.access === 'interactive-direct-child'
-              && liveAgent?.session.id === submit.parentSessionId) {
+              && ownership.currentSessionId() === submit.parentSessionId) {
               const merged = mergeDraft(app.getDraft(), text)
               app.setEditorText(merged)
               return merged === text
@@ -8165,7 +8180,7 @@ export function apply(ctx: Context, config: Config): void {
           ),
         }), {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
           onResult: (outcome) => settleSubagentSubmit(request, submit.text, outcome, viewerGeneration),
           onError: (error) => settleSubagentSubmit(
             request,
@@ -8189,7 +8204,7 @@ export function apply(ctx: Context, config: Config): void {
       // The session scope's identity — a GETTER like the cwd: a session
       // switch must make the next Ctrl+R search the NEW session (the
       // panel captures it once at open time).
-      historySearchSessionId: () => liveAgent?.session.id,
+      historySearchSessionId: () => agentNow()?.session.id,
       // The transcript image surface (plan M8/M9): the durable loader plus
       // the dim fallback coloring.
       imageLoader,
@@ -8357,7 +8372,7 @@ export function apply(ctx: Context, config: Config): void {
         viewingParentSessionId: viewing?.parentSessionId,
         viewerGenerationAtSend: viewerGeneration,
         viewerGenerationNow: app.getViewerGeneration(),
-        liveParentSessionId: liveAgent?.session.id,
+        liveParentSessionId: agentNow()?.session.id,
       })
       const disposition = subagentPromptDisposition(outcome)
       if (disposition.kind === 'sent') {
@@ -8441,7 +8456,8 @@ export function apply(ctx: Context, config: Config): void {
       scope?: TaskBrowserDatasetScope,
       header?: string,
     ): void => {
-      if (cleanedUp || liveAgent === undefined) return
+      const browserSession = agentNow()
+      if (cleanedUp || browserSession === undefined) return
       // PR2 plan §10.5/§10.8: an EXPLICIT scope (a Workflow phase/run
       // dataset) becomes the browser's dataset scope; a transition
       // (Quick→Full / Full→Quick) without one keeps the current scope; a
@@ -8454,16 +8470,15 @@ export function apply(ctx: Context, config: Config): void {
       // generation/session AT dispatch against values captured AT dispatch
       // (as in an earlier revision) could never fail — the intent must be
       // bound to the browser that hosted the confirmation (PR review P1).
-      const browserGeneration = ownership.generation()
-      const browserSession = liveAgent
+      const browserSubject = ownership.captureSubject()
       const browserToken = {}
       activeTaskBrowserToken = browserToken
       let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
       if (jobs !== undefined) {
         try {
           // Job ownership is the Session id (DSH 0.1.7 JobRegistry): the
-          // liveAgent object is only the id source here.
-          jobSnapshots = jobs.list(liveAgent.session.id)
+          // agentNow() object is only the id source here.
+          jobSnapshots = jobs.list(browserSession.session.id)
         } catch {
           // The registry read is best-effort; the jobs half stays empty.
         }
@@ -8502,7 +8517,7 @@ export function apply(ctx: Context, config: Config): void {
           // childId + mode). A nested row's durable parent is the exact
           // direct parent recorded by DSH; only a direct child falls back
           // to the browser root (the live main session).
-          const parentSessionId = row.parentId !== '' ? row.parentId as SessionId : liveAgent?.session.id
+          const parentSessionId = row.parentId !== '' ? row.parentId as SessionId : agentNow()?.session.id
           if (parentSessionId === undefined) return 'close'
           // The row carries the catalog MODE + projected activity + DEPTH:
           // the viewer target is pinned to them (continuable → interactive
@@ -8513,7 +8528,7 @@ export function apply(ctx: Context, config: Config): void {
             row.childId as SessionId, row.label, row.mode, parentSessionId, row.activity, row.depth,
           ), {
             diag,
-            sessionId: () => liveAgent?.session.id,
+            sessionId: () => agentNow()?.session.id,
             onError: (error) => {
               if (cleanedUp) return
               app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
@@ -8542,7 +8557,7 @@ export function apply(ctx: Context, config: Config): void {
         // pending) must never be stopped by the stale confirmation — the
         // captured browser values, not the dispatch-time values, are the
         // comparison side that can actually fail.
-        if (ownership.generation() !== browserGeneration || liveAgent !== browserSession) return
+        if (!captureMatches(browserSubject)) return
         if (row.kind === 'subagent') {
           if (!isSubagentRowInterruptible(row)) return
           // Re-read the live driver at confirmation time; the panel row is
@@ -8562,7 +8577,7 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => browserSession.session.id,
             onResult: (outcome) => {
-              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || ownership.generation() !== browserGeneration || liveAgent !== browserSession) return
+              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || !captureMatches(browserSubject)) return
               if (outcome.kind === 'committed') {
                 app.notify(`stopping ${row.label}`, 'info')
                 return
@@ -8582,7 +8597,7 @@ export function apply(ctx: Context, config: Config): void {
               app.notify(`could not stop ${row.label}: ${reason}`, 'error')
             },
             onError: (error) => {
-              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || ownership.generation() !== browserGeneration || liveAgent !== browserSession) return
+              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || !captureMatches(browserSubject)) return
               app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
             },
           })
@@ -8668,7 +8683,7 @@ export function apply(ctx: Context, config: Config): void {
             // when the OLD session's listing rejects (PR review P1).
             runOwned('task browser descendants', () => runtime.refreshCatalog(), {
               diag,
-              sessionId: () => liveAgent?.session.id,
+              sessionId: () => agentNow()?.session.id,
             })
           },
           onViewFull: state => {
@@ -8703,7 +8718,7 @@ export function apply(ctx: Context, config: Config): void {
       if (runtime !== undefined) {
         runOwned('task browser descendants', () => runtime.refreshCatalog(), {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
         })
       }
     }
@@ -8721,7 +8736,8 @@ export function apply(ctx: Context, config: Config): void {
      * Task Center / Subagent catalog and opens the existing surfaces —
      * never a Workflow-specific viewer or browser. */
     const handleWorkflowAction = (action: WorkflowAction): void => {
-      if (liveAgent === undefined) return
+      const agent = agentNow()
+      if (agent === undefined) return
       switch (action.kind) {
         case 'open-member': {
           // Direct member navigation (plan §9.2): the SINGLE authority
@@ -8736,7 +8752,7 @@ export function apply(ctx: Context, config: Config): void {
           const target = workflowMemberViewerTarget(
             { status: 'running', childId: action.childId },
             row,
-            liveAgent.session.id,
+            agent.session.id,
           )
           if (target === undefined) return
           runOwned('workflow member view', () => enterView(
@@ -8748,7 +8764,7 @@ export function apply(ctx: Context, config: Config): void {
             target.depth,
           ), {
             diag,
-            sessionId: () => liveAgent?.session.id,
+            sessionId: () => agentNow()?.session.id,
             onError: (error) => {
               if (cleanedUp) return
               app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
@@ -9239,7 +9255,7 @@ export function apply(ctx: Context, config: Config): void {
           // impossible. Job
           // ownership is the Session id; without a live agent the registry
           // read is the unowned-only view (caller omitted).
-          snapshots = jobs.list(liveAgent?.session.id)
+          snapshots = jobs.list(agentNow()?.session.id)
         } catch {
           // Best-effort: a failed registry read is NOT an authoritative empty
           // catalog. Keeping the previous snapshot matters most for a Job
@@ -9333,18 +9349,22 @@ export function apply(ctx: Context, config: Config): void {
       taskRuntime = new TaskBrowserRuntime({
         // The session fence key: generation + session id, captured when a
         // refresh starts and re-checked after the async listing.
-        currentKey: () => cleanedUp || liveAgent === undefined ? undefined : `${ownership.generation()}:${liveAgent.session.id}`,
+        currentKey: () => {
+          const sessionId = ownership.currentSessionId()
+          return cleanedUp || sessionId === undefined ? undefined : `${ownership.generation()}:${sessionId}`
+        },
         listDescendants: () => {
-          const sessionId = liveAgent?.session.id
+          const sessionId = agentNow()?.session.id
           return sessionId === undefined ? Promise.resolve([]) : subagents.listDescendants(sessionId)
         },
         // The merged rows re-read the CURRENT jobs snapshot at every
         // commit, so a job settlement repaints an open browser too.
         readJobs: () => {
-          if (jobs === undefined || liveAgent === undefined) return []
-          const key = `${ownership.generation()}:${liveAgent.session.id}`
+          const sessionId = ownership.currentSessionId()
+          if (jobs === undefined || sessionId === undefined) return []
+          const key = `${ownership.generation()}:${sessionId}`
           try {
-            const rows = jobs.list(liveAgent.session.id)
+            const rows = jobs.list(SessionId(sessionId))
             jobSnapshot = { key, rows }
             return rows
           } catch {
@@ -9392,18 +9412,18 @@ export function apply(ctx: Context, config: Config): void {
       taskRuntime.refreshRuntime()
       refreshAgents = (): void => {
         if (cleanedUp) return
-        if (liveAgent === undefined) {
+        if (agentNow() === undefined) {
           app.setAgents([])
           return
         }
         runOwned('task browser agents refresh', () => taskRuntime!.refreshCatalog(), {
           diag,
-          sessionId: () => liveAgent?.session.id,
+          sessionId: () => agentNow()?.session.id,
         })
       }
       refreshAgentRuntimeOnly = (): void => {
         if (cleanedUp) return
-        if (liveAgent === undefined) {
+        if (agentNow() === undefined) {
           app.setAgents([])
           return
         }
@@ -9429,8 +9449,8 @@ export function apply(ctx: Context, config: Config): void {
      * parent stays usable, nothing was opened).
      */
     const openJobView = (jobId: string): 'close' | 'keep-open' => {
-      if (jobs === undefined || liveAgent === undefined) return 'keep-open'
-      const owner = liveAgent
+      const owner = agentNow()
+      if (jobs === undefined || owner === undefined) return 'keep-open'
       let snapshot: ReturnType<NonNullable<typeof jobs>['get']>
       try {
         snapshot = jobs.get(jobId as JobId, owner.session.id)
@@ -9489,13 +9509,14 @@ export function apply(ctx: Context, config: Config): void {
     ): void => {
       // One viewer at a time, and a fresh selection replaces the previous.
       activeJobViewerClose?.()
-      if (liveAgent === undefined) return
+      const owner = agentNow()
+      if (owner === undefined) return
       // The viewer belongs to the session it was OPENED for: capture that
       // owning Session id so a leaked viewer can never refresh/stop a
       // same-id job in a different session (the registry fences every read
       // and kill against the owner, on top of the close-on-transition
       // below).
-      const ownerSessionId = liveAgent.session.id
+      const ownerSessionId = owner.session.id
       const fallbackText = snapshot.kind === 'subagent'
         ? subagentJobViewHint(snapshot.status, snapshot.detail)
         : jobStatusHint(snapshot.status, snapshot.detail)
@@ -9713,7 +9734,7 @@ export function apply(ctx: Context, config: Config): void {
      */
     let creating: Promise<void> | undefined
     const ensureSession = async (): Promise<void> => {
-      if (liveAgent !== undefined) return
+      if (agentNow() !== undefined) return
       if (creating !== undefined) return creating
       // The first-session creation is a session transition too: it runs
       // inside the single-writer gate so it can never interleave with a
@@ -9780,9 +9801,10 @@ export function apply(ctx: Context, config: Config): void {
         // bump(reset) → init. Unlike A/B, the bump happens AFTER publication.
         const committed = await runFirstSessionCommit({
           publishOwner: () => {
-            liveHandle = created.direct!.ownerHandle as AgentHandle
-            liveAgent = createdAgent
-            return createdAgent.id
+            const nextOwner = directRuntime.owners.fromHandle(created)
+            if (nextOwner === undefined) throw new Error('first-session create published a handle without a Direct owner')
+            ownership.setCurrentOwner(nextOwner, createdAgent.session.id)
+            return directRuntime.owners.completionIdentity(nextOwner)
           },
           setCompletionOwner,
           bumpGeneration: ownership.bumpGeneration,
@@ -9883,17 +9905,17 @@ export function apply(ctx: Context, config: Config): void {
       runOwned('skills/change refresh', async () => {
         const refresh = catalogRefreshRequest
         if (refresh === undefined) return undefined
-        const target = liveAgent === undefined
+        const target = agentNow() === undefined
           ? { kind: 'preset', presetId: pendingPreset ?? launchPreset } as const
           : { kind: 'agent', key: ownership.generation() } as const
         return refresh({
           source: 'invalidation',
           target,
-          ...target.kind === 'agent' ? { agent: liveAgent } : {},
+          ...target.kind === 'agent' ? { agent: agentNow() } : {},
         })
       }, {
         diag,
-        sessionId: () => liveAgent?.session.id,
+        sessionId: () => agentNow()?.session.id,
         onResult: (outcome) => {
           // NOTIFY BEFORE settled(): if app.notify throws, runOwned routes
           // to onError, whose settled() is then the ONLY settle — a dirty
@@ -9965,7 +9987,7 @@ export function apply(ctx: Context, config: Config): void {
      * and never creates a session.
      */
     function openRewindPicker(): void {
-      const source = liveAgent
+      const source = agentNow()
       if (source === undefined) {
         app.notify('no conversation to rewind', 'info')
         return
@@ -10045,7 +10067,7 @@ export function apply(ctx: Context, config: Config): void {
       ctx,
       app,
       diag,
-      get liveAgent() { return liveAgent },
+      get liveAgent() { return agentNow() },
       // Completion-notification preference setters (the /settings panel
       // writes): the controller applies the parsed value immediately and
       // the panel persists the raw string through the config port.
@@ -10272,10 +10294,11 @@ export function apply(ctx: Context, config: Config): void {
     }
     // The startup surface: a resumed session initializes everything; the
     // deferred path shows the pre-session invitation until the first message.
-    if (liveAgent !== undefined) {
+    const startupAgent = agentNow()
+    if (startupAgent !== undefined) {
       // The initial owner's catalog was prefetched before mount: no
       // duplicate refresh.
-      await initLiveSession(liveAgent)
+      await initLiveSession(startupAgent)
     } else {
       app.setWelcomeIdle(true)
       refreshStatusCheap()
@@ -10304,7 +10327,7 @@ export function apply(ctx: Context, config: Config): void {
       const openingTarget = isOpening(session.id)
       // The retiring committed Agent remains authoritative until quiesce
       // completes; the published opening target may also emit before commit.
-      const mainEvent = session.id === liveAgent?.session.id || openingTarget
+      const mainEvent = session.id === ownership.currentSessionId() || openingTarget
       const runtimeAgent = mainEvent ? agents.get(SessionId(session.id)) as Agent | undefined : undefined
       let settledViewChildId: SessionId | undefined
       if (mainEvent) {
@@ -10361,7 +10384,9 @@ export function apply(ctx: Context, config: Config): void {
        // The subagent viewer follows its own session's events; everything
       // else routes to the live agent's folder as before. Without a live
       // session (deferred start) there is nothing to route to.
-      if (liveAgent === undefined) return
+      const agent = agentNow()
+      if (agent === undefined) return
+      const ownerSessionId = ownership.currentSessionId()
       if (viewing !== undefined) {
         if (session.id === viewing.id) {
           applyOwnerStreamingToolPreviewEvent(viewing.previews, viewing.folder, event)
@@ -10393,7 +10418,7 @@ export function apply(ctx: Context, config: Config): void {
         // Any OTHER session's events (the live agent's) keep routing to the
         // main folder below — the viewer never starves the main transcript.
       }
-      if (session.id !== liveAgent.session.id) return
+      if (session.id !== ownerSessionId) return
       applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event)
 
       if (event.type === 'tool/result') {
@@ -10441,7 +10466,7 @@ export function apply(ctx: Context, config: Config): void {
       // local ack row and the latency timeline settle here.
       if (event.type === 'agent/inbox/spliced') {
         settleLocalSubmitAck('inbox inserted')
-        submitLatencyTracker.mark(liveAgent.session.id, 'inbox.inserted')
+        submitLatencyTracker.mark(agent.session.id, 'inbox.inserted')
         queueMicrotask(refreshPendingInput)
       }
       // The user message committing to the session is the ack row's
@@ -10450,7 +10475,7 @@ export function apply(ctx: Context, config: Config): void {
       // first-token latency once per turn.
       if (event.type === 'user/message') {
         settleLocalSubmitAck('user message')
-        submitLatencyTracker.mark(liveAgent.session.id, 'user.message')
+        submitLatencyTracker.mark(agent.session.id, 'user.message')
         // The durable human prompt is now applied to the transcript folder:
         // retire the matching local submission echo by identity. The `source`
         // is read structurally here and never routed into the shared
@@ -10494,7 +10519,7 @@ export function apply(ctx: Context, config: Config): void {
         // Compaction rewrites the model-visible surface: re-measure NOW
         // (the footer would otherwise show stale pressure until the next
         // step/start or turn/end).
-        settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.snapshotEvents()))
+        settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(agent.session.snapshotEvents()))
       }
       if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
       // PR D2: route the context re-measure decision through the single
@@ -10513,7 +10538,7 @@ export function apply(ctx: Context, config: Config): void {
         // The turn is live: the Working row takes over the feedback surface
         // and the submit timeline stamps the turn boundary.
         settleLocalSubmitAck('turn started')
-        submitLatencyTracker.mark(liveAgent.session.id, 'turn.start')
+        submitLatencyTracker.mark(agent.session.id, 'turn.start')
         app.setWorking(true)
         app.setBusy(true)
       } else if (event.type === 'turn/end') {
@@ -10536,7 +10561,7 @@ export function apply(ctx: Context, config: Config): void {
         // log was removed externally) is user-recoverable: notify with the
         // actionable hint — the session keeps working in memory, but
         // persistence cannot resume until restart.
-        const flushed = liveAgent.session
+        const flushed = agent.session
         runDetached('turn flush', () => sessions.flush(flushed), {
           diag,
           sessionId: () => flushed.id,
@@ -10566,7 +10591,7 @@ export function apply(ctx: Context, config: Config): void {
         const subject = agent as Agent
         const candidateId = (subject as { session?: { id?: unknown } }).session?.id
         if (typeof candidateId !== 'string' || directRuntime.registeredAgentFor(candidateId) !== subject) return false
-        if (liveAgent !== undefined && subject === liveAgent) return true
+        if (isCurrentOwnerAgent(subject)) return true
         // The adapter accepts every registered live Agent so an unviewed child
         // can retain its transient baseline without entering the main surface.
         if (viewing === undefined) return true
@@ -10603,10 +10628,11 @@ export function apply(ctx: Context, config: Config): void {
           schedulePaint()
           return
         }
-        if (liveAgent === undefined || input.sessionId !== liveAgent.session.id) return
+        const sessionId = ownership.currentSessionId()
+        if (sessionId === undefined || input.sessionId !== sessionId) return
         applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
         if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
-          submitLatencyTracker.mark(liveAgent.session.id, 'assistant.first')
+          submitLatencyTracker.mark(sessionId, 'assistant.first')
         }
         schedulePaint()
       },
@@ -10645,8 +10671,10 @@ export function apply(ctx: Context, config: Config): void {
     // (the authoritative settled boundary — running → idle on the SAME
     // live agent; children never notify).
     ctx.on('agent/status', ({ agent, status }) => {
-      if (cleanedUp || liveAgent === undefined) return
-      if (agent.id === liveAgent.id) {
+      if (cleanedUp) return
+      const owner = ownership.owner()
+      const currentAgentId = owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)
+      if (currentAgentId !== undefined && agent.id === currentAgentId) {
         completionController.onAgentStatus(agent.id, status)
         queueMicrotask(refreshPendingInput)
         return
@@ -10795,7 +10823,7 @@ export function apply(ctx: Context, config: Config): void {
     // teardown settles in milliseconds. diag is closed by the
     // retirement's own finalizer (or by the no-owner branch below).
     try {
-      if (liveAgent !== undefined && liveHandle !== undefined) {
+      if (currentOwnerPresentRef?.() === true) {
         const retirement = retireOwnedSessionRef?.()
         if (retirement !== undefined) {
           let timer: NodeJS.Timeout | undefined
