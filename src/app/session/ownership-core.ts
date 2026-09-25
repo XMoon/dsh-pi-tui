@@ -63,7 +63,7 @@ export interface SessionOwnershipCore {
   captureSubject(): SessionSubject | undefined
   isSubjectCurrent(subject: SessionSubject): boolean
 
-  /** The one release ledger: Direct handle pools read it through this seam. */
+  /** The one release ledger: a backend's owner pool reads it through this seam. */
   beginOwnerRelease(sessionId: string): () => void
   waitForOwnerRelease(sessionId: string): Promise<void>
   beginForkSourcePin(sessionId: string): ForkSourcePin

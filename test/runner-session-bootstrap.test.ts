@@ -1234,6 +1234,83 @@ test('/fork retires an unclaimed parked Direct owner during teardown', async (t)
     'an unclaimed parked Direct owner must be disposed exactly once during teardown')
 })
 
+test("an unclaimed parked owner's flush failure still warns the user (merged retirement durability)", async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-parked-flush-warn-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let signalCreateStarted!: () => void
+  let releaseCreate!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const source = fakeSession({
+    id: 'fork-parked-flush-source',
+    header: { id: 'fork-parked-flush-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const target = fakeSession({
+    id: 'fork-parked-flush-target',
+    header: { id: 'fork-parked-flush-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  // The CURRENT owner's retirement stays CLEAN; only the parked fork child's
+  // final flush fails. That durability failure must still reach the user, which
+  // requires the runner to report the MERGED (current + parked) report. The
+  // predicate is timing-independent: the fork child is the only session that is
+  // neither the source nor the resumed target.
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id
+    if (id !== undefined && id !== source.id && id !== target.id) throw new Error('disk full')
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  const mountedFiber = fiber
+  assert.ok(mountedFiber)
+  const teardown = mountedFiber.dispose()
+  releaseCreate()
+  await settle()
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the superseded fork must publish a child before teardown drains it')
+  await Promise.all([forkPromise, teardown])
+  fiber = undefined
+  await settle()
+  const output = stderrWrites.join('')
+  assert.ok(output.includes('session flush failed during retirement'),
+    `the parked owner's durability failure must reach the user: ${JSON.stringify(output)}`)
+})
+
 test('/fork suppresses a delayed failure after navigation supersession', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-failure-stale-')
@@ -4545,11 +4622,17 @@ test('shutdown during an ordinary transition that still COMMITS: the final retir
   // releases the gate. The final shutdown retirement MUST re-read the current
   // owner rather than reuse the pre-cancelled capture.
   releaseCreate()
-  await transition
-  await disposal
+  // Lock the microtask BUDGET: the committed child's disposal must land within
+  // ONE bounded settle() (40 microtask turns), before any explicit await on the
+  // transition or on the disposal promise — awaiting them first would hide a
+  // deeper retirement chain.
   await settle()
   const child = harness.createdSessions.at(-1)
   assert.ok(child, 'the transition must have created its child Session')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${child.id}`).length, 1,
+    `the shutdown retirement must dispose the NEW current owner within the settle budget: ${JSON.stringify(harness.retirementEvents)}`)
+  await transition
+  await disposal
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === `cancel:${source.id}`).length, 1,
     'the pre-cancel must cancel the OLD owner exactly once')

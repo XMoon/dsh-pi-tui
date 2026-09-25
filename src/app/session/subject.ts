@@ -7,10 +7,10 @@
  * old owner as current (plan §6.2).
  *
  * Identity model:
- * - `OwnerRef` is an opaque object owned by the Direct implementation
- *   (`app/direct`); `app/session` never inspects it. The Direct side maps it
- *   1:1 to the exact Agent OBJECT (private `WeakMap`), so the SAME parked owner
- *   re-wrapped into a new `SessionHandle` resolves to the SAME `OwnerRef`.
+ * - `OwnerRef` is an opaque object minted by a BACKEND; `app/session` never
+ *   inspects it. A backend must keep one owner ref per exact owner it serves,
+ *   so the same owner re-wrapped into a new `SessionHandle` resolves to the
+ *   SAME `OwnerRef`.
  * - A captured subject compares equal ONLY when both the exact `OwnerRef`
  *   object AND the generation match. The subject TOKEN itself is never an
  *   identity: `current()`/`capture()` mint a fresh token each time, and
@@ -27,9 +27,9 @@ declare const sessionOwnerRefBrand: unique symbol
 
 /**
  * An OPAQUE handle to one exact session owner. `app/session` never inspects it;
- * the Direct implementation mints it so that the same exact Agent OBJECT always
- * maps to the same `SessionOwnerRef` (private `WeakMap`). Branding keeps any
- * stray `object` from being accepted at the type level.
+ * a backend mints one per exact owner it serves (so a re-wrapped handle keeps
+ * the SAME owner ref). Branding keeps any stray `object` from being accepted at
+ * the type level.
  */
 export interface SessionOwnerRef {
   readonly [sessionOwnerRefBrand]: true
@@ -42,8 +42,7 @@ export interface SessionSubject {
 
 /**
  * The exact ownership record a captured subject pins. `owner` is the opaque
- * Direct `SessionOwnerRef`; `generation` is the runner's session generation at
- * capture.
+ * `SessionOwnerRef`; `generation` is the runner's session generation at capture.
  */
 export interface SessionSubjectRecord {
   readonly owner: SessionOwnerRef

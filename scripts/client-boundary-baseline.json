@@ -2,6 +2,9 @@
   "app/direct/owner-registry.ts": [
     "import:dsh-agent"
   ],
+  "app/direct/owner-retirement.ts": [
+    "import:dsh-agent"
+  ],
   "app/direct/runtime.ts": [
     "import:dsh-agent"
   ],
