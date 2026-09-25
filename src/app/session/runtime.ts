@@ -1,9 +1,10 @@
 /**
  * The BOUND session runtime (A2 plan §1.1 phase 3): the session layer's session
  * orchestration. It owns the RETIREMENT COORDINATION (§4.1), the ORDINARY
- * TRANSITION/switch (§4A), the FORK ADOPTION (§4B) and the COMMAND SETTLEMENT
- * (§3.5); the read facade (§3.4) and the first-session / startup-resume flows
- * join it in the following slices, together with their first consumers.
+ * TRANSITION/switch (§4A), the FORK ADOPTION (§4B), the FIRST-SESSION COMMIT
+ * (§4C), the STARTUP-RESUME PUBLICATION (§4D) and the COMMAND SETTLEMENT (§3.5).
+ * The read authority is the ownership core (`app/session/ownership-core.ts`),
+ * which the runner may consult directly.
  *
  * Every backend or Host operation arrives as a consumer-owned port
  * (`SessionOwnerAccess`, `SessionOwnerRetirement`) or a runner-supplied surface
@@ -17,7 +18,7 @@ import { observeSettled, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
 import { isRewindIdentityCurrent, type RewindLiveIdentity } from '../../session-fork.ts'
-import { runForkCommit, runOrdinaryCommit } from './commit-order.ts'
+import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
   SessionOwnerAccess,
   SessionOwnerRetirement,
@@ -101,6 +102,16 @@ export interface SessionRuntime {
   beginCommandSettlement(): void
   abortCommandSettlement(): void
   settleCommandSettlement(): Promise<void>
+  /** Run the first-session commit (plan §4C). Returns whether the child
+   *  committed (`false` = the lifecycle aborted during its quiesce). */
+  commitFirstSession(handle: SessionHandle): Promise<boolean>
+  /** Publish the startup-resume owner synchronously (plan §4D: publish →
+   *  completion → pre-mount quiesce). Returns the quiesce promise only when the
+   *  runner's hook produced one, so a sessionless startup stays synchronous. */
+  publishResumedOwner(
+    handle: SessionHandle | undefined,
+    preMountQuiesce: (owner: SessionOwnerRef) => Promise<unknown> | undefined,
+  ): Promise<unknown> | undefined
   // retirement coordination (§4.1)
   retireOwnedSession(): Promise<SessionRetirementReport>
   preCancelOwnedSession(): void
@@ -429,6 +440,64 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     }
     return adopted
   }
+
+  /**
+   * Run the first-session commit (plan §4C: publish → completion → await the
+   * child's idle → bump → init). Post-create initialization is best-effort: the
+   * child is committed, so a failure is warned (never a fallback), the same
+   * retire-warn-only semantics as every other transition.
+   */
+  const commitFirstSession = async (handle: SessionHandle): Promise<boolean> => {
+    const childOwner = deps.owners.fromHandle(handle)
+    if (childOwner === undefined) throw new Error('first-session create published a handle without a Direct owner')
+    return runFirstSessionCommit({
+      publishOwner: () => {
+        core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
+        return deps.owners.completionIdentity(childOwner)
+      },
+      setCompletionOwner: deps.surface.setCompletionOwner,
+      bumpGeneration: core.bumpGeneration,
+      quiesceChild: async () => {
+        try {
+          return await deps.retirement.whenIdleOrAbort(childOwner, deps.lifecycleSignal)
+        } catch (error) {
+          deps.diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
+          return false
+        }
+      },
+      initChild: async () => {
+        try {
+          await deps.surface.initLiveSession(childOwner)
+        } catch (error) {
+          deps.diag.warn('first session surface rebuild failed', { error: safeErrorMessage(error) })
+        }
+      },
+    }, handle)
+  }
+
+  /**
+   * Publish the startup-resume owner (plan §4D). The publication itself is
+   * SYNCHRONOUS, and the runner's `preMountQuiesce` hook is consulted only once
+   * an owner exists — a sessionless (deferred) startup therefore gains no
+   * microtask yield here.
+   */
+  const publishResumedOwner = (
+    handle: SessionHandle | undefined,
+    preMountQuiesce: (owner: SessionOwnerRef) => Promise<unknown> | undefined,
+  ): Promise<unknown> | undefined =>
+    runResumeCommit({
+      publishOwner: (owner) => {
+        const resumed = owner as SessionHandle | undefined
+        const nextOwner = resumed === undefined ? undefined : deps.owners.fromHandle(resumed)
+        core.setCurrentOwner(nextOwner, nextOwner === undefined ? undefined : deps.owners.sessionId(nextOwner))
+        return nextOwner === undefined ? undefined : deps.owners.completionIdentity(nextOwner)
+      },
+      setCompletionOwner: deps.surface.setCompletionOwner,
+      preMountQuiesce: () => {
+        const owner = core.owner()
+        return owner === undefined ? undefined : preMountQuiesce(owner)
+      },
+    }, handle)
   /**
    * The synchronous shutdown preparation: ask the retirement port to cancel the
    * CURRENT owner's work BEFORE the Host tree is torn down (the port keeps that
@@ -537,6 +606,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     beginCommandSettlement,
     abortCommandSettlement,
     settleCommandSettlement,
+    commitFirstSession,
+    publishResumedOwner,
     retireOwnedSession,
     preCancelOwnedSession,
   }

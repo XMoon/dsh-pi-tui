@@ -205,12 +205,6 @@ import {
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
 import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
-import {
-  runFirstSessionCommit,
-  runForkCommit,
-  runOrdinaryCommit,
-  runResumeCommit,
-} from './app/session/commit-order.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
@@ -2416,36 +2410,26 @@ export function apply(ctx: Context, config: Config): void {
       // first user message creates it (see ensureSession below).
     }
     // The startup-resume publication ORDER is fixed by `runResumeCommit`
-    // (A2 plan §4D): publish owner → completion → pre-mount quiesce. The
-    // publication itself stays SYNCHRONOUS; a sessionless (deferred) startup
-    // has nothing to quiesce and must not gain a microtask yield here.
-    const resumeQuiesce = runResumeCommit({
-      publishOwner: (owner) => {
-        const resumed = owner as SessionHandle | undefined
-        const nextOwner = resumed === undefined ? undefined : directRuntime.owners.fromHandle(resumed)
-        ownership.setCurrentOwner(nextOwner, nextOwner === undefined ? undefined : directRuntime.owners.sessionId(nextOwner))
-        return nextOwner === undefined ? undefined : directRuntime.owners.completionIdentity(nextOwner)
-      },
-      setCompletionOwner,
-      preMountQuiesce: () => {
-        const owner = ownership.owner()
-        if (owner === undefined) return undefined
-        // The resume transaction succeeded; the remaining pre-mount wait is
-        // the conversation preparation (whenIdle + the catalog ready
-        // barrier) — the second status stage replaces the first in place
-        // and STAYS until the barrier completes (the catalog prefetch can
-        // take seconds; a cleared line would read as a hang again).
-        startupStatus.show('Preparing conversation…')
-        // The pre-mount whenIdle does NOT observe the lifecycle signal, and
-        // the full surface disposer is not registered yet (the pre-mount
-        // abort path below has not been reached) — an early HMR/app disposal
-        // would otherwise leave this await hanging forever and the
-        // just-created owner would never be retired. Cancel the agent on
-        // abort so whenIdle settles, then the pre-mount abort path below
-        // retires the owner.
-        return directRuntime.retirement.whenIdleOrAbort(owner, lifecycleController.signal)
-      },
-    }, handle)
+    // (A2 plan §4D) inside the runtime: publish owner → completion → pre-mount
+    // quiesce. The publication itself stays SYNCHRONOUS; a sessionless
+    // (deferred) startup has nothing to quiesce and must not gain a microtask
+    // yield here.
+    const resumeQuiesce = sessionRuntime.publishResumedOwner(handle, (owner) => {
+      // The resume transaction succeeded; the remaining pre-mount wait is
+      // the conversation preparation (whenIdle + the catalog ready
+      // barrier) — the second status stage replaces the first in place
+      // and STAYS until the barrier completes (the catalog prefetch can
+      // take seconds; a cleared line would read as a hang again).
+      startupStatus.show('Preparing conversation…')
+      // The pre-mount whenIdle does NOT observe the lifecycle signal, and
+      // the full surface disposer is not registered yet (the pre-mount
+      // abort path below has not been reached) — an early HMR/app disposal
+      // would otherwise leave this await hanging forever and the
+      // just-created owner would never be retired. Cancel the agent on
+      // abort so whenIdle settles, then the pre-mount abort path below
+      // retires the owner.
+      return directRuntime.retirement.whenIdleOrAbort(owner, lifecycleController.signal)
+    })
     if (resumeQuiesce !== undefined) await resumeQuiesce
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
     // a resumed agent prefetches its effective catalog (a live read emits no
@@ -9270,38 +9254,10 @@ export function apply(ctx: Context, config: Config): void {
         const createdAgent = created.direct!.agent as Agent
         const opening = currentOpening()
         // The first-session commit ORDER is fixed by `runFirstSessionCommit`
-        // (A2 plan §4C): publish owner → completion → await child idle →
-        // bump(reset) → init. Unlike A/B, the bump happens AFTER publication.
-        const committed = await runFirstSessionCommit({
-          publishOwner: () => {
-            const nextOwner = directRuntime.owners.fromHandle(created)
-            if (nextOwner === undefined) throw new Error('first-session create published a handle without a Direct owner')
-            ownership.setCurrentOwner(nextOwner, createdAgent.session.id)
-            return directRuntime.owners.completionIdentity(nextOwner)
-          },
-          setCompletionOwner,
-          bumpGeneration: ownership.bumpGeneration,
-          // Post-create initialization is best-effort: the child is committed,
-          // so failures are recorded, never a fallback (the same
-          // retire-warn-only semantics as every other transition).
-          quiesceChild: async () => {
-            try {
-              const childOwner = directRuntime.owners.fromHandle(created)
-              if (childOwner === undefined) throw new Error('first-session child has no Direct owner')
-              return await directRuntime.retirement.whenIdleOrAbort(childOwner, lifecycleController.signal)
-            } catch (error) {
-              diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
-              return false
-            }
-          },
-          initChild: async () => {
-            try {
-              await initLiveSession(createdAgent)
-            } catch (error) {
-              diag.warn('first session surface rebuild failed', { error: safeErrorMessage(error) })
-            }
-          },
-        }, createdAgent)
+        // (A2 plan §4C) inside the runtime: publish owner → completion → await
+        // the child's idle → bump(reset) → init. Unlike A/B, the bump happens
+        // AFTER publication.
+        const committed = await sessionRuntime.commitFirstSession(created)
         if (!committed) {
           // The lifecycle aborted during the first-session quiesce: the surface
           // is disposed and the retirement takes over — skip the surface
