@@ -39,21 +39,21 @@ test('the ownership core is the single state owner', () => {
 })
 
 test('the current owner is published only through the Direct registry into the core slot', () => {
-  // One publish site per commit shape, each resolving the owner from the handle
-  // that shape actually owns. The ordinary transition and the fork adoption now
-  // live in the bound runtime.
-  assert.ok(indexSource.includes('const nextOwner = resumed === undefined ? undefined : directRuntime.owners.fromHandle(resumed)'),
-    'resume publication goes through the registry')
-  assert.ok(indexSource.includes('const nextOwner = directRuntime.owners.fromHandle(created)'),
-    'first-session publication goes through the registry')
+  // ALL FOUR commit shapes publish inside the bound runtime, each resolving the
+  // owner from the handle that shape actually owns. The runner never publishes an
+  // owner itself.
+  assert.equal((indexSource.match(/setCurrentOwner\(/g) ?? []).length, 0,
+    'the runner must not publish the current owner at all')
+  assert.ok(sessionRuntimeSource.includes('const nextOwner = resumed === undefined ? undefined : deps.owners.fromHandle(resumed)'),
+    'resume publication goes through the registry (runtime)')
   assert.ok(sessionRuntimeSource.includes('const nextOwner = deps.owners.fromHandle(owner as SessionHandle)'),
-    'ordinary-transition publication goes through the registry (bound runtime)')
+    'ordinary-transition publication goes through the registry (runtime)')
   assert.ok(sessionRuntimeSource.includes('const nextOwner = deps.owners.fromHandle(handle)'),
-    'fork publication goes through the registry (bound runtime)')
-  const indexPublishes = indexSource.match(/ownership\.setCurrentOwner\(nextOwner, /g) ?? []
-  assert.equal(indexPublishes.length, 2, `expected the two runner publish sites, saw ${indexPublishes.length}`)
-  const runtimePublishes = sessionRuntimeSource.match(/core\.setCurrentOwner\(nextOwner, /g) ?? []
-  assert.equal(runtimePublishes.length, 2, `expected the two runtime publish sites, saw ${runtimePublishes.length}`)
+    'fork publication goes through the registry (runtime)')
+  assert.ok(sessionRuntimeSource.includes('const childOwner = deps.owners.fromHandle(handle)'),
+    'first-session publication goes through the registry (runtime)')
+  const publishes = sessionRuntimeSource.match(/core\.setCurrentOwner\(/g) ?? []
+  assert.equal(publishes.length, 4, `expected the 4 runtime publish sites, saw ${publishes.length}`)
   assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
   assert.ok(indexSource.includes('const handleNow = (): AgentHandle | undefined =>'),
