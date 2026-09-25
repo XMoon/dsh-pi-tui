@@ -108,9 +108,24 @@ export class RemoteJobObservationPort implements JobObservationPort {
       }))
     }
 
-    own(jobs.state.subscribe(emit))
-    if (!closed && sessionId !== undefined) own(jobs.watchRows(sessionId))
-    if (!closed) own(jobs.observe(sessionId, jobId))
+    const acquire = (): void => {
+      own(jobs.state.subscribe(emit))
+      if (closed) return
+      if (sessionId !== undefined) own(jobs.watchRows(sessionId))
+      if (closed) return
+      own(jobs.observe(sessionId, jobId))
+    }
+    try {
+      acquire()
+    } catch (error) {
+      // The official ClientJobs creates the roster/observation stream inside
+      // the FIRST acquire, so `watchRows`/`observe` can throw synchronously
+      // while the connection/Context tears down. A partially acquired observer
+      // must never leak: release everything acquired before re-throwing.
+      closed = true
+      for (const release of owned.splice(0)) release()
+      throw error
+    }
     // The official snapshot may already hold a row/tail before this observer
     // acquired either lease, so the first observation is emitted immediately.
     emit()

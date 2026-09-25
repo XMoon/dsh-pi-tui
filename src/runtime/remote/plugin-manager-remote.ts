@@ -159,15 +159,22 @@ export class RemotePluginManagerPort implements PluginManagerPort {
   }
 
   subscribeInstall(listener: (event: PluginInstallEvent) => void): () => void {
-    const offState = this.remote.$on('plugin-manager/install-state', (payload) => {
-      listener({ kind: 'phase', phase: detachPhase(payload) })
-    })
-    const offLog = this.remote.$on('plugin-manager/install-log', (payload) => {
-      listener({ kind: 'log', log: detachLog(payload) })
-    })
+    const owned: Array<() => void> = []
+    try {
+      owned.push(this.remote.$on('plugin-manager/install-state', (payload) => {
+        listener({ kind: 'phase', phase: detachPhase(payload) })
+      }))
+      owned.push(this.remote.$on('plugin-manager/install-log', (payload) => {
+        listener({ kind: 'log', log: detachLog(payload) })
+      }))
+    } catch (error) {
+      // A forwarded event outside the assembly's allowlist can refuse its
+      // subscription; the earlier subscription must not leak.
+      for (const off of owned.splice(0)) off()
+      throw error
+    }
     return () => {
-      offState()
-      offLog()
+      for (const off of owned.splice(0)) off()
     }
   }
 }

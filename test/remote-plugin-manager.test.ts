@@ -69,6 +69,7 @@ interface RemotePluginManagerFixture extends RemotePluginManagerSource {
   emitState(progress: PluginInstallProgress): void
   emitLog(chunk: PluginInstallLogChunk): void
   refuse(operation: string, message: string): void
+  failOn(event: string, error: unknown): void
   readonly subscriptions: number
 }
 
@@ -78,6 +79,7 @@ function remoteFixture(): RemotePluginManagerFixture {
   const failures = new Map<string, string>()
   const stateListeners = new Set<(payload: PluginInstallProgress) => void>()
   const logListeners = new Set<(payload: PluginInstallLogChunk) => void>()
+  const eventFailures = new Map<string, unknown>()
   /** Record the call and fold a scripted refusal into the official result. */
   const settle = <T>(operation: string, value: T): { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown } => {
     calls.push(operation)
@@ -133,6 +135,9 @@ function remoteFixture(): RemotePluginManagerFixture {
     // face is overloaded per event, so the storage signature is the loose
     // call-site type and each event branch narrows its own listener.
     $on: (event: string, listener: (payload: never) => void) => {
+      // A forwarded event outside the assembly's allowlist can refuse the
+      // subscription; the fixture scripts that synchronous failure.
+      if (eventFailures.has(event)) throw eventFailures.get(event)
       if (event === 'plugin-manager/install-state') {
         const typed = listener as (payload: PluginInstallProgress) => void
         stateListeners.add(typed)
@@ -148,6 +153,7 @@ function remoteFixture(): RemotePluginManagerFixture {
     emitState(progress) { for (const listener of [...stateListeners]) listener(progress) },
     emitLog(chunk) { for (const listener of [...logListeners]) listener(chunk) },
     refuse(operation, message) { failures.set(operation, message) },
+    failOn(event, error) { eventFailures.set(event, error) },
   }
 }
 
@@ -318,4 +324,17 @@ test('a snapshot refusal rejects the whole read instead of publishing partial fa
   const port = new RemotePluginManagerPort(remote)
   remote.refuse('listPlugins', 'carrier offline')
   await assert.rejects(() => port.snapshot(), /carrier offline/)
+})
+
+test('a failed second event subscription releases the first (no leaked listener)', () => {
+  const remote = remoteFixture()
+  const port = new RemotePluginManagerPort(remote)
+  const events: PluginInstallEvent[] = []
+  remote.failOn('plugin-manager/install-log', new Error('event is not forwarded by this assembly'))
+  assert.throws(() => port.subscribeInstall(event => events.push(event)), /not forwarded/)
+  assert.equal(remote.subscriptions, 0, 'the state subscription must be rolled back')
+  // No leaked listener may still deliver after the failed subscribe.
+  remote.failOn('plugin-manager/install-log', undefined)
+  remote.emitState({ requestId: pluginInstallRequestId('req-1'), phase: 'applying' })
+  assert.equal(events.length, 0, 'the rolled-back subscription must not deliver')
 })
