@@ -209,6 +209,10 @@ async function main() {
     if (clientSmokeOnly) {
       await run(PNPM_COMMAND, ['smoke:remote-session-read'], workspace, 'Remote Session fixture smoke', npmEnvironment)
       await run(PNPM_COMMAND, ['smoke:remote-session-read-parity'], workspace, 'same-Host Remote Session parity smoke', npmEnvironment)
+      // The restored D2.3 same-Host lane: real Client Context → Gateway → Host
+      // Session Controller for ordinary create, explicit-preset create,
+      // open/retain, model select and preset select + locked.
+      await run(PNPM_COMMAND, ['smoke:remote-session-lifecycle-parity'], workspace, 'same-Host session lifecycle parity smoke', npmEnvironment)
       // The exact-family install IS the distribution the published package runs
       // against, so it must clear the same Direct ↔ official Host fork/rewind
       // parity gate as source mode. Keeping the closure here (rather than in the
