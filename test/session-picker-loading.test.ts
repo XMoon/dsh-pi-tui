@@ -149,6 +149,7 @@ function harness(sessionReader: SessionReader): Harness {
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     extensions: undefined,
     exit: () => {},

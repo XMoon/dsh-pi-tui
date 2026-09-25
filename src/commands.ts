@@ -723,6 +723,14 @@ export interface TuiCommandRunner {
    */
   withSessionWriter<T>(sessionId: string, task: () => Promise<T> | T): Promise<T>
   /**
+   * Run one prompt admission + commit inside the per-Agent serialization
+   * window shared with `/model` selection (rc.2 `serializeImageAdmission`)
+   * when `line` references an image draft; a text-only prompt runs directly.
+   * This keeps an image capability check + attachment admission + delivery
+   * commit atomic against a concurrent model switch.
+   */
+  withPromptAdmission<T>(agent: unknown, line: string, task: () => Promise<T> | T): Promise<T>
+  /**
    * Enter the subagent viewer for one child session: the target carries
    * the catalog MODE (continuable = interactive editor, one-shot =
    * read-only) and the exact direct-parent session id the follow-up write
@@ -3403,33 +3411,31 @@ export function registerTuiCommands(
     // every earlier step is synchronous, so a throw above can no longer strand
     // the pin and permanently block pruning of the referenced drafts.
     const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
-    let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
+    let userMessage: import('@deepseek-ai/dsh-llm').UserMessage | undefined
     try {
-      userMessage = await runner.prepareDraftMessage(line)
-      skillSignal.throwIfAborted()
-      if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) {
-        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-      }
-      // The session-transition write fence (review round 5): while a
-      // transition is in flight the old agent may be woken again — a steer
-      // in that window would target a session whose lock is about to be
-      // released. Refuse WITHOUT injecting the body; the invocation line is
-      // restored to the editor (nothing is lost) and the user retries after
-      // the transition settles.
-      if (runner.sessionTransitionPending()) {
-        const merged = mergeDraft(app.getDraft(), line)
-        app.setEditorText(merged)
-        recordCommandDraftDisposition(commandId, 'restored')
-        return { kind: 'error', text: merged === line
-          ? 'a session transition is in progress — try again in a moment'
-          : 'the draft changed while transitioning — review it before submitting again' }
-      }
-      // The invocation's complete write runs inside the operation barrier;
-      // the fallback body is a second ordered prompt, not an atomic batch.
-      try {
-        const outcome = await runner.withSessionWriter(agent.session.id, async () => {
+      // The whole image admission + commit runs inside the operation barrier
+      // (transition drain) and, when the invocation references an image draft,
+      // inside the SAME per-Agent serialization window as a `/model` selection
+      // (rc.2 `serializeImageAdmission`): a concurrent model switch can never
+      // change the model between the image capability check and the commit.
+      const admission = await runner.withSessionWriter(agent.session.id, () =>
+        runner.withPromptAdmission(agent, line, async (): Promise<
+          | { readonly kind: 'stale' }
+          | { readonly kind: 'transition' }
+          | { readonly kind: 'written'; readonly outcome: Awaited<ReturnType<typeof runner.sessionWriter.prompt>> | undefined }
+        > => {
           skillSignal.throwIfAborted()
-          if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) return undefined
+          if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) return { kind: 'stale' }
+          // The session-transition write fence (review round 5): while a
+          // transition is in flight the old agent may be woken again — a steer
+          // in that window would target a session whose lock is about to be
+          // released. Refuse WITHOUT injecting the body; the invocation line is
+          // restored to the editor (nothing is lost) and the user retries after
+          // the transition settles.
+          if (runner.sessionTransitionPending()) return { kind: 'transition' }
+          userMessage = await runner.prepareDraftMessage(line)
+          skillSignal.throwIfAborted()
+          if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) return { kind: 'stale' }
           // Web parity (busyEnter): a skill invocation is an agent-facing
           // prompt — under the queue mode it QUEUES like a plain prompt
           // (web: session.prompt with the policy-resolved mode). The mode
@@ -3442,11 +3448,11 @@ export function registerTuiCommands(
           // intentionally best-effort rather than a same-step batch; if the
           // first prompt does not commit, the body is never sent.
           if (delivery !== 'steer' && hostLoadsSkillBody) {
-            return runner.sessionWriter.prompt(agent.session.id, userMessage, 'queue')
+            return { kind: 'written', outcome: await runner.sessionWriter.prompt(agent.session.id, userMessage, 'queue') }
           }
           if (fallbackBody !== undefined) {
             const first = await runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer')
-            if (first.kind !== 'committed') return first
+            if (first.kind !== 'committed') return { kind: 'written', outcome: first }
             // The original invocation is durable once the first prompt
             // commits. Consume its attachments before the body prompt so a
             // later body failure cannot make a retry duplicate the line or
@@ -3455,7 +3461,7 @@ export function registerTuiCommands(
               consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
               const body = await runner.sessionWriter.prompt(agent.session.id, fallbackBody, 'steer')
               if (body.kind !== 'committed') recordCommandDraftDisposition(commandId, 'suppressed')
-              return body
+              return { kind: 'written', outcome: body }
             } catch (error) {
               // The first prompt already committed; the outer command sink
               // must not restore/replay its invocation after a body failure.
@@ -3463,36 +3469,45 @@ export function registerTuiCommands(
               throw error
             }
           }
-          return runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer')
-        })
-        if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-        if (outcome.kind !== 'committed') {
-          if (outcome.kind === 'indeterminate') { throw new IndeterminateSkillWriteError() }
-          if (outcome.kind === 'cancelled') throw cancellationError('skill write cancelled')
-          const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
-          return { kind: 'error', text: message }
-        }
-      } catch (error) {
-        if (error instanceof TransitionInProgressError) {
-          const merged = mergeDraft(app.getDraft(), line)
-          app.setEditorText(merged)
-          recordCommandDraftDisposition(commandId, 'restored')
-          return { kind: 'error', text: merged === line
-            ? 'a session transition is in progress — try again in a moment'
-            : 'the draft changed while transitioning — review it before submitting again' }
-        }
-        throw error
+          return { kind: 'written', outcome: await runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer') }
+        }))
+      if (admission.kind === 'stale') return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+      if (admission.kind === 'transition') {
+        const merged = mergeDraft(app.getDraft(), line)
+        app.setEditorText(merged)
+        recordCommandDraftDisposition(commandId, 'restored')
+        return { kind: 'error', text: merged === line
+          ? 'a session transition is in progress — try again in a moment'
+          : 'the draft changed while transitioning — review it before submitting again' }
       }
-      // The invocation COMMITTED: consume the image drafts it referenced
-      // (the prepared message holds the durable refs now; a concurrent
-      // intake's newer draft survives — review finding).
-      consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
+      const outcome = admission.outcome
+      if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+      if (outcome.kind !== 'committed') {
+        if (outcome.kind === 'indeterminate') { throw new IndeterminateSkillWriteError() }
+        if (outcome.kind === 'cancelled') throw cancellationError('skill write cancelled')
+        const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+        return { kind: 'error', text: message }
+      }
+    } catch (error) {
+      if (error instanceof TransitionInProgressError) {
+        const merged = mergeDraft(app.getDraft(), line)
+        app.setEditorText(merged)
+        recordCommandDraftDisposition(commandId, 'restored')
+        return { kind: 'error', text: merged === line
+          ? 'a session transition is in progress — try again in a moment'
+          : 'the draft changed while transitioning — review it before submitting again' }
+      }
+      throw error
     } finally {
       // The pin releases on EVERY exit — including a synchronous steer
       // throw (review finding: a leaked pin would block pruning and eat
       // draft capacity forever).
       releasePin()
     }
+    // The invocation COMMITTED: consume the image drafts it referenced (the
+    // prepared message holds the durable refs now; a concurrent intake's newer
+    // draft survives — review finding).
+    consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
     return { kind: 'success', text: 'skill ' + name + ' loaded' }
   }
 

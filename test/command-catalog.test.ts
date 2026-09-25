@@ -176,6 +176,7 @@ function stubRunner(
     sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,
@@ -534,6 +535,55 @@ test('the explicit /skill <name> path steers the original line and injects the b
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
   assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
+  app.stop()
+})
+
+test('the explicit /skill path admits and commits inside the shared prompt-admission window', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => name === 'glab'
+      ? { name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+      : undefined,
+  } as never)
+  const runner = stubRunner(ctx, app, { agent })
+  const inside = { value: false }
+  const prepareInside: boolean[] = []
+  const admissionLines: string[] = []
+  const prepare = runner.prepareDraftMessage
+  runner.prepareDraftMessage = async (text: string) => {
+    prepareInside.push(inside.value)
+    return prepare(text)
+  }
+  runner.withPromptAdmission = async <T>(_agent: unknown, line: string, task: () => Promise<T> | T): Promise<T> => {
+    admissionLines.push(line)
+    inside.value = true
+    try {
+      return await task()
+    } finally {
+      inside.value = false
+    }
+  }
+  registerTuiCommands(runner)
+  const skillDef = services.defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab @image.png' })
+  assert.equal(result.kind, 'success')
+  // The image capability check + attachment admission (`prepareDraftMessage`)
+  // and the delivery commit must both run INSIDE the per-Agent window shared
+  // with `/model` selection; running the admission outside it would let a
+  // concurrent model switch change the model mid-admission.
+  assert.deepEqual(prepareInside, [true], 'the skill admission runs inside the prompt-admission window')
+  assert.deepEqual(admissionLines, ['/glab @image.png'], 'the whole invocation line reaches the window')
+  assert.equal(delivered.length, 2, 'both ordered prompts were committed inside the window')
   app.stop()
 })
 

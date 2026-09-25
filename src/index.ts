@@ -10228,6 +10228,8 @@ export function apply(ctx: Context, config: Config): void {
         })),
       withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
         operationBarrier.runWriter(sessionId, async () => task()),
+      withPromptAdmission: <T>(agent: unknown, line: string, task: () => Promise<T> | T) =>
+        withPromptAdmission(agent as Agent, draftHasImages(line, draftImages), async () => task()),
       enterView,
       requestExit,
       exit,
