@@ -1,5 +1,5 @@
 /**
- * The alpha2 Client Session reference-ownership seam.
+ * The published Client Session reference-ownership seam.
  *
  * DSH 0.1.6-alpha.2 replaced "open moves the current selection" with explicit
  * reference ownership: `retain()` acquires one exact Client Session generation,

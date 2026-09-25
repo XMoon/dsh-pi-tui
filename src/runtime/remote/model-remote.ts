@@ -142,7 +142,7 @@ export function classifyRemoteModelFailure(error: unknown): RemoteWriteFailure {
     code === 'gateway/bad-request'
     || code === 'session/not-found'
     || code === 'session/agent-busy'
-    // alpha2: the Host resolves the Session Agent BEFORE selectModel runs, so a
+    // The Host resolves the Session Agent BEFORE selectModel runs, so a
     // writer held elsewhere is a proven pre-commit refusal (`session/writer-held`
     // carries `{ sessionId }`), never an indeterminate write.
     || code === 'session/writer-held'
@@ -338,7 +338,7 @@ export class RemoteModelCatalog implements ModelCatalog {
           }
     // Local ownership is lost by a reconnect, a newer selection, a REPLACED
     // binding generation for the same id, or a post-dispatch abort — none of
-    // which proves non-commit (v2 §0.2.4). alpha2 `binding(id)` is borrow-only,
+    // which proves non-commit (v2 §0.2.4). `binding(id)` is borrow-only,
     // so the exact-generation fence is IDENTITY, never mere presence: a same-id
     // release/re-retain yields a NEW binding on the same connection.
     const superseded = generationChanged(this.generation, captured)
