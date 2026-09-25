@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.9] - 2026-09-24
+## [0.4.9] - 2026-09-25
 
 ### Installation and version pairing
 
@@ -53,7 +53,7 @@ older DSH `0.1.5-rc.1`/`rc.2` family uses `@xmoon76/dsh-pi-tui@0.4.6`.
 
 - **`/preset` is a normal command adjudicated by the official registry alone.** rc.2 retired the rc.1 `modeSelectionEnabled` deployment-visibility policy, so `0.4.9` deletes the whole TUI-side policy layer (the DTO field, the Direct/Remote adapter branches, the command-visibility cache and its background probe): `/preset` appears in completions and `/help` whenever the command catalog is healthy, and selectability is decided only by the official `agentPresets` registry at execution time. `/preset default <id>` validates and then persists without reading any policy roster, and a blank in-session switch still goes through the official select. After upgrading to rc.2, any leftover field in an old profile is ignored by DSH; the TUI never migrates or deletes it.
 
-- **An in-session `/model` switch no longer waits for the default save.** The Direct session switch now matches rc.2: it first admits the exact current provider/model availability, normalizes through the official call config, commits `model/selection`, and returns immediately; the global-default save becomes best-effort background work whose failure is only diagnosed — it never rolls back the choice and never blocks the picker. The TUI's old default-write generation/reassert ordering is gone; overlapping writes are serialized by the official `AgentDefaultModel`.
+- **An in-session `/model` switch no longer waits for the default save.** The Direct session switch now matches rc.2: it first admits the exact current provider/model availability, normalizes through the official call config, commits `model/selection`, and returns immediately; the global-default save becomes best-effort background work whose failure is only diagnosed — it never rolls back the choice and never blocks the picker. The TUI's old default-write generation/reassert ordering is gone; overlapping writes are serialized by the official `AgentDefaultModel`. On the same Agent, an image-bearing prompt admission (including an explicit `/skill`) shares the official per-Agent serialization window with a `/model` switch: overlapping switches apply in call order, an image capability check can no longer pass under a model a concurrent switch already replaced, and text-only prompts stay unserialized.
 
 - **rc.2 dynamic tool updates: a running session records official `developer/message` tool updates and the TUI tolerates them safely.** When the DSH Agent loop records `tool-addition`/`tool-removal` for a tool-registry change, `Session.toolHistory()` is the sole authority; the TUI invents no card and keeps Ctrl+F search, export, fork/rewind and all three display projections stable, with new regressions for very long multibyte tool output and for the next prompt after a long session. Note: enabling or disabling a bundle/plugin row through the Plugin Manager inside an installed profile returns the official rc.2 `restart-required` outcome (never a silent hot-apply), which the TUI presents as-is — this release makes no "no Session recreation required" hot-apply claim.
 

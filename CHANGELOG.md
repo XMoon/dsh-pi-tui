@@ -7,7 +7,7 @@
 
 ## [Unreleased]
 
-## [0.4.9] - 2026-09-24
+## [0.4.9] - 2026-09-25
 
 ### 安装与版本对应
 
@@ -50,7 +50,7 @@ dsh --profile pi-tui
 
 - **`/preset` 回到由官方 registry 单独裁决的普通命令。** rc.2 收回了 rc.1 的 `modeSelectionEnabled` 部署可见性策略，`0.4.9` 相应删除了整条 TUI 侧的可见性策略层（DTO 字段、Direct/Remote 适配分支、命令可见性缓存与后台探测）：`/preset` 只要命令目录健康就照常出现在候选与 `/help` 中，是否可用只由官方 `agentPresets` registry 在真正执行时裁决；`/preset default <id>` 先校验再持久化，不再读取任何策略名单，会话内空白 Session 的切换仍走官方 select。升级到 rc.2 后，旧 profile 里遗留的该字段由 DSH 忽略，TUI 不会迁移或删除它。
 
-- **会话内切换 `/model` 不再等待默认保存。** Direct 会话切换现在与 rc.2 一致：先按当前 provider/model 的精确可用性准入，再经官方 call-config 归一化，提交 `model/selection` 后立刻返回；全局默认保存改为后台尽力而为，失败只记诊断、不回滚也不阻塞 picker。TUI 侧原有的默认写入 generation/重断言排序已删除，重叠写入的先后交给官方 `AgentDefaultModel` 串行化。
+- **会话内切换 `/model` 不再等待默认保存。** Direct 会话切换现在与 rc.2 一致：先按当前 provider/model 的精确可用性准入，再经官方 call-config 归一化，提交 `model/selection` 后立刻返回；全局默认保存改为后台尽力而为，失败只记诊断、不回滚也不阻塞 picker。TUI 侧原有的默认写入 generation/重断言排序已删除，重叠写入的先后交给官方 `AgentDefaultModel` 串行化。同一 Agent 上带图 prompt 的准入（含显式 `/skill`）与 `/model` 切换共用官方 per-Agent serialization window：重叠切换按调用顺序生效，图片能力检查不会再在已被替换的 model 下通过，纯文本 prompt 保持不串行。
 
 - **rc.2 动态工具更新：运行中的会话会记录官方 `developer/message` 工具更新，TUI 全程安全忽略。** 当 DSH Agent loop 因工具注册表变化记录 `tool-addition`/`tool-removal` 时，`Session.toolHistory()` 是唯一权威；TUI 不新增假卡片，Ctrl+F 搜索、导出、fork/rewind 与三种显示投影保持稳定，并补齐了超长多字节工具输出与超长会话续发 prompt 的回归。注意：在已安装 profile 内通过 Plugin Manager 对 bundle/plugin 行启用或禁用时，rc.2 Host 返回 `restart-required`（而非静默热更新），TUI 如实展示该结果；本版不承诺“无需重建会话即热生效”。
 
