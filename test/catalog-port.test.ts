@@ -132,6 +132,7 @@ test('model catalog separates global default from live Session selection', async
     setCurrent: (_agent: unknown, next: typeof liveSelection) => {
       liveSelection = next
     },
+    serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(),
     selectForNextRequest: (_agent: unknown, next: typeof liveSelection) => {
       appended.push({ type: 'model/selection', data: next })
       liveSelection = next
@@ -175,6 +176,7 @@ test('a global-default save failure does not erase a durable live Session choice
     setCurrent: (_agent: unknown, next: { provider: string; model: string }) => {
       liveSelection = next
     },
+    serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(),
     selectForNextRequest: (_agent: unknown, next: { provider: string; model: string }) => {
       appended.push({ type: 'model/selection', data: next })
       liveSelection = next
@@ -201,6 +203,7 @@ test('a failed durable append never becomes the Agent selection', async () => {
     current: () => ({ provider: 'old-provider', model: 'old-model' }),
     appendSelection: () => { throw new Error('append failed') },
     setCurrent: () => { throw new Error('setCurrent must not run after a failed append') },
+    serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(),
     selectForNextRequest: () => { throw new Error('selectForNextRequest must not run') },
   }
   const models = new DirectCatalogPort(host({
@@ -533,15 +536,25 @@ function modelOwnerDouble(): { owner: {
   appendSelection(agent: unknown, next: { provider: string; model: string; reasoningEffort?: string }): void
   setCurrent(agent: unknown, next: { provider: string; model: string; reasoningEffort?: string }): void
   selectForNextRequest(agent: unknown, next: unknown): void
+  serializeImageAdmission<Value>(agent: unknown, operation: () => Promise<Value>): Promise<Value>
 }; appended: unknown[] } {
   const appended: unknown[] = []
   let current = { provider: 'old-provider', model: 'old-model' }
+  // The real per-Agent chain, so these doubles exercise the same ordering the
+  // production DirectModelSelectionOwner provides.
+  const chains = new WeakMap<object, Promise<void>>()
   return {
     appended,
     owner: {
       current: () => current,
       appendSelection: (_agent, next) => { appended.push({ type: 'model/selection', data: next }) },
       setCurrent: (_agent, next) => { current = next },
+      serializeImageAdmission: <Value>(agent: unknown, op: () => Promise<Value>): Promise<Value> => {
+        const key = agent as object
+        const result = (chains.get(key) ?? Promise.resolve()).then(op)
+        chains.set(key, result.then(() => undefined, () => undefined))
+        return result
+      },
       selectForNextRequest: () => {},
     },
   }
@@ -655,7 +668,7 @@ test('Direct selectSessionModel honours an abort during the availability lookup 
   const started = deferred<void>()
   let release!: (value: readonly { id: string }[]) => void
   const gate = new Promise<readonly { id: string }[]>((resolve) => { release = resolve })
-  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {}, serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(), }
   const models = new DirectCatalogPort(host({
     llm: availableLlm({ listModels: async () => { started.resolve(); return gate } }),
     agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => {} },
@@ -679,6 +692,7 @@ test('Direct selectSessionModel honours an abort during normalization (before th
     current: () => undefined,
     appendSelection: (_agent: unknown, next: unknown) => { appended.push(next) },
     setCurrent: () => {},
+    serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(),
     selectForNextRequest: () => {},
   }
   const models = new DirectCatalogPort(host({
@@ -764,7 +778,7 @@ test('a Session model selection returns before a blocked default save settles', 
   const defaultGate = new Promise<void>((resolve) => { releaseDefault = resolve })
   const saveStarted = deferred<void>()
   const warnings: string[] = []
-  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {}, serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(), }
   const models = new DirectCatalogPort(host({
     llm: availableLlm({ resolveCallConfig: async (next: unknown) => next }),
     agentDefaultModel: {
@@ -788,7 +802,7 @@ test('a Session model selection returns before a blocked default save settles', 
 test('a background default save failure is diagnosed and never changes the committed Session outcome', async () => {
   const appended: unknown[] = []
   const warnings: string[] = []
-  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {}, serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(), }
   const models = new DirectCatalogPort(host({
     llm: availableLlm({ resolveCallConfig: async (next: unknown) => next }),
     agentDefaultModel: {
@@ -874,7 +888,7 @@ test('Direct selectSessionModel reports cancelled (not rejected) when aborted wh
   const gate = new Promise<void>((resolve) => { release = resolve })
   const started = deferred<void>()
   const appended: unknown[] = []
-  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {}, serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(), }
   const models = new DirectCatalogPort(host({
     llm: availableLlm({ resolveCallConfig: async () => { started.resolve(); await gate; throw new Error('route gone') } }),
     agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => {} },
@@ -896,7 +910,7 @@ test('Direct selectSessionModel reports committed + superseded when aborted afte
   const saveStarted = deferred<void>()
   let release!: () => void
   const gate = new Promise<void>((resolve) => { release = resolve })
-  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {}, serializeImageAdmission: <Value>(_a: unknown, op: () => Promise<Value>) => op(), }
   const models = new DirectCatalogPort(host({
     llm: availableLlm({ resolveCallConfig: async (next: unknown) => next }),
     agentDefaultModel: { currentSelection: () => undefined, saveSelection: async (next: unknown) => { saved.push(next); saveStarted.resolve(); await gate } },
@@ -930,4 +944,40 @@ test('Direct selectSessionPreset reports committed + superseded when aborted aft
   const result = await pending
   assert.equal(result.outcome.kind, 'committed')
   assert.equal(result.ownership, 'superseded')
+})
+
+test('overlapping Direct model selections are serialized per Agent and commit in call order', async () => {
+  // rc.2 official `session.selectModel` runs the whole validate/resolve/commit
+  // inside the per-Agent `serializeImageAdmission` window, so overlapping
+  // selections apply in call order. Without that window the newer choice can
+  // land first and be overwritten by the slower older one.
+  const { owner } = modelOwnerDouble()
+  const gates = new Map<string, (value: { provider: string; model: string }) => void>()
+  const flush = async (): Promise<void> => { for (let i = 0; i < 40; i += 1) await Promise.resolve() }
+  const models = new DirectCatalogPort(host({
+    llm: availableLlm({
+      resolveCallConfig: async (request: { provider: string; model: string }) =>
+        new Promise<{ provider: string; model: string }>((resolve) => { gates.set(request.model, resolve) }),
+    }),
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }), saveSelection: async () => {} },
+  }), () => liveAgent, owner).models
+
+  const first = models.selectSessionModel('session-live', { provider: 'p', model: 'm1' })
+  await flush()
+  assert.ok(gates.has('m1'), 'the older selection reached call-config resolution')
+  const second = models.selectSessionModel('session-live', { provider: 'p', model: 'new-model' })
+  await flush()
+  assert.ok(!gates.has('new-model'),
+    'the newer selection must WAIT for the older per-Agent operation instead of racing it')
+
+  gates.get('m1')!({ provider: 'p', model: 'm1' })
+  const firstResult = await first
+  assert.deepEqual(firstResult.outcome, { kind: 'committed', value: { provider: 'p', model: 'm1' } })
+  await flush()
+  assert.ok(gates.has('new-model'), 'the newer selection proceeds only after the older one commits')
+  gates.get('new-model')!({ provider: 'p', model: 'new-model' })
+  const secondResult = await second
+  assert.deepEqual(secondResult.outcome, { kind: 'committed', value: { provider: 'p', model: 'new-model' } })
+  assert.deepEqual(owner.current(), { provider: 'p', model: 'new-model' },
+    'the newest selection is the final Agent-local choice')
 })

@@ -365,7 +365,8 @@ export class DirectModelCatalog implements ModelCatalog {
     if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
     const llm = this.llm()
     const agent = this.agentFor(sessionId)
-    if (agent === undefined || this.modelSelections === undefined || llm === undefined) {
+    const owner = this.modelSelections
+    if (agent === undefined || owner === undefined || llm === undefined) {
       // Without a live Agent / Direct owner there is no safe Session
       // projection to mutate: refuse instead of saving only the global
       // default (which would make the caller believe the Session changed).
@@ -374,6 +375,26 @@ export class DirectModelCatalog implements ModelCatalog {
         error: { code: 'session/model-unavailable', message: 'session model selection unavailable' },
       }
     }
+    // rc.2 official `session.selectModel` serializes the WHOLE selection per
+    // Agent (`serializeImageAdmission`), the SAME window an image-bearing
+    // prompt admission takes. Enqueue BEFORE the first await so two
+    // overlapping selections apply in call order — otherwise a slower older
+    // choice can commit after (and overwrite) the newer one.
+    return owner.serializeImageAdmission(agent, () =>
+      this.commitSessionModelSelection(sessionId, agent, owner, llm, selection, signal))
+  }
+
+  private async commitSessionModelSelection(
+    sessionId: string,
+    agent: unknown,
+    owner: SessionModelSelectionOwnerLike,
+    llm: LlmServiceLike,
+    selection: ModelSelectionDto,
+    signal?: AbortSignal,
+  ): Promise<WriteOutcome<ModelSelectionDto>> {
+    // The queued operation may run after a caller abort: re-check before any
+    // work (a pre-commit abort provably did not commit).
+    if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
     // The Host owns provider/model validation and reasoning-effort
     // normalization (official `session.selectModel` semantics), but rc.2 first
     // admits the EXACT current availability: the selected provider must be
@@ -448,19 +469,20 @@ export class DirectModelCatalog implements ModelCatalog {
     // observed by a request. Only after the append commits does the choice
     // become the Agent's pending selection.
     try {
-      this.modelSelections.appendSelection(agent, next)
+      owner.appendSelection(agent, next)
     } catch (error) {
       return {
         kind: 'rejected',
         error: { code: 'session/model-unavailable', message: safeErrorMessage(error) },
       }
     }
-    this.modelSelections.setCurrent(agent, next)
+    owner.setCurrent(agent, next)
     // rc.2 commits the Session selection and returns immediately: the
     // global-default save is best-effort BACKGROUND work (pinned official
     // `session.selectModel` semantics). Its failure is diagnosed through the
     // detached owner and never undoes the durable Session choice, never
-    // rejects this outcome, and never blocks the picker.
+    // rejects this outcome, and never blocks the picker. It is STARTED inside
+    // the window (same upstream order) but never awaited here.
     this.startDefaultSave(next, sessionId)
     return { kind: 'committed', value: { ...next } }
   }
