@@ -1,4 +1,7 @@
 {
+  "app/direct/runtime.ts": [
+    "import:dsh-agent"
+  ],
   "commands.ts": [
     "import:dsh-agent",
     "import:dsh-session"
