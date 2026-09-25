@@ -171,9 +171,9 @@ export class RemoteTaskReader implements TaskReader {
     // gap would drop the roster between the two calls (the official
     // release is also entry-bound, so releasing after the acquire can
     // never tear the new stream down). The predecessor stays tracked until
-    // the successor exists, so a synchronous acquire failure (the official
-    // stream is created inside the first acquire and can throw while the
-    // connection tears down) cannot orphan a lease this reader still owns.
+    // the successor exists, so a synchronous acquire failure — defensive
+    // structural hardening; the adapter must not depend on an acquisition
+    // never throwing — cannot orphan a lease this reader still owns.
     const successor = this.jobs.watchRows(parentSessionId)
     this.releaseWatch = successor
     this.watchedSession = parentSessionId

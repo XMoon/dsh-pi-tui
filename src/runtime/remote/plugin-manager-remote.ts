@@ -168,8 +168,10 @@ export class RemotePluginManagerPort implements PluginManagerPort {
         listener({ kind: 'log', log: detachLog(payload) })
       }))
     } catch (error) {
-      // A forwarded event outside the assembly's allowlist can refuse its
-      // subscription; the earlier subscription must not leak.
+      // Defensive structural hardening: the second subscription may fail
+      // synchronously, and the earlier subscription must not leak. (The
+      // forwarded-event allowlist is a compile-time constraint in the pinned
+      // rc.2, not a runtime guarantee this adapter may rely on.)
       for (const off of owned.splice(0)) off()
       throw error
     }

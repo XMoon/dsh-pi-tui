@@ -112,8 +112,8 @@ function jobsFixture(options: {
     state: { getSnapshot: () => ({ rows: Object.fromEntries(Object.entries(rows).filter(([, value]) => value.length > 0)) }) },
     watchRows(sessionId: string) {
       watchCalls.push(sessionId)
-      // The official ClientJobs creates the roster stream inside the first
-      // acquire, which can throw synchronously while the connection tears down.
+      // Fault injection: the structural source may fail synchronously in
+      // `watchRows`, and the reader must not orphan an owned lease.
       if (watchError !== undefined) throw watchError
       let released = false
       return () => {

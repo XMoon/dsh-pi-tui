@@ -135,8 +135,8 @@ function remoteFixture(): RemotePluginManagerFixture {
     // face is overloaded per event, so the storage signature is the loose
     // call-site type and each event branch narrows its own listener.
     $on: (event: string, listener: (payload: never) => void) => {
-      // A forwarded event outside the assembly's allowlist can refuse the
-      // subscription; the fixture scripts that synchronous failure.
+      // Fault injection: the fixture can script a synchronous subscription
+      // failure for either forwarded event.
       if (eventFailures.has(event)) throw eventFailures.get(event)
       if (event === 'plugin-manager/install-state') {
         const typed = listener as (payload: PluginInstallProgress) => void
@@ -330,8 +330,8 @@ test('a failed second event subscription releases the first (no leaked listener)
   const remote = remoteFixture()
   const port = new RemotePluginManagerPort(remote)
   const events: PluginInstallEvent[] = []
-  remote.failOn('plugin-manager/install-log', new Error('event is not forwarded by this assembly'))
-  assert.throws(() => port.subscribeInstall(event => events.push(event)), /not forwarded/)
+  remote.failOn('plugin-manager/install-log', new Error('the subscription was refused'))
+  assert.throws(() => port.subscribeInstall(event => events.push(event)), /subscription was refused/)
   assert.equal(remote.subscriptions, 0, 'the state subscription must be rolled back')
   // No leaked listener may still deliver after the failed subscribe.
   remote.failOn('plugin-manager/install-log', undefined)

@@ -49,8 +49,8 @@ function jobsFixture(): JobsFixture {
     },
     watchRows(sessionId) {
       watchCalls.push(sessionId)
-      // The official ClientJobs creates the roster stream inside the first
-      // acquire, which can throw synchronously while the connection tears down.
+      // Fault injection: the structural source may fail synchronously in
+      // `watchRows`, and the adapter must not leak a partial acquisition.
       if (watchError !== undefined) throw watchError
       let released = false
       return () => {
