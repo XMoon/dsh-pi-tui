@@ -4501,6 +4501,66 @@ test('exit during a transition stuck in pre-commit whenIdle: the pre-cancel unbl
   assert.equal(harness.createdSessions.length, 0, 'the aborted create must not publish a child')
 })
 
+test('shutdown during an ordinary transition that still COMMITS: the final retirement re-reads and retires the NEW owner', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-shutdown-commit-new-owner-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const source: FakeSession = fakeSession({
+    id: 'shutdown-commit-source',
+    header: { id: 'shutdown-commit-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  let signalCreateStarted!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  let releaseCreate!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const harness = makeHarness(home, source, { provider: 'p', model: 'm' }, undefined, async () => {
+    signalCreateStarted()
+    await createGate
+  })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await createStarted
+  // Shutdown begins while the transition is parked in its `create`: the
+  // pre-cancel captures the OLD owner (A) and the memoized retirement waits for
+  // the transition gate the /new task still holds.
+  const disposal = fiber.dispose()
+  fiber = undefined
+  await settle()
+  // The create now resolves, so the transition COMMITS the NEW owner (B) and
+  // releases the gate. The final shutdown retirement MUST re-read the current
+  // owner rather than reuse the pre-cancelled capture.
+  releaseCreate()
+  await transition
+  await disposal
+  await settle()
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the transition must have created its child Session')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === `cancel:${source.id}`).length, 1,
+    'the pre-cancel must cancel the OLD owner exactly once')
+  assert.equal(events.filter(event => event === `cancel:${child.id}`).length, 1,
+    'the final retirement must cancel the NEW current owner exactly once')
+  assert.equal(events.filter(event => event === `dispose:${source.id}`).length, 1,
+    'the transition retire-old must dispose the OLD owner exactly once')
+  assert.equal(events.filter(event => event === `dispose:${child.id}`).length, 1,
+    'the shutdown retirement must dispose the NEW current owner exactly once, not the pre-cancelled one')
+})
+
 test('a pre-mount unload while the resume whenIdle is pending cancels the agent and retires the owner', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-retire-premount-whenidle-')
