@@ -24,6 +24,8 @@ interface JobsFixture extends RemoteJobObservationSource {
   subscriberCount(): number
   setRows(sessionId: string, rows: readonly RemoteObservedJobRow[]): void
   setObserved(jobId: string, state: RemoteObservedJobState | undefined): void
+  failWatch(error: unknown): void
+  failObserve(error: unknown): void
 }
 
 function jobsFixture(): JobsFixture {
@@ -34,6 +36,8 @@ function jobsFixture(): JobsFixture {
   const observeCalls: Array<readonly [string | undefined, string]> = []
   const rowReleases: string[] = []
   const observeReleases: string[] = []
+  let watchError: unknown
+  let observeError: unknown
   const notify = (): void => { for (const listener of [...listeners]) listener() }
   return {
     state: {
@@ -45,6 +49,9 @@ function jobsFixture(): JobsFixture {
     },
     watchRows(sessionId) {
       watchCalls.push(sessionId)
+      // The official ClientJobs creates the roster stream inside the first
+      // acquire, which can throw synchronously while the connection tears down.
+      if (watchError !== undefined) throw watchError
       let released = false
       return () => {
         if (released) return
@@ -54,6 +61,7 @@ function jobsFixture(): JobsFixture {
     },
     observe(sessionId, jobId) {
       observeCalls.push([sessionId, jobId])
+      if (observeError !== undefined) throw observeError
       let released = false
       return () => {
         if (released) return
@@ -66,6 +74,8 @@ function jobsFixture(): JobsFixture {
     get rowReleases() { return rowReleases },
     get observeReleases() { return observeReleases },
     subscriberCount: () => listeners.size,
+    failWatch(error) { watchError = error },
+    failObserve(error) { observeError = error },
     setRows(sessionId, value) {
       if (value.length === 0) delete rows[sessionId]
       else rows[sessionId] = value
@@ -216,4 +226,31 @@ test('two observers share nothing: each acquires and releases its own leases', (
   second.close()
   assert.deepEqual(jobs.rowReleases, ['s1', 's1'])
   assert.deepEqual(jobs.observeReleases, ['job-1', 'job-1'])
+})
+
+test('a synchronous roster acquisition failure rolls back the state subscription already acquired', () => {
+  const jobs = jobsFixture()
+  jobs.failWatch(new Error('the connection is going away'))
+  const port = new RemoteJobObservationPort(jobs)
+  assert.throws(() => port.open('s1', 'job-1', () => {}), /connection is going away/)
+  assert.equal(jobs.subscriberCount(), 0, 'the state subscription must not leak when a later acquisition throws')
+  assert.deepEqual(jobs.rowReleases, [], 'no row watch was acquired')
+  // The adapter stays usable: once the transport recovers, a later open
+  // acquires everything afresh.
+  jobs.failWatch(undefined)
+  const { snapshots, close } = observe(port, 's1')
+  assert.equal(jobs.subscriberCount(), 1)
+  assert.equal(snapshots.length, 1)
+  close()
+  assert.equal(jobs.subscriberCount(), 0)
+})
+
+test('a synchronous observation acquisition failure rolls back the row watch and the state subscription', () => {
+  const jobs = jobsFixture()
+  jobs.failObserve(new Error('the context is tearing down'))
+  const port = new RemoteJobObservationPort(jobs)
+  assert.throws(() => port.open('s1', 'job-1', () => {}), /context is tearing down/)
+  assert.equal(jobs.subscriberCount(), 0, 'the state subscription must not leak')
+  assert.deepEqual(jobs.rowReleases, ['s1'], 'the row watch must be released when the observation acquisition fails')
+  assert.deepEqual(jobs.observeReleases, [], 'no observation lease was acquired')
 })

@@ -99,10 +99,12 @@ function jobsFixture(options: {
   releases: string[]
   droppedByRelease: string[]
   setRows(sessionId: string, rows: readonly RemoteJobView[] | undefined): void
+  failWatch(error: unknown): void
 } {
   const rows: Record<string, readonly RemoteJobView[]> = { ...options.rows }
   const watchCalls: string[] = []
   const releases: string[] = []
+  let watchError: unknown
   // Entry-bound releases, mirroring the official ClientJobs contract: a
   // release only drops ITS OWN acquisition, never a successor's rows.
   const droppedByRelease: string[] = []
@@ -110,6 +112,9 @@ function jobsFixture(options: {
     state: { getSnapshot: () => ({ rows: Object.fromEntries(Object.entries(rows).filter(([, value]) => value.length > 0)) }) },
     watchRows(sessionId: string) {
       watchCalls.push(sessionId)
+      // The official ClientJobs creates the roster stream inside the first
+      // acquire, which can throw synchronously while the connection tears down.
+      if (watchError !== undefined) throw watchError
       let released = false
       return () => {
         if (released) return
@@ -124,6 +129,7 @@ function jobsFixture(options: {
     get watchCalls() { return watchCalls },
     get releases() { return releases },
     get droppedByRelease() { return droppedByRelease },
+    failWatch(error) { watchError = error },
     setRows(sessionId, value) {
       if (value === undefined || value.length === 0) delete rows[sessionId]
       else rows[sessionId] = value
@@ -385,6 +391,32 @@ test('the roster watch is retained across reads and switches with the parent ses
   // Switching back re-acquires (the old watch for parent-a was dropped).
   await reader.readDirectChildren('parent-a')
   assert.deepEqual(jobs.watchCalls, ['parent-a', 'parent-b', 'parent-a'])
+})
+
+test('a failed successor roster watch keeps the previous watch owned (no orphaned lease)', async () => {
+  const generations = generationHarness()
+  const client = sessionsFixture({
+    byId: { 'parent-a': { running: false }, 'parent-b': { running: false } },
+    projections: {
+      'parent-a': { entries: [], state: 'ready' },
+      'parent-b': { entries: [], state: 'ready' },
+    },
+  })
+  const jobs = jobsFixture({ rows: { 'parent-a': [jobView('a-1')], 'parent-b': [jobView('b-1')] } })
+  const reader = new RemoteTaskReader(client, jobs, generations.source)
+  await reader.readDirectChildren('parent-a')
+  assert.deepEqual(jobs.watchCalls, ['parent-a'])
+
+  // The successor acquisition fails synchronously (connection teardown). The
+  // reader must still OWN the predecessor watch, so dispose can release it.
+  jobs.failWatch(new Error('the connection is going away'))
+  await assert.rejects(() => reader.readDirectChildren('parent-b'), /connection is going away/)
+  assert.deepEqual(jobs.releases, [], 'a failed acquire must not release the predecessor early')
+
+  jobs.failWatch(undefined)
+  reader.dispose()
+  assert.deepEqual(jobs.releases, ['parent-a'],
+    'the predecessor watch must still be reachable and released by dispose')
 })
 
 test('dispose releases the retained watch exactly once and reacquisition stays safe', async () => {
