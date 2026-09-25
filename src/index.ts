@@ -205,6 +205,13 @@ import {
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
 import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
+import {
+  runFirstSessionCommit,
+  runForkCommit,
+  runGenerationBump,
+  runOrdinaryCommit,
+  runResumeCommit,
+} from './app/session/commit-order.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import { type DirectOwnerPoolLike } from './runtime/direct/session-lifecycle-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -2628,28 +2635,37 @@ export function apply(ctx: Context, config: Config): void {
       // session at all — zero agent, zero log, zero persistence — and the
       // first user message creates it (see ensureSession below).
     }
-    liveHandle = handle?.direct?.ownerHandle as AgentHandle | undefined
-    liveAgent = handle?.direct?.agent as Agent | undefined
-    // The completion-notification controller follows the live identity:
-    // a resumed idle session must never notify (no observed running).
-    setCompletionOwner(liveAgent?.id)
-    if (liveAgent !== undefined) {
-      // The resume transaction succeeded; the remaining pre-mount wait is
-      // the conversation preparation (whenIdle + the catalog ready
-      // barrier) — the second status stage replaces the first in place
-      // and STAYS until the barrier completes (the catalog prefetch can
-      // take seconds; a cleared line would read as a hang again).
-      startupStatus.show('Preparing conversation…')
-      // The pre-mount whenIdle does NOT observe the lifecycle signal, and
-      // the full surface disposer is not registered yet (the pre-mount
-      // abort path below has not been reached) — an early HMR/app disposal
-      // would otherwise leave this await hanging forever and the
-      // just-created owner would never be retired. Cancel the agent on
-      // abort so whenIdle settles, then the pre-mount abort path below
-      // retires the owner.
-      const resumedAgent = liveAgent
-      await whenIdleOrAbort(resumedAgent, lifecycleController.signal)
-    }
+    // The startup-resume publication ORDER is fixed by `runResumeCommit`
+    // (A2 plan §4D): publish owner → completion → pre-mount quiesce. The
+    // publication itself stays SYNCHRONOUS; a sessionless (deferred) startup
+    // has nothing to quiesce and must not gain a microtask yield here.
+    const resumeQuiesce = runResumeCommit({
+      publishOwner: (owner) => {
+        const resumed = owner as SessionHandle | undefined
+        liveHandle = resumed?.direct?.ownerHandle as AgentHandle | undefined
+        liveAgent = resumed?.direct?.agent as Agent | undefined
+        return liveAgent?.id
+      },
+      setCompletionOwner,
+      preMountQuiesce: () => {
+        if (liveAgent === undefined) return undefined
+        // The resume transaction succeeded; the remaining pre-mount wait is
+        // the conversation preparation (whenIdle + the catalog ready
+        // barrier) — the second status stage replaces the first in place
+        // and STAYS until the barrier completes (the catalog prefetch can
+        // take seconds; a cleared line would read as a hang again).
+        startupStatus.show('Preparing conversation…')
+        // The pre-mount whenIdle does NOT observe the lifecycle signal, and
+        // the full surface disposer is not registered yet (the pre-mount
+        // abort path below has not been reached) — an early HMR/app disposal
+        // would otherwise leave this await hanging forever and the
+        // just-created owner would never be retired. Cancel the agent on
+        // abort so whenIdle settles, then the pre-mount abort path below
+        // retires the owner.
+        return whenIdleOrAbort(liveAgent, lifecycleController.signal)
+      },
+    }, handle)
+    if (resumeQuiesce !== undefined) await resumeQuiesce
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
     // a resumed agent prefetches its effective catalog (a live read emits no
     // session events); the deferred start reads the cold HUMAN SKILL catalog
@@ -2846,26 +2862,23 @@ export function apply(ctx: Context, config: Config): void {
         },
         commit: (next) => {
           transitionCommitted = true
-          settlePendingQueueRecalls(true)
-          // A new session owns the surface: the OLD session's pending
-          // submit ack must never leak into it, and its latency timeline
-          // is meaningless now.
-          // A Direct create may resolve after lifecycle abort; preserve the child in
-          // the owner slots below for retirement, but do not touch the dead surface.
-          if (!cleanedUp) settleLocalSubmitAck('session switched')
-          if (!cleanedUp) submitLatencyTracker.reset()
-          // A new session owns the surface: bump the generation so late
-          // async work from the old session cannot commit, and clear
-          // old-session state.
-          if (!cleanedUp) bumpSessionGeneration()
-          liveHandle = ownerHandleOf(next) as AgentHandle | undefined
-          liveAgent = directAgentOf(next) as Agent
-          if (cleanedUp) return
-          // Session switch: the notification controller resets with the
-          // new live identity — a late idle from the OLD agent is fenced
-          // out and the new agent must be observed running before it can
-          // ever notify.
-          setCompletionOwner(liveAgent.id)
+          // The commit ORDER is fixed by `runOrdinaryCommit` (A2 plan §4A): the
+          // generation reset runs BEFORE the new owner is published, so it
+          // observes the OLD owner; a disposed surface still publishes the late
+          // child for retirement but touches nothing else.
+          runOrdinaryCommit({
+            isSurfaceDisposed: () => cleanedUp,
+            settlePendingQueueRecalls,
+            settleLocalSubmitAck,
+            resetSubmitLatency: () => submitLatencyTracker.reset(),
+            bumpGeneration: bumpSessionGeneration,
+            publishOwner: (owner) => {
+              liveHandle = ownerHandleOf(owner) as AgentHandle | undefined
+              liveAgent = directAgentOf(owner) as Agent
+              return liveAgent.id
+            },
+            setCompletionOwner,
+          }, next)
         },
         retireOld: async (next) => {
           const retired: string[] = []
@@ -3578,13 +3591,21 @@ export function apply(ctx: Context, config: Config): void {
         if (nextAgent === undefined || nextHandle === undefined) {
           throw new Error(`forked session "${handle.session.id}" has no Direct owner`)
         }
-        settlePendingQueueRecalls(true)
-        settleLocalSubmitAck('session forked')
-        submitLatencyTracker.reset()
-        bumpSessionGeneration()
-        liveAgent = nextAgent
-        liveHandle = nextHandle
-        setCompletionOwner(nextAgent.id)
+        // The fork-adoption commit ORDER is fixed by `runForkCommit`
+        // (A2 plan §4B): the generation reset runs BEFORE the child is
+        // published, exactly like the ordinary transition.
+        runForkCommit({
+          settlePendingQueueRecalls,
+          settleLocalSubmitAck,
+          resetSubmitLatency: () => submitLatencyTracker.reset(),
+          bumpGeneration: bumpSessionGeneration,
+          publishOwner: () => {
+            liveAgent = nextAgent
+            liveHandle = nextHandle
+            return nextAgent.id
+          },
+          setCompletionOwner,
+        }, nextAgent)
         adopted = true
         try {
           onAdopted?.()
@@ -4801,12 +4822,12 @@ export function apply(ctx: Context, config: Config): void {
         refreshStatusCheap()
       })
     }
-    const bumpSessionGeneration = (): number => {
-      if (cleanedUp) return sessionGeneration
-      sessionGeneration += 1
-      resetForGeneration()
-      return sessionGeneration
-    }
+    const bumpSessionGeneration = (): number => runGenerationBump({
+      isSurfaceDisposed: () => cleanedUp,
+      get: () => sessionGeneration,
+      set: (next) => { sessionGeneration = next },
+      reset: resetForGeneration,
+    })
     // PR D1 P1: while the search overlay is open the transcript keeps
     // changing (settlements, read-group reflow, new messages), so Next/Prev
     // must never jump with a stale candidate list or a stale turn. This
@@ -9819,31 +9840,41 @@ export function apply(ctx: Context, config: Config): void {
         // port contract: direct.agent is present on Direct backends).
         const createdAgent = created.direct!.agent as Agent
         const opening = currentOpening()
-        liveHandle = created.direct!.ownerHandle as AgentHandle
-        liveAgent = createdAgent
-        // First-session commit: the notification controller resets with
-        // the new live identity (a fresh agent must be observed running
-        // before it can ever notify).
-        setCompletionOwner(createdAgent.id)
-        // Post-create initialization is best-effort: the child is committed,
-        // so failures are recorded, never a fallback (the same
-        // retire-warn-only semantics as every other transition).
-        try {
-          const aborted = await whenIdleOrAbort(liveAgent, lifecycleController.signal)
-          if (aborted) {
-            // The lifecycle aborted during the first-session quiesce: the
-            // surface is disposed and the retirement takes over — skip the
-            // surface initialization below.
-            return
-          }
-        } catch (error) {
-          diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
-        }
-        bumpSessionGeneration()
-        try {
-          await initLiveSession(liveAgent)
-        } catch (error) {
-          diag.warn('first session surface rebuild failed', { error: safeErrorMessage(error) })
+        // The first-session commit ORDER is fixed by `runFirstSessionCommit`
+        // (A2 plan §4C): publish owner → completion → await child idle →
+        // bump(reset) → init. Unlike A/B, the bump happens AFTER publication.
+        const committed = await runFirstSessionCommit({
+          publishOwner: () => {
+            liveHandle = created.direct!.ownerHandle as AgentHandle
+            liveAgent = createdAgent
+            return createdAgent.id
+          },
+          setCompletionOwner,
+          bumpGeneration: bumpSessionGeneration,
+          // Post-create initialization is best-effort: the child is committed,
+          // so failures are recorded, never a fallback (the same
+          // retire-warn-only semantics as every other transition).
+          quiesceChild: async () => {
+            try {
+              return await whenIdleOrAbort(createdAgent, lifecycleController.signal)
+            } catch (error) {
+              diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
+              return false
+            }
+          },
+          initChild: async () => {
+            try {
+              await initLiveSession(createdAgent)
+            } catch (error) {
+              diag.warn('first session surface rebuild failed', { error: safeErrorMessage(error) })
+            }
+          },
+        }, createdAgent)
+        if (!committed) {
+          // The lifecycle aborted during the first-session quiesce: the surface
+          // is disposed and the retirement takes over — skip the surface
+          // initialization below.
+          return
         }
         {
            if (opening !== undefined) clearOpening(opening)
@@ -9854,7 +9885,7 @@ export function apply(ctx: Context, config: Config): void {
         // authorization). Provider issues degrade fields inside the
         // snapshot; a failed attempt is warned, never fatal.
         try {
-          await refreshLiveCatalog(liveAgent)
+          await refreshLiveCatalog(createdAgent)
         } catch (error) {
           diag.warn('first session catalog refresh failed', { error: safeErrorMessage(error) })
         }
