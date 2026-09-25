@@ -23,6 +23,17 @@
  */
 
 declare const sessionSubjectBrand: unique symbol
+declare const sessionOwnerRefBrand: unique symbol
+
+/**
+ * An OPAQUE handle to one exact session owner. `app/session` never inspects it;
+ * the Direct implementation mints it so that the same exact Agent OBJECT always
+ * maps to the same `SessionOwnerRef` (private `WeakMap`). Branding keeps any
+ * stray `object` from being accepted at the type level.
+ */
+export interface SessionOwnerRef {
+  readonly [sessionOwnerRefBrand]: true
+}
 
 /** An opaque session-ownership subject token (never an identity by itself). */
 export interface SessionSubject {
@@ -31,10 +42,11 @@ export interface SessionSubject {
 
 /**
  * The exact ownership record a captured subject pins. `owner` is the opaque
- * Direct `OwnerRef`; `generation` is the runner's session generation at capture.
+ * Direct `SessionOwnerRef`; `generation` is the runner's session generation at
+ * capture.
  */
 export interface SessionSubjectRecord {
-  readonly owner: object
+  readonly owner: SessionOwnerRef
   readonly generation: number
 }
 

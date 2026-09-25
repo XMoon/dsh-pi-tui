@@ -18,6 +18,10 @@ const indexSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.ts'),
   'utf8',
 )
+const commitOrderSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'session', 'commit-order.ts'),
+  'utf8',
+)
 
 test('the ONLY completion-controller feed is agent/status (turn/end can never notify)', () => {
   // The controller's status input appears exactly ONCE in the whole
@@ -37,13 +41,15 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
 })
 
 test('the live-agent identity resets at every commit site plus teardown', () => {
-  // Startup resume, session switch (/new /fork rewind /sessions — ONE commit
-  // point), fork adoption, the first-session creation, and the cleanup fence:
-  // exactly five resets, now routed through the named `setCompletionOwner`
-  // seam (A2). The seam itself is the ONLY place that calls the controller.
-  const occurrences = indexSource.split('setCompletionOwner(').length - 1
-  assert.equal(occurrences, 5,
-    'setCompletionOwner must run at startup resume, the switch commit, fork adoption, first-session create and cleanup')
+  // The four commit shapes (startup resume, ordinary switch, fork adoption,
+  // first-session create) apply their completion reset through the shared
+  // ordering helpers (A2 plan §4A-D); the runner keeps exactly ONE direct call
+  // for the cleanup fence. The controller is reached ONLY through the single
+  // `setCompletionOwner` seam.
+  assert.equal(commitOrderSource.split('seams.setCompletionOwner(').length - 1, 4,
+    'all four commit shapes must reset the completion owner through the seam')
+  assert.equal(indexSource.split('setCompletionOwner(undefined)').length - 1, 1,
+    'the cleanup fence must reset the completion identity to undefined exactly once')
   assert.equal(indexSource.split('completionController.setLiveAgent').length - 1, 1,
     'the completion controller must be reached ONLY through the single setCompletionOwner seam')
 })
