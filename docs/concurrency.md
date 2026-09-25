@@ -11,6 +11,17 @@ Session writer ownership has exactly two layers on the master baseline:
    `SessionOperationBarrier`, and generation/stale fences keep the TUI's
    own surface consistent while it switches sessions.
 
+The in-process layer lives in the session layer (A2): the ownership core
+(`src/app/session/ownership-core.ts`) owns the ONE current-owner slot, the
+session generation, the navigation epoch, the transition gate, the operation
+barrier and the owner-release ledger; the bound runtime
+(`src/app/session/runtime.ts`) runs the four commit shapes
+(`src/app/session/commit-order.ts`) plus the retirement coordination; the
+consumer-owned ports are in `src/app/session/owner-access.ts`; and
+`src/app/direct/owner-registry.ts` + `src/app/direct/owner-retirement.ts` are
+the Direct adapters. The runner keeps the surface providers and the Direct
+composition root.
+
 ## Host writer ownership: DSH SessionHandle + SessionWriteLease
 
 dsh sessions cannot be shared across processes. Two dsh processes (TUI +
@@ -123,12 +134,14 @@ On top of the gate, ordinary session transitions share ONE transaction shape
    but never deletes a persisted session, and dsh has no durable rollback
    API. A rejection is NEVER retried (no same-ID recovery): the old
    session stays current and the user may retry.
-4. COMMIT — a synchronous critical section (generation bump, live
-   handle/agent replacement) with no awaits between its steps.
-5. RETIRE — retire the old Direct owner (cancel → idle → drain
-   continuable descendants → final flush → dispose — see the Direct
-   top-level Agent retirement section); child surface/catalog work is
-   best-effort and the committed child always stands.
+4. COMMIT — a synchronous critical section: the generation reset runs BEFORE
+   the new owner is published into the ownership core
+   (`runOrdinaryCommit`, `src/app/session/commit-order.ts`), with no awaits
+   between its steps.
+5. RETIRE — retire the OLD owner through the retirement port, which owns the
+   official session-close order (see the session-owner retirement section);
+   child surface/catalog work is best-effort and the committed child always
+   stands.
 
 ### Fork dispatch and adoption
 
@@ -315,26 +328,46 @@ attachment preparation cannot let a later gesture overtake an earlier one.
 
 ### Generation/stale fences
 
-- The runner keeps a **monotonic session generation**, bumped on EVERY
-  session swap (switch, `/new`, `/fork`, rewind, open). Late async work
-  from the old session captures the generation it started under and
-  refuses to commit state once a newer generation owns the surface.
-- The submission re-validation checks the live agent object AND the session
-  generation before mutating visible state.
+- The ownership core (`src/app/session/ownership-core.ts`) keeps the ONE
+  **monotonic session generation**, bumped on EVERY session swap (switch,
+  `/new`, `/fork`, rewind, open) by the bound runtime. Late async work from the
+  old session captures the generation it started under and refuses to commit
+  state once a newer generation owns the surface. Session IDENTITY is the opaque
+  `SessionOwnerRef` + generation (`SessionSubject`), never a session id alone;
+  the Direct Agent object is reachable only through the Direct owner registry,
+  and the transitional `currentDirectAttachment()` projection serves Direct
+  DATA/OPERATION reads only — identity and currentness always come from the
+  core.
+- The submission re-validation checks the live owner SUBJECT (owner ref +
+  generation) before mutating visible state.
 - Rewind captures the source identity, generation and navigation epoch when the
   picker opens. Selection revalidates that full identity before dispatching the
   Host fork, so returning to the same Session id after newer navigation still
   rejects the stale picker row without creating a child.
 
-## Direct top-level Agent retirement
+## Session-owner retirement
 
-The Direct backend runs the TUI and the Host in one process and the TUI
-itself creates the top-level Agent, so closing the TUI surface must also
-retire that Direct ownership. This is a **Direct-only ownership escape**
-(`src/runtime/direct/owned-session-retirement.ts`), NOT a semantic port and
-NOT a future Remote `session.close` RPC — a future Remote client closes its
-client-side observation/connection state through official DSH client
-contracts and never destroys the Host Agent.
+The session layer drives retirement through the consumer-owned
+`SessionOwnerRetirement` port (`src/app/session/owner-access.ts`): quiesce or
+pre-cancel one owner, retire it in the official session-close order, park a
+refused fork's owner for a later claim, and report the retirement outcome: when
+a `durabilityFailure` exists the surface shows the SEMANTIC "the latest events
+may not be persisted" warning; otherwise, if any failures remain, it summarizes
+them for the user with the BACKEND-defined phase labels (diagnostic labels only
+— never a cross-backend contract). The bound runtime owns WHEN to retire and
+the control flow after an abort.
+
+The backend adapter that implements the port on the in-process path is
+`src/app/direct/owner-retirement.ts`; it owns the exactly-once shutdown cancel,
+the abort listener and the fixed-phase execution
+(`src/runtime/direct/owned-session-retirement.ts`). On the Direct backend the
+TUI and the Host share one process and the TUI created the top-level Agent, so
+the adapter's cancel/dispose really does release Agent-scoped work. That is
+NOT a future Remote `session.close` RPC — a Remote client closes its client-side
+observation/connection state through official DSH client contracts and never
+destroys the Host Agent, which is exactly why the port fixes only the
+observable contract (await quiescence and report which condition ended the
+wait) and leaves HOW an abort is reflected onto the owner to the backend.
 
 The retirement order is fixed (mirroring the official DSH ACP session
 close):
