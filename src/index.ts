@@ -1928,7 +1928,6 @@ export function apply(ctx: Context, config: Config): void {
       isSurfaceDisposed: () => cleanedUp,
       resetForGeneration: () => resetForGeneration(),
     })
-    const pendingForks = new Set<Promise<unknown>>()
     // In-flight work whose settlement is reachable only from a later callback,
     // so teardown must await it explicitly: a command execution (INCLUDING the
     // official executor's post-handler `command/done` append — a `/fork`
@@ -1936,11 +1935,6 @@ export function apply(ctx: Context, config: Config): void {
     // settles, or the durable log keeps `command/run` without `command/done`)
     // and the nested image-submit it launches in its `onResult`.
     const pendingSettlementWork = new Set<Promise<unknown>>()
-    // Every source-owner retirement that has STARTED (the deferred queue's
-    // flush). Teardown awaits these so the retirement never runs after the
-    // Host context / diag it touches is gone (a skipped dispose leaks the
-    // writer lease).
-    const pendingSourceRetirements = new Set<Promise<void>>()
     // Alt+Up may finish a queue mutation while a transition is waiting on the
     // same writer barrier. Keep its confirmed local representation until the
     // transition outcome is known: commit drops it, failure restores it.
@@ -2173,9 +2167,7 @@ export function apply(ctx: Context, config: Config): void {
         },
       },
       pendingWork: {
-        forks: () => [...pendingForks],
         settlement: () => [...pendingSettlementWork],
-        sourceRetirements: () => [...pendingSourceRetirements],
       },
       diag,
     })
@@ -3137,192 +3129,6 @@ export function apply(ctx: Context, config: Config): void {
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
 
-    // `/fork` is a registered DSH command: the official executor appends
-    // `command/done` to the SOURCE session only AFTER the handler settles. The
-    // fork handler commits the visible child inside that handler, so retiring
-    // (flushing + disposing) the source Direct owner there would detach the
-    // source Session first — `Session.append` on a detached Session never
-    // reaches the persistence writer, and the durable log would keep
-    // `command/run` without its `command/done`. These two slots let the handler
-    // QUEUE the source retirement and flush it at the first explicit
-    // post-command-settlement point instead. Outside a command (the rewind
-    // picker's owned task), the retirement runs immediately.
-    let commandExecutionDepth = 0
-    const deferredSourceRetirements: Array<{ sessionId: string; retire: () => Promise<void> }> = []
-    // Start one source retirement through the owned-task model AND register its
-    // promise, so teardown can wait for it before `diag.dispose()` / the Host
-    // teardown (see `pendingSourceRetirements`). The task promise is returned so
-    // a non-command caller can preserve the original awaited ordering.
-    const startSourceRetirement = (sessionId: string, retire: () => Promise<void>): Promise<void> | undefined => {
-      let pending: Promise<void> | undefined
-      runOwned('fork source retirement', () => {
-        const task = retire()
-        pending = task
-        return task
-      }, { diag, sessionId: () => undefined })
-      if (pending !== undefined) {
-        const tracked = pending
-        pendingSourceRetirements.add(tracked)
-        // `then(onSettled, onSettled)` (never `.finally`) so tracking a
-        // retirement cannot create a second, unhandled rejection branch:
-        // `runOwned` already owns the task's failure semantics.
-        const untrack = (): void => { pendingSourceRetirements.delete(tracked) }
-        observeSettled(tracked, untrack)
-      }
-      return pending
-    }
-    /** Retire the source owner. A DSH command defers it to its own settlement
-     *  (the executor's `command/done` append must land first) and returns
-     *  `undefined`; outside a command the retirement promise is returned so the
-     *  caller keeps the baseline ordering.
-     *
-     *  `finishRelease` settles the fork's admission pin when the retirement has
-     *  FINISHED — success or a CONTAINED failure. `retireDirectOwnedSession`
-     *  never rejects: a failed phase (notably `disposeOwner`) is recorded in its
-     *  report and diag-logged, and the pin still releases. That is deliberate:
-     *  holding the pin on a failed dispose would leave `open`/`resume` pending
-     *  forever, so the reopen instead proceeds and fails LOUDLY on the official
-     *  exclusive write claim (`session "X" is already owned by an active write
-     *  handle`). A failed dispose is a leaked-handle bug in its own right; the
-     *  retirement helper already contains and reports it. */
-    const retireSourceOwnerAfterSettlement = (
-      sessionId: string,
-      retire: () => Promise<void>,
-      finishRelease: () => void,
-    ): Promise<void> | undefined => {
-      const run = async (): Promise<void> => {
-        try {
-          await retire()
-        } finally {
-          finishRelease()
-        }
-      }
-      if (commandExecutionDepth === 0) return startSourceRetirement(sessionId, run)
-      deferredSourceRetirements.push({ sessionId, retire: run })
-      return undefined
-    }
-    /** Start every retirement queued by the settled command(s) and return the
-     *  started promises so the settlement can WAIT for them. */
-    const flushSourceRetirementsAfterSettlement = (): Promise<void>[] => {
-      const started: Promise<void>[] = []
-      while (deferredSourceRetirements.length > 0) {
-        const entry = deferredSourceRetirements.shift()
-        if (entry === undefined) continue
-        const pending = startSourceRetirement(entry.sessionId, entry.retire)
-        if (pending !== undefined) started.push(pending)
-      }
-      return started
-    }
-    /** Open one command-settlement window (A2 seam). While any window is open a
-     *  committed `/fork` QUEUES its source retirement instead of detaching the
-     *  Session whose executor is still appending `command/done`. */
-    const beginCommandSettlement = (): void => { commandExecutionDepth += 1 }
-    /** Close a window whose handler never ran: nothing was queued. */
-    const abortCommandSettlement = (): void => { commandExecutionDepth -= 1 }
-    /** Close one command-settlement window EXACTLY once and WAIT for the source
-     *  retirements it queued. The command workflow must not report completion —
-     *  nor release the submit FIFO — while the old owner still holds its write
-     *  lease, or an immediate reopen of that Session would be refused. The
-     *  executor's `command/done` append already happened inside the wrapped
-     *  execution, so this preserves durability AND makes `/fork`'s outward
-     *  completion imply the source is released. */
-    const settleCommandSettlement = async (): Promise<void> => {
-      commandExecutionDepth -= 1
-      if (commandExecutionDepth === 0) await Promise.allSettled(flushSourceRetirementsAfterSettlement())
-    }
-
-    const parkForkOwner = (handle: SessionHandle | undefined): void => {
-      const owner = handle === undefined ? undefined : directRuntime.owners.fromHandle(handle)
-      if (owner !== undefined) directRuntime.retirement.park(owner)
-    }
-    const forkNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
-      isRewindIdentityCurrent(ownership.captureNavigationIdentity(), expected)
-    const adoptFork = async (
-      handle: SessionHandle,
-      expected: RewindLiveIdentity,
-      onAdopted?: () => void,
-      pin?: { state: { retirementOwnsRelease: boolean }; release: () => void },
-    ): Promise<boolean> => {
-      let adopted = false
-      try {
-        await ownership.gate.run(() => ownership.barrier.runTransition(async () => {
-        if (cleanedUp || !forkNavigationCurrent(expected)) {
-          parkForkOwner(handle)
-          return
-        }
-        const oldOwner = ownership.owner()
-        const oldAttachment = oldOwner === undefined ? undefined : directRuntime.owners.attachmentOf(oldOwner)
-        const oldAgent = oldAttachment?.agent
-        const oldHandle = oldAttachment?.handle as AgentHandle | undefined
-        const nextOwner = directRuntime.owners.fromHandle(handle)
-        const nextAttachment = nextOwner === undefined ? undefined : directRuntime.owners.attachmentOf(nextOwner)
-        const nextAgent = nextAttachment?.agent
-        const nextHandle = nextAttachment?.handle as AgentHandle | undefined
-        if (nextOwner === undefined || nextAgent === undefined || nextHandle === undefined) {
-          throw new Error(`forked session "${handle.session.id}" has no Direct owner`)
-        }
-        // The fork-adoption commit ORDER is fixed by `runForkCommit`
-        // (A2 plan §4B): the generation reset runs BEFORE the child is
-        // published, exactly like the ordinary transition.
-        runForkCommit({
-          settlePendingQueueRecalls,
-          settleLocalSubmitAck,
-          resetSubmitLatency: () => submitLatencyTracker.reset(),
-          bumpGeneration: ownership.bumpGeneration,
-          publishOwner: () => {
-            ownership.setCurrentOwner(nextOwner, nextAgent.session.id)
-            return directRuntime.owners.completionIdentity(nextOwner)
-          },
-          setCompletionOwner,
-        }, nextAgent)
-        adopted = true
-        try {
-          onAdopted?.()
-        } catch (error) {
-          diag.error('fork adoption callback failed after child commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
-        }
-        if (oldOwner !== undefined && oldAgent !== undefined && oldHandle !== undefined) {
-          // The retirement now owns the fork's admission pin: it is released
-          // only when the source owner has actually been disposed.
-          if (pin !== undefined) pin.state.retirementOwnsRelease = true
-          const retirement = retireSourceOwnerAfterSettlement(oldAgent.session.id, async () => {
-            const report = await directRuntime.retirement.retire(oldOwner, 'transition')
-            if (report.failures.length > 0) diag.error('fork old-owner retirement failed (child committed)', { from: oldAgent.session.id, failures: report.failures })
-          }, pin?.release ?? ((): void => {}))
-          // A DSH command defers (`undefined`): the source owner must stay
-          // attached through its own `command/done` append. Every OTHER path
-          // (the rewind picker) awaits it here, exactly as before this seam, so
-          // the handoff cannot report success until the source is disposed — an
-          // immediate open/resume after that success would otherwise race its
-          // own retirement. (The `liveAgent` swap above already happened, as it
-          // always did; this preserves the returned-handoff ordering.)
-          if (retirement !== undefined) await retirement
-        }
-        let aborted = false
-        try {
-          aborted = await directRuntime.retirement.whenIdleOrAbort(nextOwner, lifecycleController.signal)
-        } catch (error) {
-          diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
-        }
-        if (!aborted) {
-          try {
-            await initLiveSession(nextAgent)
-          } catch (error) {
-            diag.error('fork child initialization failed after commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
-          }
-        }
-        try {
-          await refreshLiveCatalog(nextAgent)
-        } catch (error) {
-          diag.error('fork child catalog refresh failed after commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
-        }
-      }))
-      } catch (error) {
-        if (!adopted) throw error
-        diag.error('fork post-commit handoff failed', { error: safeErrorMessage(error), session: handle.session.id })
-      }
-      return adopted
-    }
     const forkSession = async (
       sourceSessionId: string,
       atSeq?: number,
@@ -3352,7 +3158,7 @@ export function apply(ctx: Context, config: Config): void {
       let settleFork!: () => void
       let forkedHandle: SessionHandle | undefined
       const pending = new Promise<void>(resolve => { settleFork = resolve })
-      pendingForks.add(pending)
+      sessionRuntime.trackFork(pending)
       try {
         const result = await backend.sessionLifecycle.fork({
           sourceSessionId,
@@ -3362,36 +3168,35 @@ export function apply(ctx: Context, config: Config): void {
         if (outcome.kind === 'unavailable') {
           // Client-local pre-dispatch refusal: nothing reached the Host, so
           // there is no child to park and no Host settlement to report.
-          if (result.ownership === 'superseded' || !forkNavigationCurrent(expected)) return { kind: 'success' as const }
+          if (result.ownership === 'superseded' || !sessionRuntime.isNavigationCurrent(expected)) return { kind: 'success' as const }
           return { kind: 'error' as const, text: outcome.message }
         }
         if (outcome.kind === 'rejected' || outcome.kind === 'indeterminate' || outcome.kind === 'published-with-error') {
-          if (outcome.kind === 'published-with-error') parkForkOwner(outcome.handle)
+          if (outcome.kind === 'published-with-error') sessionRuntime.parkForkOwner(outcome.handle)
           // A Direct failure is still returned as `current` because Direct has
           // no transport generation to supersede it. Navigation owns whether
           // that failure may be shown, so apply the same fence as success.
-          if (result.ownership === 'superseded' || !forkNavigationCurrent(expected)) {
+          if (result.ownership === 'superseded' || !sessionRuntime.isNavigationCurrent(expected)) {
             return { kind: 'success' as const }
           }
           return { kind: 'error' as const, text: `${outcome.error.message} (${outcome.error.code})` }
         }
-        if (result.ownership === 'superseded' || !forkNavigationCurrent(expected)) {
-          parkForkOwner(outcome.handle)
+        if (result.ownership === 'superseded' || !sessionRuntime.isNavigationCurrent(expected)) {
+          sessionRuntime.parkForkOwner(outcome.handle)
           return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}; navigation stayed on the newer session` }
         }
         forkedHandle = outcome.handle
-        const adopted = await adoptFork(outcome.handle, expected, onAdopted, pin)
+        const adopted = await sessionRuntime.adoptFork(outcome.handle, expected, onAdopted, pin)
         if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
         draftImages.clearUnpinned()
         draftFiles.clearUnpinned()
         return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
       } catch (error) {
-        if (forkedHandle !== undefined) parkForkOwner(forkedHandle)
-        if (!forkNavigationCurrent(expected)) return { kind: 'success' as const }
+        if (forkedHandle !== undefined) sessionRuntime.parkForkOwner(forkedHandle)
+        if (!sessionRuntime.isNavigationCurrent(expected)) return { kind: 'success' as const }
         return { kind: 'error' as const, text: `fork failed: ${safeErrorMessage(error)}` }
       } finally {
         settleFork()
-        pendingForks.delete(pending)
         // If the fork committed, its source retirement owns the pin (released
         // when that retirement finishes); otherwise the source was never
         // detached and is immediately reopenable.
@@ -3614,7 +3419,7 @@ export function apply(ctx: Context, config: Config): void {
       // all defined by this point — the resume that produced the live
       // agent ran after them). Without a live owner there is nothing to
       // retire; close the diagnostics handle either way (idempotent).
-      if (ownership.owner() !== undefined || directRuntime.hasParkedOwners() || pendingForks.size > 0) {
+      if (ownership.owner() !== undefined || directRuntime.hasParkedOwners() || sessionRuntime.hasPendingForks()) {
         await sessionRuntime.retireOwnedSession()
       } else {
         diag.dispose()
@@ -5569,7 +5374,7 @@ export function apply(ctx: Context, config: Config): void {
             // The post-command-settlement window opens HERE: a handler that
             // commits a fork queues its source retirement instead of detaching
             // the Session the executor is still appending `command/done` to.
-            beginCommandSettlement()
+            sessionRuntime.beginCommandSettlement()
             let settled: Promise<HostCommandOutcome>
             try {
               settled = Promise.resolve(withCommandDelivery(delivery, () => {
@@ -5599,13 +5404,13 @@ export function apply(ctx: Context, config: Config): void {
               // before it returns its promise) means the handler never ran, so
               // nothing was queued: close the window synchronously (no
               // retirement to await) and rethrow.
-              abortCommandSettlement()
+              sessionRuntime.abortCommandSettlement()
               throw error
             }
             // The official executor's post-handler `command/done` append is
             // inside this settlement: teardown awaits it before retiring the
             // current owner, and the window closes only after the append.
-            settled = settled.finally(settleCommandSettlement)
+            settled = settled.finally(sessionRuntime.settleCommandSettlement)
             pendingSettlementWork.add(settled)
             // `then(onSettled, onSettled)`: tracking must not add an unhandled
             // rejection branch next to `runOwned`'s own failure handling.

@@ -1,9 +1,9 @@
 /**
  * The BOUND session runtime (A2 plan §1.1 phase 3): the session layer's session
- * orchestration. It currently owns the RETIREMENT COORDINATION (§4.1) and the
- * ORDINARY TRANSITION/switch (§4A); the read facade (§3.4), the fork adoption
- * and the first-session / startup-resume flows join it in the following slices,
- * together with their first consumers.
+ * orchestration. It owns the RETIREMENT COORDINATION (§4.1), the ORDINARY
+ * TRANSITION/switch (§4A), the FORK ADOPTION (§4B) and the COMMAND SETTLEMENT
+ * (§3.5); the read facade (§3.4) and the first-session / startup-resume flows
+ * join it in the following slices, together with their first consumers.
  *
  * Every backend or Host operation arrives as a consumer-owned port
  * (`SessionOwnerAccess`, `SessionOwnerRetirement`) or a runner-supplied surface
@@ -13,17 +13,17 @@
  */
 
 import type { Diag } from '../../diag.ts'
+import { observeSettled, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
-import {
-  runOrdinaryCommit,
-} from './commit-order.ts'
+import { isRewindIdentityCurrent, type RewindLiveIdentity } from '../../session-fork.ts'
+import { runForkCommit, runOrdinaryCommit } from './commit-order.ts'
 import type {
   SessionOwnerAccess,
   SessionOwnerRetirement,
   SessionRetirementReport,
 } from './owner-access.ts'
-import type { SessionOwnershipCore } from './ownership-core.ts'
+import type { ForkSourcePin, SessionOwnershipCore } from './ownership-core.ts'
 import type { SessionOwnerRef } from './subject.ts'
 import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from '../../transition.ts'
 
@@ -56,15 +56,13 @@ export interface SessionRuntimeSurface {
 }
 
 /**
- * The in-flight work the retirement must drain before it retires the owner.
- * TRANSITIONAL (A2-3b-1): the ledgers are still owned by the runner and move
- * into this runtime with the fork / command-settlement flows (3b-3 / 3b-5),
- * at which point this seam disappears.
+ * The in-flight work the exit retirement must drain that STILL lives in the
+ * runner. TRANSITIONAL (A2-3b-3): only the command-settlement ledger is left;
+ * it moves in with the nested-settlement tracking (3b-5), which removes this
+ * seam.
  */
 export interface SessionPendingWork {
-  forks(): readonly Promise<unknown>[]
   settlement(): readonly Promise<unknown>[]
-  sourceRetirements(): readonly Promise<void>[]
 }
 
 export interface SessionRuntimeDeps {
@@ -85,6 +83,24 @@ export interface SessionRuntimeDeps {
 export interface SessionRuntime {
   /** Run one ordinary session transition/switch (plan §4A). */
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
+  /** Adopt one forked child inside the gate (plan §4B). */
+  adoptFork(
+    handle: SessionHandle,
+    expected: RewindLiveIdentity,
+    onAdopted?: () => void,
+    pin?: ForkSourcePin,
+  ): Promise<boolean>
+  /** Park one refused fork's owner for a later claim. */
+  parkForkOwner(handle: SessionHandle | undefined): void
+  /** Whether a captured fork/rewind identity still owns the visible surface. */
+  isNavigationCurrent(expected: RewindLiveIdentity): boolean
+  /** Track one in-flight fork (the exit retirement drains them first). */
+  trackFork(promise: Promise<unknown>): void
+  hasPendingForks(): boolean
+  // command settlement (§3.5)
+  beginCommandSettlement(): void
+  abortCommandSettlement(): void
+  settleCommandSettlement(): Promise<void>
   // retirement coordination (§4.1)
   retireOwnedSession(): Promise<SessionRetirementReport>
   preCancelOwnedSession(): void
@@ -222,6 +238,197 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     })
   }
 
+  // The fork + source-retirement ledgers (A2-3b-3): they moved out of the
+  // runner together with the flows that fill them. The command-settlement
+  // window state lives here too, because a committed `/fork` QUEUES its source
+  // retirement while an executor is still appending `command/done`.
+  const pendingForks = new Set<Promise<unknown>>()
+  const pendingSourceRetirements = new Set<Promise<void>>()
+  let commandExecutionDepth = 0
+  const deferredSourceRetirements: Array<{ sessionId: string; retire: () => Promise<void> }> = []
+
+  /** Track one in-flight fork (the exit retirement drains them first). */
+  const trackFork = (promise: Promise<unknown>): void => {
+    pendingForks.add(promise)
+    // `then(onSettled, onSettled)`: tracking must not add an unhandled rejection
+    // branch next to the fork's own failure handling.
+    observeSettled(promise, () => { pendingForks.delete(promise) })
+  }
+
+  const hasPendingForks = (): boolean => pendingForks.size > 0
+
+  /** Whether a captured fork/rewind identity still owns the visible surface. */
+  const isNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
+    isRewindIdentityCurrent(core.captureNavigationIdentity(), expected)
+
+  /** Park one refused fork's Direct owner for a later claim. */
+  const parkForkOwner = (handle: SessionHandle | undefined): void => {
+    const owner = handle === undefined ? undefined : deps.owners.fromHandle(handle)
+    if (owner !== undefined) deps.retirement.park(owner)
+  }
+
+  /**
+   * Start one source retirement through the owned-task model AND register its
+   * promise, so teardown can wait for it before the Host teardown. The task
+   * promise is returned so a non-command caller can preserve the awaited
+   * ordering.
+   */
+  const startSourceRetirement = (sessionId: string, retire: () => Promise<void>): Promise<void> | undefined => {
+    let pending: Promise<void> | undefined
+    runOwned('fork source retirement', () => {
+      const task = retire()
+      pending = task
+      return task
+    }, { diag: deps.diag, sessionId: () => undefined })
+    if (pending !== undefined) {
+      const tracked = pending
+      pendingSourceRetirements.add(tracked)
+      observeSettled(tracked, () => { pendingSourceRetirements.delete(tracked) })
+    }
+    return pending
+  }
+
+  /**
+   * Retire the source owner. A DSH command defers it to its own settlement (the
+   * executor's `command/done` append must land first) and returns `undefined`;
+   * outside a command the retirement promise is returned so the caller keeps the
+   * baseline ordering.
+   *
+   * `finishRelease` settles the fork's admission pin when the retirement has
+   * FINISHED — success or a CONTAINED failure: a failed phase is recorded in the
+   * retirement report (never a rejection), and holding the pin on a failed
+   * dispose would leave `open`/`resume` pending forever.
+   */
+  const retireSourceOwnerAfterSettlement = (
+    sessionId: string,
+    retire: () => Promise<void>,
+    finishRelease: () => void,
+  ): Promise<void> | undefined => {
+    const run = async (): Promise<void> => {
+      try {
+        await retire()
+      } finally {
+        finishRelease()
+      }
+    }
+    if (commandExecutionDepth === 0) return startSourceRetirement(sessionId, run)
+    deferredSourceRetirements.push({ sessionId, retire: run })
+    return undefined
+  }
+
+  /** Start every retirement queued by the settled command(s) and return the
+   *  started promises so the settlement can WAIT for them. */
+  const flushSourceRetirementsAfterSettlement = (): Promise<void>[] => {
+    const started: Promise<void>[] = []
+    while (deferredSourceRetirements.length > 0) {
+      const entry = deferredSourceRetirements.shift()
+      if (entry === undefined) continue
+      const pending = startSourceRetirement(entry.sessionId, entry.retire)
+      if (pending !== undefined) started.push(pending)
+    }
+    return started
+  }
+
+  /** Open one command-settlement window: while any is open a committed `/fork`
+   *  QUEUES its source retirement instead of detaching the Session whose
+   *  executor is still appending `command/done`. */
+  const beginCommandSettlement = (): void => { commandExecutionDepth += 1 }
+  /** Close a window whose handler never ran: nothing was queued. */
+  const abortCommandSettlement = (): void => { commandExecutionDepth -= 1 }
+  /** Close one window EXACTLY once and WAIT for the retirements it queued: the
+   *  command workflow must not report completion (nor release the submit FIFO)
+   *  while the old owner still holds its write lease. */
+  const settleCommandSettlement = async (): Promise<void> => {
+    commandExecutionDepth -= 1
+    if (commandExecutionDepth === 0) await Promise.allSettled(flushSourceRetirementsAfterSettlement())
+  }
+
+  /**
+   * Adopt one forked child inside the gate: re-check the navigation fence, park
+   * a refused child, commit through the fixed §4B order, retire the source owner
+   * (deferred to its command settlement when one is open) and rebuild the
+   * child's surface. Returns whether the child was adopted.
+   */
+  const adoptFork = async (
+    handle: SessionHandle,
+    expected: RewindLiveIdentity,
+    onAdopted?: () => void,
+    pin?: ForkSourcePin,
+  ): Promise<boolean> => {
+    let adopted = false
+    try {
+      await core.gate.run(() => core.barrier.runTransition(async () => {
+        if (deps.surface.isSurfaceDisposed() || !isNavigationCurrent(expected)) {
+          parkForkOwner(handle)
+          return
+        }
+        const oldOwner = core.owner()
+        const nextOwner = deps.owners.fromHandle(handle)
+        if (nextOwner === undefined) throw new Error(`forked session "${handle.session.id}" has no Direct owner`)
+        const nextSessionId = deps.owners.sessionId(nextOwner)
+        // The fork-adoption commit ORDER is fixed by `runForkCommit` (plan §4B):
+        // the generation reset runs BEFORE the child is published, exactly like
+        // the ordinary transition.
+        runForkCommit({
+          settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
+          settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
+          resetSubmitLatency: deps.surface.resetSubmitLatency,
+          bumpGeneration: core.bumpGeneration,
+          publishOwner: () => {
+            core.setCurrentOwner(nextOwner, nextSessionId)
+            return deps.owners.completionIdentity(nextOwner)
+          },
+          setCompletionOwner: deps.surface.setCompletionOwner,
+        }, handle)
+        adopted = true
+        try {
+          onAdopted?.()
+        } catch (error) {
+          deps.diag.error('fork adoption callback failed after child commit', { error: safeErrorMessage(error), session: nextSessionId })
+        }
+        if (oldOwner !== undefined) {
+          const oldSessionId = deps.owners.sessionId(oldOwner)
+          // The retirement now owns the fork's admission pin: it is released
+          // only when the source owner has actually been disposed.
+          if (pin !== undefined) pin.state.retirementOwnsRelease = true
+          const retirement = retireSourceOwnerAfterSettlement(oldSessionId, async () => {
+            const report = await deps.retirement.retire(oldOwner, 'transition')
+            if (report.failures.length > 0) {
+              deps.diag.error('fork old-owner retirement failed (child committed)', { from: oldSessionId, failures: report.failures })
+            }
+          }, pin?.release ?? ((): void => {}))
+          // A DSH command defers (`undefined`): the source owner must stay
+          // attached through its own `command/done` append. Every OTHER path
+          // (the rewind picker) awaits it here, so the handoff cannot report
+          // success until the source is disposed — an immediate open/resume after
+          // that success would otherwise race its own retirement.
+          if (retirement !== undefined) await retirement
+        }
+        let aborted = false
+        try {
+          aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
+        } catch (error) {
+          deps.diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
+        }
+        if (!aborted) {
+          try {
+            await deps.surface.initLiveSession(nextOwner)
+          } catch (error) {
+            deps.diag.error('fork child initialization failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
+          }
+        }
+        try {
+          await deps.surface.refreshLiveCatalog(nextOwner)
+        } catch (error) {
+          deps.diag.error('fork child catalog refresh failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
+        }
+      }))
+    } catch (error) {
+      if (!adopted) throw error
+      deps.diag.error('fork post-commit handoff failed', { error: safeErrorMessage(error), session: handle.session.id })
+    }
+    return adopted
+  }
   /**
    * The synchronous shutdown preparation: ask the retirement port to cancel the
    * CURRENT owner's work BEFORE the Host tree is torn down (the port keeps that
@@ -271,25 +478,27 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       try {
         // Serialize against an in-flight session transition: the gate queue is
         // FIFO, so this no-op task waits for a running transition to settle. The
-        // barrier freezes TUI writers for the retirement's write boundary.
-        let pendingForks = deps.pendingWork.forks()
-        while (pendingForks.length > 0) {
-          await Promise.allSettled([...pendingForks])
-          pendingForks = deps.pendingWork.forks()
+        // barrier freezes TUI writers for the retirement's write boundary. Each
+        // ledger is re-snapshotted until it is empty (a drain can be extended
+        // while it runs).
+        let forks = [...pendingForks]
+        while (forks.length > 0) {
+          await Promise.allSettled(forks)
+          forks = [...pendingForks]
         }
         // A `/fork` command's SOURCE Session is retired by ITS OWN command
         // settlement, never by navigation: wait for every in-flight command
         // first (that `command/done` append included), then for every source
         // retirement it queued.
-        let settlement = deps.pendingWork.settlement()
+        let settlement = [...deps.pendingWork.settlement()]
         while (settlement.length > 0) {
-          await Promise.allSettled([...settlement])
-          settlement = deps.pendingWork.settlement()
+          await Promise.allSettled(settlement)
+          settlement = [...deps.pendingWork.settlement()]
         }
-        let sourceRetirements = deps.pendingWork.sourceRetirements()
+        let sourceRetirements = [...pendingSourceRetirements]
         while (sourceRetirements.length > 0) {
-          await Promise.allSettled([...sourceRetirements])
-          sourceRetirements = deps.pendingWork.sourceRetirements()
+          await Promise.allSettled(sourceRetirements)
+          sourceRetirements = [...pendingSourceRetirements]
         }
         return await core.gate.run(() => core.barrier.runTransition(async () => {
           const current = await retire()
@@ -320,6 +529,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
 
   return {
     transitionTo,
+    adoptFork,
+    parkForkOwner,
+    isNavigationCurrent,
+    trackFork,
+    hasPendingForks,
+    beginCommandSettlement,
+    abortCommandSettlement,
+    settleCommandSettlement,
     retireOwnedSession,
     preCancelOwnedSession,
   }
