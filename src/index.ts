@@ -212,6 +212,7 @@ import {
   runResumeCommit,
 } from './app/session/commit-order.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
+import { bindSessionRuntime } from './app/session/runtime.ts'
 import type { SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -1956,148 +1957,6 @@ export function apply(ctx: Context, config: Config): void {
         else recall.abort()
       }
     }
-    // The memoized Direct owned-session retirement: ONE teardown promise
-    // shared by every teardown path (the interactive exit via the appExit
-    // disposal, the fiber disposer / HMR unload, the pre-mount abort path
-    // and the fatal startup catch) — never four copies of the same
-    // teardown. It serializes against an in-flight session transition
-    // through the transition gate + operation barrier, then retires the
-    // CURRENT owner through the retirement port, which owns the official
-    // close order (`app/direct/owner-retirement.ts`).
-    // diag stays open until the retirement diagnostics are recorded. The
-    // fatal catch reaches this coordinator through retireOwnedSessionRef.
-    let retirementPromise: Promise<SessionRetirementReport> | undefined
-    // The exactly-once shutdown cancel and the abort-aware quiesce live in the
-    // Direct owner retirement (`app/direct/owner-retirement.ts`); the runner
-    // only decides WHEN to pre-cancel or retire.
-    // Synchronous shutdown preparation: ask the retirement port to cancel the
-    // CURRENT owner's work BEFORE the Host tree is torn down. The surface
-    // teardown above already aborted the runner lifecycle, but a plain
-    // interactive exit reaches the appExit disposal through
-    // `ownership.gate.run(...)`, which schedules its task on a promise
-    // continuation — so the root teardown could unregister the inbox projection
-    // before the retirement's async cancel ran. This is ONLY the first cancel
-    // (the port keeps it exactly-once with the lifecycle-abort cancel); it never
-    // awaits idle, drains descendants, flushes or disposes a handle, and the
-    // full retirement stays inside the appExit-bounded disposal.
-    const preCancelOwnedSession = (): void => {
-      const owner = ownership.owner()
-      if (owner !== undefined) directRuntime.retirement.preCancel(owner)
-    }
-    const retireOwnedSession = (): Promise<SessionRetirementReport> => {
-      if (retirementPromise !== undefined) return retirementPromise
-      // Every entry (interactive exit, HMR unload, fatal teardown) shares the
-      // ONE synchronous pre-cancel before the memoized retirement is created:
-      // the interactive exit controller has no hook for HMR/fatal, and
-      // duplicating the cancel there is exactly the twin-track divergence that
-      // makes exactly-once hard to prove.
-      preCancelOwnedSession()
-      retirementPromise = (async (): Promise<SessionRetirementReport> => {
-        // The CURRENT Direct owner is read INSIDE the gate task, not at
-        // call time: an exit that lands while a session transition is
-        // committing must retire the NEW current owner (the old owner's
-        // retirement already ran inside the transition's post-commit
-        // phase), while an aborted transition leaves the old owner current
-        // and retires it. A deferred start never created an owner: nothing
-        // to retire, the surface teardown is complete.
-        const retire = async (): Promise<SessionRetirementReport> => {
-          // Re-read the CURRENT owner INSIDE the gate (A2 plan §4.1): a
-          // transition committed while the shutdown waited must be the one
-          // retired, never a pre-cancelled capture.
-          const owner = ownership.owner()
-          if (owner === undefined) return { failures: [], durabilityFailure: undefined }
-          const ownerSessionId = directRuntime.owners.sessionId(owner)
-          const report = await directRuntime.retirement.retire(owner, 'shutdown')
-          // Attribute each failure to the owner it came from (the parked owners
-          // log their own, with their own ids).
-          for (const failure of report.failures) {
-            diag.error('retire phase failed', {
-              session: ownerSessionId,
-              phase: failure.phase,
-              error: failure.error,
-            })
-          }
-          return report
-        }
-        /**
-         * Report the MERGED retirement (the current owner PLUS every parked
-         * owner), so a parked owner's failure — a durability failure above all —
-         * reaches the user even when the current owner retired cleanly. The
-         * per-owner failure diagnostics were already logged by the owner that
-         * produced them, so this is only the user-visible summary.
-         */
-        const reportRetirement = (report: SessionRetirementReport): void => {
-          // A retirement failure is USER-VISIBLE, not just a diag line: the
-          // terminal is already restored (the surface teardown ran before
-          // the appExit disposal), so a failed final flush would otherwise
-          // look like a clean exit while the latest events may not be
-          // persisted. The warning is best-effort and never blocks the
-          // bounded shutdown.
-          if (report.failures.length > 0) {
-            // The SEMANTIC outcome decides the wording; the backend's phase
-            // labels are printed only as diagnostics.
-            const durabilityFailure = report.durabilityFailure
-            if (durabilityFailure !== undefined) {
-              safeTerminalWarning(`\n${color.textDim('Warning:')} session flush failed during retirement (${durabilityFailure.error}) — the latest events may not be persisted\n`)
-            } else {
-              const phases = report.failures.map(failure => failure.phase).join(', ')
-              safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement failed during ${phases}\n`)
-            }
-          }
-          diag.info('retire complete', { failures: report.failures.length })
-        }
-        try {
-          // Serialize against an in-flight session transition: the gate
-          // queue is FIFO, so this no-op task waits for a running
-          // transition to settle (the surface teardown above already
-          // aborted its create/resume via the lifecycle controller). The
-          // barrier freezes TUI writers for the retirement's write
-          // boundary. The gate/barrier are constructed BEFORE any owner can
-          // exist (see the hoisted declarations), so an owner always has a
-          // serialization path.
-          while (pendingForks.size > 0) await Promise.allSettled([...pendingForks])
-          // A `/fork` command's SOURCE Session is retired by ITS OWN command
-          // settlement, never by navigation: the official executor appends
-          // `command/done` to that Session only after the handler returns. Wait
-          // for every in-flight command first (that append included), then for
-          // every source retirement it queued, so teardown can never detach the
-          // source before its `command/done` nor start a retirement after the
-          // context it touches is gone.
-          while (pendingSettlementWork.size > 0) await Promise.allSettled([...pendingSettlementWork])
-          while (pendingSourceRetirements.size > 0) await Promise.allSettled([...pendingSourceRetirements])
-          return await ownership.gate.run(() => ownership.barrier.runTransition(async () => {
-            const current = await retire()
-            const parked = await directRuntime.retirement.retireParked()
-            const report: SessionRetirementReport = {
-              failures: [...current.failures, ...parked.failures],
-              durabilityFailure: current.durabilityFailure ?? parked.durabilityFailure,
-            }
-            // The MERGED report is reported once, inside the gate: a parked
-            // owner's durability failure must warn even when the current owner
-            // retired cleanly.
-            reportRetirement(report)
-            return report
-          }))
-        } catch (error) {
-          // Defensive: a reentrant gate/barrier means a transition is STILL
-          // active — retiring now would race it. SKIP the retirement (the
-          // process is exiting; the appExit watchdog bounds it) and report it as
-          // a COORDINATOR failure: no backend retirement phase ran, so it must
-          // not masquerade as one in the user-visible warning or in the report.
-          // The normal teardown paths never reach here: they queue through the
-          // FIFO gate, and retireOwnedSession is never called from inside a
-          // transition context.
-          const reason = safeErrorMessage(error)
-          diag.error('retire barrier failed', { error: reason })
-          safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement was skipped (${reason}) — the session may not have been closed cleanly\n`)
-          return { failures: [], durabilityFailure: undefined }
-        } finally {
-          diag.dispose()
-        }
-      })()
-      return retirementPromise
-    }
-    retireOwnedSessionRef = retireOwnedSession
     // The abort-aware quiesce mechanism lives in the Direct owner retirement;
     // the runner only decides WHEN to quiesce.
 
@@ -2257,6 +2116,42 @@ export function apply(ctx: Context, config: Config): void {
       const owner = ownership.owner()
       return owner !== undefined && directRuntime.owners.attachmentOf(owner)?.agent === candidate
     }
+    /**
+     * The BOUND session runtime (A2 plan §1.1 phase 3): the session layer owns
+     * the retirement coordination; the runner supplies the user-facing reporting
+     * and the in-flight-work view (the ledgers move into the runtime with the
+     * fork / command-settlement flows in 3b-3 / 3b-5).
+     */
+    const sessionRuntime = bindSessionRuntime(ownership, {
+      owners: directRuntime.owners,
+      retirement: directRuntime.retirement,
+      surface: {
+        warnRetirement: (report) => {
+          // The SEMANTIC outcome decides the wording; the backend's phase labels
+          // are printed only as diagnostics.
+          const durabilityFailure = report.durabilityFailure
+          if (durabilityFailure !== undefined) {
+            safeTerminalWarning(`\n${color.textDim('Warning:')} session flush failed during retirement (${durabilityFailure.error}) — the latest events may not be persisted\n`)
+          } else {
+            const phases = report.failures.map(failure => failure.phase).join(', ')
+            safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement failed during ${phases}\n`)
+          }
+        },
+        warnRetirementSkipped: (reason) => {
+          safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement was skipped (${reason}) — the session may not have been closed cleanly\n`)
+        },
+      },
+      pendingWork: {
+        forks: () => [...pendingForks],
+        settlement: () => [...pendingSettlementWork],
+        sourceRetirements: () => [...pendingSourceRetirements],
+      },
+      diag,
+    })
+    // The fatal startup catch reaches the ONE memoized retirement through this
+    // ref (assigned only once the runtime exists; an earlier fatal error has no
+    // owner to retire).
+    retireOwnedSessionRef = sessionRuntime.retireOwnedSession
     // The semantic backend (server/client migration): the TUI consumes
     // Host domains through narrow ports, never ctx.* directly. Direct is the
     // only backend today; remote/wire adapters join in later milestones
@@ -3785,7 +3680,7 @@ export function apply(ctx: Context, config: Config): void {
     const { requestExit } = createExitController({
       diag,
       cleanup: disposeSurface,
-      prepareRetirement: preCancelOwnedSession,
+      prepareRetirement: sessionRuntime.preCancelOwnedSession,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
         // The Host's profileContext names the profile for EVERY launch form,
@@ -3809,7 +3704,7 @@ export function apply(ctx: Context, config: Config): void {
       // agent ran after them). Without a live owner there is nothing to
       // retire; close the diagnostics handle either way (idempotent).
       if (ownership.owner() !== undefined || directRuntime.hasParkedOwners() || pendingForks.size > 0) {
-        await retireOwnedSession()
+        await sessionRuntime.retireOwnedSession()
       } else {
         diag.dispose()
       }
@@ -3835,7 +3730,7 @@ export function apply(ctx: Context, config: Config): void {
             // No lower sink.
           }
         }
-        return retireOwnedSession()
+        return sessionRuntime.retireOwnedSession()
       }
     })
 
