@@ -204,26 +204,15 @@ import {
   type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
-import { createDirectBackend } from './runtime/backend.ts'
-import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
-import { DirectSessionReader, type SessionQueryLike } from './runtime/direct/session-direct.ts'
-import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
-import { DirectPendingInputReader } from './runtime/direct/pending-input-reader-direct.ts'
-import { DirectSessionLifecycle, type DirectOwnerPoolLike } from './runtime/direct/session-lifecycle-direct.ts'
-import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
-import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
-import { DirectConfigPort } from './runtime/direct/config-direct.ts'
-import { DirectSessionArchive } from './runtime/direct/session-archive-direct.ts'
-import { DirectHostCommandPort } from './runtime/direct/host-command-direct.ts'
-import { DirectPluginManagerPort } from './runtime/direct/plugin-manager-direct.ts'
-import { DirectJobObservationPort } from './runtime/direct/job-observation-direct.ts'
+import { createDirectRuntimeBackend } from './runtime/direct/backend-direct.ts'
+import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
+import { type DirectOwnerPoolLike } from './runtime/direct/session-lifecycle-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
 import { PluginManagerHostRegistry, type PluginManagerHostClaim } from './plugin-manager/host-registry.ts'
 import { PluginManagerPanel } from './plugin-manager/panel.ts'
 import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
-import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 import {
@@ -2454,31 +2443,21 @@ export function apply(ctx: Context, config: Config): void {
       if (agent.session.header.parentSession !== viewed.parentSessionId) return undefined
       return agent
     }
-    const directSessionWriter = new DirectSessionWriter(ctx, directAgentFor, directQueueAgentFor)
-    const directPendingInputReader = new DirectPendingInputReader(directQueueAgentFor)
-    const backend = createDirectBackend(
-      new DirectSubagentPort(ctx),
-      new DirectSessionReader(ctx, {
+    const backend = createDirectRuntimeBackend({
+      ctx,
+      diag,
+      tuiSettings,
+      modelSelections,
+      ownerPool: directOwnerPool,
+      compose: (presetId) => compose(presetId),
+      agentFor: directAgentFor,
+      queueAgentFor: directQueueAgentFor,
+      liveResolvers: {
         sessionOf: id => sessions.get(id),
         agentOf: id => agents.get(id),
         flushSession: async session => { await sessions.flush(session as never) },
-      }),
-      directPendingInputReader,
-      directSessionWriter,
-      new DirectSessionLifecycle(ctx, (presetId) => compose(presetId), directOwnerPool),
-      new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
-      new DirectCatalogPort(
-        ctx,
-        (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined,
-        modelSelections,
-        diag,
-      ),
-      new DirectConfigPort(ctx, tuiSettings, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
-      new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
-      new DirectSessionArchive(ctx),
-      new DirectHostCommandPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
-      new DirectPluginManagerPort(ctx),
-    )
+      },
+    })
 
     // The Plugin Manager operation owner OUTLIVES the panel (plan §17): a
     // closed `/plugins` never cancels an active install. It is wired once the
@@ -7276,10 +7255,9 @@ export function apply(ctx: Context, config: Config): void {
       }),
     })
     disposePluginManagerController = () => pluginManagerController.dispose()
-    // The selected-Job observation seam (P1-B): the official job-controller
-    // row is mounted by this bundle; the Direct adapter is the only module
-    // that touches `ctx.jobController`.
-    const jobObservation = new DirectJobObservationPort(ctx, diag)
+    // The selected-Job observation seam (P1-B) is served by the backend: the
+    // Direct adapter is assembled with the other semantic ports and is the only
+    // module that touches `ctx.jobController`.
     const openPluginManager = (): void => {
       // A second open is a no-op: the panel is already the active surface.
       if (pluginManagerHosts.isOpen()) return
@@ -9537,7 +9515,7 @@ export function apply(ctx: Context, config: Config): void {
       let observationError: string | undefined
       let closeObserver: () => void = () => {}
       try {
-        closeObserver = jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
+        closeObserver = backend.jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
       } catch (error) {
         // A composition without the official job-controller row (the injected
         // production row guarantees it) degrades to the status-only detail —
