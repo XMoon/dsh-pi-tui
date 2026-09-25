@@ -20,7 +20,8 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.6` (published stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; validated against the published npm rc.1 family |
 | `0.4.7-alpha.1` (published) | `dsh-v0.1.6-alpha.1` | Published forward-integration target; keeps its own alpha.1 contract and is the fallback TUI for an alpha.1 runtime |
 | `0.4.7-alpha.2` (published) | `dsh-v0.1.6-alpha.2` | Released forward-integration line; first line on the alpha.2 Client Session contract and the fallback TUI for a 0.1.6-alpha.2 runtime |
-| `0.4.8` (published stable) | `dsh-v0.1.7-rc.1` | Current stable line: the 0.1.7 profile-owned Config, declarative preset registry, SessionId-owned jobs, execute/result shell, and official Client projections/ClientJobs |
+| `0.4.8` (published stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable line: the 0.1.7 profile-owned Config, declarative preset registry, SessionId-owned jobs, execute/result shell, and official Client projections/ClientJobs |
+| `0.4.9` (published stable) | `dsh-v0.1.7-rc.2` | Current stable line: retires the rc.1 preset chooser policy, converges Direct model selection with the rc.2 availability/background-save semantics, and proves rc.2 dynamic tool updates through the existing P1 surfaces |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
@@ -46,18 +47,18 @@ reference contract; its last compatible TUI stays the published
 mount concurrently; the floor is a registry release, so the notice suggests the
 exact npm upgrade target.
 
-For the current stable `0.4.8` line, install the recommended DSH family and the
-stable TUI. DSH `0.1.7-rc.1` is the minimum and the validated target; older
+For the current stable `0.4.9` line, install the recommended DSH family and the
+stable TUI. DSH `0.1.7-rc.2` is the minimum and the validated target; older
 runtimes must use their paired TUI line from the table above. The recommended
 install command explicitly allows the DSH native install scripts:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The `0.4.8` checkout is npm Mode and targets the published
-`0.1.7-rc.1` family through its lockfile. Use the local development
+The `0.4.9` checkout is npm Mode and targets the published
+`0.1.7-rc.2` family through its lockfile. Use the local development
 flow to materialize it:
 
 ```sh
@@ -75,7 +76,7 @@ pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 The startup notice on an old runtime suggests the exact published upgrade:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2
 ```
 
 If the official `dsh-v0.1.0-rc.8` runtime must be kept, use the compatible
@@ -99,11 +100,12 @@ Official `dsh-v0.1.2-alpha.2`/`alpha.3` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, `alpha.4`/`alpha.5` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and `dsh-v0.1.3-alpha.2` uses
 `@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The published 0.1.5-rc.1/rc.2 family is
-the last runtime for the `0.4.6` stable release. The `0.4.8` npm-mode line is
-separate: its whole DSH peer floor is unified at `>=0.1.7-rc.1` (the
-rc.1 preset registry peers `dsh-agent` exactly, so a wider legacy floor can
+the last runtime for the `0.4.6` stable release. The `0.4.9` npm-mode line is
+separate: its whole DSH peer floor is unified at `>=0.1.7-rc.2` (the
+rc.2 preset registry peers `dsh-agent` exactly, so a wider legacy floor can
 no longer satisfy a fresh standalone tarball install), and its exact npm
-family is verified by the lockfile.
+family is verified by the lockfile. The `0.4.8` line keeps its `>=0.1.7-rc.1`
+floor and stays the rc.1 pairing.
 
 The root README intentionally uses DSH's moving `latest`/`alpha` channels for
 ordinary stable/preview installs; the exact release pairing and compatibility
@@ -165,10 +167,24 @@ The CI policy is deliberately explicit: pushes to `next` and pull requests
 whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
 `main` and every tag, including `next-v*`, always use registry-backed npm mode
 with a frozen lockfile. This checkout's policy is npm mode and targets
-the published `0.1.7-rc.1` family declared by `package.json` and resolved by
+the published `0.1.7-rc.2` family declared by `package.json` and resolved by
 its lockfile. The source lane independently pins `deepseek-harness` to
-`46a7f68b0922371ce7144b668b90e377d8e799f4` (`0.1.7-rc.1`) in
+`477b4f420553e8a52c2fbccc464d7561b239c443` (`0.1.7-rc.2`) in
 `test/compat/dsh-source.json` and builds and validates that family from source.
+
+**Source Mode is waived for `0.4.9` (BLOCKED upstream, not a release blocker).**
+The DSH `0.1.7-rc.2` upstream source tree is not self-cleanable: the newly
+referenced `tsconfig.desktop-keyboard-tests.json` declares
+`outDir: lib/desktop-keyboard-test-types`, while upstream `scripts/clean.ts`
+rejects every referenced TypeScript `outDir` not ending in `/types` except its
+native-entry special case. The regression was introduced after `rc.1` and is
+still present upstream, so `pnpm compat:dsh:source` cannot run against the exact
+`rc.2` tag without modifying the external DSH checkout. Source Mode is therefore
+waived for this release; **published npm-family compatibility remains the
+`0.4.9` release authority** (`pnpm compat:dsh:npm`,
+`pnpm compat:dsh:npm --exact-family`, and `pnpm compat:dsh:client-family` on the
+published `0.1.7-rc.2` family).
+
 The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the
 published `pi2dsh` bridge cannot prove compatibility against an unpublished
@@ -179,6 +195,16 @@ For local validation, use the isolated driver rather than workspace symlinks:
 ```sh
 pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 pnpm compat:dsh:npm
+```
+
+The isolated P1 profile smoke installs the packed candidate plus a probe bundle
+into a throwaway `DSH_HOME` and boots the real TUI on the published `0.1.7-rc.2`
+family; the probe proves that the bundle's `job-controller` row composed
+(`ctx.jobController`), that `follow()` opens for a real registered Job, and that
+observing it never advances the model-facing `jobs.read()` cursor:
+
+```sh
+pnpm smoke:p1-profile -- <candidate.tgz>
 ```
 
 A dirty local DSH tree is allowed only with a visible reproducibility warning;

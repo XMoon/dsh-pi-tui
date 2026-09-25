@@ -7,6 +7,27 @@
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-25
+
+### 安装与版本对应
+
+本稳定版把 DSH 兼容目标推进到已发布的 `0.1.7-rc.2`（peer floor
+`>=0.1.7-rc.2`）：rc.2 收回了 rc.1 的 preset 选择可见性部署策略、为会话内切换
+模型引入当前可用性准入与后台默认保存，并在运行中的会话里记录动态工具更新。
+`0.4.8`/rc.1 仍是上一条已发布配对，本线在 rc.1 之上做了删除式适配，而不是叠加
+兼容分支。安装 DSH 时需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.9
+dsh --profile pi-tui
+```
+
+仍需保留旧版 DSH 的用户，请安装与该 runtime 配对的 TUI 线：
+`@deepseek-ai/dsh@0.1.7-rc.1` 使用 `@xmoon76/dsh-pi-tui@0.4.8`，
+`@deepseek-ai/dsh@0.1.6-alpha.2` 使用 `@xmoon76/dsh-pi-tui@0.4.7-alpha.2`，
+更旧的 DSH `0.1.5-rc.1`/`rc.2` 使用 `@xmoon76/dsh-pi-tui@0.4.6`。
+
 ### 新增
 
 - **`/plugins`：在 TUI 内管理当前 profile 的插件与 bundle。** 新增的 Plugin Manager 直接调用官方 DSH Plugin Manager，按分区展示：正在提供当前界面的 `dsh-pi-tui`（Current TUI，只读且自保护，不能从自身界面禁用/移除）；能精确关联到 live TUI extension 贡献的包（TUI Extensions）；其余普通 DSH 插件（DSH Plugins）。可查看 bundle 元数据、声明的插件行、启用/只读/可移除状态、兼容性错误与已配置的 registry，并执行启用/禁用、删除（二次确认，且确认与具体包身份绑定）与安装。安装流程先经官方 inspect 展示包信息与所选 registry，再实时显示进度与日志，可安全取消；关闭面板不会取消安装，重新打开会恢复同一请求，丢失响应时按官方 `waitForInstall` 结果核对而不会重复安装。`/settings` 新增 `Plugins  Manage…` 行，按需打开同一个管理界面。
@@ -26,6 +47,12 @@
 ### 改进
 
 - **Task Center 的范围词汇从 `All` 改为 `Tracked`，footer Job 分母明确为当前跟踪名册。** 直接 `/tasks` 打开的完整 Task Center 显示 `[TRACKED]`（`A` 在 `ACTIVE` ↔ `TRACKED` 间切换，Quick→Full 仍保留 `ACTIVE`），表明它列出的是 Job Registry / Subagent catalog **当前仍在跟踪**的工作，而非 Session 执行历史：DSH `0.1.7` 会在前台 `bash` / `pwsh` 运行期间临时注册 Job（可观察、可停止），命令在前台等待内完成后该记录由 DSH 移除、行随之离开 Task Center，最终结果仍由 Transcript 的 tool card 承担历史展示；显式后台 Job 完成后只要 Registry 保留记录，就仍在 `TRACKED` 可见。Footer 的 Job 分母（preferred 密度显示 `1/3 tracked jobs`）同样是当前 registry 名册、可随上游移除而下降，不是 Session 总量（compact 密度保持 `1/3j` 不变）。没有新增 job 历史缓存，也没有改变后台 Job 的保留语义。
+
+- **`/preset` 回到由官方 registry 单独裁决的普通命令。** rc.2 收回了 rc.1 的 `modeSelectionEnabled` 部署可见性策略，`0.4.9` 相应删除了整条 TUI 侧的可见性策略层（DTO 字段、Direct/Remote 适配分支、命令可见性缓存与后台探测）：`/preset` 只要命令目录健康就照常出现在候选与 `/help` 中，是否可用只由官方 `agentPresets` registry 在真正执行时裁决；`/preset default <id>` 先校验再持久化，不再读取任何策略名单，会话内空白 Session 的切换仍走官方 select。升级到 rc.2 后，旧 profile 里遗留的该字段由 DSH 忽略，TUI 不会迁移或删除它。
+
+- **会话内切换 `/model` 不再等待默认保存。** Direct 会话切换现在与 rc.2 一致：先按当前 provider/model 的精确可用性准入，再经官方 call-config 归一化，提交 `model/selection` 后立刻返回；全局默认保存改为后台尽力而为，失败只记诊断、不回滚也不阻塞 picker。TUI 侧原有的默认写入 generation/重断言排序已删除，重叠写入的先后交给官方 `AgentDefaultModel` 串行化。同一 Agent 上带图 prompt 的准入（含显式 `/skill`）与 `/model` 切换共用官方 per-Agent serialization window：重叠切换按调用顺序生效，图片能力检查不会再在已被替换的 model 下通过，纯文本 prompt 保持不串行。
+
+- **rc.2 动态工具更新：运行中的会话会记录官方 `developer/message` 工具更新，TUI 全程安全忽略。** 当 DSH Agent loop 因工具注册表变化记录 `tool-addition`/`tool-removal` 时，`Session.toolHistory()` 是唯一权威；TUI 不新增假卡片，Ctrl+F 搜索、导出、fork/rewind 与三种显示投影保持稳定，并补齐了超长多字节工具输出与超长会话续发 prompt 的回归。注意：在已安装 profile 内通过 Plugin Manager 对 bundle/plugin 行启用或禁用时，rc.2 Host 返回 `restart-required`（而非静默热更新），TUI 如实展示该结果；本版不承诺“无需重建会话即热生效”。
 
 ## [0.4.8] - 2026-09-24
 
@@ -1184,7 +1211,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8
 [0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2
 [0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1

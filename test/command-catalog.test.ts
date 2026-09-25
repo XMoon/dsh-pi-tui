@@ -16,6 +16,7 @@ import { createDiag } from '../src/diag.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../src/index.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
 import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
+import { SessionOperationBarrier } from '../src/session-operation-barrier.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -176,6 +177,7 @@ function stubRunner(
     sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,
@@ -534,6 +536,125 @@ test('the explicit /skill <name> path steers the original line and injects the b
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
   assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
+  app.stop()
+})
+
+test('the explicit /skill path admits and commits inside the shared prompt-admission window', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => name === 'glab'
+      ? { name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+      : undefined,
+  } as never)
+  const runner = stubRunner(ctx, app, { agent })
+  const inside = { value: false }
+  const prepareInside: boolean[] = []
+  const admissionLines: string[] = []
+  const prepare = runner.prepareDraftMessage
+  runner.prepareDraftMessage = async (text: string) => {
+    prepareInside.push(inside.value)
+    return prepare(text)
+  }
+  runner.withPromptAdmission = async <T>(_agent: unknown, line: string, task: () => Promise<T> | T): Promise<T> => {
+    admissionLines.push(line)
+    inside.value = true
+    try {
+      return await task()
+    } finally {
+      inside.value = false
+    }
+  }
+  registerTuiCommands(runner)
+  const skillDef = services.defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab @image.png' })
+  assert.equal(result.kind, 'success')
+  // The image capability check + attachment admission (`prepareDraftMessage`)
+  // and the delivery commit must both run INSIDE the per-Agent window shared
+  // with `/model` selection; running the admission outside it would let a
+  // concurrent model switch change the model mid-admission.
+  assert.deepEqual(prepareInside, [true], 'the skill admission runs inside the prompt-admission window')
+  assert.deepEqual(admissionLines, ['/glab @image.png'], 'the whole invocation line reaches the window')
+  assert.equal(delivered.length, 2, 'both ordered prompts were committed inside the window')
+  app.stop()
+})
+
+test('a transition started after the skill writer entered waits for the skill to commit', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => name === 'glab'
+      ? { name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+      : undefined,
+  } as never)
+  const runner = stubRunner(ctx, app, { agent })
+  let transitionPending = false
+  runner.sessionTransitionPending = () => transitionPending
+  const barrier = new SessionOperationBarrier()
+  const order: string[] = []
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>((resolve) => { releaseWriter = resolve })
+  // Park AFTER the barrier counted this writer but BEFORE the skill task runs:
+  // the pre-fix in-writer `sessionTransitionPending()` re-check runs at the very
+  // start of the task, so it must observe the transition that starts now.
+  runner.withSessionWriter = (sessionId, task) => barrier.runWriter(sessionId, async () => {
+    order.push('writer-entered')
+    await writerGate
+    return task()
+  })
+  const prepare = runner.prepareDraftMessage
+  runner.prepareDraftMessage = async (text: string) => {
+    order.push('admission')
+    return prepare(text)
+  }
+  const writer = runner.sessionWriter
+  const originalPrompt = writer.prompt
+  writer.prompt = async (sessionId, message, mode) => {
+    order.push('commit')
+    return originalPrompt(sessionId, message, mode)
+  }
+  registerTuiCommands(runner)
+  const skillDef = services.defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  const pending = (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab @image.png' })
+  for (let attempt = 0; attempt < 200 && !order.includes('writer-entered'); attempt += 1) {
+    await new Promise(resolveTick => setImmediate(resolveTick))
+  }
+  assert.ok(order.includes('writer-entered'), 'the skill must own the writer before the transition starts')
+  assert.deepEqual(order, ['writer-entered'], 'the parked writer has not run its admission yet')
+  // A transition starts AFTER the writer entered: the barrier's writer-first
+  // contract requires it to WAIT for this writer to drain — it must not cancel
+  // an in-flight skill invocation. An in-writer re-check (the reviewed defect)
+  // would read `true` here and abandon the skill.
+  transitionPending = true
+  const transition = barrier.runTransition(async () => { order.push('transition-body') })
+  await new Promise(resolveTick => setImmediate(resolveTick))
+  assert.ok(!order.includes('transition-body'), 'the later transition waits for the skill writer')
+  assert.ok(!order.includes('commit'), 'the skill has not committed while parked')
+  releaseWriter()
+  const result = await pending
+  await transition
+  assert.equal(result.kind, 'success')
+  assert.ok(order.indexOf('admission') < order.indexOf('commit'), 'admission finishes before the commit')
+  assert.equal(order.filter(entry => entry === 'commit').length, 2, 'both ordered skill prompts commit inside the writer')
+  assert.equal(order.at(-1), 'transition-body', 'every skill commit happens before the later transition body')
   app.stop()
 })
 

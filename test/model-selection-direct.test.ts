@@ -85,3 +85,42 @@ test('selectForNextRequest appends durable intent before changing only that Agen
   assert.deepEqual(owner.current(first.agent), { provider: 'p', model: 'm', reasoningEffort: 'max' })
   assert.deepEqual(owner.current(second.agent), { provider: 'global', model: 'default' })
 })
+
+test('serializeImageAdmission serializes per Agent and leaves another Agent independent', async () => {
+  const owner = new DirectModelSelectionOwner({ currentSelection: () => undefined })
+  const first = fakeAgent([], undefined).agent
+  const other = fakeAgent([], undefined).agent
+  const order: string[] = []
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const one = owner.serializeImageAdmission(first, async () => { order.push('a1-start'); await gate; order.push('a1-end') })
+  const two = owner.serializeImageAdmission(first, async () => { order.push('a2') })
+  const three = owner.serializeImageAdmission(other, async () => { order.push('b1') })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(order, ['a1-start', 'b1'], 'the same Agent queues; another Agent is independent')
+  release()
+  await Promise.all([one, two, three])
+  assert.deepEqual(order, ['a1-start', 'b1', 'a1-end', 'a2'])
+})
+
+test('an image admission queued on the same Agent observes the earlier model selection commit', async () => {
+  // rc.2 shares one per-Agent window: a model selection and an image-bearing
+  // prompt admission cannot interleave, so the admission reads the committed
+  // selection rather than a racing older choice.
+  const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'global', model: 'default' }) })
+  const agent = fakeAgent([], undefined).agent
+  owner.installForAgent(agent as never)
+  const observed: unknown[] = []
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const selection = owner.serializeImageAdmission(agent, async () => {
+    await gate
+    owner.selectForNextRequest(agent, { provider: 'p', model: 'm' })
+  })
+  const admission = owner.serializeImageAdmission(agent, async () => { observed.push(owner.current(agent)) })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(observed, [], 'the admission waits behind the model-selection window')
+  release()
+  await Promise.all([selection, admission])
+  assert.deepEqual(observed, [{ provider: 'p', model: 'm' }], 'the admission reads the committed selection')
+})

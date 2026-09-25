@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-25
+
+### Installation and version pairing
+
+This stable release moves the DSH compatibility target to the published
+`0.1.7-rc.2` (peer floor `>=0.1.7-rc.2`): rc.2 retires the rc.1 preset
+chooser-policy contract, introduces exact current-availability admission plus a
+background default save for in-session model switches, and records dynamic tool
+updates inside an already-running session. `0.4.8`/rc.1 remains the previous
+released pairing; this line is a deletion-based adaptation on top of rc.1, not a
+stacked compatibility branch. Installing DSH requires explicitly allowing its
+native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.9
+dsh --profile pi-tui
+```
+
+To keep an older DSH runtime, install the TUI line paired with it:
+`@deepseek-ai/dsh@0.1.7-rc.1` uses `@xmoon76/dsh-pi-tui@0.4.8`,
+`@deepseek-ai/dsh@0.1.6-alpha.2` uses `@xmoon76/dsh-pi-tui@0.4.7-alpha.2`, and the
+older DSH `0.1.5-rc.1`/`rc.2` family uses `@xmoon76/dsh-pi-tui@0.4.6`.
+
 ### Added
 
 - **`/plugins`: manage the active profile's plugins and bundles from the TUI.** The new Plugin Manager drives the official DSH Plugin Manager and lists packages in classified sections: the `dsh-pi-tui` bundle currently providing this surface (Current TUI — read-only and self-protected, so it cannot be disabled/removed from its own screen); packages that are exactly associated with a live TUI extension contribution (TUI Extensions); and every other ordinary DSH plugin (DSH Plugins). It shows bundle metadata, declared plugin rows, enabled/read-only/removable state, compatibility errors and the configured registries, and performs enable/disable, remove (with a confirmation bound to the exact package identity) and install. Installation first runs the official inspect to show the package and the selected registry, then streams progress and logs with safe cancellation; closing the panel never cancels an install, reopening resumes the same request, and a lost response is reconciled through the official `waitForInstall` instead of installing twice. `/settings` gains a `Plugins  Manage…` row that lazily opens the same surface.
@@ -26,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Improved
 
 - **Task Center renames the user-visible `All` scope to `Tracked` and clarifies the footer job denominator as the current tracked roster.** A direct `/tasks` now opens the full Task Center on `[TRACKED]` (`A` toggles `ACTIVE` ↔ `TRACKED`; Quick→Full still preserves `ACTIVE`), making explicit that it lists the work the Job Registry / Subagent catalog currently tracks, not the session's execution history: DSH `0.1.7` temporarily registers foreground `bash`/`pwsh` work while it runs (observable and stoppable), removes the record when the command completes inside the foreground wait so the row leaves the Task Center with the registry (the Transcript tool card keeps the execution history), while handed-out background jobs stay visible in `TRACKED` after settlement as long as the registry retains them. The footer's job denominator (preferred density now reads `1/3 tracked jobs`) is likewise the current registry roster — it may shrink when upstream removes a record — never a session lifetime total (compact density keeps `1/3j`). No job history cache was added and background job retention is unchanged.
+
+- **`/preset` is a normal command adjudicated by the official registry alone.** rc.2 retired the rc.1 `modeSelectionEnabled` deployment-visibility policy, so `0.4.9` deletes the whole TUI-side policy layer (the DTO field, the Direct/Remote adapter branches, the command-visibility cache and its background probe): `/preset` appears in completions and `/help` whenever the command catalog is healthy, and selectability is decided only by the official `agentPresets` registry at execution time. `/preset default <id>` validates and then persists without reading any policy roster, and a blank in-session switch still goes through the official select. After upgrading to rc.2, any leftover field in an old profile is ignored by DSH; the TUI never migrates or deletes it.
+
+- **An in-session `/model` switch no longer waits for the default save.** The Direct session switch now matches rc.2: it first admits the exact current provider/model availability, normalizes through the official call config, commits `model/selection`, and returns immediately; the global-default save becomes best-effort background work whose failure is only diagnosed — it never rolls back the choice and never blocks the picker. The TUI's old default-write generation/reassert ordering is gone; overlapping writes are serialized by the official `AgentDefaultModel`. On the same Agent, an image-bearing prompt admission (including an explicit `/skill`) shares the official per-Agent serialization window with a `/model` switch: overlapping switches apply in call order, an image capability check can no longer pass under a model a concurrent switch already replaced, and text-only prompts stay unserialized.
+
+- **rc.2 dynamic tool updates: a running session records official `developer/message` tool updates and the TUI tolerates them safely.** When the DSH Agent loop records `tool-addition`/`tool-removal` for a tool-registry change, `Session.toolHistory()` is the sole authority; the TUI invents no card and keeps Ctrl+F search, export, fork/rewind and all three display projections stable, with new regressions for very long multibyte tool output and for the next prompt after a long session. Note: enabling or disabling a bundle/plugin row through the Plugin Manager inside an installed profile returns the official rc.2 `restart-required` outcome (never a silent hot-apply), which the TUI presents as-is — this release makes no "no Session recreation required" hot-apply claim.
 
 ## [0.4.8] - 2026-09-24
 
@@ -1493,7 +1523,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8
 [0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2
 [0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1

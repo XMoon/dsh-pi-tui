@@ -5,10 +5,10 @@ import semver from 'semver'
 import test from 'node:test'
 
 const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-const expectedWindow = '>=0.1.7-rc.1'
+const expectedWindow = '>=0.1.7-rc.2'
 const expectedDevVersion = Object.entries(packageJson.devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.1'
+const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.2'
 const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
   .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
 
@@ -18,21 +18,22 @@ const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
 test('all DSH runtime peers use the published npm lower bound', () => {
   assert.ok(dshPeerEntries.length > 0, 'the bundle must declare DSH runtime peers')
   // The compatibility train's closure unified the whole peer policy onto
-  // the rc.1 floor: the tarball's standalone install must resolve one
-  // family with the rc.1-only preset registry (whose own peer pins
+  // the rc.2 floor: the tarball's standalone install must resolve one
+  // family with the rc.2 preset registry (whose own peer pins
   // `dsh-agent` exactly), so a wider legacy floor can no longer satisfy a
   // fresh `npm install --omit=dev`.
   for (const [name, range] of dshPeerEntries) {
     assert.equal(range, expectedWindow, `${name} must use the open-ended support lower bound`)
     assert.equal(semver.validRange(range) !== null, true, `${name} peer range must be valid semver syntax`)
-    assert.equal(semver.satisfies('0.1.7-rc.1', range), true, `${name} must include its published npm floor`)
-    assert.equal(semver.satisfies('0.1.7-alpha.2', range), false, `${name} must reject the alpha line the rc.1 preset registry cannot pair with`)
+    assert.equal(semver.satisfies('0.1.7-rc.2', range), true, `${name} must include its published npm floor`)
+    assert.equal(semver.satisfies('0.1.7-alpha.2', range), false, `${name} must reject the alpha line the rc.2 preset registry cannot pair with`)
+    assert.equal(semver.satisfies('0.1.7-rc.1', range), false, `${name} must reject the previous rc.1 line below the floor`)
     assert.equal(semver.satisfies('0.1.6-alpha.1', range), false, `${name} must reject the previous alpha, which lacks the alpha.2 Client contract`)
     assert.equal(semver.satisfies('0.1.5-rc.2', range), false, `${name} must reject the previous rc line`)
     assert.equal(semver.satisfies('0.1.5-rc.1', range), false, `${name} must reject the previous rc line`)
     assert.equal(semver.satisfies('0.1.5', range), false, `${name} must reject the previous stable line`)
     assert.equal(semver.satisfies('0.1.6-alpha.0', range), false, `${name} must exclude the earlier alpha`)
-    assert.equal(semver.satisfies('0.1.6', range), false, `${name} stable releases predate the rc.1 family contract`)
+    assert.equal(semver.satisfies('0.1.6', range), false, `${name} stable releases predate the rc.2 family contract`)
     assert.equal(semver.satisfies('0.2.0', range), true, `${name} must remain open to later compatible releases`)
   }
 })

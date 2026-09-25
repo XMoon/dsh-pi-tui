@@ -1084,8 +1084,8 @@ function packageVersion(): string {
 
 /**
  * The welcome card's version line: the installed dsh version plus the
- * bundle's own version (header-badge parity — `dsh-0.1.7-rc.1 ·
- * tui-v0.4.8`). Without a resolvable dsh launcher it degrades to
+ * bundle's own version (header-badge parity — `dsh-0.1.7-rc.2 ·
+ * tui-v0.4.9`). Without a resolvable dsh launcher it degrades to
  * the bundle version alone.
  * @returns the combined version string.
  */
@@ -2363,6 +2363,16 @@ export function apply(ctx: Context, config: Config): void {
     const modelSelections = new DirectModelSelectionOwner(
       defaultModel as unknown as DefaultModelServiceLike,
     )
+    /**
+     * rc.2 shares ONE per-Agent serialization window between `/model` selection
+     * and image-bearing prompt admission (`serializeImageAdmission`): the image
+     * capability check, the attachment admission and the delivery commit apply
+     * in the same Agent-local order as a model switch, so an image prompt can
+     * never be admitted under a model capability that a concurrent switch has
+     * already replaced. A text-only prompt keeps the un-serialized path.
+     */
+    const withPromptAdmission = <T>(agent: Agent, hasImage: boolean, operation: () => Promise<T>): Promise<T> =>
+      hasImage ? modelSelections.serializeImageAdmission(agent, operation) : operation()
     // The latest SESSIONLESS /model global-default intent (a live Session write
     // is NOT recorded here: the official `session.selectModel` best-effort
     // default save is a Host side effect, so the tracker is sessionless-only).
@@ -6025,7 +6035,10 @@ export function apply(ctx: Context, config: Config): void {
                       // during a transition is refused (convergence plan
                       // phase 3).
                       try {
-                        await operationBarrier.runWriter(agent.session.id, async () => {
+                        await operationBarrier.runWriter(agent.session.id, () => withPromptAdmission(
+                          agent,
+                          draftHasImages(text, draftImages),
+                          async () => {
                           // Install the local echo before the first async
                           // admission await when the gesture did not already
                           // install it synchronously (a deferred start, or a
@@ -6077,7 +6090,8 @@ export function apply(ctx: Context, config: Config): void {
                           // Consume ONLY the referenced drafts — a concurrent
                           // intake's newer image survives (round-5 finding 1).
                           consumeDraftAttachments(text, draftImages, draftFiles)
-                        })
+                          },
+                        ))
                       } catch (error) {
                         if (cleanedUp) {
                           fallbackPin()
@@ -6223,7 +6237,10 @@ export function apply(ctx: Context, config: Config): void {
         // this writer to drain; a writer entering during a transition is
         // refused.
         try {
-          await operationBarrier.runWriter(agent.session.id, async () => {
+          await operationBarrier.runWriter(agent.session.id, () => withPromptAdmission(
+            agent,
+            draftHasImages(text, draftImages),
+            async () => {
             // Install the local echo before the first async admission await
             // (same handoff contract as the command-fallback path above).
             if (!localEchoInstalled) {
@@ -6273,7 +6290,8 @@ export function apply(ctx: Context, config: Config): void {
             // Consume ONLY the referenced drafts — a concurrent intake's
             // newer image survives (round-5 finding 1).
             consumeDraftAttachments(text, draftImages, draftFiles)
-          })
+            },
+          ))
         } catch (error) {
           if (cleanedUp) return
           if (error instanceof TransitionInProgressError) {
@@ -6614,8 +6632,15 @@ export function apply(ctx: Context, config: Config): void {
         // The draft message is prepared BEFORE the send: admission is
         // async I/O, and the prepared message is exactly what the send
         // delivers (§13).
+        const admission = await withPromptAdmission(
+          agentForSteer,
+          draftHasImages(text, draftImages),
+          async (): Promise<
+            | { readonly kind: 'stale' }
+            | { readonly kind: 'delivered'; readonly outcome: Awaited<ReturnType<typeof steerAll>> }
+          > => {
         const prepared = await prepareUserMessage(text, draftImages, submitDeps, { requestId: steerRequestId })
-        if (cleanedUp) return
+        if (cleanedUp) return { kind: 'stale' }
         // Re-check the identity after async admission, before entering the
         // writer barrier. A session switch during preparation must restore
         // the original draft instead of retargeting the new session.
@@ -6631,7 +6656,7 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(merged === text
             ? 'the session changed while sending — try again'
             : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-          return
+          return { kind: 'stale' }
         }
         // T1 BEFORE the dispatch: the steer is being invoked, and any
         // synchronously-emitted event from the delivery must never log
@@ -6675,6 +6700,10 @@ export function apply(ctx: Context, config: Config): void {
         text,
         onlyDraft ? { onlyDraft: true, draftHasPayload, draftDelivery: steerDelivery } : { draftHasPayload, draftDelivery: steerDelivery },
       )
+        return { kind: 'delivered', outcome }
+        })
+        if (admission.kind === 'stale') return
+        const outcome = admission.outcome
         if (cleanedUp) return
         // Only a successful send consumes the drafts: on block/stale the
         // draft was restored and the images are still referenced — removing
@@ -10199,6 +10228,8 @@ export function apply(ctx: Context, config: Config): void {
         })),
       withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
         operationBarrier.runWriter(sessionId, async () => task()),
+      withPromptAdmission: <T>(agent: unknown, line: string, task: () => Promise<T> | T) =>
+        withPromptAdmission(agent as Agent, draftHasImages(line, draftImages), async () => task()),
       enterView,
       requestExit,
       exit,

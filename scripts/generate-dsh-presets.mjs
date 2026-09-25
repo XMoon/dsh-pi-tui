@@ -4,7 +4,7 @@
  * declarations from `@deepseek-ai/dsh-web-app`'s exported preset patch
  * assets.
  *
- * DSH 0.1.7's (through 0.1.7-rc.1) `dsh.bundle.patch` only resolves
+ * DSH 0.1.7's (through 0.1.7-rc.2) `dsh.bundle.patch` only resolves
  * bundle-package-relative paths (`join(packageDir, file)`), so a bundle
  * cannot reference the web package's exported assets directly — this
  * generated mirror is the 0.1.7 compatibility packaging workaround for
@@ -46,7 +46,7 @@ patch assets exported by \`${OFFICIAL_PACKAGE}\` (see
 \`pnpm build\` regenerates the mirror from the official package, and
 \`test/dsh-preset-parity.test.mjs\` fails the suite on any byte drift.
 
-This mirror exists only because DSH 0.1.7's (through 0.1.7-rc.1)
+This mirror exists only because DSH 0.1.7's (through 0.1.7-rc.2)
 \`dsh.bundle.patch\` resolves bundle-package-relative paths and cannot
 reference another package's exported assets. It is a recorded upstream
 packaging gap — remove it when DSH ships a shared preset bundle or

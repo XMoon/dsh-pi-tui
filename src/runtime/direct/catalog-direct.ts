@@ -17,6 +17,8 @@
 
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-preset-registry'
 import { safeErrorMessage } from '../../error-boundary.ts'
+import { runDetached } from '../../detached.ts'
+import type { Diag } from '../../diag.ts'
 import {
   copyModelSelection,
   normalizeModelSelection,
@@ -88,24 +90,48 @@ export interface DefaultModelServiceLike {
   saveSelection(next: ModelSelectionDto): Promise<unknown>
 }
 
-/** The narrow diagnostic surface the model catalog reports fencing
- *  corrections through (structural — the runner's Diag satisfies it). */
+/** The narrow diagnostic surface the model catalog reports through
+ *  (structural — the runner's Diag satisfies it). */
 export interface ModelDiagLike {
   warn(message: string, fields?: Record<string, unknown>): void
 }
 
+/** A no-op diagnostics channel for an embedded/test adapter constructed
+ *  without the runner's Diag: detached ownership still observes failures
+ *  instead of leaving a bare promise. */
+const NOOP_DIAG: Diag = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  dispose: () => {},
+}
+
+/** Adapt the optional narrow diagnostic surface to the full detached-work
+ *  channel (severity is collapsed onto the one sink the seam owns). */
+function detachedDiag(diag: ModelDiagLike | undefined): Diag {
+  if (diag === undefined) return NOOP_DIAG
+  return {
+    debug: () => {},
+    info: () => {},
+    warn: (message, fields) => diag.warn(message, fields),
+    error: (message, fields) => diag.warn(message, fields),
+    dispose: () => {},
+  }
+}
+
 /** The structural `agentPresets` service surface (the 0.1.7 declarative
  * registry). `remoteExportList` is the PUBLIC official roster projection
- * (the `@Remote('list')` method — path-free rows, the Host-effective
- * default and the mode-selection policy from one snapshot); `select` is
- * the official blank-Session write. Identity is id-only: `trust`/`path`/
- * `authorable` are retired upstream and deliberately absent here. */
+ * (the `@Remote('list')` method — path-free rows plus the Host-effective
+ * default from one snapshot); `select` is the official blank-Session write.
+ * Identity is id-only: `trust`/`path`/`authorable` are retired upstream and
+ * deliberately absent here, as is the rc.1-only `modeSelectionEnabled`
+ * deployment policy the rc.2 registry no longer declares or reads. */
 export interface AgentPresetsServiceLike {
   resolve(id?: string): Promise<AgentPreset>
   get defaultId(): string
   /** The public official roster projection: path-free rows + the
-   *  Host-effective default + the deployment's mode-selection policy, read
-   *  from ONE settings snapshot. */
+   *  Host-effective default, read from ONE settings snapshot. */
   remoteExportList(): Promise<{
     readonly presets: readonly {
       readonly id: string
@@ -114,7 +140,6 @@ export interface AgentPresetsServiceLike {
       readonly description?: string
       readonly broken?: string
     }[]
-    readonly modeSelectionEnabled: boolean
   }>
   select?(agent: unknown, agentPreset: string): Promise<string>
 }
@@ -168,18 +193,6 @@ export class DirectModelCatalog implements ModelCatalog {
   private readonly agentFor: (sessionId: string) => unknown | undefined
   private readonly modelSelections: SessionModelSelectionOwnerLike | undefined
   private readonly diag: ModelDiagLike | undefined
-  /** Fence overlapping default writes so the newest choice wins persistence. */
-  private defaultWriteGeneration = 0
-  /** The generation of the newest SUCCESSFULLY committed default. Any
-   *  successful write with a NEWER generation advances it, so a failed
-   *  newer attempt never erases an older success (the correction target
-   *  stays the newest committed value). */
-  private committedGeneration = 0
-  /** The newest SUCCESSFULLY committed default (the correction target). A
-   *  failed attempt is never recorded here, so a failed choice can never be
-   *  resurrected by a stale-write correction. */
-  private latestCommitted: ModelSelectionDto | undefined
-  private latestWrite: Promise<unknown> = Promise.resolve()
 
   constructor(
     ctx: HostContextLike,
@@ -300,68 +313,35 @@ export class DirectModelCatalog implements ModelCatalog {
     if (defaultModel === undefined) {
       return Promise.resolve({ kind: 'rejected', error: { code: 'session/model-unavailable', message: 'model selection service unavailable' } })
     }
-
-    const generation = ++this.defaultWriteGeneration
-    // Start immediately rather than serializing behind a hung older write. If
-    // an older write settles after a newer one, its completion fences and
-    // reasserts the newest COMMITTED value after all newer writes have settled.
-    const write = Promise.resolve().then(() => defaultModel.saveSelection({ ...next }))
-    this.latestWrite = write
-    const fence = (outcome: { ok: true; value: unknown } | { ok: false; error: unknown }): Promise<WriteOutcome<void>> => {
-      // Any successful write advances the committed target when its
-      // generation is NEWER than the current committed one: a failed newer
-      // attempt must never erase an older success, and a stale write's
-      // success must never mark an older value as the committed target.
-      if (outcome.ok && generation > this.committedGeneration) {
-        this.committedGeneration = generation
-        this.latestCommitted = { ...next }
-      }
-      // The correction is AWAITED as part of THIS write's settlement (never a
-      // detached fire-and-forget): the caller that observes this promise knows
-      // the newest committed value has been re-asserted, so a following
-      // fresh-create admission can never read an older stale completion.
-      return this.reassertLatest(generation).then((): WriteOutcome<void> => {
-        if (outcome.ok) return { kind: 'committed', value: undefined }
+    // This is the explicit sessionless/default write: the caller asked to
+    // persist the default, so it awaits the settlement. rc.2
+    // `AgentDefaultModel.saveSelection()` serializes overlapping saves itself,
+    // so the TUI only maps the outcome (success → committed, failure →
+    // indeterminate) and owns no ordering.
+    return Promise.resolve()
+      .then(() => defaultModel.saveSelection({ ...next }))
+      .then(
+        (): WriteOutcome<void> => ({ kind: 'committed', value: undefined }),
         // A failed settings write may or may not have landed; the durable
         // commit state is not provable, so it stays indeterminate (never a
         // false rejection that would let a caller retry blind).
-        return {
+        (error: unknown): WriteOutcome<void> => ({
           kind: 'indeterminate',
-          error: { code: 'session/model-default-indeterminate', message: safeErrorMessage(outcome.error) },
-        }
-      })
-    }
-    return write.then(
-      value => fence({ ok: true, value }),
-      error => fence({ ok: false, error }),
-    )
+          error: { code: 'session/model-default-indeterminate', message: safeErrorMessage(error) },
+        }),
+      )
   }
 
-  private async reassertLatest(generation: number): Promise<void> {
-    while (generation !== this.defaultWriteGeneration) {
-      const observedGeneration = this.defaultWriteGeneration
-      const observedWrite = this.latestWrite
-      await observedWrite.catch(() => undefined)
-      if (observedGeneration !== this.defaultWriteGeneration) continue
-      const latest = this.latestCommitted
-      const defaultModel = this.defaultModel()
-      if (latest === undefined || defaultModel === undefined) return
-      try {
-        await defaultModel.saveSelection({ ...latest })
-      } catch (error) {
-        // A failed correction leaves the durable default stale until the
-        // next save reasserts it; report the failure instead of swallowing
-        // it (the caller still observes its own write's result).
-        this.diag?.warn('model default correction failed', {
-          error: error instanceof Error ? error.message : String(error),
-        })
-        return
-      }
-      // Mark the generation we just reasserted as observed. A newer selection
-      // could have started while the correction was in flight; the loop then
-      // observes that newer generation and reasserts it instead.
-      generation = observedGeneration
-    }
+  /** Start the best-effort global-default save for a committed Session
+   *  selection. rc.2 returns the Session success immediately; the rejection is
+   *  observed through the detached owner, never the Session outcome. */
+  private startDefaultSave(selection: ModelSelectionDto, sessionId: string): void {
+    const defaultModel = this.defaultModel()
+    if (defaultModel === undefined) return
+    runDetached('model default save', () => defaultModel.saveSelection({ ...selection }), {
+      diag: detachedDiag(this.diag),
+      sessionId: () => sessionId,
+    })
   }
 
   sessionSelection(sessionId: string): ModelSelectionDto | undefined {
@@ -385,7 +365,8 @@ export class DirectModelCatalog implements ModelCatalog {
     if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
     const llm = this.llm()
     const agent = this.agentFor(sessionId)
-    if (agent === undefined || this.modelSelections === undefined || llm === undefined) {
+    const owner = this.modelSelections
+    if (agent === undefined || owner === undefined || llm === undefined) {
       // Without a live Agent / Direct owner there is no safe Session
       // projection to mutate: refuse instead of saving only the global
       // default (which would make the caller believe the Session changed).
@@ -394,10 +375,68 @@ export class DirectModelCatalog implements ModelCatalog {
         error: { code: 'session/model-unavailable', message: 'session model selection unavailable' },
       }
     }
+    // rc.2 official `session.selectModel` serializes the WHOLE selection per
+    // Agent (`serializeImageAdmission`), the SAME window an image-bearing
+    // prompt admission takes. Enqueue BEFORE the first await so two
+    // overlapping selections apply in call order — otherwise a slower older
+    // choice can commit after (and overwrite) the newer one.
+    return owner.serializeImageAdmission(agent, () =>
+      this.commitSessionModelSelection(sessionId, agent, owner, llm, selection, signal))
+  }
+
+  private async commitSessionModelSelection(
+    sessionId: string,
+    agent: unknown,
+    owner: SessionModelSelectionOwnerLike,
+    llm: LlmServiceLike,
+    selection: ModelSelectionDto,
+    signal?: AbortSignal,
+  ): Promise<WriteOutcome<ModelSelectionDto>> {
+    // The queued operation may run after a caller abort: re-check before any
+    // work (a pre-commit abort provably did not commit).
+    if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
     // The Host owns provider/model validation and reasoning-effort
-    // normalization (official `session.selectModel` semantics): resolve the
-    // call config FIRST and commit the NORMALIZED result. An unavailable
-    // model/effort is refused before any Session mutation.
+    // normalization (official `session.selectModel` semantics), but rc.2 first
+    // admits the EXACT current availability: the selected provider must be
+    // currently advertised and the exact model must be in its current list.
+    // This is a one-operation admission check over the already-owned `ctx.llm`
+    // service (never a second model catalog cache).
+    try {
+      const providers = llm.listProviders()
+      if (!providers.some(provider => provider.id === selection.provider)) {
+        return {
+          kind: 'rejected',
+          error: {
+            code: 'session/model-unavailable',
+            message: `model provider "${selection.provider}" is not available`,
+          },
+        }
+      }
+      const models = await llm.listModels(selection.provider)
+      // Re-check AFTER the availability await and BEFORE the durable commit:
+      // an abort during the lookup provably did not commit.
+      if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
+      if (!models.some(model => model.id === selection.model)) {
+        return {
+          kind: 'rejected',
+          error: {
+            code: 'session/model-unavailable',
+            message: `model "${selection.model}" is not available on provider "${selection.provider}"`,
+          },
+        }
+      }
+    } catch (error) {
+      // An abort during the lookup is a PROVEN PRE-commit cancellation — never
+      // a bogus rejection.
+      if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
+      return {
+        kind: 'rejected',
+        error: { code: 'session/model-unavailable', message: safeErrorMessage(error) },
+      }
+    }
+    // The Host owns provider-specific normalization; resolve the call config
+    // and commit the NORMALIZED result. An unavailable model/effort is refused
+    // before any Session mutation.
     let resolved: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
     try {
       resolved = await llm.resolveCallConfig({
@@ -430,28 +469,21 @@ export class DirectModelCatalog implements ModelCatalog {
     // observed by a request. Only after the append commits does the choice
     // become the Agent's pending selection.
     try {
-      this.modelSelections.appendSelection(agent, next)
+      owner.appendSelection(agent, next)
     } catch (error) {
       return {
         kind: 'rejected',
         error: { code: 'session/model-unavailable', message: safeErrorMessage(error) },
       }
     }
-    this.modelSelections.setCurrent(agent, next)
-    // The global-default save is best-effort and NEVER undoes the durable
-    // Session choice (pinned official `session.selectModel` semantics: the
-    // Host logs a default-save failure and still succeeds). A diagnostic is
-    // recorded instead of a rejection.
-    const defaultOutcome = await this.saveDefaultSelection(next)
-    if (defaultOutcome.kind !== 'committed') {
-      this.diag?.warn('model default save did not commit after the Session selection', {
-        session: sessionId,
-        kind: defaultOutcome.kind,
-        ...defaultOutcome.kind === 'rejected' || defaultOutcome.kind === 'indeterminate'
-          ? { error: defaultOutcome.error.message }
-          : {},
-      })
-    }
+    owner.setCurrent(agent, next)
+    // rc.2 commits the Session selection and returns immediately: the
+    // global-default save is best-effort BACKGROUND work (pinned official
+    // `session.selectModel` semantics). Its failure is diagnosed through the
+    // detached owner and never undoes the durable Session choice, never
+    // rejects this outcome, and never blocks the picker. It is STARTED inside
+    // the window (same upstream order) but never awaited here.
+    this.startDefaultSave(next, sessionId)
     return { kind: 'committed', value: { ...next } }
   }
 
@@ -500,10 +532,10 @@ export class DirectPresetCatalog implements PresetCatalog {
   async roster(signal?: AbortSignal): Promise<PresetRosterDto> {
     signal?.throwIfAborted()
     const presets = this.presets()
-    if (presets === undefined) return { presets: [], modeSelectionEnabled: false }
+    if (presets === undefined) return { presets: [] }
     // The PUBLIC official roster projection (the `@Remote('list')` method):
-    // path-free rows, the Host-effective default and the mode-selection
-    // policy from ONE settings snapshot.
+    // path-free rows and the Host-effective default from ONE settings
+    // snapshot.
     const roster = await presets.remoteExportList()
     signal?.throwIfAborted()
     const defaultId = roster.presets.find(preset => preset.isDefault === true)?.id
@@ -515,7 +547,6 @@ export class DirectPresetCatalog implements PresetCatalog {
         ...preset.broken === undefined ? {} : { broken: preset.broken },
       })),
       ...defaultId === undefined ? {} : { defaultId },
-      modeSelectionEnabled: roster.modeSelectionEnabled,
     }
   }
 

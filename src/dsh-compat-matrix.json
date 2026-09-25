@@ -13,11 +13,11 @@
     "the release-notes tests."
   ],
   "current": {
-    "since": "0.4.8",
-    "requires": "DeepSeek Harness 0.1.7-rc.1 or later",
-    "upgradeDsh": "0.1.7-rc.1",
-    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1",
-    "guidance": "This 0.4.8 line is validated with the published DeepSeek Harness 0.1.7-rc.1 distribution; see docs/dsh-compatibility.md."
+    "since": "0.4.9",
+    "requires": "DeepSeek Harness 0.1.7-rc.2 or later",
+    "upgradeDsh": "0.1.7-rc.2",
+    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2",
+    "guidance": "This 0.4.9 line targets the published DeepSeek Harness 0.1.7-rc.2 distribution (the exact npm family is verified); see docs/dsh-compatibility.md."
   },
   "floor": {
     "below": "0.1.0-rc.8",
@@ -117,6 +117,13 @@
       "tui": "0.4.8",
       "versions": [
         "0.1.7-rc.1"
+      ]
+    },
+    {
+      "dshFrom": "0.1.7-rc.2",
+      "tui": "0.4.9",
+      "versions": [
+        "0.1.7-rc.2"
       ]
     }
   ]

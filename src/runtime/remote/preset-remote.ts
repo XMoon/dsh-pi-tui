@@ -2,10 +2,10 @@
  * Experimental Remote implementation of the semantic PresetCatalog port (D2.3).
  *
  * Reads map to the official `agentPresets.list` roster (path-free rows beside
- * the Host-effective default and the mode-selection policy). The write maps to
- * the official `agentPresets.select(sessionId, presetId)`; the Host owns the
- * serialized switch ordering, the blank-session re-check, the recompose
- * transaction and the durable `agent-preset/selected` commit.
+ * the Host-effective default). The write maps to the official
+ * `agentPresets.select(sessionId, presetId)`; the Host owns the serialized
+ * switch ordering, the blank-session re-check, the recompose transaction and
+ * the durable `agent-preset/selected` commit.
  *
  * Rules (D2.3 plan §9.2): no local blank reducer, no local recompose logic, no
  * generated setup callback, no Agent object, no retry after ambiguous dispatch.
@@ -33,7 +33,6 @@ export interface RemotePresetRosterRow {
 /** The official `agentPresets.list` roster value. */
 export interface RemotePresetRoster {
   readonly presets: readonly RemotePresetRosterRow[]
-  readonly modeSelectionEnabled: boolean
 }
 
 /** The official generated `agentPresets` Remote face. */
@@ -60,7 +59,6 @@ function copyRoster(roster: PresetRosterDto): PresetRosterDto {
   return {
     presets: roster.presets.map(copyRosterEntry),
     ...roster.defaultId === undefined ? {} : { defaultId: roster.defaultId },
-    modeSelectionEnabled: roster.modeSelectionEnabled,
   }
 }
 
@@ -110,7 +108,7 @@ const REMOTE_PRESET_REFUSAL_CODES: ReadonlySet<string> = new Set([
 export class RemotePresetCatalog implements PresetCatalog {
   private readonly presets: RemotePresetRemotes
   private readonly generation: RemoteConnectionGenerationSource
-  /** The last loaded Host roster (default + rows + policy), generation-tagged,
+  /** The last loaded Host roster (default + rows), generation-tagged,
    *  latest-read-wins, detached on read AND write. */
   private readonly rosterCache = new GenerationCache<PresetRosterDto>(copyRoster)
   /** Owner token for overlapping same-generation preset selections (v2 §0.2.5).
@@ -148,7 +146,6 @@ export class RemotePresetCatalog implements PresetCatalog {
     const dto: PresetRosterDto = {
       presets: result.value.presets.map(copyRosterEntry),
       ...defaultId === undefined ? {} : { defaultId },
-      modeSelectionEnabled: result.value.modeSelectionEnabled,
     }
     // Latest-only read (v2 §0.2.3): a newer roster read supersedes this one.
     // Never cache or return the stale DTO; serve the newer value when present.

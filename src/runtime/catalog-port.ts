@@ -20,8 +20,8 @@
  * `WriteOutcome` vocabulary.
  *
  * D2.3 preset convergence: the roster read carries the Host-effective default
- * and mode-selection policy beside path-free rows, and the blank-Session
- * selection is one official semantic write.
+ * beside path-free rows, and the blank-Session selection is one official
+ * semantic write.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/catalog-port
@@ -165,14 +165,12 @@ export interface PresetRosterEntry {
 }
 
 /** The agent-preset roster read: path-free rows beside the Host-effective
- * default and the deployment's mode-selection policy (mirrors the official
- * `agentPresets.list` roster). */
+ * default (mirrors the official rc.2 `agentPresets.list` roster, which no
+ * longer declares a deployment mode-selection policy). */
 export interface PresetRosterDto {
   readonly presets: readonly PresetRosterEntry[]
   /** The preset id a caller naming none composes on. */
   readonly defaultId?: string
-  /** Whether this deployment exposes preset selection at all. */
-  readonly modeSelectionEnabled: boolean
 }
 
 /** The agent-preset catalog sub-domain: what exists, what resolves, what the
@@ -184,7 +182,7 @@ export interface PresetCatalog {
   /** Whether the deployment composes a preset roster at all. */
   available(): boolean
   /** Every preset the configured roots currently supply, beside the
-   *  Host-effective default and the mode-selection policy. */
+   *  Host-effective default. */
   roster(signal?: AbortSignal): Promise<PresetRosterDto>
   /** Resolve one preset id (undefined = the deployment default). Returns
    *  the CONCRETE id (undefined ONLY when the deployment composes no

@@ -39,6 +39,9 @@ export interface SessionModelSelectionOwnerLike {
   /** Set only one Agent's in-memory pending choice. */
   setCurrent(agent: unknown, selection: ModelSelectionValue | undefined): void
   selectForNextRequest(agent: unknown, selection: ModelSelectionValue): void
+  /** Run one operation inside the Agent's shared model-selection / image
+   *  prompt-admission serialization window (rc.2 `serializeImageAdmission`). */
+  serializeImageAdmission<Value>(agent: unknown, operation: () => Promise<Value>): Promise<Value>
 }
 
 function agentSelection(value: ModelSelectionValue | undefined): ModelSelection | undefined {
@@ -72,12 +75,29 @@ function requestHeaderOf(agent: Agent): unknown {
  */
 export class DirectModelSelectionOwner implements SessionModelSelectionOwnerLike {
   private readonly installed = new WeakMap<Agent, InstalledModelSelection>()
+  /** The per-Agent model-selection / image prompt-admission chain (rc.2
+   *  `ApiSessionAgentController.serializeImageAdmission`). Overlapping model
+   *  selections and image-bearing prompt admissions therefore apply in call
+   *  order instead of racing each other. */
+  private readonly admissionChains = new WeakMap<Agent, Promise<void>>()
   private readonly defaultModel: DefaultModelServiceLike
 
   constructor(defaultModel: DefaultModelServiceLike) {
     // Explicit field, never a parameter property: the bundle's tests run
     // .ts files under Node's strip-only loader, which rejects that syntax.
     this.defaultModel = defaultModel
+  }
+
+  /**
+   * Run one operation inside the Agent's serialization window. The chain
+   * swallows each settled result so a failed operation never poisons the
+   * queue, while the returned promise still rejects to its own caller.
+   */
+  serializeImageAdmission<Value>(agent: unknown, operation: () => Promise<Value>): Promise<Value> {
+    const live = agent as Agent
+    const result = (this.admissionChains.get(live) ?? Promise.resolve()).then(operation)
+    this.admissionChains.set(live, result.then(() => undefined, () => undefined))
+    return result
   }
 
   /** Read the current process default without retaining its object identity. */
