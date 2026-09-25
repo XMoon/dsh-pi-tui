@@ -52,7 +52,7 @@ dsh --profile pi-tui
 
 - **会话内切换 `/model` 不再等待默认保存。** Direct 会话切换现在与 rc.2 一致：先按当前 provider/model 的精确可用性准入，再经官方 call-config 归一化，提交 `model/selection` 后立刻返回；全局默认保存改为后台尽力而为，失败只记诊断、不回滚也不阻塞 picker。TUI 侧原有的默认写入 generation/重断言排序已删除，重叠写入的先后交给官方 `AgentDefaultModel` 串行化。
 
-- **在已经运行的会话里启用插件/工具后，下一次请求即可使用，无需重建会话。** 通过现有 Plugin Manager 启用能力后，工具变更由 DSH Agent loop 记录为官方 `developer/message` 工具更新（`Session.toolHistory()` 是唯一权威）；TUI 只安全忽略这类事件，不新增假卡片，Ctrl+F 搜索、导出、fork/rewind 与三种显示投影保持稳定，并补齐了超长多字节工具输出与超长会话续发 prompt 的回归。
+- **rc.2 动态工具更新：运行中的会话会记录官方 `developer/message` 工具更新，TUI 全程安全忽略。** 当 DSH Agent loop 因工具注册表变化记录 `tool-addition`/`tool-removal` 时，`Session.toolHistory()` 是唯一权威；TUI 不新增假卡片，Ctrl+F 搜索、导出、fork/rewind 与三种显示投影保持稳定，并补齐了超长多字节工具输出与超长会话续发 prompt 的回归。注意：在已安装 profile 内通过 Plugin Manager 对 bundle/plugin 行启用或禁用时，rc.2 Host 返回 `restart-required`（而非静默热更新），TUI 如实展示该结果；本版不承诺“无需重建会话即热生效”。
 
 ## [0.4.8] - 2026-09-24
 

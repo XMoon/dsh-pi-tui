@@ -1,18 +1,25 @@
 /**
- * rc.2 live tool enablement through the production Plugin Manager seam
+ * rc.2 dynamic tool-registry change through the production Plugin Manager seam
  * (implementation plan §13).
  *
  * A real DSH AgentLoop + Session + tool runtime runs against a recording LLM
- * adapter. The probe capability is enabled through the production semantic
- * seam (`DirectPluginManagerPort` → official `pluginManager.setBundleEnabled`,
- * the same seam the TUI controller dispatches), which registers exactly one
- * new tool. The SAME Agent/Session then sends its next request, and the proof
- * is that:
+ * adapter. A live tool-registry change is dispatched through the production
+ * semantic seam (`PluginManagerController` → `DirectPluginManagerPort` →
+ * official `pluginManager.setBundleEnabled`), and the Host service double
+ * registers exactly one new tool — the same registry change an installed
+ * profile produces when a tool source changes. The SAME Agent/Session then
+ * sends its next request, and the proof is that:
  *
- * - the request/tool projection contains the newly enabled tool;
+ * - the request/tool projection contains the newly registered tool;
  * - the Session records the official `developer/message` tool-addition;
  * - `Session.toolHistory()` — the DSH-owned fold — reflects the update;
  * - the Agent/Session identity never changed (no recreation).
+ *
+ * Scope note: this isolates the Agent-loop dynamic-tool behavior plus the TUI
+ * dispatch seam. In a real installed profile, rc.2 reports `restart-required`
+ * for a Plugin Manager bundle/plugin-row toggle rather than hot-applying it,
+ * and the TUI presents that outcome; there is no "hot-enable without Session
+ * recreation" claim here.
  *
  * @module @xmoon76/dsh-pi-tui/plugin-manager-live-tool.test
  */
@@ -152,7 +159,7 @@ function developerContent(agent: Agent): readonly (readonly { type: string; tool
     .map(event => (event.data as { message: { content: readonly { type: string; toolName: string }[] } }).message.content)
 }
 
-test('an enable through the production Plugin Manager seam reaches the next request on the SAME Session', async () => {
+test('a live tool-registry change through the production Plugin Manager seam reaches the next request on the SAME Session', async () => {
   const { ctx, agent, adapter, registerProbe } = await mountLoop()
   const sessionId = agent.session.id
 
@@ -161,9 +168,11 @@ test('an enable through the production Plugin Manager seam reaches the next requ
   assert.deepEqual(toolNames(agent), [], 'the probe tool is absent from the first request')
   assert.deepEqual(adapter.requests[0]?.tools?.map(schema => schema.name) ?? [], [])
 
-  // Enable through the FULL production chain: the TUI controller dispatches the
-  // official mutation through the Direct port (only the official Host service is
-  // faked; its setBundleEnabled registers the probe tool).
+  // Dispatch through the FULL production chain: the TUI controller calls the
+  // Direct port, which calls the official mutation. Only the official Host
+  // service is faked — its setBundleEnabled performs the live registry change.
+  // (An installed profile's rc.2 Host reports `restart-required` for a bundle
+  // toggle instead; the TUI presents that outcome there.)
   ctx.provide('pluginManager', fakePluginManager(registerProbe) as never)
   const port = new DirectPluginManagerPort(ctx as never)
   const controller = new PluginManagerController(port, {
