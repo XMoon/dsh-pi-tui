@@ -194,7 +194,7 @@ import { draftHasFiles } from './attachment/placeholder.ts'
 import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController } from './exit.ts'
-import { retireDirectOwnedSession, type RetirementReport } from './runtime/direct/owned-session-retirement.ts'
+import { type SessionRetirementReport } from './app/session/owner-access.ts'
 import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, steerAll, steerHasPayload, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import {
   resolveSubagentSettleTarget,
@@ -224,7 +224,6 @@ import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 import {
   LifecycleError,
   directAgentOf,
-  ownerHandleOf,
   requireCreated,
   requireOpened,
   type CreateSessionRequest,
@@ -1873,7 +1872,7 @@ export function apply(ctx: Context, config: Config): void {
   // and is exposed to the fatal catch through a ref assigned once the
   // coordinator is defined. The fatal catch treats an unassigned slot as
   // "no owner".
-  let retireOwnedSessionRef: (() => Promise<RetirementReport>) | undefined
+  let retireOwnedSessionRef: (() => Promise<SessionRetirementReport>) | undefined
   /**
    * Whether a current Direct owner (agent + handle) exists, for the fatal catch
    * below. The ownership core lives INSIDE the async root, so the catch reads it
@@ -1963,76 +1962,29 @@ export function apply(ctx: Context, config: Config): void {
     // and the fatal startup catch) — never four copies of the same
     // teardown. It serializes against an in-flight session transition
     // through the transition gate + operation barrier, then retires the
-    // CURRENT Direct owner in the fixed order cancel → idle → descendants →
-    // flush → dispose (see src/runtime/direct/owned-session-retirement.ts).
+    // CURRENT owner through the retirement port, which owns the official
+    // close order (`app/direct/owner-retirement.ts`).
     // diag stays open until the retirement diagnostics are recorded. The
     // fatal catch reaches this coordinator through retireOwnedSessionRef.
-    let retirementPromise: Promise<RetirementReport> | undefined
-    // The exact Agents whose SHUTDOWN cancel already landed. A WeakSet, not a
-    // single value: one exit can shutdown-cancel more than one owner — the
-    // CURRENT owner is pre-cancelled before `appExit`, and a session transition
-    // or fork that commits afterwards still retires the OLD owner it replaced.
-    // Keyed by Agent OBJECT identity, never by session id, so a committed
-    // transition's NEW owner is still cancelled. A cancel that throws is
-    // deliberately NOT recorded, so a later shutdown-aware path retries it.
-    const shutdownCancelledAgents = new WeakSet<Agent>()
-    // ONE exactly-once shutdown cancel. Every shutdown-aware cancel funnels
-    // here:
-    //   - `whenIdleOrAbort`'s lifecycle-abort listener, which fires while
-    //     `disposeSurface()` aborts the controller and unblocks a transition
-    //     parked in its pre/post-commit quiesce;
-    //   - the synchronous exit preparation and the memoized retirement entry;
-    //   - the transition / fork retirements that can still commit AFTER the exit
-    //     began (via `cancelRetiredOwner` below).
-    // `agent.cancel` is idempotent, but a second call must not land after the
-    // root teardown unregistered the inbox projection — that ordering is the
-    // exact failure this hardening fixes, and it is what makes the cancel phase
-    // report `cannot read inbox state: its projection registration is not
-    // active`.
-    const cancelShutdownAgent = (agent: Agent): void => {
-      if (shutdownCancelledAgents.has(agent)) return
-      agent.cancel({ kind: 'user' })
-      shutdownCancelledAgents.add(agent)
-    }
-    // The cancel phase of a transition / fork retirement. During shutdown it
-    // MUST join the exactly-once set: the owner it retires may already have been
-    // shutdown-cancelled, and a late non-cooperative child create can commit
-    // after `appExit` started the root teardown. Outside shutdown the ordinary
-    // cancel semantics are unchanged — the set is shutdown bookkeeping only.
-    const cancelRetiredOwner = (agent: Agent): void => {
-      if (lifecycleController.signal.aborted) cancelShutdownAgent(agent)
-      else agent.cancel({ kind: 'user' })
-    }
-    // Synchronous shutdown preparation: cancel the CURRENT Direct owner's work
-    // BEFORE the Host tree is torn down. The surface teardown above already
-    // aborted the runner lifecycle, but a plain interactive exit reaches the
-    // appExit disposal through `ownership.gate.run(...)`, which schedules its
-    // task on a promise continuation — so the root teardown could unregister
-    // the inbox projection before the retirement's async cancel phase ran
-    // (`phase=cancel ... projection registration is not active`). This is ONLY
-    // the first cancel: it never awaits idle, drains descendants, flushes, or
-    // disposes a handle, and the full retirement stays inside the
-    // appExit-bounded disposal. `cancelShutdownAgent` makes it exactly-once
-    // with the lifecycle-abort cancel, so the later cancel phase is a no-op
-    // for the same Agent.
+    let retirementPromise: Promise<SessionRetirementReport> | undefined
+    // The exactly-once shutdown cancel and the abort-aware quiesce live in the
+    // Direct owner retirement (`app/direct/owner-retirement.ts`); the runner
+    // only decides WHEN to pre-cancel or retire.
+    // Synchronous shutdown preparation: ask the retirement port to cancel the
+    // CURRENT owner's work BEFORE the Host tree is torn down. The surface
+    // teardown above already aborted the runner lifecycle, but a plain
+    // interactive exit reaches the appExit disposal through
+    // `ownership.gate.run(...)`, which schedules its task on a promise
+    // continuation — so the root teardown could unregister the inbox projection
+    // before the retirement's async cancel ran. This is ONLY the first cancel
+    // (the port keeps it exactly-once with the lifecycle-abort cancel); it never
+    // awaits idle, drains descendants, flushes or disposes a handle, and the
+    // full retirement stays inside the appExit-bounded disposal.
     const preCancelOwnedSession = (): void => {
-      const agent = agentNow()
-      if (agent === undefined) return
-      if (shutdownCancelledAgents.has(agent)) return
-      diag.info('retire cancel', { session: agent.session.id })
-      try {
-        cancelShutdownAgent(agent)
-      } catch (error) {
-        // Do NOT mark success: the appExit-disposal cancel phase must retry.
-        // A failure here must never throw into the exit controller — appExit
-        // has to follow regardless.
-        diag.error('retire pre-cancel failed', {
-          session: agent.session.id,
-          error: safeErrorMessage(error),
-        })
-      }
+      const owner = ownership.owner()
+      if (owner !== undefined) directRuntime.retirement.preCancel(owner)
     }
-    const retireOwnedSession = (): Promise<RetirementReport> => {
+    const retireOwnedSession = (): Promise<SessionRetirementReport> => {
       if (retirementPromise !== undefined) return retirementPromise
       // Every entry (interactive exit, HMR unload, fatal teardown) shares the
       // ONE synchronous pre-cancel before the memoized retirement is created:
@@ -2040,7 +1992,7 @@ export function apply(ctx: Context, config: Config): void {
       // duplicating the cancel there is exactly the twin-track divergence that
       // makes exactly-once hard to prove.
       preCancelOwnedSession()
-      retirementPromise = (async (): Promise<RetirementReport> => {
+      retirementPromise = (async (): Promise<SessionRetirementReport> => {
         // The CURRENT Direct owner is read INSIDE the gate task, not at
         // call time: an exit that lands while a session transition is
         // committing must retire the NEW current owner (the old owner's
@@ -2048,76 +2000,33 @@ export function apply(ctx: Context, config: Config): void {
         // phase), while an aborted transition leaves the old owner current
         // and retires it. A deferred start never created an owner: nothing
         // to retire, the surface teardown is complete.
-        const retireParked = async (agent: Agent, handle: AgentHandle): Promise<RetirementReport> =>
-          retireDirectOwnedSession({
-            // A parked owner is retired ONLY by this loop, exactly once: it is
-            // never the CURRENT owner, so neither the exit pre-cancel nor the
-            // lifecycle-abort listener can have cancelled it. It therefore keeps
-            // the plain cancel and is deliberately outside
-            // `shutdownCancelledAgents` (see plan §8.7).
-            cancel: () => agent.cancel({ kind: 'user' }),
-            whenIdle: () => agent.whenIdle(),
-            drainDescendants: async () => {
-              const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
-              await subagents?.drainContinuableDescendants?.([agent])
-            },
-            flush: async () => { await sessions.flush(agent.session) },
-            disposeOwner: () => handle.dispose(),
-          })
-        const retire = async (): Promise<RetirementReport> => {
+        const retire = async (): Promise<SessionRetirementReport> => {
           // Re-read the CURRENT owner INSIDE the gate (A2 plan §4.1): a
           // transition committed while the shutdown waited must be the one
           // retired, never a pre-cancelled capture.
           const owner = ownership.owner()
-          const attachment = owner === undefined ? undefined : directRuntime.owners.attachmentOf(owner)
-          const agent = attachment?.agent
-          const handle = attachment?.handle as AgentHandle | undefined
-          if (agent === undefined || handle === undefined) {
-            return { failures: [] }
-          }
-          diag.info('retire start', { session: agent.session.id })
-          const report = await retireDirectOwnedSession({
-            cancel: () => {
-              // The exactly-once shutdown cancel already covered THIS exact
-              // Agent (the ordinary interactive path, or the lifecycle-abort
-              // listener that unblocked a parked quiesce). Re-cancelling is
-              // idempotent, but skipping it keeps every shutdown path at
-              // exactly one cancel and — more importantly — keeps the second
-              // cancel from landing after the root teardown unregistered the
-              // inbox projection. A DIFFERENT Agent here means a committed
-              // transition replaced the owner, and that one must be cancelled
-              // now.
-              if (shutdownCancelledAgents.has(agent)) return
-              diag.info('retire cancel', { session: agent.session.id })
-              cancelShutdownAgent(agent)
-            },
-            whenIdle: async () => {
-              diag.info('retire idle', { session: agent.session.id })
-              await agent.whenIdle()
-            },
-            drainDescendants: async () => {
-              diag.info('retire descendants', { session: agent.session.id })
-              const subagents = ctx.get('subagents') as {
-                drainContinuableDescendants?(parents: readonly unknown[]): Promise<void>
-              } | undefined
-              await subagents?.drainContinuableDescendants?.([agent])
-            },
-            flush: async () => {
-              diag.info('retire flush', { session: agent.session.id })
-              await sessions.flush(agent.session)
-            },
-            disposeOwner: async () => {
-              diag.info('retire dispose', { session: agent.session.id })
-              await handle.dispose()
-            },
-          })
+          if (owner === undefined) return { failures: [], durabilityFailure: undefined }
+          const ownerSessionId = directRuntime.owners.sessionId(owner)
+          const report = await directRuntime.retirement.retire(owner, 'shutdown')
+          // Attribute each failure to the owner it came from (the parked owners
+          // log their own, with their own ids).
           for (const failure of report.failures) {
             diag.error('retire phase failed', {
-              session: agent.session.id,
+              session: ownerSessionId,
               phase: failure.phase,
               error: failure.error,
             })
           }
+          return report
+        }
+        /**
+         * Report the MERGED retirement (the current owner PLUS every parked
+         * owner), so a parked owner's failure — a durability failure above all —
+         * reaches the user even when the current owner retired cleanly. The
+         * per-owner failure diagnostics were already logged by the owner that
+         * produced them, so this is only the user-visible summary.
+         */
+        const reportRetirement = (report: SessionRetirementReport): void => {
           // A retirement failure is USER-VISIBLE, not just a diag line: the
           // terminal is already restored (the surface teardown ran before
           // the appExit disposal), so a failed final flush would otherwise
@@ -2125,16 +2034,17 @@ export function apply(ctx: Context, config: Config): void {
           // persisted. The warning is best-effort and never blocks the
           // bounded shutdown.
           if (report.failures.length > 0) {
-            const flushFailure = report.failures.find(failure => failure.phase === 'flush')
-            if (flushFailure !== undefined) {
-              safeTerminalWarning(`\n${color.textDim('Warning:')} session flush failed during retirement (${flushFailure.error}) — the latest events may not be persisted\n`)
+            // The SEMANTIC outcome decides the wording; the backend's phase
+            // labels are printed only as diagnostics.
+            const durabilityFailure = report.durabilityFailure
+            if (durabilityFailure !== undefined) {
+              safeTerminalWarning(`\n${color.textDim('Warning:')} session flush failed during retirement (${durabilityFailure.error}) — the latest events may not be persisted\n`)
             } else {
               const phases = report.failures.map(failure => failure.phase).join(', ')
               safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement failed during ${phases}\n`)
             }
           }
-          diag.info('retire complete', { session: agent.session.id, failures: report.failures.length })
-          return report
+          diag.info('retire complete', { failures: report.failures.length })
         }
         try {
           // Serialize against an in-flight session transition: the gate
@@ -2157,22 +2067,30 @@ export function apply(ctx: Context, config: Config): void {
           while (pendingSourceRetirements.size > 0) await Promise.allSettled([...pendingSourceRetirements])
           return await ownership.gate.run(() => ownership.barrier.runTransition(async () => {
             const current = await retire()
-            const failures = [...current.failures]
-            for (const { agent, handle } of directRuntime.takeAllParkedOwners()) {
-              const report = await retireParked(agent, handle)
-              failures.push(...report.failures)
+            const parked = await directRuntime.retirement.retireParked()
+            const report: SessionRetirementReport = {
+              failures: [...current.failures, ...parked.failures],
+              durabilityFailure: current.durabilityFailure ?? parked.durabilityFailure,
             }
-            return { failures }
+            // The MERGED report is reported once, inside the gate: a parked
+            // owner's durability failure must warn even when the current owner
+            // retired cleanly.
+            reportRetirement(report)
+            return report
           }))
         } catch (error) {
           // Defensive: a reentrant gate/barrier means a transition is STILL
-          // active — retiring now would race it. Record the failure and SKIP
-          // the retirement (the process is exiting; the appExit watchdog
-          // bounds it). The normal teardown paths never reach here: they
-          // queue through the FIFO gate, and retireOwnedSession is never
-          // called from inside a transition context.
-          diag.error('retire barrier failed', { error: safeErrorMessage(error) })
-          return { failures: [{ phase: 'cancel', error: `retirement skipped: ${safeErrorMessage(error)}` }] }
+          // active — retiring now would race it. SKIP the retirement (the
+          // process is exiting; the appExit watchdog bounds it) and report it as
+          // a COORDINATOR failure: no backend retirement phase ran, so it must
+          // not masquerade as one in the user-visible warning or in the report.
+          // The normal teardown paths never reach here: they queue through the
+          // FIFO gate, and retireOwnedSession is never called from inside a
+          // transition context.
+          const reason = safeErrorMessage(error)
+          diag.error('retire barrier failed', { error: reason })
+          safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement was skipped (${reason}) — the session may not have been closed cleanly\n`)
+          return { failures: [], durabilityFailure: undefined }
         } finally {
           diag.dispose()
         }
@@ -2180,53 +2098,8 @@ export function apply(ctx: Context, config: Config): void {
       return retirementPromise
     }
     retireOwnedSessionRef = retireOwnedSession
-    // Await an agent's quiescence, cancelling it if the runner lifecycle
-    // aborts first. A transition's pre-commit whenIdle and the pre-mount
-    // wait do NOT observe the lifecycle signal — without the cancel a busy
-    // agent would keep the await hanging past the appExit watchdog and the
-    // ordered retirement would never run.
-    const whenIdleOrAbort = async (agent: Agent, signal: AbortSignal): Promise<boolean> => {
-      if (signal.aborted) {
-        cancelShutdownAgent(agent)
-        await agent.whenIdle()
-        return true
-      }
-      let aborted = false
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = (): void => {
-          aborted = true
-          // The lifecycle abort IS a shutdown cancel, so it shares the ONE
-          // exactly-once path with the exit preparation / retirement entry:
-          // otherwise this cancel and the later cancel phase hit the same
-          // Agent twice. The throw is contained INSIDE the listener: an
-          // AbortSignal is a Node EventTarget, so a listener exception never
-          // surfaces to the `abort()` caller (the `disposeSurface()` try/catch
-          // cannot see it) — Node turns it into an uncaughtException instead.
-          // Rejecting this promise instead fails the parked transition
-          // cleanly, and the memoized retirement retries the cancel later
-          // (nothing was recorded, because `cancelShutdownAgent` records only
-          // a successful cancel).
-          try {
-            cancelShutdownAgent(agent)
-          } catch (error) {
-            // Reject with the RAW value, exactly like the sibling
-            // `whenIdle()`-rejection path below: ANY formatting step here
-            // (`String(error)`, an unprotected `instanceof`, a `.message` read)
-            // can itself throw for a hostile value — a null-prototype object
-            // has no coercion — and that throw would escape this EventTarget
-            // listener as an uncaughtException, bypassing the containment.
-            // Downstream observation goes through the repo's total formatters.
-            reject(error)
-          }
-        }
-        signal.addEventListener('abort', onAbort, { once: true })
-        agent.whenIdle().then(
-          () => { signal.removeEventListener('abort', onAbort); resolve() },
-          (error) => { signal.removeEventListener('abort', onAbort); reject(error) },
-        )
-      })
-      return aborted
-    }
+    // The abort-aware quiesce mechanism lives in the Direct owner retirement;
+    // the runner only decides WHEN to quiesce.
 
     // Persisted TUI preferences: the `tui-app` plugin's profile-owned
     // volatile Config references are the ONE runtime authority (DSH 0.1.7
@@ -2335,6 +2208,15 @@ export function apply(ctx: Context, config: Config): void {
       // reads the ONE ownership-core release ledger through these two seams.
       waitForRelease: ownership.waitForOwnerRelease,
       currentOwner: () => ownership.owner(),
+      isLifecycleAborted: () => lifecycleController.signal.aborted,
+      // The runner supplies the Host operations the Direct retirement needs;
+      // the Direct layer never reaches for the Host service itself.
+      drainContinuableDescendants: async (agent) => {
+        const subagents = ctx.get('subagents') as {
+          drainContinuableDescendants?(parents: readonly unknown[]): Promise<void>
+        } | undefined
+        await subagents?.drainContinuableDescendants?.([agent])
+      },
       // Behavior preserved: the same `composeAgent` wiring, now with the
       // runtime's Agent-scoped model-selection install.
       compose: (installSelection, presetId) =>
@@ -2628,8 +2510,8 @@ export function apply(ctx: Context, config: Config): void {
       },
       setCompletionOwner,
       preMountQuiesce: () => {
-        const agent = agentNow()
-        if (agent === undefined) return undefined
+        const owner = ownership.owner()
+        if (owner === undefined) return undefined
         // The resume transaction succeeded; the remaining pre-mount wait is
         // the conversation preparation (whenIdle + the catalog ready
         // barrier) — the second status stage replaces the first in place
@@ -2643,7 +2525,7 @@ export function apply(ctx: Context, config: Config): void {
         // just-created owner would never be retired. Cancel the agent on
         // abort so whenIdle settles, then the pre-mount abort path below
         // retires the owner.
-        return whenIdleOrAbort(agent, lifecycleController.signal)
+        return directRuntime.retirement.whenIdleOrAbort(owner, lifecycleController.signal)
       },
     }, handle)
     if (resumeQuiesce !== undefined) await resumeQuiesce
@@ -2830,8 +2712,8 @@ export function apply(ctx: Context, config: Config): void {
       let transitionCommitted = false
       return runTransitionTo<T>({
         quiesceOld: async () => {
-          const agent = agentNow()
-          if (agent === undefined) return
+          const owner = ownership.owner()
+          if (owner === undefined) return
           // QUIESCE first: after whenIdle the old agent can no longer
           // produce turn events, so the final flush below is truly final.
           // (A /new while the agent is busy now WAITS for the
@@ -2841,13 +2723,15 @@ export function apply(ctx: Context, config: Config): void {
           // agent (which may be a NEW owner committed by an earlier queued
           // transition), so the transition settles instead of hanging past
           // the appExit watchdog.
-          await whenIdleOrAbort(agent, lifecycleController.signal)
+          await directRuntime.retirement.whenIdleOrAbort(owner, lifecycleController.signal)
           // Final flush before the switch. The DSH SessionWriteLease
           // (kernel flock) is the only cross-process writer authority, so
-          // no TUI-side lock bookkeeping is needed around the flush.
-          const flushAgent = agentNow()
-          if (flushAgent === undefined) return
-          await sessions.flush(flushAgent.session)
+          // no TUI-side lock bookkeeping is needed around the flush. The
+          // owner is re-read AFTER the quiesce (the abort path may have
+          // swapped it), matching the pre-cutover live read.
+          const flushOwner = ownership.owner()
+          if (flushOwner === undefined) return
+          await directRuntime.retirement.flush(flushOwner)
         },
         commit: (next) => {
           transitionCommitted = true
@@ -2872,29 +2756,14 @@ export function apply(ctx: Context, config: Config): void {
         },
         retireOld: async (next) => {
           const retired: string[] = []
-          // 1. Retire the OLD Direct owner in the fixed order
-          //    cancel → idle → descendants → final flush → dispose (the
-          //    same order as the official DSH ACP session close). The
-          //    pre-commit quiesce already idled + flushed; this post-commit
-          //    pass covers the window where the old agent was re-woken by a
-          //    Host-side continuation, drains its continuable descendants
-          //    (the core of the exit-retirement fix), establishes the final
-          //    durability boundary, and releases the old handle. Every
-          //    phase failure is contained — the committed child always
-          //    stands.
-          if (oldHandle !== undefined && oldAgent !== undefined) {
-            const report = await retireDirectOwnedSession({
-              cancel: () => cancelRetiredOwner(oldAgent),
-              whenIdle: () => oldAgent.whenIdle(),
-              drainDescendants: async () => {
-                const subagents = ctx.get('subagents') as {
-                  drainContinuableDescendants?(parents: readonly unknown[]): Promise<void>
-                } | undefined
-                await subagents?.drainContinuableDescendants?.([oldAgent])
-              },
-              flush: async () => { await sessions.flush(oldAgent.session) },
-              disposeOwner: () => oldHandle.dispose(),
-            })
+          // 1. Retire the OLD owner through the retirement port (which owns the
+          //    official close order). The pre-commit quiesce already idled +
+          //    flushed; this post-commit pass covers the window where the old
+          //    agent was re-woken by a Host-side continuation, establishes the
+          //    final durability boundary, and releases the old handle. Every
+          //    phase failure is contained — the committed child always stands.
+          if (oldOwner !== undefined && oldHandle !== undefined && oldAgent !== undefined) {
+            const report = await directRuntime.retirement.retire(oldOwner, 'transition')
             for (const failure of report.failures) {
               // A failed dispose means the old session may still have
               // writers; the child stays current and the failure is
@@ -2911,7 +2780,9 @@ export function apply(ctx: Context, config: Config): void {
             // and the retirement takes over: skip the surface
             // initialization below (it would repaint into the disposed
             // app) and let the committed child stand.
-            const aborted = await whenIdleOrAbort(directAgentOf(next) as Agent, lifecycleController.signal)
+            const nextOwner = directRuntime.owners.fromHandle(next as SessionHandle)
+            if (nextOwner === undefined) throw new Error('committed transition child has no Direct owner')
+            const aborted = await directRuntime.retirement.whenIdleOrAbort(nextOwner, lifecycleController.signal)
             if (aborted) {
               retired.push('child quiesce aborted by lifecycle')
               return
@@ -3555,8 +3426,8 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     const parkForkOwner = (handle: SessionHandle | undefined): void => {
-      const owner = handle === undefined ? undefined : ownerHandleOf(handle) as AgentHandle | undefined
-      if (owner !== undefined) directRuntime.ownerPool.park(owner)
+      const owner = handle === undefined ? undefined : directRuntime.owners.fromHandle(handle)
+      if (owner !== undefined) directRuntime.retirement.park(owner)
     }
     const forkNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
       isRewindIdentityCurrent(ownership.captureNavigationIdentity(), expected)
@@ -3604,21 +3475,12 @@ export function apply(ctx: Context, config: Config): void {
         } catch (error) {
           diag.error('fork adoption callback failed after child commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
         }
-        if (oldAgent !== undefined && oldHandle !== undefined) {
+        if (oldOwner !== undefined && oldAgent !== undefined && oldHandle !== undefined) {
           // The retirement now owns the fork's admission pin: it is released
           // only when the source owner has actually been disposed.
           if (pin !== undefined) pin.state.retirementOwnsRelease = true
           const retirement = retireSourceOwnerAfterSettlement(oldAgent.session.id, async () => {
-            const report = await retireDirectOwnedSession({
-              cancel: () => cancelRetiredOwner(oldAgent),
-              whenIdle: () => oldAgent.whenIdle(),
-              drainDescendants: async () => {
-                const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
-                await subagents?.drainContinuableDescendants?.([oldAgent])
-              },
-              flush: async () => { await sessions.flush(oldAgent.session) },
-              disposeOwner: () => oldHandle.dispose(),
-            })
+            const report = await directRuntime.retirement.retire(oldOwner, 'transition')
             if (report.failures.length > 0) diag.error('fork old-owner retirement failed (child committed)', { from: oldAgent.session.id, failures: report.failures })
           }, pin?.release ?? ((): void => {}))
           // A DSH command defers (`undefined`): the source owner must stay
@@ -3632,7 +3494,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         let aborted = false
         try {
-          aborted = await whenIdleOrAbort(nextAgent, lifecycleController.signal)
+          aborted = await directRuntime.retirement.whenIdleOrAbort(nextOwner, lifecycleController.signal)
         } catch (error) {
           diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
         }
@@ -9813,7 +9675,9 @@ export function apply(ctx: Context, config: Config): void {
           // retire-warn-only semantics as every other transition).
           quiesceChild: async () => {
             try {
-              return await whenIdleOrAbort(createdAgent, lifecycleController.signal)
+              const childOwner = directRuntime.owners.fromHandle(created)
+              if (childOwner === undefined) throw new Error('first-session child has no Direct owner')
+              return await directRuntime.retirement.whenIdleOrAbort(childOwner, lifecycleController.signal)
             } catch (error) {
               diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
               return false

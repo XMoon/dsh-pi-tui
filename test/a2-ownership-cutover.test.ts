@@ -13,6 +13,7 @@ import test from 'node:test'
 const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
 const coreSource = readFileSync(new URL('../src/app/session/ownership-core.ts', import.meta.url), 'utf8')
 const runtimeSource = readFileSync(new URL('../src/app/direct/runtime.ts', import.meta.url), 'utf8')
+const retirementSource = readFileSync(new URL('../src/app/direct/owner-retirement.ts', import.meta.url), 'utf8')
 
 test('the runner keeps NO local ownership authority (A2-2 cutover)', () => {
   assert.ok(!/\blet liveAgent\b/.test(indexSource), 'no local liveAgent declaration')
@@ -150,6 +151,40 @@ test('the admission fences use the ownership subject; only the param-agent fence
   const legacyFences = indexSource.match(/sessionUnchanged\(/g) ?? []
   assert.equal(legacyFences.length, 2,
     'only the two param-agent interrupt fences may keep the exact-Agent sessionUnchanged compare')
+})
+
+test('a coordinator-level retirement failure never masquerades as a backend phase', () => {
+  // The gate/barrier guard skips a retirement that would race an active
+  // transition. No backend retirement phase ran, so the runner must report it as
+  // its OWN diagnostic instead of synthesizing a backend phase label that the
+  // generic warning would then present as a real phase failure.
+  assert.ok(indexSource.includes('session retirement was skipped (${reason})'),
+    'the coordinator failure warns with its own wording')
+  assert.ok(!/phase: 'cancel', error: `retirement skipped/.test(indexSource),
+    'the coordinator must not fabricate a backend cancel-phase failure')
+  assert.ok(indexSource.includes('return { failures: [], durabilityFailure: undefined }'),
+    'a skipped retirement returns an empty report, not a fake phase failure')
+})
+
+test('retirement failures are attributed to the owner that produced them', () => {
+  // The runner logs the CURRENT owner's failures with the owner-derived session
+  // id; the Direct adapter logs each PARKED owner's failures with that owner's
+  // own session id. The merged summary carries the user warning only, so it can
+  // never re-label a parked failure as the current session's.
+  const retireBlock = span('const retire = async (): Promise<SessionRetirementReport> => {', 'const reportRetirement')
+  assert.ok(retireBlock.includes('const ownerSessionId = directRuntime.owners.sessionId(owner)'),
+    'the current owner failure log must use the OWNER-derived session id')
+  assert.ok(retireBlock.includes("diag.error('retire phase failed'"), 'the current owner failures are logged here')
+  const parkedBlock = retirementSource.slice(
+    retirementSource.indexOf('const retireParked = async'),
+    retirementSource.indexOf('const park = ('),
+  )
+  assert.ok(parkedBlock.includes('session: agent.session.id'),
+    "each parked owner's failures must carry ITS OWN session id")
+  const mergedBlock = span('const reportRetirement', 'try {')
+  assert.ok(!mergedBlock.includes("diag.error('retire phase failed'"),
+    'the merged summary must not re-label failures with the current session')
+  assert.ok(mergedBlock.includes('diag.info(\'retire complete\''), 'the merged summary reports the total count')
 })
 
 test('the Direct runtime no longer accepts a getLiveAgent dep', () => {

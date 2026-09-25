@@ -1,11 +1,11 @@
 /**
  * The four session-commit shapes as STATELESS ordering helpers (A2 plan §4).
  *
- * These functions own NO state: the runner supplies every operation as a seam
- * and keeps `liveAgent` / `liveHandle` / `sessionGeneration` itself. Their only
- * job is to fix the ORDER, so a spy-seam unit test can lock the sequence the
- * runner had before the ownership cutover — the shapes differ and must NOT be
- * unified:
+ * These functions own NO state: the caller supplies every operation as a seam
+ * and keeps the owner slot, the generation and the completion identity itself
+ * (the ownership core holds them). Their only job is to fix the ORDER, so a
+ * spy-seam unit test can lock the exact sequence the session layer requires —
+ * the shapes differ and must NOT be unified:
  *
  * ```text
  * A ordinary transition: bump(reset) → publish owner → completion
@@ -19,7 +19,8 @@
  * @module @xmoon76/dsh-pi-tui/app/session/commit-order
  */
 
-/** Publish the new owner and return its completion identity (Direct `Agent.id`). */
+/** Publish the new owner and return its completion identity (an opaque id the
+ *  completion controller compares; the backend decides what it is). */
 export interface OwnerPublicationSeams {
   publishOwner(owner: unknown): string | undefined
   setCompletionOwner(identity: string | undefined): void

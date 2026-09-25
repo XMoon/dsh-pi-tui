@@ -45,7 +45,9 @@ import type {
   DirectOwnerPoolLike,
 } from '../../runtime/direct/session-lifecycle-direct.ts'
 import { createDirectOwnerRegistry, type DirectOwnerRegistry } from './owner-registry.ts'
+import { createDirectOwnerRetirement } from './owner-retirement.ts'
 import type { SessionOwnerRef } from '../session/subject.ts'
+import type { SessionOwnerRetirement } from '../session/owner-access.ts'
 
 /** The interactive continuable child currently mounted by a viewer. */
 export interface DirectViewedQueueAgent {
@@ -95,6 +97,11 @@ export interface DirectApplicationRuntimeDeps {
    * uses it for the A2-transitional `currentDirectAttachment()` projection.
    */
   readonly currentOwner: () => SessionOwnerRef | undefined
+  /** Whether the runner lifecycle was aborted (shutdown cancel semantics). */
+  readonly isLifecycleAborted: () => boolean
+  /** Drain one Direct Agent's continuable descendants (runner-supplied Host
+   *  operation; the Direct layer never reaches for the Host service itself). */
+  readonly drainContinuableDescendants: (agent: Agent) => Promise<void>
   /**
    * Build one preset composition, installing the runtime's Agent-scoped model
    * selection during setup. The runner supplies its `composeAgent` closure; the
@@ -137,8 +144,8 @@ export interface DirectApplicationRuntime {
   readonly owners: DirectOwnerRegistry
   /** Whether any Direct owner handle is currently parked for a future reopen. */
   hasParkedOwners(): boolean
-  /** Drain every parked Direct owner for the exit retirement (Direct-only). */
-  takeAllParkedOwners(): Array<{ agent: Agent; handle: AgentHandle }>
+  /** The Direct owner retirement (cancel/quiesce/retire/park; A2 §3.3). */
+  readonly retirement: SessionOwnerRetirement
 }
 
 /**
@@ -208,6 +215,29 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
   // the core's current owner live on every call (A2 transitional projection).
   const owners = createDirectOwnerRegistry(deps.currentOwner)
 
+  // Drain every parked owner for the exit retirement (Direct-only).
+  const takeAllParkedOwners = (): Array<{ agent: Agent; handle: AgentHandle }> => {
+    const drained: Array<{ agent: Agent; handle: AgentHandle }> = []
+    for (const [sessionId, handle] of parkedDirectOwners) {
+      drained.push({ agent: handle.agent, handle })
+      parkedDirectOwners.delete(sessionId)
+    }
+    return drained
+  }
+
+  // The ONE Direct owner retirement (plan A2 §3.3): it owns the exactly-once
+  // shutdown cancel, the abort-aware quiesce mechanism and the fixed-phase
+  // retirement order; the runner only decides WHEN to retire quiesce.
+  const retirement = createDirectOwnerRetirement({
+    owners,
+    diag: deps.diag,
+    isLifecycleAborted: deps.isLifecycleAborted,
+    drainContinuableDescendants: deps.drainContinuableDescendants,
+    flushSession: (session) => deps.resolvers.flushSession(session),
+    parkHandle: (handle) => ownerPool.park(handle),
+    takeAllParkedOwners,
+  })
+
   const backend = createDirectRuntimeBackend({
     ctx: deps.ctx,
     diag: deps.diag,
@@ -253,13 +283,6 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     ownerPool,
     owners,
     hasParkedOwners: () => parkedDirectOwners.size > 0,
-    takeAllParkedOwners: () => {
-      const drained: Array<{ agent: Agent; handle: AgentHandle }> = []
-      for (const [sessionId, handle] of parkedDirectOwners) {
-        drained.push({ agent: handle.agent, handle })
-        parkedDirectOwners.delete(sessionId)
-      }
-      return drained
-    },
+    retirement,
   }
 }
