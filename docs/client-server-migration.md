@@ -1545,6 +1545,13 @@ TypeScript restructure. It is structural only:
 - **M3 has NOT started.** The published semantic `Backend`, the `src/runtime/*-port.ts`
   contracts, and the Remote adapter contract stay frozen; no new Backend verb
   or DTO change is part of this stage.
+- **Landed slices.** A1 — `src/app/direct/runtime.ts` owns the Direct
+  application composition POLICY and facades (the ONE `DirectModelSelectionOwner`,
+  the `agentFor`/`queueAgentFor` selection logic, the semantic `Backend` call and
+  the Direct assistant-stream install); `src/index.ts` keeps the
+  `liveAgent`/`viewedQueueAgent` state, passes live getters, and still supplies
+  the concrete Host lookups (`agents.get`/`sessions.get`) for the resolver
+  callbacks, so no second current-session truth exists.
 - **Ownership targets** (`src/app/**`): `bootstrap` (composition root),
   `direct` (Direct application-side Host coupling + Direct-only facades),
   `session` (session navigation/lifetime + opaque `SessionSubject` authority),

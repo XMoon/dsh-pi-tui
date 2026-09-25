@@ -41,7 +41,7 @@ import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-tool-todo'
 import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs } from './runtime/direct/tui-settings-direct.ts'
-import { DirectModelSelectionOwner, type DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
+import type { DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
 import { rawSelectionFromRequestHeader, sameModelSelection } from './model-selection.ts'
 // Empty type imports carry the loader Context merge for the settlement await
 // and the cmdline Context merge for the appExit host value.
@@ -204,7 +204,7 @@ import {
   type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
-import { createDirectRuntimeBackend } from './runtime/direct/backend-direct.ts'
+import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import { type DirectOwnerPoolLike } from './runtime/direct/session-lifecycle-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -213,7 +213,6 @@ import { PluginManagerHostRegistry, type PluginManagerHostClaim } from './plugin
 import { PluginManagerPanel } from './plugin-manager/panel.ts'
 import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
-import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 import {
   LifecycleError,
@@ -2349,19 +2348,45 @@ export function apply(ctx: Context, config: Config): void {
     // The live Agent is declared before the TUI-facing facade so every read
     // after a transition follows the current Session rather than a startup
     // snapshot. It remains undefined for deferred-start surfaces.
-    const modelSelections = new DirectModelSelectionOwner(
-      defaultModel as unknown as DefaultModelServiceLike,
-    )
-    /**
-     * rc.2 shares ONE per-Agent serialization window between `/model` selection
-     * and image-bearing prompt admission (`serializeImageAdmission`): the image
-     * capability check, the attachment admission and the delivery commit apply
-     * in the same Agent-local order as a model switch, so an image prompt can
-     * never be admitted under a model capability that a concurrent switch has
-     * already replaced. A text-only prompt keeps the un-serialized path.
-     */
-    const withPromptAdmission = <T>(agent: Agent, hasImage: boolean, operation: () => Promise<T>): Promise<T> =>
-      hasImage ? modelSelections.serializeImageAdmission(agent, operation) : operation()
+    //
+    // The Direct application runtime owns the Direct-only composition: the ONE
+    // per-Agent model-selection owner shared with the picker, the Direct
+    // resolvers, the semantic Backend, and the Direct assistant-stream install.
+    // It reads the live session authority through getters, so this runner keeps
+    // the single `liveAgent` / `viewedQueueAgent` mutable truth (A2 relocates
+    // that authority into `app/session`).
+    let viewedQueueAgent: {
+      readonly parentSessionId: string
+      readonly childSessionId: string
+      readonly agent: Agent
+    } | undefined
+    const directRuntime = createDirectApplicationRuntime({
+      ctx,
+      diag,
+      tuiSettings,
+      defaultModel: defaultModel as unknown as DefaultModelServiceLike,
+      ownerPool: directOwnerPool,
+      // Behavior preserved: the same `composeAgent` wiring, now with the
+      // runtime's Agent-scoped model-selection install.
+      compose: (installSelection, presetId) =>
+        composeAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState),
+      getLiveAgent: () => liveAgent,
+      getViewedQueueAgent: () => viewedQueueAgent,
+      registeredAgentFor: sessionId => agents.get(SessionId(sessionId)),
+      resolvers: {
+        sessionOf: sessionId => sessions.get(SessionId(sessionId)),
+        agentOf: sessionId => agents.get(SessionId(sessionId)),
+        flushSession: async session => { await sessions.flush(session as never) },
+      },
+    })
+    // The semantic backend (server/client migration): the TUI consumes
+    // Host domains through narrow ports, never ctx.* directly. Direct is the
+    // only backend today; remote/wire adapters join in later milestones
+    // behind the SAME port interfaces. The adapter assembly is owned by
+    // `runtime/direct/backend-direct.ts`; this runner only consumes it.
+    const backend = directRuntime.backend
+    /** Resolve one preset composition through the runtime's model-selection install. */
+    const compose = (presetId?: string): Promise<AgentComposition> => directRuntime.compose(presetId)
     // The latest SESSIONLESS /model global-default intent (a live Session write
     // is NOT recorded here: the official `session.selectModel` best-effort
     // default save is a Host side effect, so the tracker is sessionless-only).
@@ -2398,7 +2423,7 @@ export function apply(ctx: Context, config: Config): void {
       get current(): ModelSelection | undefined {
         return liveAgent === undefined
           ? defaultIntent.intent ?? (defaultModel.currentSelection() as ModelSelection | undefined)
-          : modelSelections.current(liveAgent)
+          : directRuntime.modelSelections.current(liveAgent)
       },
       set current(next: ModelSelection | undefined) {
         // The facade write path: a live Session routes to its own selection
@@ -2409,55 +2434,10 @@ export function apply(ctx: Context, config: Config): void {
           setDefaultIntent(next)
           return
         }
-        modelSelections.setCurrent(liveAgent, next)
+        directRuntime.modelSelections.setCurrent(liveAgent, next)
       },
       assembled: undefined,
     }
-    const installSessionModelSelection = (_agentCtx: Context, agent: Agent): void => { modelSelections.installForAgent(agent) }
-    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState)
-
-    // The semantic backend (server/client migration): the TUI consumes
-    // Host domains through narrow ports, never ctx.* directly. Direct is the
-    // only backend today; remote/wire adapters join in later milestones
-    // behind the SAME port interfaces. Constructed here (after compose) so
-    // the Direct session lifecycle can resolve preset compositions.
-    const directAgentFor = (sessionId: string): Agent | undefined =>
-      liveAgent?.session.id === sessionId ? liveAgent : undefined
-    // Queue occurrence operations have a narrower, separate child authority:
-    // only the exact live Agent currently mounted by an interactive
-    // continuable viewer may be addressed. Ordinary prompt/cancel/title verbs
-    // continue using directAgentFor, so resolving a child here cannot bypass
-    // SubagentPort's parent-authorized prompt path.
-    let viewedQueueAgent: {
-      readonly parentSessionId: string
-      readonly childSessionId: string
-      readonly agent: Agent
-    } | undefined
-    const directQueueAgentFor = (sessionId: string): Agent | undefined => {
-      if (liveAgent?.session.id === sessionId) return liveAgent
-      const viewed = viewedQueueAgent
-      if (viewed === undefined || viewed.childSessionId !== sessionId) return undefined
-      if (liveAgent?.session.id !== viewed.parentSessionId) return undefined
-      const agent = agents.get(SessionId(sessionId))
-      if (agent === undefined || agent !== viewed.agent || agent.session.id !== sessionId) return undefined
-      if (agent.session.header.parentSession !== viewed.parentSessionId) return undefined
-      return agent
-    }
-    const backend = createDirectRuntimeBackend({
-      ctx,
-      diag,
-      tuiSettings,
-      modelSelections,
-      ownerPool: directOwnerPool,
-      compose: (presetId) => compose(presetId),
-      agentFor: directAgentFor,
-      queueAgentFor: directQueueAgentFor,
-      liveResolvers: {
-        sessionOf: id => sessions.get(id),
-        agentOf: id => agents.get(id),
-        flushSession: async session => { await sessions.flush(session as never) },
-      },
-    })
 
     // The Plugin Manager operation owner OUTLIVES the panel (plan §17): a
     // closed `/plugins` never cancels an active install. It is wired once the
@@ -3084,7 +3064,7 @@ export function apply(ctx: Context, config: Config): void {
       // sessionless save would paint m1 as both base and pending.
       const selection = liveAgent === undefined
         ? (defaultModel.currentSelection() as ModelSelection | undefined)
-        : modelSelections.current(liveAgent)
+        : directRuntime.modelSelections.current(liveAgent)
       const base = selection !== undefined
         ? labelOf(selection)
         : liveAgent === undefined ? 'no model' : `${liveAgent.options.provider}/${liveAgent.options.model}`
@@ -6014,7 +5994,7 @@ export function apply(ctx: Context, config: Config): void {
                       // during a transition is refused (convergence plan
                       // phase 3).
                       try {
-                        await operationBarrier.runWriter(agent.session.id, () => withPromptAdmission(
+                        await operationBarrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
                           agent,
                           draftHasImages(text, draftImages),
                           async () => {
@@ -6216,7 +6196,7 @@ export function apply(ctx: Context, config: Config): void {
         // this writer to drain; a writer entering during a transition is
         // refused.
         try {
-          await operationBarrier.runWriter(agent.session.id, () => withPromptAdmission(
+          await operationBarrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
             agent,
             draftHasImages(text, draftImages),
             async () => {
@@ -6611,7 +6591,7 @@ export function apply(ctx: Context, config: Config): void {
         // The draft message is prepared BEFORE the send: admission is
         // async I/O, and the prepared message is exactly what the send
         // delivers (§13).
-        const admission = await withPromptAdmission(
+        const admission = await directRuntime.withPromptAdmission(
           agentForSteer,
           draftHasImages(text, draftImages),
           async (): Promise<
@@ -8112,7 +8092,7 @@ export function apply(ctx: Context, config: Config): void {
           }
           runOwned('subagent queue steer', () => steerAll({
             currentAgent: () => {
-              const current = directQueueAgentFor(submit.childSessionId)
+              const current = directRuntime.queueAgentFor(submit.childSessionId)
               return current === undefined ? undefined : current as unknown as SteerAgentLike
             },
             currentGeneration: () => app.getViewerGeneration(),
@@ -8132,7 +8112,7 @@ export function apply(ctx: Context, config: Config): void {
             barrier: operationBarrier,
           }, submit.text, { draftHasPayload: false }), {
             diag,
-            sessionId: () => directQueueAgentFor(submit.childSessionId)?.session.id,
+            sessionId: () => directRuntime.queueAgentFor(submit.childSessionId)?.session.id,
             onError: (error) => {
               restoreChildDraft(submit.text)
               if (cleanedUp || app.getViewerGeneration() !== childViewerGeneration) return
@@ -9620,7 +9600,7 @@ export function apply(ctx: Context, config: Config): void {
       // Setup installs this before publication; the idempotent call also
       // covers test/direct adapters that hand an already-live Agent back to
       // the runner. Its fold is the resume source of truth.
-      modelSelections.installForAgent(agent)
+      directRuntime.modelSelections.installForAgent(agent)
       // The session's own workspace joins the known-cwd set (Rule 2 for
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
@@ -10207,7 +10187,7 @@ export function apply(ctx: Context, config: Config): void {
       withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
         operationBarrier.runWriter(sessionId, async () => task()),
       withPromptAdmission: <T>(agent: unknown, line: string, task: () => Promise<T> | T) =>
-        withPromptAdmission(agent as Agent, draftHasImages(line, draftImages), async () => task()),
+        directRuntime.withPromptAdmission(agent as Agent, draftHasImages(line, draftImages), async () => task()),
       enterView,
       requestExit,
       exit,
@@ -10309,7 +10289,7 @@ export function apply(ctx: Context, config: Config): void {
       if (mainEvent) {
         const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
         if (selectionEvent.type === 'model/selection') {
-          if (runtimeAgent !== undefined) modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
+          if (runtimeAgent !== undefined) directRuntime.modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
         } else if (event.type === 'request/header' && runtimeAgent !== undefined) {
           const data = event.data as unknown
           const header = typeof data === 'object' && data !== null
@@ -10317,7 +10297,7 @@ export function apply(ctx: Context, config: Config): void {
             : undefined
           const raw = rawSelectionFromRequestHeader(header)
           if (raw !== undefined) {
-            modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
+            directRuntime.modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
           }
         }
         if (event.type === 'tool/call') {
@@ -10555,8 +10535,7 @@ export function apply(ctx: Context, config: Config): void {
     // child — and stamps the first-token latency. The identity fence
     // re-reads the live surface so a stale stream from a retired agent
     // never reaches the presentation.
-    const assistantStreamHandle = installAssistantStreamDirect({
-      ctx,
+    const assistantStreamHandle = directRuntime.installAssistantStream({
       isCurrentAgent: (agent) => {
         // EXACT Agent object identity (master's own headless consumer
         // compares `subject !== agent` the same way): a stale stream from
@@ -10565,7 +10544,7 @@ export function apply(ctx: Context, config: Config): void {
         if (typeof agent !== 'object' || agent === null) return false
         const subject = agent as Agent
         const candidateId = (subject as { session?: { id?: unknown } }).session?.id
-        if (typeof candidateId !== 'string' || agents.get(SessionId(candidateId)) !== subject) return false
+        if (typeof candidateId !== 'string' || directRuntime.registeredAgentFor(candidateId) !== subject) return false
         if (liveAgent !== undefined && subject === liveAgent) return true
         // The adapter accepts every registered live Agent so an unviewed child
         // can retain its transient baseline without entering the main surface.
