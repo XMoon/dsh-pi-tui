@@ -4,9 +4,15 @@
  * semantic assembly needs, constructs the ONE `DirectModelSelectionOwner`, wires
  * the Direct assistant-stream install, and delegates the semantic adapter
  * assembly to `runtime/direct/backend-direct.ts` (the single
- * `createDirectRuntimeBackend` owner; no adapter is constructed here). The
- * concrete Host service lookups (`agents.get`/`sessions.get`) are still supplied
- * BY the runner as narrow resolver callbacks; A5's bootstrap owns them.
+ * `createDirectRuntimeBackend` owner; no adapter is constructed here).
+ *
+ * Host-lookup ownership (final Stage-A zoning): `app/direct` is the Direct
+ * application coupling owner, so the concrete Host lookups
+ * (`agents.get`/`sessions.get`/`agentDefaultModel`) move behind THIS module's
+ * Direct composition/factory seam. In A1 they are still supplied BY the runner
+ * as narrow resolver callbacks because the session/application composition
+ * owners do not exist yet; `app/bootstrap` only constructs/connects/selects
+ * owners and must never become a new Host-business-coupling zone.
  *
  * This is the approved zone for Direct coupling (`ctx` forwarding and the
  * `@deepseek-ai/dsh-agent` identity type). It deliberately holds NO mutable
@@ -65,8 +71,10 @@ export interface DirectHostResolvers {
 export interface DirectApplicationRuntimeDeps {
   /**
    * The Host context, forwarded to the Direct adapters and the stream
-   * installer. It performs no Direct application lookup here: the runner
-   * supplies every resolver callback in this deps object.
+   * installer. A1 performs no Direct application lookup here: the runner
+   * supplies every resolver callback in this deps object. By A5 the Direct Host
+   * lookups (`agents`/`sessions`/`agentDefaultModel`) move behind this module's
+   * composition seam; `app/bootstrap` only connects owners.
    */
   readonly ctx: DirectBackendContextLike
   readonly diag: Diag
