@@ -608,15 +608,20 @@ test('a transition started after the skill writer entered waits for the skill to
   let transitionPending = false
   runner.sessionTransitionPending = () => transitionPending
   const barrier = new SessionOperationBarrier()
-  runner.withSessionWriter = (sessionId, task) => barrier.runWriter(sessionId, async () => task())
   const order: string[] = []
-  let releaseAdmission!: () => void
-  const admissionGate = new Promise<void>((resolve) => { releaseAdmission = resolve })
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>((resolve) => { releaseWriter = resolve })
+  // Park AFTER the barrier counted this writer but BEFORE the skill task runs:
+  // the pre-fix in-writer `sessionTransitionPending()` re-check runs at the very
+  // start of the task, so it must observe the transition that starts now.
+  runner.withSessionWriter = (sessionId, task) => barrier.runWriter(sessionId, async () => {
+    order.push('writer-entered')
+    await writerGate
+    return task()
+  })
   const prepare = runner.prepareDraftMessage
   runner.prepareDraftMessage = async (text: string) => {
-    order.push('admission-start')
-    await admissionGate
-    order.push('admission-end')
+    order.push('admission')
     return prepare(text)
   }
   const writer = runner.sessionWriter
@@ -629,29 +634,27 @@ test('a transition started after the skill writer entered waits for the skill to
   const skillDef = services.defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const pending = (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab @image.png' })
-  // Wait until the skill owns the writer and is parked in the admission chain.
-  for (let attempt = 0; attempt < 200 && !order.includes('admission-start'); attempt += 1) {
+  for (let attempt = 0; attempt < 200 && !order.includes('writer-entered'); attempt += 1) {
     await new Promise(resolveTick => setImmediate(resolveTick))
   }
-  assert.ok(order.includes('admission-start'), 'the skill must have entered the writer and started admission')
-  // A transition now starts AFTER the writer entered: the barrier's writer-first
+  assert.ok(order.includes('writer-entered'), 'the skill must own the writer before the transition starts')
+  assert.deepEqual(order, ['writer-entered'], 'the parked writer has not run its admission yet')
+  // A transition starts AFTER the writer entered: the barrier's writer-first
   // contract requires it to WAIT for this writer to drain — it must not cancel
-  // an in-flight skill invocation. `transitionPending` becomes true only NOW, so
-  // an in-writer re-check (the reviewed defect) would abort this writer.
+  // an in-flight skill invocation. An in-writer re-check (the reviewed defect)
+  // would read `true` here and abandon the skill.
   transitionPending = true
   const transition = barrier.runTransition(async () => { order.push('transition-body') })
   await new Promise(resolveTick => setImmediate(resolveTick))
   assert.ok(!order.includes('transition-body'), 'the later transition waits for the skill writer')
-  releaseAdmission()
+  assert.ok(!order.includes('commit'), 'the skill has not committed while parked')
+  releaseWriter()
   const result = await pending
   await transition
   assert.equal(result.kind, 'success')
-  assert.ok(order.indexOf('admission-end') < order.indexOf('commit'),
-    'the admission finishes before the commit')
-  assert.equal(order.filter(entry => entry === 'commit').length, 2,
-    'both ordered skill prompts commit inside the writer section')
-  assert.equal(order.at(-1), 'transition-body',
-    'every skill commit happens before the later transition body')
+  assert.ok(order.indexOf('admission') < order.indexOf('commit'), 'admission finishes before the commit')
+  assert.equal(order.filter(entry => entry === 'commit').length, 2, 'both ordered skill prompts commit inside the writer')
+  assert.equal(order.at(-1), 'transition-body', 'every skill commit happens before the later transition body')
   app.stop()
 })
 
