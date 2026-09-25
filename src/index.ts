@@ -2341,6 +2341,15 @@ export function apply(ctx: Context, config: Config): void {
         // A notification failure is Client-local UX: never crash the TUI.
       }
     })
+    /**
+     * The completion-owner fence (A2 seam). The notification controller fences
+     * by the EXACT Direct `Agent.id` — a late `agent/status` from a retired
+     * agent must never notify. The value is the owner's completion identity
+     * (never a session id), and `undefined` on the teardown path.
+     */
+    const setCompletionOwner = (identity: string | undefined): void => {
+      completionController.setLiveAgent(identity)
+    }
     const terminalFocusTracker = new TerminalFocusTracker()
     completionController.setMode(parseNotificationMode(tuiSettings?.get().notificationMode))
     completionController.setMethod(parseNotificationMethod(tuiSettings?.get().notificationMethod))
@@ -2623,7 +2632,7 @@ export function apply(ctx: Context, config: Config): void {
     liveAgent = handle?.direct?.agent as Agent | undefined
     // The completion-notification controller follows the live identity:
     // a resumed idle session must never notify (no observed running).
-    completionController.setLiveAgent(liveAgent?.id)
+    setCompletionOwner(liveAgent?.id)
     if (liveAgent !== undefined) {
       // The resume transaction succeeded; the remaining pre-mount wait is
       // the conversation preparation (whenIdle + the catalog ready
@@ -2728,7 +2737,40 @@ export function apply(ctx: Context, config: Config): void {
       turns: folder.groupedTurns(),
     })
     let statsFolder = new StatsFolder()
-    let openingSession: { id: string; events: SessionEvent[] } | undefined
+    /**
+     * The opening-session JOURNAL (A2 seam). Presentation-only: it fences which
+     * pre-commit events belong to the target being opened, and `initLiveSession`
+     * merges its cut into the cold hydration. The journal (including its mutable
+     * event array) is PRIVATE behind this API: callers only ever hold the opaque
+     * identity token, and read events through the readonly `openingCut` view.
+     */
+    /** Opaque identity token of one opening journal (no readable members). */
+    type OpeningToken = object
+    let openingJournal: { readonly token: OpeningToken; readonly id: string; events: SessionEvent[] } | undefined
+    /** Begin an opening journal and return its opaque identity token. */
+    const beginOpening = (id: string): OpeningToken => {
+      const token: OpeningToken = {}
+      openingJournal = { token, id, events: [] as SessionEvent[] }
+      return token
+    }
+    /** The opaque identity token of the journal currently being opened, if any. */
+    const currentOpening = (): OpeningToken | undefined => openingJournal?.token
+    /** Clear only the EXACT journal identity (a newer transition's journal wins). */
+    const clearOpening = (token: OpeningToken): void => {
+      if (openingJournal?.token === token) openingJournal = undefined
+    }
+    /** Unconditional clear (the ensure-first-session finally path). */
+    const resetOpening = (): void => { openingJournal = undefined }
+    /** Whether the given session id is the one currently being opened. */
+    const isOpening = (sessionId: string): boolean =>
+      openingJournal !== undefined && openingJournal.id === sessionId
+    /** Record one pre-commit event for the opening target (no-op otherwise). */
+    const recordOpeningEvent = (sessionId: string, event: SessionEvent): void => {
+      if (openingJournal !== undefined && openingJournal.id === sessionId) openingJournal.events.push(event)
+    }
+    /** The readonly opening cut for one session id, or undefined. */
+    const openingCut = (sessionId: string): { id: string; events: readonly SessionEvent[] } | undefined =>
+      openingJournal?.id === sessionId ? { id: openingJournal.id, events: openingJournal.events } : undefined
      let goalText: string | undefined
 
     /** Repaint the welcome card from the live agent's current facts. Re-read
@@ -2780,8 +2822,7 @@ export function apply(ctx: Context, config: Config): void {
     const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
       navigationEpoch += 1
       const from = liveAgent?.session.id
-      const opening = { id: steps.target.id, events: [] as SessionEvent[] }
-      openingSession = opening
+      const opening = beginOpening(steps.target.id)
       const oldHandle = liveHandle
       const oldAgent = liveAgent
       let transitionCommitted = false
@@ -2824,7 +2865,7 @@ export function apply(ctx: Context, config: Config): void {
           // new live identity — a late idle from the OLD agent is fenced
           // out and the new agent must be observed running before it can
           // ever notify.
-          completionController.setLiveAgent(liveAgent.id)
+          setCompletionOwner(liveAgent.id)
         },
         retireOld: async (next) => {
           const retired: string[] = []
@@ -2891,7 +2932,7 @@ export function apply(ctx: Context, config: Config): void {
           } catch (error) {
             retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
           }
-          if (openingSession === opening) openingSession = undefined
+          clearOpening(opening)
           if (retired.length > 0) {
             diag.error('transition retire failed (child committed)', { to: (directAgentOf(next) as Agent).session.id, failures: retired })
           }
@@ -2899,11 +2940,11 @@ export function apply(ctx: Context, config: Config): void {
         },
         recordFailure: (phase, error) => {
           diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
-          if (openingSession === opening) openingSession = undefined
+          clearOpening(opening)
         },
       }, steps).finally(() => {
         if (!transitionCommitted) settlePendingQueueRecalls(false)
-        if (openingSession === opening) openingSession = undefined
+        clearOpening(opening)
       })
     }
 
@@ -3489,6 +3530,12 @@ export function apply(ctx: Context, config: Config): void {
       }
       return started
     }
+    /** Open one command-settlement window (A2 seam). While any window is open a
+     *  committed `/fork` QUEUES its source retirement instead of detaching the
+     *  Session whose executor is still appending `command/done`. */
+    const beginCommandSettlement = (): void => { commandExecutionDepth += 1 }
+    /** Close a window whose handler never ran: nothing was queued. */
+    const abortCommandSettlement = (): void => { commandExecutionDepth -= 1 }
     /** Close one command-settlement window EXACTLY once and WAIT for the source
      *  retirements it queued. The command workflow must not report completion —
      *  nor release the submit FIFO — while the old owner still holds its write
@@ -3496,7 +3543,7 @@ export function apply(ctx: Context, config: Config): void {
      *  executor's `command/done` append already happened inside the wrapped
      *  execution, so this preserves durability AND makes `/fork`'s outward
      *  completion imply the source is released. */
-    const settleCommandExecution = async (): Promise<void> => {
+    const settleCommandSettlement = async (): Promise<void> => {
       commandExecutionDepth -= 1
       if (commandExecutionDepth === 0) await Promise.allSettled(flushSourceRetirementsAfterSettlement())
     }
@@ -3537,7 +3584,7 @@ export function apply(ctx: Context, config: Config): void {
         bumpSessionGeneration()
         liveAgent = nextAgent
         liveHandle = nextHandle
-        completionController.setLiveAgent(nextAgent.id)
+        setCompletionOwner(nextAgent.id)
         adopted = true
         try {
           onAdopted?.()
@@ -3768,7 +3815,7 @@ export function apply(ctx: Context, config: Config): void {
       // late `agent/status` idle from the old live agent must never emit
       // a notification into a dead surface (the identity fence drops
       // every event once the live id is undefined).
-      completionController.setLiveAgent(undefined)
+      setCompletionOwner(undefined)
       // Disable terminal focus reporting FIRST — before any throwable
       // teardown step — so the mode can never leak into the shell even
       // when a later teardown operation throws (idempotent: a startup
@@ -4669,9 +4716,13 @@ export function apply(ctx: Context, config: Config): void {
       if (selection === undefined) return undefined
       return { selection, status: defaultIntent.outcome === 'unresolved' ? 'unresolved' : 'pending' }
     }
-    const bumpSessionGeneration = (): number => {
-      if (cleanedUp) return sessionGeneration
-      sessionGeneration += 1
+    /**
+     * The synchronous surface reset that follows a generation bump (A2 seam).
+     * MUST stay synchronous — no await, no microtask — and MUST run while the
+     * OLD owner is still current: the session runtime publishes the new owner
+     * only AFTER this returns (see the four commit shapes in the A2 plan §4).
+     */
+    const resetForGeneration = (): void => {
       callArgs.clear()
       mainStreamingToolPreviews.clear()
       // The new session's subagent delegations are a fresh namespace: stale
@@ -4749,6 +4800,11 @@ export function apply(ctx: Context, config: Config): void {
         // deferred path — the teardown refresh is UI-only.
         refreshStatusCheap()
       })
+    }
+    const bumpSessionGeneration = (): number => {
+      if (cleanedUp) return sessionGeneration
+      sessionGeneration += 1
+      resetForGeneration()
       return sessionGeneration
     }
     // PR D1 P1: while the search overlay is open the transcript keeps
@@ -5852,7 +5908,7 @@ export function apply(ctx: Context, config: Config): void {
             // The post-command-settlement window opens HERE: a handler that
             // commits a fork queues its source retirement instead of detaching
             // the Session the executor is still appending `command/done` to.
-            commandExecutionDepth += 1
+            beginCommandSettlement()
             let settled: Promise<HostCommandOutcome>
             try {
               settled = Promise.resolve(withCommandDelivery(delivery, () => {
@@ -5882,13 +5938,13 @@ export function apply(ctx: Context, config: Config): void {
               // before it returns its promise) means the handler never ran, so
               // nothing was queued: close the window synchronously (no
               // retirement to await) and rethrow.
-              commandExecutionDepth -= 1
+              abortCommandSettlement()
               throw error
             }
             // The official executor's post-handler `command/done` append is
             // inside this settlement: teardown awaits it before retiring the
             // current owner, and the window closes only after the append.
-            settled = settled.finally(settleCommandExecution)
+            settled = settled.finally(settleCommandSettlement)
             pendingSettlementWork.add(settled)
             // `then(onSettled, onSettled)`: tracking must not add an unhandled
             // rejection branch next to `runOwned`'s own failure handling.
@@ -9605,7 +9661,7 @@ export function apply(ctx: Context, config: Config): void {
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
       rememberHistoryCwd(agent.session.header.cwd ?? '')
-      const opening = openingSession?.id === agent.session.id ? openingSession : undefined
+      const opening = openingCut(agent.session.id)
        const events = opening === undefined
          ? agent.session.snapshotEvents()
          : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
@@ -9716,7 +9772,7 @@ export function apply(ctx: Context, config: Config): void {
         // (no pin, no second fresh fallback).
         const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context, agent: Agent) => Promise<void> | void }): Promise<SessionHandle> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
-          openingSession = { id: String(sessionId), events: [] }
+          beginOpening(String(sessionId))
           // Quiesce EVERY sessionless `/model` default write (and its fenced
           // correction) BEFORE the create: the Direct adapter captures the
           // settled persisted Host default for Agent activation. A failed
@@ -9762,13 +9818,13 @@ export function apply(ctx: Context, config: Config): void {
         // A successful Direct create always yields the live agent (the
         // port contract: direct.agent is present on Direct backends).
         const createdAgent = created.direct!.agent as Agent
-        const opening = openingSession
+        const opening = currentOpening()
         liveHandle = created.direct!.ownerHandle as AgentHandle
         liveAgent = createdAgent
         // First-session commit: the notification controller resets with
         // the new live identity (a fresh agent must be observed running
         // before it can ever notify).
-        completionController.setLiveAgent(createdAgent.id)
+        setCompletionOwner(createdAgent.id)
         // Post-create initialization is best-effort: the child is committed,
         // so failures are recorded, never a fallback (the same
         // retire-warn-only semantics as every other transition).
@@ -9790,7 +9846,7 @@ export function apply(ctx: Context, config: Config): void {
           diag.warn('first session surface rebuild failed', { error: safeErrorMessage(error) })
         }
         {
-           if (openingSession === opening) openingSession = undefined
+           if (opening !== undefined) clearOpening(opening)
          }
          // The first real session's catalog comes from the REAL agent:
         // await the coordinator refresh so the first submission rides the
@@ -9808,7 +9864,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       })).finally(() => {
          creating = undefined
-         openingSession = undefined
+         resetOpening()
        })
       return creating
     }
@@ -10279,11 +10335,10 @@ export function apply(ctx: Context, config: Config): void {
       if (attachedSession !== undefined && attachedSession !== session) return
       // Opening journals fence presentation only. Runtime bookkeeping must
       // continue to observe the target for selections, approvals, and cleanup.
-      const mainOpening = openingSession
+      const openingTarget = isOpening(session.id)
       // The retiring committed Agent remains authoritative until quiesce
       // completes; the published opening target may also emit before commit.
-      const mainEvent = session.id === liveAgent?.session.id
-        || (mainOpening !== undefined && mainOpening.id === session.id)
+      const mainEvent = session.id === liveAgent?.session.id || openingTarget
       const runtimeAgent = mainEvent ? agents.get(SessionId(session.id)) as Agent | undefined : undefined
       let settledViewChildId: SessionId | undefined
       if (mainEvent) {
@@ -10328,8 +10383,8 @@ export function apply(ctx: Context, config: Config): void {
           viewCallToChild.delete(callId)
         }
       }
-       if (mainOpening !== undefined && session.id === mainOpening.id && (viewing === undefined || viewing.id !== session.id)) {
-         mainOpening.events.push(event)
+       if (openingTarget && (viewing === undefined || viewing.id !== session.id)) {
+         recordOpeningEvent(session.id, event)
          return
        }
        const opening = openingViewer
@@ -10576,7 +10631,7 @@ export function apply(ctx: Context, config: Config): void {
         // attempt (abandoned end or a committed `assistant/attempt`
         // settlement) clears the step's tool previews — its deltas never
         // materialized into durable calls.
-        if (openingSession !== undefined && input.sessionId === openingSession.id && (viewing === undefined || viewing.id !== input.sessionId)) return
+        if (isOpening(input.sessionId) && (viewing === undefined || viewing.id !== input.sessionId)) return
          if (viewing !== undefined && input.sessionId === viewing.id) {
           applyAssistantLiveInput(viewing.folder, viewing.stats, viewing.previews, input)
           schedulePaint()

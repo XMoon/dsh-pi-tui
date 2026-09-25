@@ -478,8 +478,10 @@ test('the runner wires agent/status to the membership-gated RUNTIME-only refresh
 })
 
 test('a session switch closes the open task browser, CLEARS the badge synchronously and resets the runtime coordinator', () => {
+  // The session bump now delegates its synchronous surface reset to the named
+  // `resetForGeneration` seam (A2); the invariant spans both.
   const bump = indexSource.slice(
-    indexSource.indexOf('const bumpSessionGeneration'),
+    indexSource.indexOf('const resetForGeneration'),
     indexSource.indexOf('const jumpToSearchMatch'),
   )
   assert.ok(bump.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')
