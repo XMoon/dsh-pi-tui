@@ -171,6 +171,20 @@ the published `0.1.7-rc.2` family declared by `package.json` and resolved by
 its lockfile. The source lane independently pins `deepseek-harness` to
 `477b4f420553e8a52c2fbccc464d7561b239c443` (`0.1.7-rc.2`) in
 `test/compat/dsh-source.json` and builds and validates that family from source.
+
+**Source Mode is waived for `0.4.9` (BLOCKED upstream, not a release blocker).**
+The DSH `0.1.7-rc.2` upstream source tree is not self-cleanable: the newly
+referenced `tsconfig.desktop-keyboard-tests.json` declares
+`outDir: lib/desktop-keyboard-test-types`, while upstream `scripts/clean.ts`
+rejects every referenced TypeScript `outDir` not ending in `/types` except its
+native-entry special case. The regression was introduced after `rc.1` and is
+still present upstream, so `pnpm compat:dsh:source` cannot run against the exact
+`rc.2` tag without modifying the external DSH checkout. Source Mode is therefore
+waived for this release; **published npm-family compatibility remains the
+`0.4.9` release authority** (`pnpm compat:dsh:npm`,
+`pnpm compat:dsh:npm --exact-family`, and `pnpm compat:dsh:client-family` on the
+published `0.1.7-rc.2` family).
+
 The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the
 published `pi2dsh` bridge cannot prove compatibility against an unpublished
