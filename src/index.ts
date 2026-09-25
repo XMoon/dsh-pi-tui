@@ -159,7 +159,7 @@ import { DefaultWriteBarrier } from './default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
-import { runDetached, runOwned, isCancellation, cancellationError, observeSettled, type OwnedTaskOptions } from './detached.ts'
+import { runDetached, runOwned, isCancellation, cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from './history.ts'
 import { terminalTitleOf } from './terminal-title.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from './history-persist.ts'
@@ -1922,13 +1922,6 @@ export function apply(ctx: Context, config: Config): void {
       isSurfaceDisposed: () => cleanedUp,
       resetForGeneration: () => resetForGeneration(),
     })
-    // In-flight work whose settlement is reachable only from a later callback,
-    // so teardown must await it explicitly: a command execution (INCLUDING the
-    // official executor's post-handler `command/done` append — a `/fork`
-    // command's SOURCE Session has to stay attached while its own executor
-    // settles, or the durable log keeps `command/run` without `command/done`)
-    // and the nested image-submit it launches in its `onResult`.
-    const pendingSettlementWork = new Set<Promise<unknown>>()
     // Alt+Up may finish a queue mutation while a transition is waiting on the
     // same writer barrier. Keep its confirmed local representation until the
     // transition outcome is known: commit drops it, failure restores it.
@@ -2159,9 +2152,6 @@ export function apply(ctx: Context, config: Config): void {
             seq: agent === undefined ? undefined : Number(agent.session.seq),
           })
         },
-      },
-      pendingWork: {
-        settlement: () => [...pendingSettlementWork],
       },
       diag,
     })
@@ -5395,11 +5385,9 @@ export function apply(ctx: Context, config: Config): void {
             // inside this settlement: teardown awaits it before retiring the
             // current owner, and the window closes only after the append.
             settled = settled.finally(sessionRuntime.settleCommandSettlement)
-            pendingSettlementWork.add(settled)
             // `then(onSettled, onSettled)`: tracking must not add an unhandled
             // rejection branch next to `runOwned`'s own failure handling.
-            const untrackSettlement = (): void => { pendingSettlementWork.delete(settled) }
-            observeSettled(settled, untrackSettlement)
+            sessionRuntime.trackSettlementWork(settled)
             return settled
           }, {
             diag,
@@ -5482,7 +5470,6 @@ export function apply(ctx: Context, config: Config): void {
                   // consumes the handoff pin across the async admission
                   // and releases it in its own finally (review finding 1
                   // follow-up).
-                  let nestedSettlement: Promise<unknown> | undefined
                   runOwned('image submit', () => {
                     const task = runReservedSubmit({
                     // TRANSFER the handoff reservation, never a second
@@ -5576,11 +5563,7 @@ export function apply(ctx: Context, config: Config): void {
                     }, text)
                     // This nested submission starts one callback later than the
                     // command execution, so teardown must reach it explicitly.
-                    nestedSettlement = task
-                    const untrackNested = (): void => {
-                      if (nestedSettlement !== undefined) pendingSettlementWork.delete(nestedSettlement)
-                    }
-                    observeSettled(task, untrackNested)
+                    sessionRuntime.trackSettlementWork(task)
                     return task
                   }, {
                     diag,
@@ -5606,7 +5589,6 @@ export function apply(ctx: Context, config: Config): void {
                       settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
                     },
                   })
-                  if (nestedSettlement !== undefined) pendingSettlementWork.add(nestedSettlement)
                 } else {
                   fallbackPin()
                   submitTurn.release()

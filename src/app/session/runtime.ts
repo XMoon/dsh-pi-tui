@@ -56,16 +56,6 @@ export interface SessionRuntimeSurface {
   reportSwitch(from: string | undefined, to: SessionOwnerRef): void
 }
 
-/**
- * The in-flight work the exit retirement must drain that STILL lives in the
- * runner. TRANSITIONAL (A2-3b-3): only the command-settlement ledger is left;
- * it moves in with the nested-settlement tracking (3b-5), which removes this
- * seam.
- */
-export interface SessionPendingWork {
-  settlement(): readonly Promise<unknown>[]
-}
-
 export interface SessionRuntimeDeps {
   /** The opaque owner mapping (backend-side). */
   readonly owners: SessionOwnerAccess
@@ -74,7 +64,6 @@ export interface SessionRuntimeDeps {
   /** The runner lifecycle abort signal (the quiesces observe it). */
   readonly lifecycleSignal: AbortSignal
   readonly surface: SessionRuntimeSurface
-  readonly pendingWork: SessionPendingWork
   /** Diagnostics; the runtime logs per-owner retirement failures and disposes
    *  the sink at the end of the exit retirement (its last consumer). */
   readonly diag: Diag
@@ -98,6 +87,8 @@ export interface SessionRuntime {
   /** Track one in-flight fork (the exit retirement drains them first). */
   trackFork(promise: Promise<unknown>): void
   hasPendingForks(): boolean
+  /** Track one in-flight command settlement / nested submission. */
+  trackSettlementWork(promise: Promise<unknown>): void
   // command settlement (§3.5)
   beginCommandSettlement(): void
   abortCommandSettlement(): void
@@ -255,6 +246,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   // retirement while an executor is still appending `command/done`.
   const pendingForks = new Set<Promise<unknown>>()
   const pendingSourceRetirements = new Set<Promise<void>>()
+  // In-flight command settlements / nested submissions (reachable only from a
+  // later callback, so the exit retirement waits for them explicitly).
+  const pendingSettlementWork = new Set<Promise<unknown>>()
   let commandExecutionDepth = 0
   const deferredSourceRetirements: Array<{ sessionId: string; retire: () => Promise<void> }> = []
 
@@ -267,6 +261,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   const hasPendingForks = (): boolean => pendingForks.size > 0
+
+  /** Track one in-flight command settlement / nested submission. */
+  const trackSettlementWork = (promise: Promise<unknown>): void => {
+    pendingSettlementWork.add(promise)
+    // `then(onSettled, onSettled)`: tracking must not add an unhandled rejection
+    // branch next to `runOwned`'s own failure handling.
+    observeSettled(promise, () => { pendingSettlementWork.delete(promise) })
+  }
 
   /** Whether a captured fork/rewind identity still owns the visible surface. */
   const isNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
@@ -559,10 +561,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // settlement, never by navigation: wait for every in-flight command
         // first (that `command/done` append included), then for every source
         // retirement it queued.
-        let settlement = [...deps.pendingWork.settlement()]
+        let settlement = [...pendingSettlementWork]
         while (settlement.length > 0) {
           await Promise.allSettled(settlement)
-          settlement = [...deps.pendingWork.settlement()]
+          settlement = [...pendingSettlementWork]
         }
         let sourceRetirements = [...pendingSourceRetirements]
         while (sourceRetirements.length > 0) {
@@ -603,6 +605,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     isNavigationCurrent,
     trackFork,
     hasPendingForks,
+    trackSettlementWork,
     beginCommandSettlement,
     abortCommandSettlement,
     settleCommandSettlement,
