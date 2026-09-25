@@ -31,7 +31,7 @@ export interface SessionOwnershipCoreDeps {
 
 /** One atomic navigation identity capture (session id + generation + epoch). */
 export interface NavigationIdentity {
-  readonly sessionId?: string
+  readonly sessionId: string | undefined
   readonly generation: number
   readonly navigationEpoch: number
 }
@@ -143,11 +143,7 @@ export function createSessionOwnershipCore(deps: SessionOwnershipCoreDeps): Sess
     },
     navigationEpoch: () => navigationEpoch,
     bumpNavigationEpoch: () => (navigationEpoch += 1),
-    captureNavigationIdentity: () => ({
-      ...currentSessionId === undefined ? {} : { sessionId: currentSessionId },
-      generation,
-      navigationEpoch,
-    }),
+    captureNavigationIdentity: () => ({ sessionId: currentSessionId, generation, navigationEpoch }),
     subjectAuthority,
     subject: () => subjectAuthority.current(),
     captureSubject: () => subjectAuthority.capture(),
