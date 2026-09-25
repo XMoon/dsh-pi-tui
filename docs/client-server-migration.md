@@ -68,17 +68,21 @@ Agent, Session, or Context objects across the boundary.
 
 The current Direct backend owns the in-process top-level Agent and must
 quiesce/drain/dispose it during runner teardown (interactive exit, HMR
-unload, and post-commit session transitions). The retirement is a
-**Direct-only ownership escape** (`src/runtime/direct/owned-session-retirement.ts`,
-structural callbacks only — no semantic-port change, no new Host coupling)
-retained until M8 and is NOT a Remote session-close semantic. A future
-Remote client closes its client-side observation/connection state through
-official DSH client contracts; this fix does not invent a host
-session-destroy RPC, does not add `close()`/`dispose()`/`drainSubagents()`
-to the `SessionLifecycle` port, and does not expose
-`drainContinuableDescendants` as a cross-backend capability. The ownership-
-retirement portion remains pending; D1.1 does not change this Direct-only
-semantic, and Direct remains the production backend.
+unload, and post-commit session transitions). A2 put that retirement behind the
+consumer-owned `SessionOwnerRetirement` port
+(`src/app/session/owner-access.ts`); the Direct adapter that implements it
+(`src/app/direct/owner-retirement.ts` +
+`src/runtime/direct/owned-session-retirement.ts`) still uses the Direct-only
+`SessionHandle.direct` escape and is retained until M8. The port describes the
+session layer's OWN need (quiesce/pre-cancel/retire/park one owner) and leaves
+HOW an abort reaches the owner to the backend, so it is NOT a Remote
+session-close semantic: a future Remote client closes its client-side
+observation/connection state through official DSH client contracts. This work
+does not invent a host session-destroy RPC, does not add
+`close()`/`dispose()`/`drainSubagents()` to the `SessionLifecycle` port, and
+does not expose `drainContinuableDescendants` as a cross-backend capability (the
+runner injects it as a provider). The ownership-retirement portion (removing the
+`direct` escape) remains pending, and Direct remains the production backend.
 
 ### Lifecycle creation cancellation (Stage B / pre-M2)
 
