@@ -291,6 +291,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,
@@ -468,6 +469,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,
@@ -621,6 +623,7 @@ test('/footer Esc cancels without writing', async () => {
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (doc) => { if (doc !== undefined) applied.push({ ...doc }) },
   }
@@ -700,6 +703,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: () => {},
   }
@@ -779,6 +783,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (doc) => {
       if (doc === undefined) return
@@ -891,6 +896,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
@@ -982,6 +988,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
@@ -1061,6 +1068,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
@@ -1181,6 +1189,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
     extensions: undefined,
@@ -1284,6 +1293,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
       enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
       applyFooterSettings: (d, savedCustomItems) => {
         if (d === undefined) return
@@ -1407,6 +1417,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
       enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
       applyFooterSettings: (d, savedCustomItems) => {
         if (d === undefined) return
@@ -1516,6 +1527,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
       enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
       applyFooterSettings: (d, savedCustomItems) => {
         if (d === undefined) return
