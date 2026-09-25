@@ -8,7 +8,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { RemotePluginManagerPort, type RemotePluginManagerRemotes } from '../src/runtime/remote/plugin-manager-remote.ts'
+import {
+  RemotePluginManagerPort,
+  type RemotePluginManagerNamespace,
+  type RemotePluginManagerSource,
+} from '../src/runtime/remote/plugin-manager-remote.ts'
 import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../src/runtime/direct/plugin-manager-direct.ts'
 import { pluginInstallRequestId } from '../src/runtime/plugin-manager-mapping.ts'
 import type {
@@ -59,7 +63,7 @@ const refused = (message: string): { readonly ok: false; readonly error: unknown
   error: { code: 'gateway/internal', message },
 })
 
-interface RemotePluginManagerFixture extends RemotePluginManagerRemotes {
+interface RemotePluginManagerFixture extends RemotePluginManagerSource {
   readonly calls: string[]
   readonly installOptions: InstallBundleOptions[]
   emitState(progress: PluginInstallProgress): void
@@ -80,7 +84,7 @@ function remoteFixture(): RemotePluginManagerFixture {
     const message = failures.get(operation)
     return message === undefined ? ok(value) : refused(message)
   }
-  return {
+  const pluginManager: RemotePluginManagerNamespace = {
     listBundles: async () => settle('listBundles', [BUNDLE]),
     listPlugins: async () => settle('listPlugins', [PLUGIN]),
     registries: async () => settle('registries', {
@@ -122,6 +126,9 @@ function remoteFixture(): RemotePluginManagerFixture {
       ? null
       : { ...CHANGE, stage: 'install' as const, target: String(requestId) }),
     cancelInstall: async () => settle('cancelInstall', { status: 'cancelled' as const }),
+  }
+  return {
+    pluginManager,
     // The fixture stores listeners for BOTH forwarded events; the official
     // face is overloaded per event, so the storage signature is the loose
     // call-site type and each event branch narrows its own listener.

@@ -50,11 +50,10 @@ import type { RemoteResultLike } from './session-writer-remote.ts'
 import { remoteFailureMessage } from './write-failure.ts'
 
 /**
- * The official generated `pluginManager` Remote face this adapter consumes:
- * the same record types and the forwarded `plugin-manager/*` install events
- * the Direct Host service exposes.
+ * The official generated `pluginManager` Remote namespace: the same record
+ * types the Direct Host service exposes.
  */
-export interface RemotePluginManagerRemotes {
+export interface RemotePluginManagerNamespace {
   listBundles(): Promise<RemoteResultLike<BundleInfo[]>>
   listPlugins(): Promise<RemoteResultLike<PluginInfo[]>>
   registries(): Promise<RemoteResultLike<PluginRegistries>>
@@ -70,6 +69,16 @@ export interface RemotePluginManagerRemotes {
   installBundle(spec: string, options?: InstallBundleOptions): Promise<RemoteResultLike<ChangeResult>>
   waitForInstall(requestId: PluginInstallRequestId): Promise<RemoteResultLike<ChangeResult | null>>
   cancelInstall(requestId: PluginInstallRequestId): Promise<RemoteResultLike<PluginInstallCancellation>>
+}
+
+/**
+ * The official Client Remote face this adapter consumes: the generated
+ * `pluginManager` namespace (methods) plus the typed Remote's forwarded-event
+ * subscription (`$on`) — exactly the shape the Client assembly exposes, so the
+ * published `ClientRemote` satisfies it with no cast.
+ */
+export interface RemotePluginManagerSource {
+  readonly pluginManager: RemotePluginManagerNamespace
   $on(event: 'plugin-manager/install-state', listener: (payload: PluginInstallProgress) => void): () => void
   $on(event: 'plugin-manager/install-log', listener: (payload: PluginInstallLogChunk) => void): () => void
 }
@@ -82,18 +91,18 @@ function unwrapRemote<T>(result: RemoteResultLike<T>, operation: string): T {
 
 /** The experimental Remote Plugin Manager port over the generated Remote. */
 export class RemotePluginManagerPort implements PluginManagerPort {
-  private readonly remote: RemotePluginManagerRemotes
+  private readonly remote: RemotePluginManagerSource
 
-  constructor(remote: RemotePluginManagerRemotes) {
+  constructor(remote: RemotePluginManagerSource) {
     this.remote = remote
   }
 
   async snapshot(): Promise<PluginManagerSnapshot> {
     const [bundles, plugins, registries, exemptions] = await Promise.all([
-      this.remote.listBundles(),
-      this.remote.listPlugins(),
-      this.remote.registries(),
-      this.remote.listVersionExemptions(),
+      this.remote.pluginManager.listBundles(),
+      this.remote.pluginManager.listPlugins(),
+      this.remote.pluginManager.registries(),
+      this.remote.pluginManager.listVersionExemptions(),
     ])
     return detachPluginManagerSnapshot({
       bundles: unwrapRemote(bundles, 'listBundles'),
@@ -104,7 +113,7 @@ export class RemotePluginManagerPort implements PluginManagerPort {
   }
 
   async inspect(spec: string, registry?: string | null, signal?: AbortSignal): Promise<PluginSpecInspectionFact> {
-    const result = await this.remote.inspect(
+    const result = await this.remote.pluginManager.inspect(
       spec,
       registry === undefined ? undefined : { registry },
       signal,
@@ -113,15 +122,15 @@ export class RemotePluginManagerPort implements PluginManagerPort {
   }
 
   async setBundleEnabled(name: string, enabled: boolean): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.setBundleEnabled(name, enabled), 'setBundleEnabled'))
+    return detachChange(unwrapRemote(await this.remote.pluginManager.setBundleEnabled(name, enabled), 'setBundleEnabled'))
   }
 
   async setPluginEnabled(id: string, enabled: boolean): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.setPluginEnabled(id, enabled), 'setPluginEnabled'))
+    return detachChange(unwrapRemote(await this.remote.pluginManager.setPluginEnabled(id, enabled), 'setPluginEnabled'))
   }
 
   async removeBundle(name: string): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.removeBundle(name), 'removeBundle'))
+    return detachChange(unwrapRemote(await this.remote.pluginManager.removeBundle(name), 'removeBundle'))
   }
 
   async startInstall(request: PluginInstallRequest): Promise<PluginChangeFact> {
@@ -130,12 +139,12 @@ export class RemotePluginManagerPort implements PluginManagerPort {
       registry: request.registry,
       ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
     }
-    return detachChange(unwrapRemote(await this.remote.installBundle(request.spec, options), 'installBundle'))
+    return detachChange(unwrapRemote(await this.remote.pluginManager.installBundle(request.spec, options), 'installBundle'))
   }
 
   async waitForInstall(requestId: string): Promise<PluginChangeFact | null> {
     const result = unwrapRemote(
-      await this.remote.waitForInstall(pluginInstallRequestId(requestId)),
+      await this.remote.pluginManager.waitForInstall(pluginInstallRequestId(requestId)),
       'waitForInstall',
     )
     return result === null ? null : detachChange(result)
@@ -143,7 +152,7 @@ export class RemotePluginManagerPort implements PluginManagerPort {
 
   async cancelInstall(requestId: string): Promise<PluginInstallCancellationFact> {
     const result = unwrapRemote(
-      await this.remote.cancelInstall(pluginInstallRequestId(requestId)),
+      await this.remote.pluginManager.cancelInstall(pluginInstallRequestId(requestId)),
       'cancelInstall',
     )
     return Object.freeze({ status: result.status })

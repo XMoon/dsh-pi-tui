@@ -1,5 +1,5 @@
 /**
- * Read-only Task Center adapter over the official rc.1 Client model.
+ * Read-only Task Center adapter over the published DSH 0.1.7-rc.2 Client model.
  *
  * Child membership comes from the official Client Session projections
  * (`projectionsBySession[parentId].values.subagentCatalog`), parent

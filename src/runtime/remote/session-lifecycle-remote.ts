@@ -1,9 +1,9 @@
 /**
  * Experimental Remote implementation of the semantic SessionLifecycle port
- * (D2.3–D2.4, aligned to the DSH 0.1.6-alpha.2 Client contract).
+ * (D2.3–D2.4, aligned to the published DSH 0.1.7-rc.2 Client contract).
  *
- * alpha2 turned Client Session lifetime into explicit reference ownership:
- * `retain()` owns one exact generation, `binding()` only borrows, `create()`
+ * The published Client contract keeps Session lifetime as explicit reference
+ * ownership: `retain()` owns one exact generation, `binding()` only borrows, `create()`
  * and `fork()` publish a catalogued identity WITHOUT guaranteeing a binding,
  * and the Client's own current-selection slot is gone (navigation belongs to
  * the view owner). Three consequences shape this adapter:
@@ -58,6 +58,7 @@ import {
   acquireMainSurfaceReference,
   type MainSurfaceReference,
   type RemoteSessionReferenceLike,
+  type RemoteSessionTarget,
   type TuiSessionReferenceSource,
 } from './session-reference.ts'
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
@@ -66,20 +67,25 @@ import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
  * RemoteResult is already unwrapped by ClientSessions.create/fork; only the
  * generated session namespace below exposes RemoteResultLike values. */
 export interface RemoteLifecycleSessions {
-  create(opts: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
+  /** The official `create()` argument is OPTIONAL; mirroring that is what keeps
+   * the published `ISessions` structurally assignable (the contract gate). */
+  create(opts?: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
   fork(opts: { readonly sessionId: string; readonly atSeq?: number }): Promise<string>
   /** Public list reconciliation after a raw generated create. */
   refresh(): Promise<void>
   retain(
-    target: string,
+    target: RemoteSessionTarget,
     options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
   ): RemoteSessionReferenceLike
 }
 
-/** The official generated `session` Remote create face. */
+/** The official generated `session` Remote create face. The identity stays
+ * OPTIONAL exactly like the published `SessionCreateRequest`, so the official
+ * namespace remains structurally assignable (the contract gate); this adapter
+ * always supplies the preallocated id. */
 export interface RemoteLifecycleSessionRemotes {
   create(request: {
-    readonly sessionId: string
+    readonly sessionId?: string
     readonly cwd?: string
     readonly agentPreset?: string
   }): Promise<RemoteResultLike<{ readonly sessionId: string; readonly agentPreset?: string }>>
@@ -276,8 +282,8 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     // `created + superseded`, never a downgraded indeterminate.
     if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
     // The raw generated create bypasses `ClientSessions.create()`'s local
-    // mutation recording, so the published id is not yet addressable. alpha2
-    // `retain(stringId)` resolves through the resident/list/address tables, and
+    // mutation recording, so the published id is not yet addressable. The
+    // published `retain(stringId)` resolves through the resident/list/address tables, and
     // the `api-session/added` frame is not guaranteed to precede this line:
     // reconcile deterministically through the public list refresh.
     try {
@@ -344,7 +350,7 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     if (captured === undefined) {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" cannot be opened: the remote connection is not connected` } }
     }
-    // alpha2 acquisition IS `retain`: it materializes the exact generation
+    // published acquisition IS `retain`: it materializes the exact generation
     // (and starts its initial history open) without moving any Client-global
     // selection. An unknown identity throws instead of silently succeeding.
     let owner: MainSurfaceReference
@@ -371,7 +377,7 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
 
   async fork(request: ForkSessionRequest): Promise<ForkResult> {
     // The semantic port accepts only canonical event sequences; the official
-    // alpha.2 Host treats an explicit `atSeq` as the EXACT inclusive event cut
+    // Host treats an explicit `atSeq` as the EXACT inclusive event cut
     // and rejects a nonexistent one, so this adapter must not create a
     // Remote-only normalization rule on top of it.
     if (request.atSeq !== undefined
