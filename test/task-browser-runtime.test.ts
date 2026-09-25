@@ -527,13 +527,13 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
   // browser OPENED, never against values captured at dispatch — a
   // dispatch-time capture can never differ from the current state, so the
   // real protection is binding the intent to the opening surface.
-  assert.ok(handler.includes("sessionGeneration !== browserGeneration || liveAgent !== browserSession"),
+  assert.ok(handler.includes('ownership.generation() !== browserGeneration || liveAgent !== browserSession'),
     'the dispatch must compare the current generation/session against the OPEN-time capture')
   assert.ok(handler.includes('activeTaskBrowserToken !== actionBrowserToken'),
     'a delayed result must not notify after the browser surface has been replaced or closed')
   const openMarker = 'const openTasksBrowser = ('
   const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 1200)
-  assert.ok(openHead.includes('const browserGeneration = sessionGeneration'),
+  assert.ok(openHead.includes('const browserGeneration = ownership.generation()'),
     'the browser must capture the generation at open')
   assert.ok(openHead.includes('const browserSession = liveAgent'),
     'the browser must capture the live agent at open')
