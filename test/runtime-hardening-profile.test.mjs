@@ -67,7 +67,7 @@ test('the preset registry row stays the deployment default on the host plane', (
 
 test('dsh-invariants stays a composition row: exact dev pin, deliberately no runtime peer', () => {
   assert.equal(manifest.devDependencies?.['@deepseek-ai/dsh-invariants'], '0.1.7-rc.2',
-    'the development target stays pinned to the exact rc.1 package for the real-mount tests')
+    'the development target stays pinned to the exact rc.2 package for the real-mount tests')
   // `@deepseek-ai/dsh-invariants` is named only by cordis.patch.yml — a
   // composition row the dsh Host resolves from its own installation, exactly
   // like `@deepseek-ai/dsh-agent-preset`. `src/` never imports it, so a peer
