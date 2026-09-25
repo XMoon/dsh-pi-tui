@@ -9,12 +9,13 @@
  * recovery) are covered by the remote-session-writer, remote-host-command,
  * remote-subagent-port, and remote-pending-input-reader unit suites.
  *
- * The retired D2.3 create/open/model/preset same-Host integration harness
- * is NOT replaced by this closure: its semantic contracts are covered by
- * adapter tests (remote-session-lifecycle / remote-model-port /
- * remote-preset-port), and restoring a focused same-Host lifecycle parity
- * smoke is a documented follow-up in docs/client-server-migration.md
- * (Known coverage follow-ups). This closure proves only the D2.4
+ * The retired D2.3 create/open/model/preset same-Host integration harness is
+ * replaced by the focused `smoke:remote-session-lifecycle-parity`
+ * (scripts/dsh-remote-session-lifecycle-parity-smoke.mjs): real Client Context →
+ * Gateway → Host Session Controller for ordinary create, explicit-preset
+ * create, open/retain, model select and preset select + locked. The semantic
+ * contracts stay covered by the adapter tests (remote-session-lifecycle /
+ * remote-model-port / remote-preset-port). This closure proves only the D2.4
  * fork/rewind parity scenarios.
  *
  * @module dsh-remote-d2-closure-smoke

@@ -12,6 +12,7 @@
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
+Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -21,7 +22,7 @@ M8  NOT STARTED   (Direct ownership retirement — only after concurrency proof)
 
 Current production backend: direct
 Experimental backend:      none (no complete Backend(kind=remote))
-Experimental Remote:        reads + selected ordinary writes (adapters proven in tests/smoke)
+Experimental Remote:        reads + selected ordinary writes + Plugin Manager / Job observation (adapters proven in tests/smoke, NOT composed)
 Remote writes:              experimental/test only (no production wiring)
 Remote attach:              unsupported
 Direct rollback:           available
@@ -1128,14 +1129,9 @@ Coverage note: the retired D2.3 same-Host harness also exercised real Client
 Context → Gateway → Host Session Controller integration for create/open,
 model selection, and preset selection. Those semantics remain covered by
 adapter contract/unit tests (`remote-session-lifecycle`, `remote-model-port`,
-`remote-preset-port`), but the same-Host integration lane for
-create/open/model/preset is currently absent. This is a known non-blocking
-coverage gap.
-
-Future follow-up: add a focused `smoke:remote-session-lifecycle-parity`
-covering ordinary create, explicit-preset create, open/retain, model select,
-and preset select + locked — without restoring the retired monolithic D2.3
-harness.
+`remote-preset-port`), and the same-Host integration lane for
+create/open/model/preset is now restored by the focused
+`smoke:remote-session-lifecycle-parity` (Pre-M3, see the Pre-M3 status section).
 
 - `ModelCatalog` gained one semantic directory read, `loadDirectory()`, matching
   the official `session.modelCatalog()` generation snapshot (deployment
@@ -1247,8 +1243,9 @@ preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; and
 headless model/preset/create/open presentation tests. The 0.1.6-era
 same-Host `smoke:remote-d2-lifecycle` integration smoke was retired after
 its semantic scenarios gained adapter-level replacement coverage; its
-create/open/model/preset same-Host integration layer is not currently
-replaced and remains a documented follow-up. The boundary gate stays green
+create/open/model/preset same-Host integration layer is restored by the
+focused `smoke:remote-session-lifecycle-parity` (Pre-M3, see the Pre-M3
+status section). The boundary gate stays green
 and `packages/pi-tui/**` is unchanged.
 
 ## D2.4 status (COMPLETE) — Host-owned fork / rewind convergence
@@ -1472,14 +1469,72 @@ queued-input exclusion proven through child continuation, P6 lineage,
 P7 subagent ancestor workspace, P8 activation default). The old D2.3-importing
 harness was retired with the 0.1.6-era `dsh-agent-presets` package it named.
 
+## Pre-M3 status (COMPLETE, no behavior change)
+
+Pre-M3 pinned the semantic/backend/client boundaries M3 depends on. It is a
+structural closure, deliberately NOT M3 and NOT the TypeScript architecture
+refactor: production stays Direct, there is no backend flag, no Remote attach,
+no UI/UX change, and no public Extension SDK change.
+
+- **Direct backend assembly centralized.** `src/runtime/direct/backend-direct.ts`
+  is the single owner that constructs the Direct semantic adapters from the
+  runner-supplied resolvers; `src/index.ts` no longer constructs them one by
+  one. The backend vocabulary gained `job-observation`, and the production Job
+  viewer reads `backend.jobObservation` — the Direct adapter is no longer a
+  runner-local side channel that bypasses `Backend`. The M2 shadow reads
+  (`TaskReader`, `PresentationReader`, `SurfaceAuthorityReader`) deliberately
+  stay OUT of `Backend`, and the model-selection owner plus the Direct
+  assistant-stream install stay runner-owned.
+- **P1 Remote parity (adapters only).** `RemotePluginManagerPort` maps the
+  generated `pluginManager` Remote plus its forwarded install events through the
+  SAME pure `plugin-manager-mapping.ts` the Direct adapter uses; a refused
+  `RemoteResult` becomes one thrown Error. `RemoteJobObservationPort` consumes
+  the official Client `IJobs` (`state.rows`/`state.observed`, ref-counted
+  `watchRows`/`observe`) and owns no follow/cursor/reconnect/tail state machine.
+  Neither adapter is production-composed.
+- **Published-contract gate.** `test/remote-official-contract.test.ts` proves
+  every M3-bound Remote adapter accepts the published DSH 0.1.7-rc.2 public
+  Client/Remote face with NO cast; the three structural sources the gate proved
+  narrower than the official contract were fixed rather than hidden.
+- **Same-Host integration.** `smoke:remote-session-lifecycle-parity`
+  (run inside the exact-family client lane) proves the restored D2.3 lane over a
+  real Client Context → Gateway → Host Session Controller: ordinary create,
+  explicit-preset create, open/retain, model select, and preset select + locked.
+
+Still deferred to M3 (adapter-ready, not wired): Remote backend production
+assembly; Connection ownership in the TUI process; Client Context lifetime;
+backend selection/loading; Remote main-surface owner install; the
+`retain new -> commit -> release old` transition; writer-held caller/UI
+recovery; Remote submission-presentation composition; Remote Task/Presentation
+production consumption; Remote Plugin Manager panel wiring; Remote Job viewer
+wiring.
+
+The M3 entry architecture is:
+
+```text
+TUI
+  ↓
+semantic Backend / Client-local presentation seams
+  ↓
+official Client domain services
+  ↓
+generated Remotes
+  ↓
+Connection / Gateway
+  ↓
+Host domain services
+```
+
+It is explicitly NOT a private giant RPC and NOT a re-implemented
+Session/Job/Plugin Manager reducer.
+
 ## Known coverage follow-ups
 
 Non-blocking coverage gaps with a named owner lane. These are not current
 merge blockers; each records what is absent and the follow-up shape.
 
-| Follow-up | Absent today | Follow-up shape |
-|---|---|---|
-| D2.3 same-Host integration lane | The retired 0.1.6-era `smoke:remote-d2-lifecycle` also proved real Client Context → Gateway → Host Session Controller integration for ordinary create, explicit-preset create, open/retain, model select, and preset select + locked. Adapter contract tests cover those semantics; the same-Host integration layer is not currently replaced. | A focused `smoke:remote-session-lifecycle-parity` covering those five flows, without restoring the retired monolithic D2.3 harness. |
+None currently: the D2.3 same-Host integration lane is closed by
+`smoke:remote-session-lifecycle-parity` (see the Pre-M3 status section).
 
 ## Known blockers
 
