@@ -1,4 +1,7 @@
 {
+  "app/direct/owner-registry.ts": [
+    "import:dsh-agent"
+  ],
   "app/direct/runtime.ts": [
     "import:dsh-agent"
   ],

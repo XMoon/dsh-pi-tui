@@ -213,7 +213,6 @@ import {
 } from './app/session/commit-order.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
-import { type DirectOwnerPoolLike } from './runtime/direct/session-lifecycle-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
 import { PluginManagerHostRegistry, type PluginManagerHostClaim } from './plugin-manager/host-registry.ts'
@@ -1924,21 +1923,6 @@ export function apply(ctx: Context, config: Config): void {
       isSurfaceDisposed: () => cleanedUp,
       resetForGeneration: () => resetForGeneration(),
     })
-    const parkedDirectOwners = new Map<string, AgentHandle>()
-    const directOwnerPool: DirectOwnerPoolLike = {
-      claim: sessionId => {
-        const handle = parkedDirectOwners.get(sessionId)
-        if (handle !== undefined) parkedDirectOwners.delete(sessionId)
-        return handle
-      },
-      park: handle => {
-        const sessionId = String(handle.agent.session.id)
-        const previous = parkedDirectOwners.get(sessionId)
-        if (previous !== undefined && previous !== handle) throw new Error(`duplicate parked Direct owner for session "${sessionId}"`)
-        parkedDirectOwners.set(sessionId, handle)
-      },
-      waitForRelease: ownership.waitForOwnerRelease,
-    }
     const pendingForks = new Set<Promise<unknown>>()
     // In-flight work whose settlement is reachable only from a later callback,
     // so teardown must await it explicitly: a command execution (INCLUDING the
@@ -2163,9 +2147,8 @@ export function apply(ctx: Context, config: Config): void {
           return await ownership.gate.run(() => ownership.barrier.runTransition(async () => {
             const current = await retire()
             const failures = [...current.failures]
-            for (const [sessionId, parked] of parkedDirectOwners) {
-              parkedDirectOwners.delete(sessionId)
-              const report = await retireParked(parked.agent, parked)
+            for (const { agent, handle } of directRuntime.takeAllParkedOwners()) {
+              const report = await retireParked(agent, handle)
               failures.push(...report.failures)
             }
             return { failures }
@@ -2337,7 +2320,10 @@ export function apply(ctx: Context, config: Config): void {
       diag,
       tuiSettings,
       defaultModel: defaultModel as unknown as DefaultModelServiceLike,
-      ownerPool: directOwnerPool,
+      // The Direct owner pool is built and owned inside the Direct runtime; it
+      // reads the ONE ownership-core release ledger through these two seams.
+      waitForRelease: ownership.waitForOwnerRelease,
+      currentOwner: () => ownership.owner(),
       // Behavior preserved: the same `composeAgent` wiring, now with the
       // runtime's Agent-scoped model-selection install.
       compose: (installSelection, presetId) =>
@@ -3519,7 +3505,7 @@ export function apply(ctx: Context, config: Config): void {
 
     const parkForkOwner = (handle: SessionHandle | undefined): void => {
       const owner = handle === undefined ? undefined : ownerHandleOf(handle) as AgentHandle | undefined
-      if (owner !== undefined) directOwnerPool.park(owner)
+      if (owner !== undefined) directRuntime.ownerPool.park(owner)
     }
     const forkNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
       isRewindIdentityCurrent({
@@ -3914,7 +3900,7 @@ export function apply(ctx: Context, config: Config): void {
       // all defined by this point — the resume that produced the live
       // agent ran after them). Without a live owner there is nothing to
       // retire; close the diagnostics handle either way (idempotent).
-      if (liveAgent !== undefined || liveHandle !== undefined || parkedDirectOwners.size > 0 || pendingForks.size > 0) {
+      if (liveAgent !== undefined || liveHandle !== undefined || directRuntime.hasParkedOwners() || pendingForks.size > 0) {
         await retireOwnedSession()
       } else {
         diag.dispose()
