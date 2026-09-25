@@ -3413,6 +3413,20 @@ export function registerTuiCommands(
     const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage | undefined
     try {
+      // A transition ALREADY pending when this invocation is about to enter the
+      // writer is refused up front (draft restored). Once the writer owns the
+      // barrier, a transition that starts LATER MUST wait for this writer to
+      // drain — `SessionOperationBarrier`'s writer-first contract — so there is
+      // deliberately NO transition re-check inside the section (a re-check
+      // would let a later transition cancel a writer that started first).
+      if (runner.sessionTransitionPending()) {
+        const merged = mergeDraft(app.getDraft(), line)
+        app.setEditorText(merged)
+        recordCommandDraftDisposition(commandId, 'restored')
+        return { kind: 'error', text: merged === line
+          ? 'a session transition is in progress — try again in a moment'
+          : 'the draft changed while transitioning — review it before submitting again' }
+      }
       // The whole image admission + commit runs inside the operation barrier
       // (transition drain) and, when the invocation references an image draft,
       // inside the SAME per-Agent serialization window as a `/model` selection
@@ -3421,18 +3435,10 @@ export function registerTuiCommands(
       const admission = await runner.withSessionWriter(agent.session.id, () =>
         runner.withPromptAdmission(agent, line, async (): Promise<
           | { readonly kind: 'stale' }
-          | { readonly kind: 'transition' }
           | { readonly kind: 'written'; readonly outcome: Awaited<ReturnType<typeof runner.sessionWriter.prompt>> | undefined }
         > => {
           skillSignal.throwIfAborted()
           if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) return { kind: 'stale' }
-          // The session-transition write fence (review round 5): while a
-          // transition is in flight the old agent may be woken again — a steer
-          // in that window would target a session whose lock is about to be
-          // released. Refuse WITHOUT injecting the body; the invocation line is
-          // restored to the editor (nothing is lost) and the user retries after
-          // the transition settles.
-          if (runner.sessionTransitionPending()) return { kind: 'transition' }
           userMessage = await runner.prepareDraftMessage(line)
           skillSignal.throwIfAborted()
           if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) return { kind: 'stale' }
@@ -3472,14 +3478,6 @@ export function registerTuiCommands(
           return { kind: 'written', outcome: await runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer') }
         }))
       if (admission.kind === 'stale') return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-      if (admission.kind === 'transition') {
-        const merged = mergeDraft(app.getDraft(), line)
-        app.setEditorText(merged)
-        recordCommandDraftDisposition(commandId, 'restored')
-        return { kind: 'error', text: merged === line
-          ? 'a session transition is in progress — try again in a moment'
-          : 'the draft changed while transitioning — review it before submitting again' }
-      }
       const outcome = admission.outcome
       if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
       if (outcome.kind !== 'committed') {

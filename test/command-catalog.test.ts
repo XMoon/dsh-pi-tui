@@ -16,6 +16,7 @@ import { createDiag } from '../src/diag.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../src/index.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
 import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
+import { SessionOperationBarrier } from '../src/session-operation-barrier.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -584,6 +585,73 @@ test('the explicit /skill path admits and commits inside the shared prompt-admis
   assert.deepEqual(prepareInside, [true], 'the skill admission runs inside the prompt-admission window')
   assert.deepEqual(admissionLines, ['/glab @image.png'], 'the whole invocation line reaches the window')
   assert.equal(delivered.length, 2, 'both ordered prompts were committed inside the window')
+  app.stop()
+})
+
+test('a transition started after the skill writer entered waits for the skill to commit', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered)
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => name === 'glab'
+      ? { name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+      : undefined,
+  } as never)
+  const runner = stubRunner(ctx, app, { agent })
+  let transitionPending = false
+  runner.sessionTransitionPending = () => transitionPending
+  const barrier = new SessionOperationBarrier()
+  runner.withSessionWriter = (sessionId, task) => barrier.runWriter(sessionId, async () => task())
+  const order: string[] = []
+  let releaseAdmission!: () => void
+  const admissionGate = new Promise<void>((resolve) => { releaseAdmission = resolve })
+  const prepare = runner.prepareDraftMessage
+  runner.prepareDraftMessage = async (text: string) => {
+    order.push('admission-start')
+    await admissionGate
+    order.push('admission-end')
+    return prepare(text)
+  }
+  const writer = runner.sessionWriter
+  const originalPrompt = writer.prompt
+  writer.prompt = async (sessionId, message, mode) => {
+    order.push('commit')
+    return originalPrompt(sessionId, message, mode)
+  }
+  registerTuiCommands(runner)
+  const skillDef = services.defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  const pending = (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab @image.png' })
+  // Wait until the skill owns the writer and is parked in the admission chain.
+  for (let attempt = 0; attempt < 200 && !order.includes('admission-start'); attempt += 1) {
+    await new Promise(resolveTick => setImmediate(resolveTick))
+  }
+  assert.ok(order.includes('admission-start'), 'the skill must have entered the writer and started admission')
+  // A transition now starts AFTER the writer entered: the barrier's writer-first
+  // contract requires it to WAIT for this writer to drain — it must not cancel
+  // an in-flight skill invocation. `transitionPending` becomes true only NOW, so
+  // an in-writer re-check (the reviewed defect) would abort this writer.
+  transitionPending = true
+  const transition = barrier.runTransition(async () => { order.push('transition-body') })
+  await new Promise(resolveTick => setImmediate(resolveTick))
+  assert.ok(!order.includes('transition-body'), 'the later transition waits for the skill writer')
+  releaseAdmission()
+  const result = await pending
+  await transition
+  assert.equal(result.kind, 'success')
+  assert.ok(order.indexOf('admission-end') < order.indexOf('commit'),
+    'the admission finishes before the commit')
+  assert.equal(order.filter(entry => entry === 'commit').length, 2,
+    'both ordered skill prompts commit inside the writer section')
+  assert.equal(order.at(-1), 'transition-body',
+    'every skill commit happens before the later transition body')
   app.stop()
 })
 
