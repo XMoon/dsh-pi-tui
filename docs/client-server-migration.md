@@ -13,6 +13,7 @@ M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, bas
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
 Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
+Pre-M3 TS Architecture Convergence  IN PROGRESS   (M3-oriented application-layer ownership convergence, NO behavior change — see the Pre-M3 TS Architecture Convergence status section)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -1527,6 +1528,42 @@ Host domain services
 
 It is explicitly NOT a private giant RPC and NOT a re-implemented
 Session/Job/Plugin Manager reducer.
+
+## Pre-M3 TS Architecture Convergence status (IN PROGRESS, no behavior change)
+
+This stage extracts the runner/composition/session/submission/surface
+ownership that M3 must touch out of the ~10.8k-line `src/index.ts`, so M3 is
+`transport + composition + lifecycle ownership wiring` instead of also a giant
+TypeScript restructure. It is structural only:
+
+- **No behavior change.** Transition order, writer/transition contract, fork
+  publication/adoption, image/model admission serialization, draft
+  restore/suppress rules, UI/UX, and the Extension public API are frozen.
+- **Production stays Direct.** `BackendKind` remains `direct`; there is no
+  `remote` backend branch, no runtime backend flag, no Remote attach, and no
+  Client Context production lifetime.
+- **M3 has NOT started.** The published semantic `Backend`, the `src/runtime/*-port.ts`
+  contracts, and the Remote adapter contract stay frozen; no new Backend verb
+  or DTO change is part of this stage.
+- **Ownership targets** (`src/app/**`): `bootstrap` (composition root),
+  `direct` (Direct application-side Host coupling + Direct-only facades),
+  `session` (session navigation/lifetime + opaque `SessionSubject` authority),
+  `submission` (TUI writer orchestration), `command` (TUI command-runner
+  facade), `surface` (TUI/backend-consumer wiring). `src/runtime/**` keeps its
+  semantic ports/adapters and must not import `src/app/**`.
+- **Machine-enforced direction.** `scripts/pre-m3-architecture-gate.mjs`
+  (`pnpm gate:architecture`) parses the TypeScript AST and rejects
+  `runtime → app`, Direct imports from any module that is not a composition
+  owner (`index.ts`, `app/bootstrap.ts`, `app/direct/**`, `runtime/**`) — the
+  §5.2 presentation boundary in enumeration-free form, with one type-only
+  historical exception allowlisted — Remote composition statically reachable
+  from `startup.ts`, and Direct adapter construction in `app/surface`. It is
+  separate from `scripts/client-boundary-gate.mjs`, which remains the
+  Host-coupling authority (see `docs/client-server-coupling.md`).
+
+Every implementation move re-exports any existing package-root export from
+`src/index.ts` (guarded by `test/public-entrypoint-compat.test.ts`); removing a
+root export is a separate API PR, never a side effect of this stage.
 
 ## Known coverage follow-ups
 

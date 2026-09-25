@@ -35,6 +35,42 @@
   the derives carry no Host type imports), and the runner (`src/index.ts`)
   wires the real services in — the two new `index.ts` baseline entries
   (`planMode`, `sandboxPolicy`) are exactly that wiring, not UI debt.
+- The **application-layer dependency direction** between the new `src/app/**`
+  owners, the frozen `src/runtime/**` semantic layer, and presentation modules
+  is enforced separately by `scripts/pre-m3-architecture-gate.mjs`
+  (`pnpm gate:architecture`, see the Pre-M3 TS Architecture Convergence status
+  in `docs/client-server-migration.md`). This file stays the Host-coupling
+  authority only; the two gates answer different questions.
+
+## Application-layer ownership target (Pre-M3 TS Architecture Convergence)
+
+The stage moves M3-critical runner ownership out of `src/index.ts` into
+`src/app/**`. Host business coupling is allowed only in
+`runtime/direct/**` and `app/direct/**`; the other application owners consume
+semantic ports / the `Backend` / narrow injected callbacks. Status below is
+`planned` until its slice lands.
+
+| Owner | Owns | Host coupling | Status |
+|---|---|---|---|
+| `src/app/direct/**` | Direct application-side composition deps, `DirectModelSelectionOwner`, Direct assistant-stream install facade, Direct-only scoped-catalog/stats facades | allowed (`ctx.get(...)` lives HERE) | planned (A1) |
+| `src/app/session/**` | current session subject/generation, transition gate + operation barrier ownership, ordinary create/open/switch and fork adoption orchestration, opaque `SessionSubject` authority | none | planned (A2) |
+| `src/app/submission/**` | submit/queue/steer writer orchestration, writer-barrier admission, prompt admission, draft restore/consume, Host-command orchestration | none | planned (A3) |
+| `src/app/command/**` | `TuiCommandRunner` facade implementation over session/submission/backend/surface | none | planned (A3) |
+| `src/app/surface/**` | `TuiApp` construction/start/dispose, pending input, task/job/plugin wiring, status/transcript/search refresh coordination, extension `SurfaceHost` attachment | none | planned (A4) |
+| `src/app/bootstrap.ts` | runner composition root: construct/connect/install lifetime/dispose | none | planned (A5) |
+
+`src/runtime/**` (semantic ports, `backend.ts`, `direct/**`, `remote/**`) keeps
+its current coupling and must not import `src/app/**`. Only `src/index.ts`,
+`src/app/bootstrap.ts`, `src/app/direct/**` and `src/runtime/**` may import
+`app/direct/**` / `runtime/direct/**` — every other module (the non-Direct
+application owners `app/session`, `app/submission`, `app/command`, `app/surface`,
+and all presentation such as `tui-app.ts`, `transcript.ts`, `present.ts`,
+`footer/**`, `components/**`) consumes semantic DTOs / Backend ports / narrow
+injected callbacks; the single proven historical exception is the type-only
+`legacy-settings-migration.ts` import, recorded in the gate allowlist (a value
+import of the same target still fails). `app/surface/**` must not construct
+Direct adapters, and experimental Remote composition must not be statically
+reachable from `startup.ts`.
 
 ## Categories
 
