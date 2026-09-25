@@ -118,10 +118,13 @@ export class RemoteJobObservationPort implements JobObservationPort {
     try {
       acquire()
     } catch (error) {
-      // The official ClientJobs creates the roster/observation stream inside
-      // the FIRST acquire, so `watchRows`/`observe` can throw synchronously
-      // while the connection/Context tears down. A partially acquired observer
-      // must never leak: release everything acquired before re-throwing.
+      // Defensive structural hardening: the source's acquisition calls may
+      // fail synchronously, and this adapter must not depend on them never
+      // throwing. (In the pinned rc.2 the carrier failure of a ClientJobs
+      // stream surfaces asynchronously through the stream consumer, but that
+      // is an implementation detail, not a contract.) A partially acquired
+      // observer must never leak: release everything acquired before
+      // re-throwing.
       closed = true
       for (const release of owned.splice(0)) release()
       throw error
