@@ -22,7 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/app/direct/runtime
  */
 
-import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Diag } from '../../diag.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { Backend } from '../../runtime/backend.ts'
@@ -43,6 +43,8 @@ import type {
   CompositionLike,
   DirectOwnerPoolLike,
 } from '../../runtime/direct/session-lifecycle-direct.ts'
+import { createDirectOwnerRegistry, type DirectOwnerRegistry } from './owner-registry.ts'
+import type { SessionOwnerRef } from '../session/subject.ts'
 
 /** The interactive continuable child currently mounted by a viewer. */
 export interface DirectViewedQueueAgent {
@@ -82,8 +84,16 @@ export interface DirectApplicationRuntimeDeps {
   readonly tuiSettings: TuiSettingsConfig | undefined
   /** The persisted default-model service. */
   readonly defaultModel: DefaultModelServiceLike
-  /** The Direct Session ownership pool (lifecycle retirement/claim). */
-  readonly ownerPool: DirectOwnerPoolLike
+  /**
+   * The ownership core's owner-release seam. The Direct owner pool is built and
+   * owned HERE; it reads the ONE ledger through this callback.
+   */
+  readonly waitForRelease: (sessionId: string) => Promise<void>
+  /**
+   * The ownership core's current opaque owner (read-only). The owner registry
+   * uses it for the A2-transitional `currentDirectAttachment()` projection.
+   */
+  readonly currentOwner: () => SessionOwnerRef | undefined
   /**
    * Build one preset composition, installing the runtime's Agent-scoped model
    * selection during setup. The runner supplies its `composeAgent` closure; the
@@ -122,6 +132,14 @@ export interface DirectApplicationRuntime {
     readonly isCurrentAgent: (agent: unknown) => boolean
     readonly onInput: (input: AssistantLiveInput) => void
   }) => AssistantStreamDirectHandle
+  /** The Direct Session ownership pool (lifecycle retirement/claim). */
+  readonly ownerPool: DirectOwnerPoolLike
+  /** The Direct Agent↔OwnerRef registry (opaque owner mapping + A2 escapes). */
+  readonly owners: DirectOwnerRegistry
+  /** Whether any Direct owner handle is currently parked for a future reopen. */
+  hasParkedOwners(): boolean
+  /** Drain every parked Direct owner for the exit retirement (Direct-only). */
+  takeAllParkedOwners(): Array<{ agent: Agent; handle: AgentHandle }>
 }
 
 /**
@@ -167,12 +185,34 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     flushSession: (session: unknown): Promise<void> => deps.resolvers.flushSession(session),
   }
 
+  // The Direct owner pool is built and owned HERE (plan A2 §3.3): it keeps the
+  // parked AgentHandle map and reads the ONE release ledger through the core's
+  // `waitForRelease` seam. The runner never sees the pool's storage.
+  const parkedDirectOwners = new Map<string, AgentHandle>()
+  const ownerPool: DirectOwnerPoolLike = {
+    claim: sessionId => {
+      const handle = parkedDirectOwners.get(sessionId)
+      if (handle !== undefined) parkedDirectOwners.delete(sessionId)
+      return handle
+    },
+    park: handle => {
+      const sessionId = String(handle.agent.session.id)
+      const previous = parkedDirectOwners.get(sessionId)
+      if (previous !== undefined && previous !== handle) throw new Error(`duplicate parked Direct owner for session "${sessionId}"`)
+      parkedDirectOwners.set(sessionId, handle)
+    },
+    waitForRelease: deps.waitForRelease,
+  }
+  // The ONE Direct Agent↔OwnerRef registry. `currentDirectAttachment()` reads
+  // the core's current owner live on every call (A2 transitional projection).
+  const owners = createDirectOwnerRegistry(deps.currentOwner)
+
   const backend = createDirectRuntimeBackend({
     ctx: deps.ctx,
     diag: deps.diag,
     tuiSettings: deps.tuiSettings,
     modelSelections,
-    ownerPool: deps.ownerPool,
+    ownerPool,
     compose: (presetId) => compose(presetId),
     agentFor,
     queueAgentFor,
@@ -209,5 +249,16 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     registeredAgentFor: deps.registeredAgentFor,
     withPromptAdmission,
     installAssistantStream,
+    ownerPool,
+    owners,
+    hasParkedOwners: () => parkedDirectOwners.size > 0,
+    takeAllParkedOwners: () => {
+      const drained: Array<{ agent: Agent; handle: AgentHandle }> = []
+      for (const [sessionId, handle] of parkedDirectOwners) {
+        drained.push({ agent: handle.agent, handle })
+        parkedDirectOwners.delete(sessionId)
+      }
+      return drained
+    },
   }
 }
