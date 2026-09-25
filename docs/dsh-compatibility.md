@@ -197,6 +197,16 @@ pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 pnpm compat:dsh:npm
 ```
 
+The isolated P1 profile smoke installs the packed candidate plus a probe bundle
+into a throwaway `DSH_HOME` and boots the real TUI on the published `0.1.7-rc.2`
+family; the probe proves that the bundle's `job-controller` row composed
+(`ctx.jobController`), that `follow()` opens for a real registered Job, and that
+observing it never advances the model-facing `jobs.read()` cursor:
+
+```sh
+pnpm smoke:p1-profile -- <candidate.tgz>
+```
+
 A dirty local DSH tree is allowed only with a visible reproducibility warning;
 CI requires a clean checkout. Source-only overrides and generated manifests are
 removed with the temporary validation workspace and must never be committed to
