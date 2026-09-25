@@ -1549,9 +1549,11 @@ TypeScript restructure. It is structural only:
   application composition POLICY and facades (the ONE `DirectModelSelectionOwner`,
   the `agentFor`/`queueAgentFor` selection logic, the semantic `Backend` call and
   the Direct assistant-stream install); `src/index.ts` keeps the
-  `liveAgent`/`viewedQueueAgent` state, passes live getters, and still supplies
-  the concrete Host lookups (`agents.get`/`sessions.get`) for the resolver
-  callbacks, so no second current-session truth exists.
+  `liveAgent`/`viewedQueueAgent` state and passes live getters, and in A1 still
+  supplies the concrete Host lookups (`agents.get`/`sessions.get`) for the
+  resolver callbacks. Those lookups belong to `app/direct`'s Direct composition
+  seam (A5 moves them behind it); `app/bootstrap` only connects owners and is not
+  a Host-coupling zone. No second current-session truth exists.
 - **Ownership targets** (`src/app/**`): `bootstrap` (composition root),
   `direct` (Direct application-side Host coupling + Direct-only facades),
   `session` (session navigation/lifetime + opaque `SessionSubject` authority),
