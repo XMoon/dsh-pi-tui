@@ -22,7 +22,7 @@ interface DirectPendingMessageLike {
 }
 
 /** The minimal live Agent shape for this Direct adapter. */
-interface DirectPendingAgentLike {
+export interface DirectPendingAgentLike {
   readonly status: string
   readonly session: { readonly id: string }
   readonly inbox: {
