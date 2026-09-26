@@ -66,15 +66,22 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
   // turn/end is outcome recording only).
   assert.equal(surfaceSource.split('completionController.onAgentStatus').length - 1, 1,
     'the surface must expose exactly one controller feed')
-  const occurrences = indexSource.split('surface.onAgentStatus(').length - 1
-  assert.equal(occurrences, 1, 'exactly one runner feed path — agent/status')
-  const marker = "ctx.on('agent/status', ({ agent, status }) => {"
-  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 900)
-  assert.ok(handler.includes('surface.onAgentStatus(agent.id, status)'),
+  // A4-7: the routing decision is surface-owned; the runner keeps a thin
+  // delegation. The single controller feed is inside the surface routing body.
+  assert.equal(indexSource.split('surface.routeAgentStatus(').length - 1, 1,
+    'exactly one runner registration delegates to the surface routing')
+  const marker = "ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))"
+  assert.ok(indexSource.includes(marker),
+    'the agent/status handler must delegate to the surface routing')
+  const routing = surfaceSource.slice(
+    surfaceSource.indexOf('const routeAgentStatus = '),
+    surfaceSource.indexOf('const routeProviderRefresh = '),
+  )
+  assert.ok(routing.includes('feedCompletionStatus(agentId, status)'),
     'the agent/status handler must route the main agent to the controller')
-  assert.ok(handler.includes('if (!surface.hasTask(agent.id)) return'),
+  assert.ok(routing.includes('if (!taskHasChild(agentId)) return'),
     'the child membership gate must stay (children never notify and never repaint)')
-  assert.ok(handler.includes('surface.refreshAgentRuntimeOnly()'),
+  assert.ok(routing.includes('refreshAgentRuntimeOnly()'),
     'the child runtime refresh must stay')
 })
 

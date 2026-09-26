@@ -15,6 +15,10 @@ const coreSource = readFileSync(new URL('../src/app/session/ownership-core.ts', 
 const runtimeSource = readFileSync(new URL('../src/app/direct/runtime.ts', import.meta.url), 'utf8')
 const retirementSource = readFileSync(new URL('../src/app/direct/owner-retirement.ts', import.meta.url), 'utf8')
 const sessionRuntimeSource = readFileSync(new URL('../src/app/session/runtime.ts', import.meta.url), 'utf8')
+// A4-7: the presentation event routing moved into the surface owner, so the
+// currentness locks below are anchored to the surface routing bodies and the
+// runner's injected core read.
+const surfaceSource = readFileSync(new URL('../src/app/surface/runtime.ts', import.meta.url), 'utf8')
 
 test('the runner keeps NO local ownership authority (A2-2 cutover)', () => {
   assert.ok(!/\blet liveAgent\b/.test(indexSource), 'no local liveAgent declaration')
@@ -104,36 +108,47 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the Job listing reads the SAME core session id')
   assert.ok(!readJobs.includes('agentNow('), 'readJobs must not read the Direct attachment')
 
-  // session/event main routing: the captured variable and the gate in ONE span
-  const eventRouting = span('const ownerSessionId = ownership.currentSessionId()',
-    'applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event)')
+  // session/event main routing (A4-7): the gate moved into the surface owner;
+  // the runner injects the core session id. Gate + injection in ONE assertion
+  // each, so neither side can drift.
+  const eventRouting = spanOf(surfaceSource, 'const ownerSessionId = source.currentSessionId()',
+    'main.applyToolPreview(event)')
   assert.ok(eventRouting.includes('if (session.id !== ownerSessionId) return'),
-    'the main routing gate uses the CORE-captured session id')
-  assert.ok(!/const ownerSessionId = [^o]/.test(eventRouting),
-    'ownerSessionId must be assigned from the ownership core only')
+    'the main routing gate uses the injected session id')
+  assert.ok(!/const ownerSessionId = [^s]/.test(eventRouting),
+    'ownerSessionId must be assigned from the injected core read only')
+  assert.ok(indexSource.includes('currentSessionId: () => ownership.currentSessionId()'),
+    'the runner must inject the ownership-core session id')
 
-  // assistant-stream input gate: source + gate in ONE span
-  const onInput = span('onInput: (input) => {', 'assistantStreamBaselineFor = ')
-  assert.ok(onInput.includes('const sessionId = ownership.currentSessionId()'),
-    'the assistant-stream input takes its session id from the core')
+  // assistant-stream input gate (A4-7): the surface owns the routing; source +
+  // gate in ONE span.
+  const onInput = spanOf(surfaceSource, 'const applyAssistantInput = ', 'const applyResumedCompaction = ')
+  assert.ok(onInput.includes('const sessionId = source.currentSessionId()'),
+    'the assistant-stream input takes its session id from the injected core read')
   assert.ok(onInput.includes('if (sessionId === undefined || input.sessionId !== sessionId) return'),
     'the assistant-stream input gate uses the SAME core session id')
   assert.ok(!onInput.includes('agentNow('), 'the assistant-stream input gate must not read the Direct attachment')
 
   // exact-Agent identity helper + assistant-stream current check
-  assert.ok(indexSource.includes('if (isCurrentOwnerAgent(subject)) return true'),
-    'the exact-Agent main-surface check resolves the identity from the core owner')
+  assert.ok(surfaceSource.includes('if (source.isCurrentOwnerAgent(subject)) return true'),
+    'the exact-Agent main-surface check resolves the identity through the injected helper')
   const helper = span('const isCurrentOwnerAgent = ', '// The semantic backend')
   assert.ok(helper.includes('const owner = ownership.owner()') && helper.includes('attachmentOf(owner)?.agent === candidate'),
     'the exact-Agent identity helper starts from the core owner')
+  assert.ok(indexSource.includes('isCurrentOwnerAgent: (agent) => isCurrentOwnerAgent(agent as Agent)'),
+    'the runner must inject its exact-Agent identity helper')
 
-  // agent/status ownership: owner + completion identity in ONE span
-  const agentStatus = span("ctx.on('agent/status'", '// Provider-topology and credential events')
-  assert.ok(agentStatus.includes('const currentAgentId = owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)'),
-    'the agent/status ownership check resolves the completion identity from the core owner')
-  assert.ok(agentStatus.includes('agent.id === currentAgentId'),
+  // agent/status ownership (A4-7): owner + completion identity in ONE span in
+  // the surface; the runner injects the core-derived completion identity.
+  const agentStatus = spanOf(surfaceSource, 'const routeAgentStatus = ', 'const routeProviderRefresh = ')
+  assert.ok(agentStatus.includes('const currentAgentId = source.completionOwnerId()'),
+    'the agent/status ownership check resolves the injected completion identity')
+  assert.ok(agentStatus.includes('agentId === currentAgentId'),
     'the agent/status main branch compares against the core-derived completion identity')
   assert.ok(!agentStatus.includes('agentNow('), 'agent/status must not read the Direct attachment')
+  assert.ok(indexSource.includes('completionOwnerId: () => {')
+    && indexSource.includes('directRuntime.owners.completionIdentity(owner)'),
+    'the runner must inject the completion identity from the core owner')
 
   // No identity/currentness judgement may use the Direct attachment as the
   // authority (existence checks like `agentNow() === undefined` are fine).

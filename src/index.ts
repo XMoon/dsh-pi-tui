@@ -126,7 +126,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { isEmptyAcceleratedViewerSubmit, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TranscriptSearchCloseReason, type TuiApp, type TuiAppEvents } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TranscriptSearchCloseReason, type TuiApp, type TuiAppEvents } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
@@ -1380,131 +1380,16 @@ function timedBootstrapScan<T>(diag: Diag, name: string, eventCount: number, sca
   return result
 }
 
-/** One fold of a compaction lifecycle event over the runner's in-flight
- * compaction state. Pure (the firehose applies the returned surface
- * effects): dsh-compaction is not a peer, so the event is read
- * structurally. */
-export interface CompactionFold {
-  /** The updated in-flight compaction id (the newest start wins). */
-  id: string | undefined
-  /** compaction/start: the compacting flag turns ON (footer/working row). */
-  active: boolean
-  /** A MATCHED compaction/end: the compacting flag turns OFF and busy is
-   * re-derived from the turn log (a stale end never clears a newer
-   * compaction's state). */
-  clear: boolean
-  /** The compaction phase the event implies: compaction/start →
-   * 'summarizing', a MATCHED compaction/summary → 'applying'. Undefined
-   * when the event does not advance the phase (a stale summary, any
-   * compaction/end — the settle clears via {@link clear}). */
-  phase?: Exclude<CompactionPhase, 'idle'>
-  /** The settle notification for compaction/end, when one fires. */
-  notify: { text: string; kind: 'info' | 'error' } | undefined
-}
-
-/** Fold one compaction lifecycle event over the in-flight state. */
-export function foldCompactionEvent(
-  state: { id: string | undefined },
-  event: { type: string; data: { compactionId?: unknown; error?: unknown } },
-): CompactionFold {
-  if (event.type === 'compaction/start') {
-    return {
-      id: typeof event.data.compactionId === 'string' ? event.data.compactionId : undefined,
-      active: true,
-      clear: false,
-      phase: 'summarizing',
-      notify: undefined,
-    }
-  }
-  if (event.type === 'compaction/summary') {
-    // ONLY a summary matching the in-flight compaction advances the phase
-    // to 'applying': a stale summary (another compaction's, or an id-less
-    // orphan) must not flip the label while the current compaction is
-    // still summarizing.
-    const matched = typeof event.data.compactionId === 'string' && event.data.compactionId === state.id
-    return {
-      id: state.id,
-      active: false,
-      clear: false,
-      phase: matched ? 'applying' : undefined,
-      notify: undefined,
-    }
-  }
-  if (event.type === 'compaction/end') {
-    const error = typeof event.data.error === 'string' && event.data.error !== '' ? event.data.error : undefined
-    // ONLY an end whose id matches the in-flight compaction settles it:
-    // a stale end (another compaction's, or an id-less orphan from a
-    // foreign/corrupt log) must neither clear the state nor notify.
-    const matched = typeof event.data.compactionId === 'string' && event.data.compactionId === state.id
-    return {
-      id: matched ? undefined : state.id,
-      active: false,
-      clear: matched,
-      notify: matched
-        ? {
-          text: error === undefined ? 'Context compacted' : `Compaction failed: ${error}`,
-          kind: error === undefined ? 'info' : 'error',
-        }
-        : undefined,
-    }
-  }
-  return { id: state.id, active: false, clear: false, notify: undefined }
-}
-
-/** The minimal compaction-settle surface the runner passes in — STRUCTURAL
- * on purpose: referencing the full {@link TuiApp} class from a public
- * export would inline the whole surface (and its internal registry/
- * presentation dependencies) into the published declaration bundle. The
- * settle contract only needs the three phase/busy/working setters. */
-export interface CompactionSettleSurface {
-  setCompactionPhase(phase: 'idle'): void
-  setBusy(busy: boolean): void
-  setWorking(busy: boolean): void
-}
-
-/** The UI side effects of a MATCHED compaction settle: clear the phase,
- * hand the working row back to the turn state, and re-measure the session
- * surface so the footer context reflects the compacted log IMMEDIATELY —
- * the next step/start or turn/end would otherwise delay the refresh.
- * Exported as a seam so the settle contract is testable without a full
- * runner driver (the firehose closure is not). */
-export function settleCompactionSurface(
-  app: CompactionSettleSurface,
-  refreshStatus: () => void,
-  busyNow: boolean,
-): void {
-  app.setCompactionPhase('idle')
-  app.setBusy(busyNow)
-  app.setWorking(busyNow)
-  refreshStatus()
-}
-
-/** The busy flag after a turn-boundary event: a turn end must NOT clear
- * the busy state while a compaction is still in flight — an interrupted
- * turn can close (turn/end) before its compaction settles, and the
- * single-Esc cancel must stay armed until compaction/end. */
-export function busyAfterTurnBoundary(eventType: 'turn/start' | 'turn/end', compacting: boolean): boolean {
-  return eventType === 'turn/start' || compacting
-}
-
-/** PR D2 test seam: whether a session event type marks the model-visible
- * context dirty (re-measure through the SessionReader port) or only
- * repaints cheaply (cached measurement). The firehose routes every event
- * through this classification — the single source of truth for the
- * status/measurement split. `compaction/end` is classified 'measure' but
- * the firehose deliberately SKIPS it here: a matched compaction settle
- * re-measures through the fold-outcome path (settleCompactionSurface), so
- * a STALE compaction/end can never trigger a measurement. */
-export function contextRefreshKind(eventType: string): 'measure' | 'cheap' {
-  switch (eventType) {
-    case 'step/start':
-    case 'turn/end':
-    case 'compaction/end':
-      return 'measure'
-    default:
-      return 'cheap'
-  }
-}
+// A4-7: the compaction/context presentation folds moved to the surface
+// routing owner (plan §16); the root entry point re-exports them unchanged so
+// the published package surface stays byte-compatible.
+export {
+  foldCompactionEvent,
+  settleCompactionSurface,
+  busyAfterTurnBoundary,
+  contextRefreshKind,
+} from './app/surface/presentation-folds.ts'
+export type { CompactionFold, CompactionSettleSurface } from './app/surface/presentation-folds.ts'
 
 /**
  * The in-flight compaction state a resumed session log implies: the newest
@@ -3701,9 +3586,6 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
     const callArgs = new Map<ToolCallId, string>()
-    // The in-flight compaction's id (paired start/end in the firehose): a
-    // stale end must never clear a NEWER compaction's footer/busy state.
-    let compactingId: string | undefined
     // Transcript-search state (see the onSearch* events below). Matches are
     // LIGHTWEIGHT occurrence identities (representative id + semantic source +
     // ordinals — never full message objects): the full-history search runs
@@ -7090,12 +6972,9 @@ export function apply(ctx: Context, config: Config): void {
       // A resumed session may be mid-compaction. Reset the old phase first;
       // then re-arm only the newest live bracket, matching the log fold.
       const resumedCompaction = timedBootstrapScan(diag, 'compaction', events.length, () => compactingFromLog(events))
-      compactingId = resumedCompaction.id
-      app.setCompactionPhase(resumedCompaction.active ? 'summarizing' : 'idle')
-      if (resumedCompaction.active) {
-        app.setBusy(true)
-        app.setWorking(true)
-      }
+      // A4-7: the `compactingId` routing state and the phase/busy/working
+      // presentation are surface-owned (plan §16).
+      surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
       app.clearLocalMessages()
       app.clearNotify() // a notice from the previous session is stale here
       // Issue #8: a stale keyboard exit confirmation must not exit the NEW
@@ -7760,19 +7639,72 @@ export function apply(ctx: Context, config: Config): void {
       app.notify(resumeFailure, 'error')
       resumeFailure = undefined
     }
-    ctx.on('session/event', (session, event) => {
-      if (cleanedUp) return
-      const attachedSession = sessions.get(session.id)
-      if (attachedSession !== undefined && attachedSession !== session) return
-      // Opening journals fence presentation only. Runtime bookkeeping must
-      // continue to observe the target for selections, approvals, and cleanup.
-      const openingTarget = surface.openingJournal.isOpening(session.id)
-      // The retiring committed Agent remains authoritative until quiesce
-      // completes; the published opening target may also emit before commit.
-      const mainEvent = session.id === ownership.currentSessionId() || openingTarget
-      const runtimeAgent = mainEvent ? agents.get(SessionId(session.id)) as Agent | undefined : undefined
-      let settledViewChildId: SessionId | undefined
-      if (mainEvent) {
+    // A4-7 (plan §16): the presentation event routing is SURFACE-owned. The
+    // runner keeps only the Cordis registration below (a thin delegation) plus
+    // the Direct assistant-stream INSTALL and the Direct/domain bookkeeping
+    // supplied through this narrow capability bundle.
+    const mainPresentation = {
+      get folder() { return folder },
+      get stats() { return statsFolder },
+      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event),
+    }
+    const viewedChildPresentation = {
+      get id() { return viewing!.id },
+      get folder() { return viewing!.folder },
+      get stats() { return viewing!.stats },
+      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(viewing!.previews, viewing!.folder, event),
+      beginTurn: () => {
+        const target = viewing!
+        target.activity = 'running'
+        // A cold child or same-session rollover becomes queue-authorized
+        // at its lifecycle boundary, before the first assistant frame.
+        const current = agents.get(target.id)
+        target.viewAgent = current
+        setViewedQueueAgent(current)
+      },
+      endTurn: () => { viewing!.activity = 'inactive' },
+      refreshFooter: () => refreshViewerFooter(),
+    }
+    /** The compaction settle's log-end working read: the runner owns the
+     *  live-session log read; the surface only decides WHEN the settle
+     *  re-measures. */
+    const currentWorkingFromLog = (): boolean => {
+      const agent = agentNow()
+      return agent === undefined ? false : workingFromLog(agent.session.snapshotEvents())
+    }
+    /** Persist one completed turn (Direct/domain persistence stays runner-owned). */
+    const flushTurn = (): void => {
+      const agent = agentNow()
+      if (agent === undefined) return
+      const flushed = agent.session
+      runDetached('turn flush', () => sessions.flush(flushed), {
+        diag,
+        sessionId: () => flushed.id,
+        notify: (message) => app.notify(
+          `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
+          'error',
+        ),
+        recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+      })
+    }
+    surface.attachEventRouting({
+      isCleanedUp: () => cleanedUp,
+      isAttachedSession: (session) => {
+        const attachedSession = sessions.get(SessionId(session.id))
+        return attachedSession === undefined || attachedSession === session
+      },
+      currentSessionId: () => ownership.currentSessionId(),
+      hasLiveAgent: () => agentNow() !== undefined,
+      completionOwnerId: () => {
+        const owner = ownership.owner()
+        return owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)
+      },
+      // Direct bookkeeping (plan §16): model-selection observation, the
+      // request-header consume, the call-args cache, the pending-subagent feed
+      // and the viewed-child settle map all stay runner-owned.
+      observeMainEvent: (sessionId, event) => {
+        const runtimeAgent = agents.get(SessionId(sessionId)) as Agent | undefined
+        let settledViewChildId: SessionId | undefined
         const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
         if (selectionEvent.type === 'model/selection') {
           if (runtimeAgent !== undefined) directRuntime.modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
@@ -7813,208 +7745,60 @@ export function apply(ctx: Context, config: Config): void {
           settledViewChildId = viewCallToChild.get(callId)
           viewCallToChild.delete(callId)
         }
-      }
-       if (openingTarget && (viewing === undefined || viewing.id !== session.id)) {
-         surface.openingJournal.record(session.id, event)
-         return
-       }
-       const opening = openingViewer
-       if (opening !== undefined && viewerOpen.isCurrent(opening.request) && session.id === opening.childId) {
-         opening.events.push(event)
-         return
-       }
-       // The subagent viewer follows its own session's events; everything
-      // else routes to the live agent's folder as before. Without a live
-      // session (deferred start) there is nothing to route to.
-      const agent = agentNow()
-      if (agent === undefined) return
-      const ownerSessionId = ownership.currentSessionId()
-      if (viewing !== undefined) {
-        if (session.id === viewing.id) {
-          applyOwnerStreamingToolPreviewEvent(viewing.previews, viewing.folder, event)
-          viewing.folder.apply([event])
-          viewing.stats.apply([event])
-          // The store-activity snapshot moves with the child's own
-          // lifecycle: a turn starting means the child is live again
-          // (cold resume), a turn ending parks it. The footer's activity
-          // field follows, so an inactive child that cold-resumes shows
-          // running while it streams.
-          if (event.type === 'turn/start') {
-            viewing.activity = 'running'
-            // A cold child or same-session rollover becomes queue-authorized
-            // at its lifecycle boundary, before the first assistant frame.
-            const current = agents.get(viewing.id)
-            viewing.viewAgent = current
-            setViewedQueueAgent(current)
-          } else if (event.type === 'turn/end') viewing.activity = 'inactive'
-          schedulePaint()
-          // The child's turn/step/stats counters move at step boundaries
-          // (the stats fold counts at step/end) — the footer follows then,
-          // never on every streaming delta. A turn START also refreshes so
-          // the activity flips to running the moment a cold resume begins.
-          if (event.type === 'turn/start' || event.type === 'step/end' || event.type === 'turn/end') refreshViewerFooter()
-          if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(refreshPendingInput)
-          if (event.type === 'turn/end') paintNow()
-          return
+        return settledViewChildId
+      },
+      // The opening viewer's buffer stays runner-owned (`openingViewer` /
+      // `viewerOpen`); the surface owns the decision to route into it.
+      appendOpeningViewerEvent: (sessionId, event) => {
+        const opening = openingViewer
+        if (opening !== undefined && viewerOpen.isCurrent(opening.request) && sessionId === opening.childId) {
+          opening.events.push(event)
+          return true
         }
-        // Any OTHER session's events (the live agent's) keep routing to the
-        // main folder below — the viewer never starves the main transcript.
-      }
-      if (session.id !== ownerSessionId) return
-      applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event)
-
-      if (event.type === 'tool/result') {
-        const childId = settledViewChildId
-        const popAfterApply = childId !== undefined && viewing !== undefined && viewing.id === childId
-        if (popAfterApply) {
-          // The event below lands in the main folder FIRST so the pop shows
-          // the settled card, not the running one.
-          folder.apply([event])
-          statsFolder.apply([event])
-          exitView()
-          return
-        }
-      }
-      folder.apply([event])
-      statsFolder.apply([event])
-      // The goal badge folds incrementally: the newest goal/change event
-      // decides, so one event is enough (clear/completed hide the badge).
-      if (event.type === 'goal/change') goalText = foldGoal([event])
-      // Permission knob events (preset/policy/mode) carry no transcript
-      // content, so they must not schedule a repaint: the repaint would call
-      // setTranscript and wipe an in-flight notify (e.g. the
-      // "permission: …" notice) ~REPAINT_FLUSH_MS after the switch, making
-      // it flash. The footer badge refresh below repaints the status line
-      // instead, and the next real session event repaints the transcript.
-      const isKnob = event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode'
-      if (!isKnob) schedulePaint()
-      if (event.type === 'todo/write') app.setTodoSummary(event.data.todos)
-      if (event.type === 'plan/mode') app.setPlanMode(event.data.active)
-      if (event.type === 'session/title') app.setSessionTitle(foldSessionTitle([event])?.title)
-      // A permission switch (command, Shift+Tab, settings panel) lands as
-      // knob events between turns: refresh the footer mode badge right away
-      // instead of waiting for the next step/turn boundary.
-      if (isKnob) {
-        // Knob events are UI-only: the permission badge repaints from
-        // cached facts — never a context measurement.
+        return false
+      },
+      main: () => mainPresentation,
+      viewedChildId: () => viewing?.id,
+      viewedChild: () => viewedChildPresentation,
+      schedulePaint: () => schedulePaint(),
+      paintNow: () => paintNow(),
+      exitView: () => { exitView() },
+      refreshPendingInput: () => refreshPendingInput(),
+      refreshStatusCheap: () => refreshStatusCheap(),
+      refreshStatusAndWelcome: () => {
         refreshStatusCheap()
-      }
-      // Every durable inbox mutation (followup, steer, splice) commits
-      // an agent/inbox/spliced event. The upstream Inbox commits the event
-      // BEFORE its live projection mutates (synchronous observers see the
-      // pre-splice lists), so the pane must read the inbox on the next
-      // microtask — after the splice has actually landed. This is also the
-      // FIRST authoritative signal a submission reached the session: the
-      // local ack row and the latency timeline settle here.
-      if (event.type === 'agent/inbox/spliced') {
-        settleLocalSubmitAck('inbox inserted')
-        submitLatencyTracker.mark(agent.session.id, 'inbox.inserted')
-        queueMicrotask(refreshPendingInput)
-      }
-      // The user message committing to the session is the ack row's
-      // AUTHORITATIVE clear (the host pre-step can delay it well past the
-      // inbox insert); the first assistant chunk stamps the provider's
-      // first-token latency once per turn.
-      if (event.type === 'user/message') {
-        settleLocalSubmitAck('user message')
-        submitLatencyTracker.mark(agent.session.id, 'user.message')
-        // The durable human prompt is now applied to the transcript folder:
-        // retire the matching local submission echo by identity. The `source`
-        // is read structurally here and never routed into the shared
-        // presentation port.
-        const source = (event.data as { readonly source?: unknown }).source as
-          | { readonly kind?: unknown; readonly rpcId?: unknown }
-          | undefined
-        if (source?.kind === 'user' && typeof source.rpcId === 'string') {
-          pendingSubmissions.observeDurable(source.rpcId)
-          // Paint the durable replacement into the message tree FIRST, then
-          // retire the local echo in the same frame: removing the lane before
-          // the durable row is paintable would leave one blank frame.
-          paintNow()
-          refreshPendingInput()
+        updateWelcomeCard()
+      },
+      applyGoalChange: (event) => { goalText = foldGoal([event]) },
+      sessionTitleOf: (event) => foldSessionTitle([event])?.title,
+      settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
+      markSubmitLatency: (sessionId, phase) => { submitLatencyTracker.mark(sessionId, phase) },
+      observeDurableSubmission: (rpcId) => pendingSubmissions.observeDurable(rpcId),
+      markContextDirty: () => markContextDirty(),
+      refreshContextMeasurement: (reason) => refreshContextMeasurement(reason),
+      currentWorkingFromLog,
+      flushTurn,
+      // The assistant-stream routing's exact-Agent facts (never a Direct import
+      // in the surface).
+      registeredAgentIs: (sessionId, agent) => directRuntime.registeredAgentFor(sessionId) === agent,
+      isCurrentOwnerAgent: (agent) => isCurrentOwnerAgent(agent as Agent),
+      viewedChildAgent: () => viewing?.viewAgent,
+      setViewedChildAgent: (agent) => { if (viewing !== undefined) viewing.viewAgent = agent as Agent },
+      setViewedQueueAgent: (agent) => setViewedQueueAgent(agent as Agent),
+      agentForSession: (sessionId) => agents.get(SessionId(sessionId)),
+      applyViewedChildAssistantInput: (input) => {
+        const target = viewing
+        if (target === undefined) return
+        applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
+      },
+      applyMainAssistantInput: (input, sessionId) => {
+        applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
+        if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
+          submitLatencyTracker.mark(sessionId, 'assistant.first')
         }
-      }
-      // Compaction lifecycle (dsh-compaction is not a peer — the event
-      // data is read structurally): the working row advertises the
-      // compaction phase (summarizing → applying), the busy flag covers
-      // the single-Esc cancel (pi parity), and the settle notifies. The
-      // compactionId pairs start/end so a stale end can never clear a
-      // NEWER compaction's state (foldCompactionEvent).
-      const compacted = foldCompactionEvent({ id: compactingId }, event as never)
-      compactingId = compacted.id
-      if (compacted.phase === 'summarizing') {
-        app.setCompactionPhase('summarizing')
-        // Busy while compacting: a single Esc cancels the compaction (pi
-        // parity — compaction rides the turn signal).
-        app.setBusy(true)
-      }
-      if (compacted.phase === 'applying') {
-        app.setCompactionPhase('applying')
-      }
-      if (compacted.clear) {
-        // The compacted replacement has committed to the live session
-        // surface: re-measure context immediately so the footer reflects
-        // the new surface without waiting for the next step/start or
-        // turn/end. The working row hands back to the turn state: a
-        // turn-enclosed compaction keeps the turn animation, a standalone
-        // one clears.
-        // Compaction rewrites the model-visible surface: re-measure NOW
-        // (the footer would otherwise show stale pressure until the next
-        // step/start or turn/end).
-        settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(agent.session.snapshotEvents()))
-      }
-      if (compacted.notify !== undefined) app.notify(compacted.notify.text, compacted.notify.kind)
-      // PR D2: route the context re-measure decision through the single
-      // classifier (test seam). compaction/end is NOT routed here — its
-      // re-measure is driven by the MATCHED compaction fold above (a stale
-      // compaction/end must never re-measure).
-      const eventType = String(event.type)
-      if (eventType !== 'compaction/end' && contextRefreshKind(eventType) === 'measure') {
-        markContextDirty()
-        refreshContextMeasurement(eventType === 'turn/end' ? 'turn-end' : 'step-start')
-      }
-      // Persist each completed turn so a crash loses at most the live turn.
-      // The busy indicator follows turn boundaries: on from the moment a
-      // turn starts (model wait + tool calls), off when it ends.
-      if (event.type === 'turn/start') {
-        // The turn is live: the Working row takes over the feedback surface
-        // and the submit timeline stamps the turn boundary.
-        settleLocalSubmitAck('turn started')
-        submitLatencyTracker.mark(agent.session.id, 'turn.start')
-        app.setWorking(true)
-        app.setBusy(true)
-      } else if (event.type === 'turn/end') {
-        app.setWorking(false)
-        // NOTE: the submit-latency timeline is deliberately NOT reset on
-        // turn/end — a submission accepted while this turn was running
-        // (busy/queue) is processed by the NEXT turn, and resetting here
-        // would erase exactly the T1→T4/T4→T5 journey Phase E exists to
-        // measure. The baseline ends only on: the next accept (rebase),
-        // the assistant.first auto-complete, a terminal non-delivery exit
-        // (token-scoped settle) or a session switch.
-        // A turn end must not clear the busy flag while a compaction is
-        // still in flight (an interrupted turn can close before its
-        // compaction settles) — the single-Esc cancel stays armed.
-        app.setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
-        paintNow()
-        // Persist each completed turn so a crash loses at most the live
-        // turn. Detached: a flush rejection must never surface as an
-        // unhandled rejection in the event firehose. An ENOENT flush (the
-        // log was removed externally) is user-recoverable: notify with the
-        // actionable hint — the session keeps working in memory, but
-        // persistence cannot resume until restart.
-        const flushed = agent.session
-        runDetached('turn flush', () => sessions.flush(flushed), {
-          diag,
-          sessionId: () => flushed.id,
-          notify: (message) => app.notify(
-            `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
-            'error',
-          ),
-          recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
-        })
-      }
+      },
     })
+    ctx.on('session/event', (session, event) => surface.routeSessionEvent(session, event))
     // Session v2 live assistant streams: the TRANSIENT plane
     // (`agent/assistant-stream` frames mapped through the neutral port).
     // Live model output never rides the durable log; the runner routes the
@@ -8024,60 +7808,11 @@ export function apply(ctx: Context, config: Config): void {
     // re-reads the live surface so a stale stream from a retired agent
     // never reaches the presentation.
     const assistantStreamHandle = directRuntime.installAssistantStream({
-      isCurrentAgent: (agent) => {
-        // EXACT Agent object identity (master's own headless consumer
-        // compares `subject !== agent` the same way): a stale stream from
-        // a retired agent must never reach the presentation, even when the
-        // replacement agent drives the SAME session.
-        if (typeof agent !== 'object' || agent === null) return false
-        const subject = agent as Agent
-        const candidateId = (subject as { session?: { id?: unknown } }).session?.id
-        if (typeof candidateId !== 'string' || directRuntime.registeredAgentFor(candidateId) !== subject) return false
-        if (isCurrentOwnerAgent(subject)) return true
-        // The adapter accepts every registered live Agent so an unviewed child
-        // can retain its transient baseline without entering the main surface.
-        if (viewing === undefined) return true
-        if (candidateId !== viewing.id) return false
-        // The viewed child follows one exact Agent object at a time. A same-session
-        // cold-resume replaces a disposed Agent; the registry
-        // identity change is the lifecycle rollover edge for this viewer.
-        if (viewing.viewAgent !== undefined) {
-          if (viewing.viewAgent === subject) return true
-          if (agents.get(viewing.id) !== viewing.viewAgent) {
-            viewing.viewAgent = subject
-            setViewedQueueAgent(subject)
-            queueMicrotask(refreshPendingInput)
-            return true
-          }
-          return false
-        }
-        viewing.viewAgent = subject
-        setViewedQueueAgent(subject)
-        queueMicrotask(refreshPendingInput)
-        return true
-      },
-      onInput: (input) => {
-        // The preview projection keeps the durable completed-turn guard:
-        // a late live chunk for a completed turn is a replay artifact and must
-        // not resurrect a preview. The folder/stats folds carry their own
-        // gates. A FAILED
-        // attempt (abandoned end or a committed `assistant/attempt`
-        // settlement) clears the step's tool previews — its deltas never
-        // materialized into durable calls.
-        if (surface.openingJournal.isOpening(input.sessionId) && (viewing === undefined || viewing.id !== input.sessionId)) return
-         if (viewing !== undefined && input.sessionId === viewing.id) {
-          applyAssistantLiveInput(viewing.folder, viewing.stats, viewing.previews, input)
-          schedulePaint()
-          return
-        }
-        const sessionId = ownership.currentSessionId()
-        if (sessionId === undefined || input.sessionId !== sessionId) return
-        applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
-        if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
-          submitLatencyTracker.mark(sessionId, 'assistant.first')
-        }
-        schedulePaint()
-      },
+      // A4-7 (plan §16): the routing bodies are surface-owned. The Direct
+      // INSTALL stays Direct-owned; the surface exposes the neutral entry
+      // points for the identity fence and the per-target fold + repaint.
+      isCurrentAgent: (agent) => surface.isCurrentAssistantAgent(agent),
+      onInput: (input) => surface.applyAssistantInput(input),
     })
     assistantStreamBaselineFor = assistantStreamHandle.baselineFor
     lifecycleController.signal.addEventListener('abort', assistantStreamHandle, { once: true })
@@ -8085,46 +7820,22 @@ export function apply(ctx: Context, config: Config): void {
     // dock badge (they never register jobs). The events are scoped by the
     // delegating parent, but an UNTAGGED listener (this runner) receives
     // every agent-scoped event — including nested descendants' — so no
-    // reachability caveat applies; the tool/call fallback above stays as
-    // a redundant safety net. These are CATALOG events: membership/tree
-    // may have changed, so they re-list.
-    ctx.on('subagent/start', () => {
-      surface.refreshAgents()
-      queueMicrotask(refreshPendingInput)
-    })
-    ctx.on('subagent/end', () => {
-      surface.refreshAgents()
-      queueMicrotask(refreshPendingInput)
-    })
-    // `agent/status` is the LIVE runtime channel: a child's driver
-    // transition (running ↔ idle) must repaint the task browser and the
-    // badge WITHOUT a re-listing — membership changes come only from the
-    // lifecycle events above, and `listDescendants().activity` is
-    // store-presence, never execution state (an idle continuable child
-    // stays live in the session store and would otherwise read as
-    // `running` forever). The membership gate keeps this cheap and safe:
-    // only flips of children in the CACHED catalog refresh the task surface —
-    // the MAIN agent's own per-turn flips (and any stale post-switch
-    // event) do not re-list it; the queue projection below refreshes from its
-    // pending snapshot.
-    // The coordinator re-projects every child from the Agent registry
-    // at commit time. The MAIN agent's
-    // transitions feed the completion-notification controller
-    // (the authoritative settled boundary — running → idle on the SAME
-    // live agent; children never notify).
-    ctx.on('agent/status', ({ agent, status }) => {
-      if (cleanedUp) return
-      const owner = ownership.owner()
-      const currentAgentId = owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)
-      if (currentAgentId !== undefined && agent.id === currentAgentId) {
-        surface.onAgentStatus(agent.id, status)
-        queueMicrotask(refreshPendingInput)
-        return
-      }
-      if (!surface.hasTask(agent.id)) return
-      surface.refreshAgentRuntimeOnly()
-      if (viewing?.id === agent.id) queueMicrotask(refreshPendingInput)
-    })
+    // reachability caveat applies; the tool/call fallback stays as a
+    // redundant safety net. These are CATALOG events: membership/tree may
+    // have changed, so they re-list (A4-7 surface routing).
+    ctx.on('subagent/start', () => surface.routeSubagentLifecycle())
+    ctx.on('subagent/end', () => surface.routeSubagentLifecycle())
+    // `agent/status` is the LIVE runtime channel: a child's driver transition
+    // (running ↔ idle) repaints the task browser and the badge WITHOUT a
+    // re-listing (membership changes come only from the lifecycle events, and
+    // `listDescendants().activity` is store-presence, never execution state).
+    // The MAIN agent's transitions feed the completion-notification controller
+    // (the authoritative settled boundary — running → idle on the SAME live
+    // agent; children never notify). A4-7: the membership gate, the
+    // completion-controller feed and the pending-input microtasks are
+    // surface-owned (`surface.routeAgentStatus`); the completion-identity
+    // provider stays here.
+    ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))
     // Provider-topology and credential events refresh the footer model row
     // and the welcome card: a /login /logout /add-provider (or an external
     // settings.yaml / .credentials.yaml edit) changes the live provider /
@@ -8132,31 +7843,16 @@ export function apply(ctx: Context, config: Config): void {
     // selection. All three events are capability-optional: an absent llm /
     // settings / credentials service never mounts them, and a throwing
     // listener is contained by the event bus (the refresh is best-effort).
-    // The credential update surface has reference and durable-record events;
-    // both change the same footer/welcome state, so they share one refresh
-    // callback.
-    ctx.on('llm/adapters-updated', () => {
-      if (cleanedUp) return
-      refreshStatusCheap()
-      updateWelcomeCard()
-    })
-    ctx.on('settings/document-updated', (ns) => {
-      if (cleanedUp) return
-      if (ns === 'llm-pi-ai' || ns === 'llm-deepseek') {
-        refreshStatusCheap()
-        updateWelcomeCard()
-      }
-    })
-    const refreshCredentialSurface = (): void => {
-      if (cleanedUp) return
-      refreshStatusCheap()
-      updateWelcomeCard()
-    }
+    // A4-7: the refresh routing (the cleanup fence, the namespace filter and
+    // the refresh coordination) is surface-owned; the registrations and the
+    // credential subscription disposal stay runner-owned.
+    ctx.on('llm/adapters-updated', () => surface.routeProviderRefresh())
+    ctx.on('settings/document-updated', (ns) => surface.routeSettingsRefresh(ns))
     // The credential event wiring is the config port's (migration M1.9):
     // reference- and record-updated both change the same surface. The
     // subscription is DISPOSED on teardown — a remount/HMR must never
     // accumulate duplicate Host listeners (review finding).
-    const disposeCredentialSubscription = backend.config.credentials.onChanged(refreshCredentialSurface)
+    const disposeCredentialSubscription = backend.config.credentials.onChanged(() => surface.routeProviderRefresh())
     lifecycleController.signal.addEventListener('abort', disposeCredentialSubscription, { once: true })
     // Plan, busy, title, compaction, and todo bootstrap state are installed by
     // initLiveSession together with the two hydrated projections. Keeping all

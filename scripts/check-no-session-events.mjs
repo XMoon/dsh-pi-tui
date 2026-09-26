@@ -76,7 +76,11 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // hooks, so the same two call sites now read through `attachmentForSession`.
   { file: 'src/index.ts', call: 'snapshotEvents', site: 'sessionStats: (sessionId) => computeStats(attachmentForSession(sessionId).session.snapshotEvents()),', why: '/status Direct stats fold over the in-process session log (A3-5 command-runtime surface hook)' },
   { file: 'src/index.ts', call: 'eventAt', site: 'const event = session.eventAt(SessionSeq(seq))', why: '/copy last assistant-message read over the Direct in-process session log (A3-2 facade provider)' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: "settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(agent.session.snapshotEvents()))", why: 'Direct compaction-end context re-measure from the in-process log' },
+  // A4-7 relocated the compaction-settle working read into the injected
+  // `currentWorkingFromLog` capability (the surface owns only the WHEN); the
+  // debt moved WITH the call site, never doubled. The surface never reads the
+  // live session log itself.
+  { file: 'src/index.ts', call: 'snapshotEvents', site: 'return agent === undefined ? false : workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability)' },
   { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },
   { file: 'src/runtime/direct/presentation-read-direct.ts', call: 'snapshotEvents', site: 'const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))', why: 'Direct presentation read fold over the in-process session log' },
   { file: 'src/transcript.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },
