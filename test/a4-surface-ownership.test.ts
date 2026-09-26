@@ -163,7 +163,7 @@ test('A4-7: the four presentation routing bodies live in app/surface, not the ru
     'the surface must issue the main transcript apply call')
   assert.match(surface, /viewer\.folder\.apply\(\[event\]\)/u,
     'the surface must issue the viewed-child transcript apply call')
-  assert.match(surface, /source\.paintNow\(\)/u,
+  assert.match(surface, /\bpaintNow\(\)/u,
     'the surface must coordinate the forced repaint')
 
   // 2. assistant stream: the Direct INSTALL stays, the routing bodies move.
@@ -203,4 +203,128 @@ test('A4-7: the four presentation routing bodies live in app/surface, not the ru
     'the surface must own the settings refresh routing')
   assert.match(surface, /namespace === 'llm-pi-ai' \|\| namespace === 'llm-deepseek'/u,
     'the surface must own the settings namespace filter')
+
+  // 5. the subagent tool/call refresh DECISION (A4-7 P2): the runner reports
+  // the presentation intent; the surface routing performs the refresh.
+  assert.match(surface, /SurfaceMainEventObservation/u,
+    'the surface must define the observation-intent record')
+  assert.match(surface, /if \(observed\.refreshAgents\) refreshAgents\(\)/u,
+    'the surface must decide/perform the subagent tool/call refresh')
+  assert.match(indexSource, /return \{ settledViewChildId, refreshAgents \}/u,
+    'the runner must report the refresh intent instead of calling it')
+  assert.doesNotMatch(indexSource, /startsWith\('subagent'\)\) \{\n\s*surface\.refreshAgents\(\)/u,
+    'the runner must not call refreshAgents inside the subagent tool/call branch')
+})
+
+test('A4-4: the status commit and the pending-input presentation are surface-owned', () => {
+  const surface = read('src/app/surface/runtime.ts')
+
+  // Status COMMIT coordination: the runner keeps the semantic derivation and
+  // delegates the two-call commit (`status.update` then `mounted().setStatus`).
+  assert.match(surface, /commitStatus\(patch, legacyFacts\)/u,
+    'the surface must own the status commit')
+  assert.match(surface, /status\.update\(patch\)/u,
+    'the surface must commit the status patch')
+  assert.match(surface, /mounted\(\)\.setStatus\(legacyFacts\)/u,
+    'the surface must commit the legacy footer facts')
+  assert.match(indexSource, /surface\.commitStatus\(patch,/u,
+    'the runner must delegate the status commit to the surface')
+  assert.doesNotMatch(indexSource, /surface\.status\.update\(/u,
+    'the runner must not commit the status store directly')
+  assert.doesNotMatch(indexSource, /app\.setStatus\(/u,
+    'the runner must not commit the legacy status directly')
+
+  // Pending-input presentation: the runner injects only the semantic read,
+  // the submission echoes and the text projection.
+  assert.match(surface, /const refreshPendingInput = /u,
+    'the surface must own the pending-input presentation')
+  assert.match(surface, /buildPendingPresentation\(/u,
+    'the surface must own the pending/submission join')
+  assert.match(surface, /pendingOwnInputBySubject/u,
+    'the surface must own the own-input viewport memory')
+  assert.match(surface, /\.setPendingInputPresentation\(/u,
+    'the surface must publish the pending presentation')
+  assert.doesNotMatch(indexSource, /const refreshPendingInput\b/u,
+    'the runner must not hold the pending-input presentation implementation')
+  assert.doesNotMatch(indexSource, /pendingOwnInputBySubject/u,
+    'the runner must not hold the own-input memory')
+  assert.doesNotMatch(indexSource, /buildPendingPresentation\(/u,
+    'the runner must not hold the pending/submission join')
+  assert.match(indexSource, /pendingSubjectId: \(\) => activePendingSessionId\(\)/u,
+    'the runner must inject the active pending subject only')
+  assert.match(indexSource, /pendingSnapshot: \(sessionId\) => backend\.pendingInputReader\.snapshot\(sessionId\)/u,
+    'the runner must inject the semantic pending snapshot only')
+  assert.match(indexSource, /submissionEchoes: \(sessionId\) => submissionPresentation\.snapshot\(sessionId\)/u,
+    'the runner must inject the submission-presentation echoes only')
+  assert.match(indexSource, /queueTextOf: content => queueTextOf\(/u,
+    'the runner must inject the text projection only')
+  // Every runner call site goes through the surface owner.
+  assert.match(indexSource, /surface\.refreshPendingInput\(\)/u,
+    'the runner must drive the pending refresh through the surface')
+  assert.doesNotMatch(indexSource, /(?<!surface\.)\brefreshPendingInput\(\)/u,
+    'no runner-local pending refresh remains')
+})
+
+test('A4-8: the active-target, repaint and search/transcript wiring are surface-owned', () => {
+  const surface = read('src/app/surface/runtime.ts')
+
+  // The SELECTION policy (main vs viewed child).
+  assert.match(surface, /const activeFolder = /u, 'the surface must own the active folder selection')
+  assert.match(surface, /const activeWindow = /u, 'the surface must own the active window selection')
+  assert.match(surface, /const activeStreamingToolPreviews = /u,
+    'the surface must own the active previews selection')
+  assert.doesNotMatch(indexSource, /const activeFolder\b/u,
+    'the runner must not select the active folder')
+  assert.doesNotMatch(indexSource, /const activeWindow\b/u,
+    'the runner must not select the active window')
+  assert.doesNotMatch(indexSource, /const activeStreamingToolPreviews\b/u,
+    'the runner must not select the active previews')
+
+  // Repaint SCHEDULING + the projection glue.
+  assert.match(surface, /const repaintTarget = /u, 'the surface must own the projection glue')
+  assert.match(surface, /const paintNow = /u, 'the surface must own the forced repaint')
+  assert.match(surface, /const schedulePaint = /u, 'the surface must own the coalesced repaint')
+  assert.match(surface, /REPAINT_FLUSH_MS = 50/u, 'the surface must own the flush interval')
+  assert.doesNotMatch(indexSource, /const paintNow\b/u, 'the runner must not schedule the forced repaint')
+  assert.doesNotMatch(indexSource, /const schedulePaint\b/u, 'the runner must not schedule the coalesced repaint')
+  assert.doesNotMatch(indexSource, /REPAINT_FLUSH_MS/u, 'the runner must not own the flush interval')
+  assert.doesNotMatch(indexSource, /function repaint\(/u, 'the runner must not own the repaint algorithm')
+  assert.doesNotMatch(indexSource, /\brepaint\(app,/u, 'the runner must not call the moved repaint algorithm')
+  assert.match(indexSource, /surface\.repaint\(\)/u, 'the runner must repaint through the surface')
+  assert.match(surface, /schedulePaint\(\): void/u, 'the surface must expose schedulePaint()')
+  assert.match(surface, /paintNow\(\): void/u, 'the surface must expose paintNow()')
+
+  // The transcript-navigation + search presentation callbacks.
+  assert.match(surface, /const transcriptMoveOlder = /u, 'the surface must own the navigation wiring')
+  assert.match(surface, /const transcriptJumpLatest = /u, 'the surface must own the jump-latest wiring')
+  assert.match(surface, /const jumpToSearchMatch = /u, 'the surface must own the search commit')
+  assert.match(surface, /const runSearchQuery = /u, 'the surface must own the search query wiring')
+  assert.match(surface, /const closeSearch = /u, 'the surface must own the search close wiring')
+  assert.match(surface, /onSearchQuery: query => runSearchQuery\(query\)/u,
+    'the surface must wire the search query callback')
+  assert.match(surface, /onTranscriptMoveOlder: \(\) => transcriptMoveOlder\(\)/u,
+    'the surface must wire the navigation callback')
+  assert.match(surface, /searchBindingForRepaint/u, 'the surface must own the search repaint binding')
+  assert.doesNotMatch(indexSource, /onTranscriptMoveOlder:/u,
+    'the runner must not wire the transcript navigation callbacks')
+  assert.doesNotMatch(indexSource, /onTranscriptTurnOlder:/u,
+    'the runner must not wire the transcript turn navigation')
+  assert.doesNotMatch(indexSource, /onTranscriptJumpLatest:/u,
+    'the runner must not wire the jump-latest callback')
+  assert.doesNotMatch(indexSource, /onSearchOpen:/u, 'the runner must not wire the search-open callback')
+  assert.doesNotMatch(indexSource, /onSearchQuery:/u, 'the runner must not wire the search-query callback')
+  assert.doesNotMatch(indexSource, /onSearchNext:/u, 'the runner must not wire the search-next callback')
+  assert.doesNotMatch(indexSource, /onSearchClose:/u, 'the runner must not wire the search-close callback')
+  assert.doesNotMatch(indexSource, /searchBindingForRepaint/u, 'the runner must not hold the search binding')
+  assert.doesNotMatch(indexSource, /const jumpToSearchMatch\b/u, 'the runner must not hold the search commit')
+  assert.doesNotMatch(indexSource, /const resetSearchState\b/u, 'the runner must not hold the search reset')
+  assert.match(indexSource, /surface\.resetSearchPresentation\(\)/u,
+    'the runner must reset the search presentation through the surface')
+
+  // The Host registrations, the Direct install and the credential
+  // subscription/disposal stay in the runner.
+  assert.match(indexSource, /ctx\.on\('session\/event'/u, 'the runner keeps the session/event registration')
+  assert.match(indexSource, /directRuntime\.installAssistantStream\(/u, 'the runner keeps the Direct assistant-stream install')
+  assert.match(indexSource, /credentials\.onChanged\(/u, 'the runner keeps the credential subscription')
+  assert.match(indexSource, /disposeCredentialSubscription/u, 'the runner keeps the credential disposal')
 })

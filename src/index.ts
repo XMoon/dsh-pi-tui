@@ -87,8 +87,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
-import { childOwnEvents, textOf, TranscriptFolder, type TranscriptSearchMatch } from './transcript.ts'
-import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
+import { childOwnEvents, textOf, TranscriptFolder } from './transcript.ts'
 import { renderTranscriptMarkdown } from './transcript.ts'
 import { sessionArtifactFilename } from './session-artifact-filename.ts'
 import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from './client-artifact-save.ts'
@@ -118,7 +117,6 @@ import { derivePlanStatus, projectedPlanActive, type PlanProjectionLike } from '
 import { usageFromStats } from './status/derive-usage.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from './status/context-measurement.ts'
-import { refreshedSearchState, steppedSearchOverlayState, type SearchOverlayState } from './search-overlay.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
 import { migrateLegacySettings } from './legacy-settings-migration.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
@@ -126,12 +124,11 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { isEmptyAcceleratedViewerSubmit, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TranscriptSearchCloseReason, type TuiApp, type TuiAppEvents } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, type QueueItem, type StreamingToolPreview, type TuiApp, type TuiAppEvents } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
   removeStreamingToolPreview,
-  streamingToolPreviewSnapshot,
   upsertStreamingToolPreview,
 } from './streaming-tool-preparing.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
@@ -143,7 +140,6 @@ import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands
 import { DefaultIntentTracker } from './default-intent.ts'
 import { DefaultWriteBarrier } from './default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
-import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from './history.ts'
@@ -234,7 +230,6 @@ import { isRewindIdentityCurrent, type RewindLiveIdentity } from './session-fork
 import { SessionTransitionGate } from './transition-gate.ts'
 import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './submit-ack.ts'
 import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
-import { buildPendingPresentation } from './pending-presentation.ts'
 import { DirectSubmissionPresentation, type SubmissionPresentationSource } from './submission-presentation.ts'
 import { SubmitLatencyTracker } from './submit-latency.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
@@ -386,8 +381,6 @@ interface AppExit {
 const TRANSCRIPT_WINDOW_TURNS = 20
 /** Overlapping turn step used when browsing older/newer history. */
 const TRANSCRIPT_WINDOW_STEP = 10
-/** Coalesced repaint interval for streaming events, in ms. */
-const REPAINT_FLUSH_MS = 50
 /** Throttle for re-chaining a RUNNING local shell card's result to the
  * bounded tail (plan §5.1): the running preview refreshes at most this
  * often, so a high-throughput log cannot rebuild the view per chunk. */
@@ -1182,42 +1175,6 @@ function mergeSessionEventCut(
   return [...snapshot, ...opening.filter(event => Number(event.seq) > cut)]
 }
 
-/**
- * Repaint the transcript from the active folder's bounded window. Messages,
- * navigation facts, turn activities and live preparing rows come from one
- * presentation snapshot so a repaint can never show a stale Thought header
- * against fresh rows.
- *
- * `searchPresentation` (perf plan S2 §5.2) resolves the search presentation for
- * THIS projection epoch. It runs AFTER `folder.window()` and BEFORE
- * `setTranscript()`, so the target / weak-match objects are bound before the
- * single rebuild — a live group reflow can no longer force a second rebuild
- * through a post-projection rebind.
- */
-function repaint(
-  app: TuiApp,
-  folder: TranscriptFolder,
-  windowController: TranscriptWindowController,
-  streamingToolPreviews: readonly StreamingToolPreview[],
-  searchPresentation?: () => TranscriptSearchPresentation | undefined,
-  onProjected?: () => void,
-): TranscriptWindow {
-  windowController.setTurns(folder.groupedTurns())
-  const endTurn = windowController.endTurn()
-  const projection = folder.window({
-    maxTurns: windowController.windowTurns,
-    ...(endTurn === undefined ? {} : { endTurn }),
-  })
-  onProjected?.()
-  app.setTranscript(projection.messages, folder.turnActivities(), {
-    ...windowController.state(),
-    firstTurn: projection.firstTurn,
-    lastTurn: projection.lastTurn,
-    hasNewer: projection.hasNewer,
-  }, streamingToolPreviews, searchPresentation?.())
-  return projection
-}
-
 /** Current git branch from the nearest .git/HEAD, or empty outside a checkout. */
 function gitBranch(cwd: string): string {
   let dir = cwd
@@ -1380,16 +1337,17 @@ function timedBootstrapScan<T>(diag: Diag, name: string, eventCount: number, sca
   return result
 }
 
-// A4-7: the compaction/context presentation folds moved to the surface
-// routing owner (plan §16); the root entry point re-exports them unchanged so
-// the published package surface stays byte-compatible.
+// A4-7: the compaction/context presentation folds live in the top-level
+// compaction-presentation module (plan §16/§27) and are consumed by the
+// surface routing; the root entry point re-exports them unchanged so the
+// published package surface stays byte-compatible.
 export {
   foldCompactionEvent,
   settleCompactionSurface,
   busyAfterTurnBoundary,
   contextRefreshKind,
-} from './app/surface/presentation-folds.ts'
-export type { CompactionFold, CompactionSettleSurface } from './app/surface/presentation-folds.ts'
+} from './compaction-presentation.ts'
+export type { CompactionFold, CompactionSettleSurface } from './compaction-presentation.ts'
 
 /**
  * The in-flight compaction state a resumed session log implies: the newest
@@ -2640,8 +2598,9 @@ export function apply(ctx: Context, config: Config): void {
       if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
       if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
       if (!plainSectionEqual(current.host, host)) patch.host = host
-      surface.status.update(patch)
-      app.setStatus({
+      // A4-4 (plan §13.1): the semantic derivation stays here; the surface
+      // owns the commit coordination (`status.update` then `setStatus`).
+      surface.commitStatus(patch, {
         model: modelLabel(),
         // The FULL cwd lands in the structured workspace section (the
         // footer cwd ITEM shortens for display itself); the legacy
@@ -2737,13 +2696,6 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     let app: TuiApp
-    // Per-repaint search binding (perf plan S2 §5.2): resolves the weak-match
-    // representatives + the current target against the folder state that
-    // produced the projection, so a live group reflow never strands the
-    // highlight/reveal on a stale card object AND never causes a second
-    // rebuild. Assigned once the search state below exists; undefined before
-    // that (and while no search is active it returns undefined).
-    let searchBindingForRepaint: (() => TranscriptSearchPresentation | undefined) | undefined
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -3386,10 +3338,8 @@ export function apply(ctx: Context, config: Config): void {
         }
       })
     }
-    // Coalesced repaint: streaming events fold into the folder immediately
-    // (cheap) but the view rebuild flushes at most every REPAINT_FLUSH_MS,
-    // and immediately on turn/end.
-    let repaintTimer: NodeJS.Timeout | undefined
+    // Coalesced repaint is surface-owned (A4-8): the runner no longer owns
+    // the flush timer; the surface routing schedules its own repaint.
     // Ephemeral previews are isolated per presentation owner: the main live
     // session and a mounted child viewer never share call ids or rows.
     const mainStreamingToolPreviews = new Map<string, StreamingToolPreview>()
@@ -3474,78 +3424,6 @@ export function apply(ctx: Context, config: Config): void {
       }
       return { text: parts.join(' '), foldableText }
     }
-    /**
-     * Own pending input must become VISIBLE even when the reader deliberately
-     * browsed away from the live tail (official Web: an appended user node /
-     * steering node / submission echo forces `toBottom`). Ownership is
-     * EXPLICIT here — only a client-LOCAL submission echo is own input, so a
-     * background/other-client authoritative steering occurrence never steals
-     * the viewport. Keys are tracked per SUBJECT, so entering/leaving the child
-     * viewer neither re-fires nor forgets the parent's own input.
-     */
-    const pendingOwnInputBySubject = new Map<string, ReadonlySet<string>>()
-    /**
-     * Read one coherent pending-input projection and publish it to the app in
-     * a SINGLE atomic presentation update: authoritative `queued` rows plus
-     * local queued echoes (queue pane), and authoritative `steering` rows plus
-     * local user echoes (the ephemeral conversation-tail lane). `context` is
-     * deliberately excluded from the pending USER surface. Correlation is by
-     * request/rpc identity — never text.
-     */
-    const refreshPendingInput = (): void => {
-      if (cleanedUp) return
-      const sessionId = activePendingSessionId()
-      const pending = sessionId === undefined
-        ? undefined
-        : backend.pendingInputReader.snapshot(sessionId)
-      // The client-local echoes are read from the submission-presentation seam
-      // (Direct ledger today; the official pendingSubmissions source on the
-      // experimental Remote path) so the two optimistic identities never run
-      // together. The join below is the single authoritative rule.
-      const subjectEchoes = submissionPresentation.snapshot(sessionId) ?? []
-      const { queued, steering, running } = buildPendingPresentation({
-        pending,
-        submissions: subjectEchoes,
-        textOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
-      })
-      // Ownership: only a local echo bound for the TRANSCRIPT lane
-      // (steering/transcript) is own input that may take the viewport. A local
-      // QUEUED echo lives in the queue pane (chrome), not the transcript. The
-      // key set is derived from the LEDGER (not the visible rows), so an
-      // authoritative rpc-correlated replacement — or the Host claim that
-      // re-presents the echo before the durable message — never counts as a
-      // second new own input.
-      const subjectKey = sessionId ?? ''
-      const ownLaneKeys = new Set(
-        subjectEchoes.filter(echo => echo.placement !== 'queued').map(echo => echo.requestId),
-      )
-      const previousOwnKeys = pendingOwnInputBySubject.get(subjectKey)
-      const hasNewOwnInput = previousOwnKeys === undefined
-        ? ownLaneKeys.size > 0
-        : [...ownLaneKeys].some(key => !previousOwnKeys.has(key))
-      // Keep only NON-EMPTY subject entries: an interactive child subject has
-      // no local echo (echoes are main-session-only), so retaining an empty Set
-      // per visited child would grow this map for the life of the parent
-      // session. A non-empty parent entry must survive viewer round trips so
-      // its existing own input does not re-fire as "new".
-      if (ownLaneKeys.size === 0) pendingOwnInputBySubject.delete(subjectKey)
-      else pendingOwnInputBySubject.set(subjectKey, ownLaneKeys)
-      if (hasNewOwnInput) {
-        // The live tail may be outside the current virtual window (the reader
-        // paged into history): move the subject's window back to latest BEFORE
-        // presenting, so the local echo — and later its durable replacement —
-        // are actually in the projection the viewport scrolls to.
-        const controller = activeWindow()
-        if (!controller.isLatest()) {
-          controller.latest()
-          repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-        }
-        app.setPendingInputPresentation({ queued, steering, running })
-        app.scrollToBottom()
-        return
-      }
-      app.setPendingInputPresentation({ queued, steering, running })
-    }
     // The Direct stream adapter keeps active prefixes for Agents that were not
     // being displayed yet; enterView replays this exact-agent baseline before
     // mounting the child surface.
@@ -3557,12 +3435,6 @@ export function apply(ctx: Context, config: Config): void {
     // callId → child session id, established when the user opens a child's
     // transcript (see enterView). Consumed on the matching tool/result.
     const viewCallToChild = new Map<string, SessionId>()
-    const activeFolder = (): TranscriptFolder => viewing?.folder ?? folder
-    const activeWindow = (): TranscriptWindowController => viewing?.window ?? windowController
-    const activeStreamingToolPreviews = (): readonly StreamingToolPreview[] => {
-      if (!activeWindow().isLatest()) return []
-      return streamingToolPreviewSnapshot(viewing?.previews ?? mainStreamingToolPreviews)
-    }
     const applyOwnerStreamingToolPreviewEvent = (
       previews: Map<string, StreamingToolPreview>,
       ownerFolder: TranscriptFolder,
@@ -3570,136 +3442,12 @@ export function apply(ctx: Context, config: Config): void {
     ): void => {
       applyStreamingToolPreviewEvent(previews, event)
     }
-    const paintNow = (): void => {
-      if (repaintTimer !== undefined) {
-        clearTimeout(repaintTimer)
-        repaintTimer = undefined
-      }
-      repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), searchBindingForRepaint)
-    }
-    const schedulePaint = (): void => {
-      if (repaintTimer !== undefined) return
-      repaintTimer = setTimeout(() => {
-        repaintTimer = undefined
-        repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), searchBindingForRepaint)
-      }, REPAINT_FLUSH_MS)
-    }
     // Tool-call arguments by callId, for the approval-preview dialog.
     const callArgs = new Map<ToolCallId, string>()
-    // Transcript-search state (see the onSearch* events below). Matches are
-    // LIGHTWEIGHT occurrence identities (representative id + semantic source +
-    // ordinals — never full message objects): the full-history search runs
-    // over the folder's incremental projection, so a query change never
-    // materializes the grouped transcript nor re-lowercases history.
-    let searchMatches: TranscriptSearchMatch[] = []
-    let searchCurrent = -1
-    // Opt-in local wall-clock profiling of the Ctrl+F hot path (perf plan S1
-    // §4.2). A no-op unless DSH_TUI_SEARCH_PROFILE=1.
-    const searchProfiler: SearchProfile = createSearchProfiler(searchProfilingEnabled())
-    // Query-refinement state (D1): the previous query's matches are reused
-    // only when the new query PREFIX-extends the previous one on the SAME
-    // folder with an UNCHANGED projection revision (the folder validates
-    // both; the folder identity guard keeps a subagent viewer's matches
-    // from ever being reused for the parent session or vice versa).
-    let lastSearchQuery = ''
-    let lastSearchRevision = 0
-    let lastSearchFolder: TranscriptFolder | undefined
-    /** The folder's search revision at the last COMMITTED projection epoch: the
-     * same-window fast path is valid only while this still matches the live
-     * folder (otherwise the projected bounds/objects are stale). */
-    let searchBoundRevision = -1
-    /** The unique representative card ids of the current result set, and the
-     * published representative objects (weak-highlight scope). */
-    let searchMatchRepresentativeIds: number[] = []
-    let searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
-    const sameMessageSet = (left: ReadonlySet<TranscriptMessage>, right: ReadonlySet<TranscriptMessage>): boolean => {
-      if (left.size !== right.size) return false
-      for (const message of left) if (!right.has(message)) return false
-      return true
-    }
-    /** Re-resolve the representative ids against the CURRENT folder projection.
-     * The published SET keeps its identity when the resolved cards are
-     * unchanged, so a passive projection does not bump the presentation
-     * revision for nothing. */
-    const resolveSearchMatchMessages = (): ReadonlySet<TranscriptMessage> => {
-      const folder = activeFolder()
-      const next = new Set<TranscriptMessage>()
-      if (lastSearchQuery !== '' && lastSearchFolder === folder) {
-        for (const id of searchMatchRepresentativeIds) {
-          const message = folder.resolveSearchMatch({ id, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 })
-          if (message !== undefined) next.add(message)
-        }
-      }
-      if (sameMessageSet(next, searchMatchMessages)) return searchMatchMessages
-      // Mirror the authoritative published set so the NEXT resolution keeps
-      // object identity when the cards are unchanged (a fresh Set every
-      // repaint would bump the presentation revision and clear the Focus
-      // live-height floors for nothing).
-      searchMatchMessages = next
-      return next
-    }
-    /** The current target resolved against the LIVE folder (stable match →
-     * current card object). Undefined while no match is current. */
-    const resolveSearchTarget = (): TranscriptSearchPresentationTarget | undefined => {
-      if (lastSearchQuery === '' || searchCurrent < 0 || lastSearchFolder === undefined) return undefined
-      const folder = activeFolder()
-      if (folder !== lastSearchFolder) return undefined
-      const match = searchMatches[searchCurrent]
-      if (match === undefined) return undefined
-      const message = folder.resolveSearchMatch(match)
-      if (message === undefined) return undefined
-      return { query: lastSearchQuery, match, message }
-    }
-    const refreshSearchMatchMessages = (): void => {
-      const folder = activeFolder()
-      const ids: number[] = []
-      if (lastSearchQuery !== '' && lastSearchFolder === folder) {
-        const seen = new Set<number>()
-        for (const match of searchMatches) {
-          if (seen.has(match.id)) continue
-          seen.add(match.id)
-          ids.push(match.id)
-        }
-      }
-      searchMatchRepresentativeIds = ids
-      // The stage lives HERE, next to the pass it measures: a duplicate
-      // representative pass can never hide behind a single stage emission.
-      searchProfiler.stage('search.resolve-representatives')
-    }
-    const resetSearchState = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
-      // Only a runner that actually holds search state needs to publish the
-      // atomic clear: an unconditional empty commit would force a pointless
-      // message-tree rebuild on every Ctrl+End in regular fullscreen use.
-      const hadState = lastSearchQuery !== '' || searchMatches.length > 0
-        || searchMatchRepresentativeIds.length > 0 || searchMatchMessages.size > 0
-      searchMatches = []
-      searchCurrent = -1
-      lastSearchQuery = ''
-      lastSearchRevision = 0
-      lastSearchFolder = undefined
-      searchMatchRepresentativeIds = []
-      searchMatchMessages = new Set()
-      searchBoundRevision = -1
-      // ONE atomic commit: an empty representative set AND no target, so a
-      // session/surface reset can never leave the old card bound as
-      // the search highlight or keep a temporary reveal alive.
-      if (hadState && app !== undefined) {
-        app.finishTranscriptSearchPresentation(searchMatchMessages, options)
-      }
-    }
-    // After EVERY projection commit, resolve the presentation for THAT epoch:
-    // a passive live reflow replaces the representative card object, and the
-    // reveal/highlight must follow the stable match without a second rebuild.
-    // `grantReveal` stays false so a user collapse is never resurrected.
-    searchBindingForRepaint = (): TranscriptSearchPresentation | undefined => {
-      // Record the committed projection epoch even with no search active: the
-      // first query after opening the overlay must be able to take the
-      // same-window fast path against the projection the user is looking at.
-      const folder = activeFolder()
-      searchBoundRevision = folder.searchRevision()
-      if (lastSearchQuery === '' || lastSearchFolder === undefined || folder !== lastSearchFolder) return undefined
-      return { matchMessages: resolveSearchMatchMessages(), target: resolveSearchTarget(), grantReveal: false }
-    }
+    // Transcript search presentation state and the repaint binding are
+    // surface-owned (A4-8, plan §17); the runner keeps only the folder
+    // instances (behind the routing source) and calls
+    // `surface.resetSearchPresentation()` at a session-generation bump.
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
     // catalog refresh, title folds) captures the
@@ -3766,7 +3514,8 @@ export function apply(ctx: Context, config: Config): void {
       // and dead callId→child maps would silently disable the auto-pop.
       pendingSubagentCalls.length = 0
       viewCallToChild.clear()
-      resetSearchState()
+      // A4-8: the search presentation state is surface-owned.
+      surface.resetSearchPresentation()
       windowController.latest()
       windowController.setTurns(folder.groupedTurns())
       app.setSearchResult(0, 0)
@@ -3781,10 +3530,10 @@ export function apply(ctx: Context, config: Config): void {
       surface.resetTasks()
       // The pending-input presentation is session-scoped too: clear old
       // semantic rows AND local submission echoes at the synchronous
-      // generation boundary before the new subject is published.
+      // generation boundary before the new subject is published. The
+      // own-input memory is surface-owned (A4-4).
       pendingSubmissions.clear()
-      pendingOwnInputBySubject.clear()
-      app.setPendingInputPresentation({ queued: [], steering: [], running: false })
+      surface.resetPendingPresentation()
       // A new session owns the surface: tear down the subagent viewer. The
       // old viewer's parent session is gone (the continuation contract
       // requires the EXACT live parent), so the child transcript, the
@@ -3812,116 +3561,16 @@ export function apply(ctx: Context, config: Config): void {
         // keeps the teardown's intent explicit and ordering-safe). The
         // Esc path uses exitFocusViewerScope instead (restore).
         app.discardFocusViewerScope()
-        repaint(app, folder, windowController, activeStreamingToolPreviews(), searchBindingForRepaint)
+        surface.repaint()
         windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
         // The new session's own measurement comes from its initLiveSession
         // deferred path — the teardown refresh is UI-only.
         refreshStatusCheap()
       })
     }
-    // PR D1 P1: while the search overlay is open the transcript keeps
-    // changing (settlements, read-group reflow, new messages), so Next/Prev
-    // must never jump with a stale candidate list or a stale turn. This
-    // re-runs the SAME lightweight query when the active folder's
-    // projection revision moved (or the folder itself changed), recovers the
-    // previously current OCCURRENCE by its match key, and clamps the index.
-    const refreshSearchMatchesIfStale = (): void => {
-      const folder = activeFolder()
-      const refreshed = refreshedSearchState(
-        { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
-        folder,
-      )
-      if (!refreshed.changed) return
-      searchMatches = refreshed.matches
-      searchCurrent = refreshed.current
-      lastSearchRevision = refreshed.revision
-      lastSearchFolder = folder
-      app.setSearchResult(searchCurrent + 1, searchMatches.length)
-    }
-    /** The search presentation for an EXPLICIT navigation: `grantReveal` so the
-     * temporary reveal is (re-)granted, and the representative set / target
-     * resolved against the live folder. */
-    const navigationSearchPresentation = (match: TranscriptSearchMatch): TranscriptSearchPresentation => {
-      const folder = activeFolder()
-      const message = folder.resolveSearchMatch(match)
-      return {
-        matchMessages: resolveSearchMatchMessages(),
-        ...(message === undefined ? {} : { target: { query: lastSearchQuery, match, message } }),
-        grantReveal: true,
-      }
-    }
-    const jumpToSearchMatch = (): void => {
-      // `jumpToSearchMatch` is the ONLY caller of the stale refresh and the ONLY
-      // place that derives the representative ids: one O(searchMatches) dedupe
-      // pass per operation, over the FINAL result set (a 3000-result query must
-      // not pay it two or three times per keystroke).
-      refreshSearchMatchesIfStale()
-      refreshSearchMatchMessages()
-      const match = searchMatches[searchCurrent]
-      if (match === undefined) {
-        // Publish the current (empty) representative set AND the cleared target
-        // in ONE atomic commit. A bare setTranscriptSearchTarget(undefined)
-        // would carry the PREVIOUS published set, leaving the presentation's
-        // representative half stale until the search closes.
-        const presentation: TranscriptSearchPresentation = {
-          matchMessages: resolveSearchMatchMessages(),
-          target: undefined,
-          grantReveal: false,
-        }
-        searchProfiler.stage('search.presentation-commit')
-        // The setter reports whether it actually committed: a repeat no-match
-        // step (same empty set, target already cleared) is a no-op and MUST NOT
-        // be reported as a rebuild.
-        if (app.setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
-        app.setSearchResult(0, 0)
-        return
-      }
-      const folder = activeFolder()
-      const controller = activeWindow()
-      // Same-window fast path (perf plan S2 §5.4): the match is already inside
-      // the projected bounds AND the projection is the live epoch, so bind the
-      // new presentation to it directly — one rebuild, no re-window, no
-      // remeasure. The bounds come from the CURRENT projected window, never
-      // from the controller mode alone.
-      const snapshot = controller.snapshot()
-      const sameWindow = lastSearchFolder === folder
-        && searchBoundRevision === folder.searchRevision()
-        && snapshot.firstTurn !== undefined && snapshot.lastTurn !== undefined
-        && match.turn >= snapshot.firstTurn && match.turn <= snapshot.lastTurn
-      if (sameWindow) {
-        const presentation = navigationSearchPresentation(match)
-        searchProfiler.stage('search.presentation-commit')
-        if (app.setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
-        app.scrollToSearchTarget()
-        searchProfiler.stage('search.scroll')
-        app.setSearchResult(searchCurrent + 1, searchMatches.length)
-        return
-      }
-      // Off-window: ONE fold snapshot (plan §19) — the anchored message window
-      // and the activities come from the same folder call. Order is the
-      // contract (plan §22): anchor the window FIRST, then repaint with the
-      // presentation bound to THAT projection epoch (the target/weak-match
-      // objects are in place before the single rebuild), and only THEN anchor
-      // the exact rendered occurrence.
-      controller.anchorAt(match.turn)
-      repaint(
-        app,
-        folder,
-        controller,
-        activeStreamingToolPreviews(),
-        () => {
-          const presentation = navigationSearchPresentation(match)
-          searchProfiler.stage('search.presentation-commit')
-          return presentation
-        },
-        () => searchProfiler.stage('search.window'),
-      )
-      searchProfiler.stage('search.rebuild')
-      searchBoundRevision = folder.searchRevision()
-      app.scrollToSearchTarget()
-      searchProfiler.stage('search.scroll')
-      app.setSearchResult(searchCurrent + 1, searchMatches.length)
-    }
+    // The search-overlay stale refresh, the navigation presentation and the
+    // jump commit are surface-owned (A4-8, plan §17). The matching/stepping
+    // algorithms stay in transcript.ts / search-overlay.ts.
     /** Enter the subagent viewer for one session (live or persisted). The
      * target carries the catalog MODE (continuable = interactive editor,
      * one-shot = read-only — never guessed from running/inactive) and the
@@ -4095,7 +3744,7 @@ export function apply(ctx: Context, config: Config): void {
       // disclosures must not leak into the child transcript (plan §26).
       setViewedQueueAgent(childAgent)
       app.enterFocusViewerScope()
-      repaint(app, childFolder, childWindow, activeStreamingToolPreviews(), searchBindingForRepaint)
+      surface.repaint()
       // The viewer bar covers the editor (a read-only placeholder for
       // one-shot, the child's own draft for continuable) and the header
       // badges the mode — the transient notify is no longer the only "you
@@ -4104,7 +3753,7 @@ export function apply(ctx: Context, config: Config): void {
       app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: childActivity, access })
       // The queue pane follows the child only after the viewer and its exact
       // queue authority are both published.
-      refreshPendingInput()
+      surface.refreshPendingInput()
 
        } finally {
          if (openingViewer === opening) openingViewer = undefined
@@ -4136,13 +3785,13 @@ export function apply(ctx: Context, config: Config): void {
       // Restore the parent's Focus disclosures BEFORE the repaint so the
       // projection uses them (plan §26).
       app.exitFocusViewerScope()
-      repaint(app, folder, windowController, activeStreamingToolPreviews(), searchBindingForRepaint)
+      surface.repaint()
       // The main transcript may have grown while the viewer covered it (the
       // child's result, the parent's streaming): restore the parent's semantic latest/history position
       // so the pop never loses an intentional history anchor.
       windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
       refreshStatusCheap()
-      refreshPendingInput()
+      surface.refreshPendingInput()
       return true
     }
     /** Error sink for a failed session creation: restore the draft and
@@ -4358,14 +4007,14 @@ export function apply(ctx: Context, config: Config): void {
         ...(sessionId === undefined ? {} : { sessionId }),
         generation,
       })
-      refreshPendingInput()
+      surface.refreshPendingInput()
       if (placement !== 'transcript') settleLocalSubmitAck('local pending echo', { token: ackToken })
     }
     /** Remove one local submission echo on a known terminal exit. */
     const settleLocalSubmission = (requestId: string | undefined): void => {
       if (requestId === undefined) return
       pendingSubmissions.settle(requestId)
-      refreshPendingInput()
+      surface.refreshPendingInput()
     }
     /**
      * Notify one submission failure WITHOUT restoring (the task's catch
@@ -5876,69 +5525,9 @@ export function apply(ctx: Context, config: Config): void {
           rmSync(file, { force: true })
         }
       },
-      // Virtual history boundaries preserve the rendered overlap anchor;
-      // paging changes only the presentation window, never the fold.
-      onTranscriptMoveOlder: () => {
-        const anchor = app.captureTranscriptViewportAnchor()
-        const controller = activeWindow()
-        if (!controller.moveOlder()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-        // Preserve the old top edge at the same rendered row in the overlap.
-        if (anchor === undefined) app.scrollToBottom({ disableFollow: true })
-        else app.restoreTranscriptViewportAnchor(anchor, 'top')
-        return true
-      },
-      // Ctrl+Up / Ctrl+Down in fullscreen: single-turn prompt navigation
-      // over the virtual window (the fork's OSC 133 scan finds nothing in
-      // DSH transcripts — the semantic turn list lives HERE).
-      onTranscriptTurnOlder: () => {
-        if (!app.isFullscreen()) return false
-        const controller = activeWindow()
-        if (!controller.turnOlder()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-        app.scrollToBottom({ disableFollow: true })
-        return true
-      },
-      onTranscriptTurnNewer: () => {
-        if (!app.isFullscreen()) return false
-        const controller = activeWindow()
-        if (!controller.turnNewer()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-        app.scrollToBottom({ disableFollow: true })
-        return true
-      },
-      onTranscriptMoveNewer: () => {
-        const anchor = app.captureTranscriptViewportAnchor()
-        const controller = activeWindow()
-        if (!controller.moveNewer()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-        if (controller.isLatest()) app.scrollToBottom()
-        else if (anchor === undefined) app.scrollToTop({ disableFollow: true })
-        else app.restoreTranscriptViewportAnchor(anchor, 'bottom')
-        return true
-      },
-      onTranscriptJumpLatest: () => {
-        // Ctrl+End is a fullscreen transcript action. In regular mode it must
-        // fall through so the editor retains its own Ctrl+End behavior.
-        if (!app.isFullscreen()) return false
-        // Ctrl+End is a semantic reset, not merely a viewport scroll. With
-        // search open, the explicit `jump-latest` close reason owns the reset
-        // and latest projection so this path does not repaint twice.
-        if (app.isSearching()) {
-          app.closeTranscriptSearch('jump-latest')
-          app.setSearchResult(0, 0)
-          return true
-        }
-        resetSearchState()
-        app.setTranscriptSearchTarget(undefined)
-        const controller = activeWindow()
-        const changed = controller.latest()
-        if (!changed && !app.isFullscreen()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-        app.scrollToBottom()
-        app.setSearchResult(0, 0)
-        return true
-      },
+      // The transcript navigation callbacks (MoveOlder/TurnOlder/TurnNewer/
+      // MoveNewer/JumpLatest) are surface-owned wiring (A4-8, plan §17); the
+      // surface overlays them in `SurfaceRuntime.start`.
       onFullscreenChange: (fullscreen) => {
         const settings = tuiSettings
         if (settingsForms !== undefined) {
@@ -5955,97 +5544,10 @@ export function apply(ctx: Context, config: Config): void {
           })
         }
       },
-      // Transcript search: matches run over the FULL folded
-      // transcript (lightweight indexed projection — never a full
-      // materialization); each jump re-windows the view so the matched turn
-      // is visible (older turns collapse above it into the summary entry).
-      onSearchOpen: () => {
-        // A stale search presentation from a previous session must never
-        // leak its reveal/highlight into the fresh overlay.
-        app.setTranscriptSearchTarget(undefined)
-      },
-      onSearchQuery: (query) => {
-        searchProfiler.start()
-        const folder = activeFolder()
-        // Prefix refinement reuses the previous candidate set only when the
-        // query EXTENDS it on the SAME folder; the folder itself also
-        // requires an unchanged projection revision (a live append or group
-        // reflow between queries invalidates the candidates).
-        searchMatches = folder.search(query, lastSearchQuery !== '' && folder === lastSearchFolder
-          ? { previousQuery: lastSearchQuery, previousMatches: searchMatches, revision: lastSearchRevision }
-          : undefined)
-        searchProfiler.stage('search.semantic')
-        lastSearchQuery = query
-        lastSearchRevision = folder.searchRevision()
-        lastSearchFolder = folder
-        searchCurrent = searchMatches.length > 0 ? 0 : -1
-        // The jump owns the single representative pass for this operation.
-        // Always run the jump path: an empty/no-match query must CLEAR the
-        // stale search presentation target (0/0), not leave the previous
-        // reveal/highlight on screen.
-        jumpToSearchMatch()
-        searchProfiler.end()
-      },
-      onSearchNext: () => {
-        searchProfiler.start()
-        // PR D1 P1: refresh BEFORE stepping — an empty candidate list
-        // still refreshes (a match that arrived while the overlay stayed
-        // open must be discoverable), and the step is computed on the
-        // REFRESHED list. The policy lives in steppedSearchOverlayState,
-        // shared by both handlers.
-        const folder = activeFolder()
-        const stepped = steppedSearchOverlayState(
-          { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
-          folder,
-          1,
-        )
-        searchMatches = stepped.matches
-        searchCurrent = stepped.current
-        lastSearchRevision = stepped.revision
-        lastSearchFolder = folder
-        // The jump owns the single representative pass for this operation.
-        // An emptied list steps to -1: the jump path still runs so the
-        // stale target/highlight is cleared (0/0).
-        jumpToSearchMatch()
-        searchProfiler.end()
-      },
-      onSearchPrev: () => {
-        searchProfiler.start()
-        const folder = activeFolder()
-        const stepped = steppedSearchOverlayState(
-          { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
-          folder,
-          -1,
-        )
-        searchMatches = stepped.matches
-        searchCurrent = stepped.current
-        lastSearchRevision = stepped.revision
-        lastSearchFolder = folder
-        // The jump owns the single representative pass for this operation.
-        jumpToSearchMatch()
-        searchProfiler.end()
-      },
-      onSearchClose: (reason: TranscriptSearchCloseReason) => {
-        if (reason === 'dismiss') {
-          const anchor = app.captureTranscriptViewportAnchor()
-          resetSearchState({ preserveCurrentReveal: true })
-          if (anchor !== undefined) app.restoreTranscriptViewportAnchor(anchor, 'top')
-          return
-        }
-        if (reason === 'jump-latest') {
-          // Clear the presentation in memory; the latest-window repaint below
-          // commits both changes in the single required message-tree rebuild.
-          resetSearchState({ rebuild: false })
-          const controller = activeWindow()
-          controller.latest()
-          repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-          app.scrollToBottom()
-          return
-        }
-        // A physical surface swap owns the next projection. Clear the search
-        // state without rebuilding the old screen or promoting its reveal.
-        resetSearchState({ rebuild: false })
-      },
+      // The Ctrl+R search presentation callbacks (Open/Query/Next/Prev/Close)
+      // are surface-owned wiring (A4-8, plan §17); the surface overlays them
+      // in `SurfaceRuntime.start`. The matching/index algorithm stays in
+      // transcript.ts and the stepping policy in search-overlay.ts.
       // P7d: a single Esc with no overlay up exits the subagent viewer
       // instead of arming the double-Esc cancel.
       onSingleEscape: () => exitView(),
@@ -6132,7 +5634,7 @@ export function apply(ctx: Context, config: Config): void {
           readDraft: () => app.getDraft(),
           writeDraft: (text) => app.setDraft(text),
           notify: (message, kind) => app.notify(message, kind),
-          refreshPendingInput,
+          refreshPendingInput: () => surface.refreshPendingInput(),
           diag,
         })
       },
@@ -6820,6 +6322,166 @@ export function apply(ctx: Context, config: Config): void {
     // The initial status projection is committed after session hydration (or
     // in the deferred branch below), so a resumed session never paints a
     // temporary empty stats projection.
+    // A4-7 (plan §16): the presentation event routing is SURFACE-owned. The
+    // runner keeps only the Cordis registrations (thin delegations) plus the
+    // Direct assistant-stream INSTALL and the Direct/domain bookkeeping
+    // supplied through this narrow capability bundle. A4-4/A4-8: the same
+    // bundle also carries the pending-input capabilities, the presentation
+    // targets (folder/window/previews) and the repaint/search refresh
+    // coordination, so it is attached BEFORE the startup calls into
+    // `surface.refreshPendingInput()`.
+    const mainPresentation = {
+      get folder() { return folder },
+      get stats() { return statsFolder },
+      get window() { return windowController },
+      get previews() { return mainStreamingToolPreviews },
+      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event),
+    }
+    const viewedChildPresentation = {
+      get id() { return viewing!.id },
+      get folder() { return viewing!.folder },
+      get stats() { return viewing!.stats },
+      get window() { return viewing!.window },
+      get previews() { return viewing!.previews },
+      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(viewing!.previews, viewing!.folder, event),
+      beginTurn: () => {
+        const target = viewing!
+        target.activity = 'running'
+        // A cold child or same-session rollover becomes queue-authorized
+        // at its lifecycle boundary, before the first assistant frame.
+        const current = agents.get(target.id)
+        target.viewAgent = current
+        setViewedQueueAgent(current)
+      },
+      endTurn: () => { viewing!.activity = 'inactive' },
+      refreshFooter: () => refreshViewerFooter(),
+    }
+    surface.attachEventRouting({
+      isCleanedUp: () => cleanedUp,
+      isAttachedSession: (session) => {
+        const attachedSession = sessions.get(SessionId(session.id))
+        return attachedSession === undefined || attachedSession === session
+      },
+      currentSessionId: () => ownership.currentSessionId(),
+      hasLiveAgent: () => agentNow() !== undefined,
+      completionOwnerId: () => {
+        const owner = ownership.owner()
+        return owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)
+      },
+      // Direct bookkeeping (plan §16): model-selection observation, the
+      // request-header consume, the call-args cache, the pending-subagent feed
+      // and the viewed-child settle map all stay runner-owned.
+      observeMainEvent: (sessionId, event) => {
+        const runtimeAgent = agents.get(SessionId(sessionId)) as Agent | undefined
+        let settledViewChildId: SessionId | undefined
+        let refreshAgents = false
+        const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
+        if (selectionEvent.type === 'model/selection') {
+          if (runtimeAgent !== undefined) directRuntime.modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
+        } else if (event.type === 'request/header' && runtimeAgent !== undefined) {
+          const data = event.data as unknown
+          const header = typeof data === 'object' && data !== null
+            ? (data as { header?: unknown }).header
+            : undefined
+          const raw = rawSelectionFromRequestHeader(header)
+          if (raw !== undefined) {
+            directRuntime.modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
+          }
+        }
+        if (event.type === 'tool/call') {
+          callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
+            ? event.data.arguments
+            : JSON.stringify(event.data.arguments))
+          if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
+            // The subagent-refresh DECISION is surface-owned (A4-7 P2): report
+            // the presentation intent; `routeSessionEvent` performs the
+            // refresh. The intent is recorded at the ORIGINAL position (before
+            // the description parse/push); the refresh schedules async catalog
+            // work and reads no state this bookkeeping mutates, so the
+            // observable order is unchanged.
+            refreshAgents = true
+            let description = ''
+            try {
+              const parsed = JSON.parse(event.data.arguments)
+              if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { description?: unknown }).description === 'string') {
+                description = (parsed as { description: string }).description
+              }
+            } catch {
+              // A non-JSON arguments payload carries no matchable description.
+            }
+            pendingSubagentCalls.push({ callId: event.data.callId, description })
+          }
+        } else if (event.type === 'tool/result') {
+          // Session V4: the durable tool-role message owns the call identity
+          // directly (no user-role wrapper to unwrap).
+          const callId = event.data.message.toolCallId
+          callArgs.delete(callId)
+          const callIndex = pendingSubagentCalls.findIndex(call => call.callId === callId)
+          if (callIndex !== -1) pendingSubagentCalls.splice(callIndex, 1)
+          settledViewChildId = viewCallToChild.get(callId)
+          viewCallToChild.delete(callId)
+        }
+        return { settledViewChildId, refreshAgents }
+      },
+      // The opening viewer's buffer stays runner-owned (`openingViewer` /
+      // `viewerOpen`); the surface owns the decision to route into it.
+      appendOpeningViewerEvent: (sessionId, event) => {
+        const opening = openingViewer
+        if (opening !== undefined && viewerOpen.isCurrent(opening.request) && sessionId === opening.childId) {
+          opening.events.push(event)
+          return true
+        }
+        return false
+      },
+      main: () => mainPresentation,
+      viewedChildId: () => viewing?.id,
+      viewedChild: () => viewedChildPresentation,
+      mainFolder: () => folder,
+      viewedChildFolder: () => viewing!.folder,
+      // A4-4 pending-input capabilities: the semantic subject + snapshot read,
+      // the client-local submission echoes and the text projection. The
+      // presentation join/own-input/viewport policy is surface-owned.
+      pendingSubjectId: () => activePendingSessionId(),
+      pendingSnapshot: (sessionId) => backend.pendingInputReader.snapshot(sessionId),
+      submissionEchoes: (sessionId) => submissionPresentation.snapshot(sessionId),
+      queueTextOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
+      exitView: () => { exitView() },
+      refreshStatusCheap: () => refreshStatusCheap(),
+      refreshStatusAndWelcome: () => {
+        refreshStatusCheap()
+        updateWelcomeCard()
+      },
+      applyGoalChange: (event) => { goalText = foldGoal([event]) },
+      sessionTitleOf: (event) => foldSessionTitle([event])?.title,
+      settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
+      markSubmitLatency: (sessionId, phase) => { submitLatencyTracker.mark(sessionId, phase) },
+      observeDurableSubmission: (rpcId) => pendingSubmissions.observeDurable(rpcId),
+      markContextDirty: () => markContextDirty(),
+      refreshContextMeasurement: (reason) => refreshContextMeasurement(reason),
+      // Bound late: these helpers are declared AFTER the startup calls that
+      // read the routing source (they only run from the live event firehose).
+      currentWorkingFromLog: () => currentWorkingFromLog(),
+      flushTurn: () => flushTurn(),
+      // The assistant-stream routing's exact-Agent facts (never a Direct import
+      // in the surface).
+      registeredAgentIs: (sessionId, agent) => directRuntime.registeredAgentFor(sessionId) === agent,
+      isCurrentOwnerAgent: (agent) => isCurrentOwnerAgent(agent as Agent),
+      viewedChildAgent: () => viewing?.viewAgent,
+      setViewedChildAgent: (agent) => { if (viewing !== undefined) viewing.viewAgent = agent as Agent },
+      setViewedQueueAgent: (agent) => setViewedQueueAgent(agent as Agent),
+      agentForSession: (sessionId) => agents.get(SessionId(sessionId)),
+      applyViewedChildAssistantInput: (input) => {
+        const target = viewing
+        if (target === undefined) return
+        applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
+      },
+      applyMainAssistantInput: (input, sessionId) => {
+        applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
+        if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
+          submitLatencyTracker.mark(sessionId, 'assistant.first')
+        }
+      },
+    })
     // A4-6: the Task Browser + Job viewer wiring is surface-owned. The runner
     // injects the narrow production capability the surface needs (plan §15.2):
     // the live session id, the ownership-subject fence, the jobs registry reads,
@@ -6899,7 +6561,7 @@ export function apply(ctx: Context, config: Config): void {
       diag,
       isCleanedUp: () => cleanedUp,
     })
-    refreshPendingInput()
+    surface.refreshPendingInput()
     // The TUI-owned slash commands are registered as soon as the runner
     // surface exists — the commands service's GLOBAL layer needs no agent,
     // so the whole command surface (and the editor's tab completion) is
@@ -6980,12 +6642,12 @@ export function apply(ctx: Context, config: Config): void {
       // Issue #8: a stale keyboard exit confirmation must not exit the NEW
       // session.
       app.clearExitConfirmation()
-      repaint(app, folder, windowController, activeStreamingToolPreviews(), searchBindingForRepaint)
+      surface.repaint()
       // PR D2: the first usable frame paints with the cached measurement
       // (or none); the context measure is deferred one event-loop turn so
       // cold resume never blocks first paint on a long-session scan.
       refreshStatusCheap()
-      refreshPendingInput()
+      surface.refreshPendingInput()
       scheduleInitialContextMeasure(agent)
       // Repaint both task channels (the JobRegistry roster + the subagent
       // catalog): the dock/badge are owner-fenced,
@@ -7640,31 +7302,10 @@ export function apply(ctx: Context, config: Config): void {
       resumeFailure = undefined
     }
     // A4-7 (plan §16): the presentation event routing is SURFACE-owned. The
-    // runner keeps only the Cordis registration below (a thin delegation) plus
-    // the Direct assistant-stream INSTALL and the Direct/domain bookkeeping
-    // supplied through this narrow capability bundle.
-    const mainPresentation = {
-      get folder() { return folder },
-      get stats() { return statsFolder },
-      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event),
-    }
-    const viewedChildPresentation = {
-      get id() { return viewing!.id },
-      get folder() { return viewing!.folder },
-      get stats() { return viewing!.stats },
-      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(viewing!.previews, viewing!.folder, event),
-      beginTurn: () => {
-        const target = viewing!
-        target.activity = 'running'
-        // A cold child or same-session rollover becomes queue-authorized
-        // at its lifecycle boundary, before the first assistant frame.
-        const current = agents.get(target.id)
-        target.viewAgent = current
-        setViewedQueueAgent(current)
-      },
-      endTurn: () => { viewing!.activity = 'inactive' },
-      refreshFooter: () => refreshViewerFooter(),
-    }
+    // routing source (and its main/viewed-child presentation targets) are
+    // attached EARLIER, before `surface.attachTasks` and the startup
+    // `surface.refreshPendingInput()` calls, because the A4-4/A4-8 surface
+    // methods read the source during startup.
     /** The compaction settle's log-end working read: the runner owns the
      *  live-session log read; the surface only decides WHEN the settle
      *  re-measures. */
@@ -7687,117 +7328,6 @@ export function apply(ctx: Context, config: Config): void {
         recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
       })
     }
-    surface.attachEventRouting({
-      isCleanedUp: () => cleanedUp,
-      isAttachedSession: (session) => {
-        const attachedSession = sessions.get(SessionId(session.id))
-        return attachedSession === undefined || attachedSession === session
-      },
-      currentSessionId: () => ownership.currentSessionId(),
-      hasLiveAgent: () => agentNow() !== undefined,
-      completionOwnerId: () => {
-        const owner = ownership.owner()
-        return owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)
-      },
-      // Direct bookkeeping (plan §16): model-selection observation, the
-      // request-header consume, the call-args cache, the pending-subagent feed
-      // and the viewed-child settle map all stay runner-owned.
-      observeMainEvent: (sessionId, event) => {
-        const runtimeAgent = agents.get(SessionId(sessionId)) as Agent | undefined
-        let settledViewChildId: SessionId | undefined
-        const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
-        if (selectionEvent.type === 'model/selection') {
-          if (runtimeAgent !== undefined) directRuntime.modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
-        } else if (event.type === 'request/header' && runtimeAgent !== undefined) {
-          const data = event.data as unknown
-          const header = typeof data === 'object' && data !== null
-            ? (data as { header?: unknown }).header
-            : undefined
-          const raw = rawSelectionFromRequestHeader(header)
-          if (raw !== undefined) {
-            directRuntime.modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
-          }
-        }
-        if (event.type === 'tool/call') {
-          callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
-            ? event.data.arguments
-            : JSON.stringify(event.data.arguments))
-          if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
-            surface.refreshAgents()
-            let description = ''
-            try {
-              const parsed = JSON.parse(event.data.arguments)
-              if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { description?: unknown }).description === 'string') {
-                description = (parsed as { description: string }).description
-              }
-            } catch {
-              // A non-JSON arguments payload carries no matchable description.
-            }
-            pendingSubagentCalls.push({ callId: event.data.callId, description })
-          }
-        } else if (event.type === 'tool/result') {
-          // Session V4: the durable tool-role message owns the call identity
-          // directly (no user-role wrapper to unwrap).
-          const callId = event.data.message.toolCallId
-          callArgs.delete(callId)
-          const callIndex = pendingSubagentCalls.findIndex(call => call.callId === callId)
-          if (callIndex !== -1) pendingSubagentCalls.splice(callIndex, 1)
-          settledViewChildId = viewCallToChild.get(callId)
-          viewCallToChild.delete(callId)
-        }
-        return settledViewChildId
-      },
-      // The opening viewer's buffer stays runner-owned (`openingViewer` /
-      // `viewerOpen`); the surface owns the decision to route into it.
-      appendOpeningViewerEvent: (sessionId, event) => {
-        const opening = openingViewer
-        if (opening !== undefined && viewerOpen.isCurrent(opening.request) && sessionId === opening.childId) {
-          opening.events.push(event)
-          return true
-        }
-        return false
-      },
-      main: () => mainPresentation,
-      viewedChildId: () => viewing?.id,
-      viewedChild: () => viewedChildPresentation,
-      schedulePaint: () => schedulePaint(),
-      paintNow: () => paintNow(),
-      exitView: () => { exitView() },
-      refreshPendingInput: () => refreshPendingInput(),
-      refreshStatusCheap: () => refreshStatusCheap(),
-      refreshStatusAndWelcome: () => {
-        refreshStatusCheap()
-        updateWelcomeCard()
-      },
-      applyGoalChange: (event) => { goalText = foldGoal([event]) },
-      sessionTitleOf: (event) => foldSessionTitle([event])?.title,
-      settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
-      markSubmitLatency: (sessionId, phase) => { submitLatencyTracker.mark(sessionId, phase) },
-      observeDurableSubmission: (rpcId) => pendingSubmissions.observeDurable(rpcId),
-      markContextDirty: () => markContextDirty(),
-      refreshContextMeasurement: (reason) => refreshContextMeasurement(reason),
-      currentWorkingFromLog,
-      flushTurn,
-      // The assistant-stream routing's exact-Agent facts (never a Direct import
-      // in the surface).
-      registeredAgentIs: (sessionId, agent) => directRuntime.registeredAgentFor(sessionId) === agent,
-      isCurrentOwnerAgent: (agent) => isCurrentOwnerAgent(agent as Agent),
-      viewedChildAgent: () => viewing?.viewAgent,
-      setViewedChildAgent: (agent) => { if (viewing !== undefined) viewing.viewAgent = agent as Agent },
-      setViewedQueueAgent: (agent) => setViewedQueueAgent(agent as Agent),
-      agentForSession: (sessionId) => agents.get(SessionId(sessionId)),
-      applyViewedChildAssistantInput: (input) => {
-        const target = viewing
-        if (target === undefined) return
-        applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
-      },
-      applyMainAssistantInput: (input, sessionId) => {
-        applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
-        if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
-          submitLatencyTracker.mark(sessionId, 'assistant.first')
-        }
-      },
-    })
     ctx.on('session/event', (session, event) => surface.routeSessionEvent(session, event))
     // Session v2 live assistant streams: the TRANSIENT plane
     // (`agent/assistant-stream` frames mapped through the neutral port).
