@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
+import { ownerOccurrences, ownerSource } from './support/owner-modules.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -124,16 +125,21 @@ test('A5a: the composition ROOT owns every composition site (the entry owns none
     assert.equal(entry.includes(site), false, `the entry must not own ${name}`)
     assert.ok(root.includes(site), `the composition root must own ${name} (${site})`)
   }
+  // Owner-internal state constructors: A5b moves some of these into the owner
+  // module that owns the lifetime (plan A5b §8.1), so the lock follows the
+  // ownership LOCATION to the A5b owner surface instead of pinning them to the
+  // composition root; the entry must still construct none of them.
+  const ownerSurface = ownerSource()
   for (const [site] of SINGLE_OWNER_SITES) {
     assert.equal(entry.includes(site), false, `the entry must not construct ${site}`)
-    assert.ok(root.includes(site), `the composition root must construct ${site}`)
+    assert.ok(ownerSurface.includes(site), `the owning module must construct ${site}`)
   }
 })
 
-test('A5: every application owner is constructed exactly once in the composition surface', () => {
+test('A5: every application owner is constructed exactly once in the owner surface', () => {
   for (const [site, expected] of SINGLE_OWNER_SITES) {
-    assert.equal(compositionOccurrences(site), expected,
-      `${site} must have exactly ${expected} construction site(s) in the composition surface`)
+    assert.equal(ownerOccurrences(site), expected,
+      `${site} must have exactly ${expected} construction site(s) in the A5b owner surface`)
   }
 })
 
