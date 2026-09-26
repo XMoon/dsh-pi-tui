@@ -1556,15 +1556,35 @@ TypeScript restructure. It is structural only:
   `liveAgent`/`viewedQueueAgent` state and passes live getters, and in A1 still
   supplies the concrete Host lookups (`agents.get`/`sessions.get`) for the
   resolver callbacks. Those lookups belong to `app/direct`'s Direct composition
-  seam (A5-3 moved them behind it). `src/app/bootstrap.ts` is the application
-  composition root (A5-2): it resolves the Host services the owners are built
+  seam (A5a moved them behind it). `src/app/bootstrap.ts` is the application
+  composition root (A5a): it resolves the Host services the owners are built
   from and connects them (plan §23/§26), while every Direct-only fact stays
   behind `app/direct`. No second current-session truth exists.
-- **A5-2 — composition root + facade.** `src/app/bootstrap.ts` owns the runner
-  composition (`applyRunner`); `src/index.ts` keeps the Cordis contract, the
-  `Config` re-export and the public root surface, and `apply` delegates. The
+- **A5 status — A5a COMPLETE / A5b REQUIRED (approved plan split).** A5a (this
+  PR) is the bootstrap/facade cutover: `src/app/bootstrap.ts` owns the runner
+  composition (`applyRunner` → the named coordinator `startRunner()` → the
+  terminal `handleStartupFailure`; `registerRunnerDisposal` for the fiber
+  disposal), `src/index.ts` is a 173-line package facade (Cordis contract,
+  `Config` re-export, public root re-exports, the frozen `composeAgent` /
+  `recordedPreset` declarations delegating to `app/direct/composition.ts`, and
+  `apply`), every root helper implementation lives in its natural top-level
+  module, and the Direct Host lookups live behind `app/direct`'s own seam. The
   entry's Host coupling is now only the `@deepseek-ai/dsh-agent` types its frozen
   public `composeAgent` overloads declare.
+- **§23 composition-only / giant-root criterion: PARTIAL — BLOCKING STAGE
+  COMPLETION.** `startRunner()` still holds the linear composition body together
+  with the application handler groups (`runLocalShell`, `enterView`,
+  `dispatchViaSession`, `runLocalCommand`, `steerNow`, `dispatchUserInput`,
+  `surfaceEvents`, `applyFooterSettings`, `initLiveSession`, `registerCommands`,
+  …). The empirical dependency map measured ~140 declarations shared across that
+  body with every candidate phase boundary crossing 30–45 of them, so a
+  phase-function split would require lifting essentially all of them (the §24
+  forbidden "everything bag" in declaration form, and a TDZ→`undefined`
+  regression risk). A5b closes §23 by extracting real application handler
+  OWNERSHIP — dependency-cut first, preferring the existing `app/submission` /
+  `app/command` / `app/surface` seams over a new directory. This is BLOCKING: it
+  is **not** in "Known non-blocking follow-ups", and the stage is not complete
+  until A5b merges (the plan's original DONE conditions are unchanged).
 - **Ownership targets** (`src/app/**`): `bootstrap` (composition root),
   `direct` (Direct application-side Host coupling + Direct-only facades),
   `session` (session navigation/lifetime + opaque `SessionSubject` authority),
