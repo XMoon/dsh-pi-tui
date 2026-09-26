@@ -139,10 +139,6 @@ import {
 } from './streaming-tool-preparing.ts'
 import { parseUserKeybindings } from './keybindings/config.ts'
 
-import { normalizedKeyToKeyId } from './keybindings/manager.ts'
-import { Text } from '@xmoon76/pi-tui'
-import type { Component } from '@xmoon76/pi-tui'
-import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
   buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, isViewerAccessInteractive, workflowMemberViewerTarget,
@@ -211,10 +207,6 @@ import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { createSurfaceRuntime } from './app/surface/runtime.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
-import { PluginManagerController } from './plugin-manager/controller.ts'
-import { PluginManagerHostRegistry, type PluginManagerHostClaim } from './plugin-manager/host-registry.ts'
-import { PluginManagerPanel } from './plugin-manager/panel.ts'
-import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
@@ -2281,10 +2273,9 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     // The Plugin Manager operation owner OUTLIVES the panel (plan §17): a
-    // closed `/plugins` never cancels an active install. It is wired once the
-    // extension read seam exists (below); teardown disposes its install-event
-    // subscription through this holder.
-    let disposePluginManagerController: (() => void) | undefined
+    // closed `/plugins` never cancels an active install. A4-5: the controller
+    // and its install-event subscription are owned by the surface runtime
+    // (`surface.attachPluginManager` / `surface.disposePluginManager`).
 
     // Whole-document settings writes must not copy a project-layer
     // footerCustomItems value into the USER section. The config port is the
@@ -3027,11 +3018,9 @@ export function apply(ctx: Context, config: Config): void {
       _unstableEmergencyRelease(): void
       setUnstableSurfaceSeam(surfaceId: string, handle: import('./extension/unstable-types.ts').UnstableSurfaceHandle): void
     }) | undefined
-    let extensionHost: SurfaceHost | undefined
-    // The generation-LEASED release of THIS runner's theme-unload hook
-    // (the review's P2): the HMR cleanup releases only its own hook, never
-    // a newer runner generation's.
-    let releaseThemeUnloadedHook: (() => void) | undefined
+    // The extension surface host and the generation-LEASED theme-unload hook
+    // release are A4-5 surface-owned resources (`surface.attachExtensionHost` /
+    // `surface.dispose`); the runner no longer holds their slots.
     // Tool-card presentation bridge: the Web's render intents resolved from
     // the LIVE tool registry as the agent sees it (scoped lookup), so the
     // rendered card matches the definition that actually executed. The scope
@@ -3106,13 +3095,9 @@ export function apply(ctx: Context, config: Config): void {
     // 0600 temp files holding FULL local-shell output (for truncated runs);
     // removed at TUI exit (default), never on their own.
     const shellTempFiles = new Set<string>()
-    // M2: the plugin keybinding-sync unsubscribe slot. Hoisted here BEFORE
-    // cleanup (TDZ guard, review finding): cleanup is already registered
-    // into the effect below, so a throwing subscription registration at
-    // startup must never turn the teardown into a second ReferenceError
-    // that masks the original failure and skips the extension detach /
-    // diag dispose.
-    let stopPluginKeybindingSync: (() => void) | undefined
+    // M2: the plugin keybinding-sync unsubscribe slot is A4-5 surface-owned
+    // (`surface.bindPluginKeybinds` / `surface.dispose`); the runner no longer
+    // holds it.
     // The catalog refresh coordinator: the ONE post-mount refresh owner
     // (first session, switches, /preset, /reload). Declared here (before
     // cleanup) for the same TDZ guard — cleanup disposes it, and a
@@ -3184,9 +3169,10 @@ export function apply(ctx: Context, config: Config): void {
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
-      // Release the Plugin Manager install-event subscription. This never
-      // cancels a Host install: only the official cancel action does that.
-      disposePluginManagerController?.()
+      // Release the Plugin Manager install-event subscription at its original
+      // EARLY position (a late install event must never notify/repaint a dying
+      // surface). The subscription is surface-owned (A4-5).
+      surface.disposePluginManager()
       // PR D2: cancel the deferred initial context measure — a stale
       // callback must never measure/repaint into the disposed surface.
       cancelDeferredContextMeasure?.()
@@ -3227,25 +3213,11 @@ export function apply(ctx: Context, config: Config): void {
       activeJobViewerClose = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
-      // The mounted TuiApp is released by its surface owner (A4): the runner
-      // steps above/below release only what the runner still owns.
+      // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
+      // and the extension surface bridge are released by their surface owner
+      // (A4): the runner steps around this call release only what the runner
+      // still owns.
       surface.dispose()
-      // M2: unsubscribe the plugin keybinding sync (the registry outlives
-      // the surface — a stale listener must not resync into a dead app).
-      stopPluginKeybindingSync?.()
-      stopPluginKeybindingSync = undefined
-      // Release THIS generation's theme-unload hook BEFORE the app dies:
-      // without the generation lease, the old callback (capturing the
-      // disposed app) would stay installed until the next runner installed
-      // its own — and a theme fiber unloading in the window would reach
-      // into the disposed app (the review's P2).
-      releaseThemeUnloadedHook?.()
-      releaseThemeUnloadedHook = undefined
-      // Detach the extension service's surface bridge (its capability set
-      // and state listeners die with the surface). The surfaceId lease
-      // makes a stale detach a no-op (P1).
-      extensionService?.detachSurface(extensionHost?.surfaceId)
-      extensionHost = undefined
       // NOTE: diag.dispose() is NOT here — the Direct owned-session
       // retirement (retireOwnedSession) records its diagnostics first and
       // closes diag last (see below).
@@ -5843,27 +5815,12 @@ export function apply(ctx: Context, config: Config): void {
     // M3 runner wiring (F-1): when the extension host service is mounted,
     // the TUI surface attaches a SurfaceHost over its ledger — extensions
     // (including the first-party builtins) render into the chrome. Without
-    // the service the surface runs exactly as before (host fallbacks).
+    // the service the surface runs exactly as before (host fallbacks). A4-5:
+    // the host and its generation-leased theme-unload hook are surface-owned;
+    // the runner only resolves the service (it never becomes a service
+    // locator inside `app/surface`).
     extensionService = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
-    if (extensionService !== undefined) {
-      extensionHost = new SurfaceHost(extensionService._ledger(), () => app.requestRender())
-      // Selected-plugin-theme fallback (the review's P2): when the theme
-      // currently applied unloads (HMR), the host must restore the
-      // builtin dark palette — the registry alone only removes the
-      // record and repaints, leaving the dead plugin's palette on screen.
-      // The hook is keyed on the SOURCE-QUALIFIED selectable value (the
-      // same identity applyPluginPalette records — the review's P2: a
-      // bare name shared the file namespace and could collide). The
-      // GENERATION-LEASED release is stored so THIS runner's HMR cleanup
-      // releases only its own hook (never a newer generation's).
-      releaseThemeUnloadedHook = extensionService.setThemeUnloadedHook(({ selectableValue }) => {
-        if (app.activePluginTheme() === selectableValue) {
-          app.clearActivePluginTheme()
-          app.applyTheme('dark')
-          app.trackTerminalTheme(false)
-        }
-      })
-    }
+    if (extensionService !== undefined) surface.attachExtensionHost(extensionService)
     /** The clipboard bridge (plan M3): a bounded execFile runner with a
      * generous buffer (clipboard payloads can be multi-MB); `input` is
      * piped to the child's stdin (issue #7 — the copy helpers read their
@@ -5898,55 +5855,11 @@ export function apply(ctx: Context, config: Config): void {
     startupStatus.clear()
     // ── Plugin Manager (P1-A) ──────────────────────────────────────────────
     // ONE controller/panel for both entries (`/plugins` and
-    // `/settings → Plugins`). The port is the narrow Direct adapter; the
-    // presentation classification reads only the shared extension runtime's
-    // own health records — never a second inventory or a second manager.
-    // The token-owned registry distinguishes a normal close from an external
-    // Settings teardown (see its module header).
-    const pluginManagerHosts = new PluginManagerHostRegistry()
-    const pluginManagerController = new PluginManagerController(backend.pluginManager, {
-      requestRender: () => { if (pluginManagerHosts.isOpen()) app.requestRender() },
-      requestClose: () => pluginManagerHosts.closeActive(),
-      notify: (message, kind) => app.notify(message, kind),
-      isOpen: () => pluginManagerHosts.isOpen(),
-      diag,
-    }, {
-      observations: () => extensionService === undefined ? [] : observeTuiExtensions({
-        healthSnapshot: () => extensionService!._ledger().healthSnapshot(),
-        ownerEntryIds: () => extensionService!._ownerEntryIds(),
-      }),
-    })
-    disposePluginManagerController = () => pluginManagerController.dispose()
-    // The selected-Job observation seam (P1-B) is served by the backend: the
-    // Direct adapter is assembled with the other semantic ports and is the only
-    // module that touches `ctx.jobController`.
-    const openPluginManager = (): void => {
-      // A second open is a no-op: the panel is already the active surface.
-      if (pluginManagerHosts.isOpen()) return
-      let close: () => void = () => {}
-      const claim = pluginManagerHosts.claim(() => close())
-      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
-        // Any hide path that disposes the panel releases this owner exactly
-        // once (a normal close and an external teardown are the same here).
-        onDispose: () => claim.releaseExternally(),
-      })
-      close = app.openPluginManagerPanel(panel, () => claim.releaseExternally())
-      pluginManagerController.open('direct-command')
-    }
-    /** The `/settings → Plugins` entry: the SAME panel/controller hosted as a
-     * lazy SettingsList submenu; `done` returns to the Settings list. */
-    const createPluginManagerSubmenu = (done: (selected?: string) => void): Component => {
-      let claim: PluginManagerHostClaim | undefined
-      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
-        // The Settings parent may dispose this submenu WITHOUT calling `done`
-        // (the fork's lifecycle contract): release only the OWNER.
-        onDispose: () => claim?.releaseExternally(),
-      })
-      // The user close path returns to Settings; an external teardown must not.
-      claim = pluginManagerHosts.claim(() => claim?.closeNormally(), done)
-      pluginManagerController.open('settings-submenu')
-      return panel
-    }
+    // `/settings → Plugins`). A4-5: the controller, the token-owned host
+    // registry and both entries are surface-owned; the runner resolves only the
+    // semantic plugin-manager port and holds the returned entries for its
+    // command layer.
+    const pluginManager = surface.attachPluginManager({ port: backend.pluginManager, diag })
     // A4: the application input contract owned by the session/submission/
     // command layers. The surface owner (`surface.start` below) owns the mount
     // and the surface-local option wiring; the runner hands this table in
@@ -6684,8 +6597,6 @@ export function apply(ctx: Context, config: Config): void {
       // browse). The handler is declared below (it needs the task browser +
       // viewer openers); the closure only runs on a user click.
       handleWorkflowAction: (action) => handleWorkflowAction(action),
-      extensionService,
-      extensionHost,
       // Issue #7: the fullscreen drag selection and `/copy` are the SAME user
       // copy intent and share ONE clipboard policy. That policy delivers
       // through two independent legs (terminal-client OSC 52 + native/helper
@@ -6741,28 +6652,13 @@ export function apply(ctx: Context, config: Config): void {
     // docs/client-server-migration.md). A settings edit takes effect after
     // `/keybindings reload`; the fail-soft parser above keeps the keymap's
     // last-known-good state on any read/parse error.
-    // M2: the plugin contributions compile into the effective keymap at
-    // the LOWEST priority (a Host action always wins). The runner syncs
-    // the registry snapshot on every invalidation (the manager skips
-    // unchanged rules, so the rebuild is cheap).
-    const syncPluginKeybindings = (): void => {
-      const registry = extensionService?.keybindings
-      if (registry === undefined) return
-      const snapshot = registry.snapshot()
-      keybindings.setPluginRules(snapshot.bindings.map(binding => ({
-        id: binding.id,
-        action: binding.action,
-        key: normalizedKeyToKeyId(binding.key),
-      })))
-    }
-    syncPluginKeybindings()
-    // M2 DYNAMIC LIFECYCLE (convergence finding): plugin bindings
-    // registered AFTER mount — or unloaded — must resync the effective
-    // keymap (the initial snapshot is not enough). Subscribe to the
-    // registry's change notifications so every register/dispose
-    // re-syncs; the subscription is disposed with the runner teardown.
-    // The unsubscribe slot was hoisted before cleanup (TDZ guard).
-    stopPluginKeybindingSync = extensionService?.keybindings?.subscribe(() => syncPluginKeybindings())
+    // M2: the plugin contributions compile into the effective keymap at the
+    // LOWEST priority (a Host action always wins). A4-5: the sync and its
+    // registry subscription are surface-owned (`surface.bindPluginKeybinds`);
+    // the surface syncs on every invalidation (the manager skips unchanged
+    // rules, so the rebuild is cheap) and releases the subscription with the
+    // surface teardown.
+    surface.bindPluginKeybinds()
     /**
      * One follow-up send settled (plan §10/§11/§12):
      * - ACCEPTED: the child inbox owns the message — never restore the
@@ -7215,99 +7111,13 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    // M3: attach the extension host to the surface chrome once per
-    // generation (F-1): the header/dock/footer merge extension content, and
-    // the service's capability set + state bridge become live.
-    if (extensionHost !== undefined && extensionService !== undefined) {
-      // M7 (round-1 finding 3): renderer failures land in the extension
-      // health ledger — observable via /status diagnostics, never
-      // swallowed. Safe single-line message (no stack traces, hostile
-      // toString handled — the plan's error policy §18).
-      app.setRendererErrorSink(({ id, error, slot, owner }) => {
-        const message = safeErrorMessage(error).replace(/\s+/g, ' ').slice(0, 200)
-        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
-        extensionService._ledger().recordError(healthSlot, id, owner, message)
-      })
-      // M7 (P1-08): a renderer that renders successfully after a failure
-      // RECOVERS — clear its health record (the next failure starts a NEW
-      // error generation).
-      app.setRendererRecoveredSink(({ id, slot, owner }) => {
-        const healthSlot = slot === 'tool' ? 'transcript.tool.renderer' : 'transcript.message.renderer'
-        extensionService._ledger().clearError(healthSlot, id, owner)
-      })
-      // M8: the managed-overlay mount seam (plan §13.3) — the plugin
-      // supplies an ExtensionView; the host compiles + mounts it through
-      // its overlay broker (modal stacking, focus, migration, teardown).
-      // The seam is SURFACE-scoped (P1-4): bound to THIS attachment's
-      // surfaceId so a stale old-generation detach never unbinds a newer
-      // surface's seam.
-      extensionService.setOverlayMount(extensionHost.surfaceId, (view, options) => app.showExtensionOverlay(view, options))
-      // Phase 2: the ADVANCED seams (plan §4/§8/§9) — interactive overlay
-      // mounts and editor controls, both SURFACE-scoped like the stable
-      // overlay seam (a stale old-generation detach never unbinds a newer
-      // surface's seam).
-      extensionService.setAdvancedOverlayMount(extensionHost.surfaceId, (component, options) =>
-        app.showAdvancedInteractiveOverlay(component, options))
-      extensionService.setAdvancedEditorSeam(extensionHost.surfaceId, app.advancedEditorControls())
-      // Phase 4: the ADVANCED imperative UI seam (plan §4A/§4B) — the
-      // broker reuses the host's own picker/question/notify infrastructure.
-      extensionService.setAdvancedUiSeam(extensionHost.surfaceId, app.advancedUiBroker())
-      // Phase 4: the ADVANCED host-state seam (plan §4D). The seam
-      // DELEGATES to the app's host-state facade (single source of
-      // truth); the app fires onAdvancedSetTheme for non-built-in theme
-      // names and THIS handler resolves the palette through the theme
-      // registry (a registered plugin theme; unknown names are a no-op).
-      extensionService.setAdvancedHostSeam(extensionHost.surfaceId, {
-        getTheme: () => app.advancedHostState().getTheme(),
-        setTheme: (name) => app.advancedHostState().setTheme(name),
-        setTitle: (title) => app.advancedHostState().setTitle(title),
-        setWorkingMessage: (message) => app.advancedHostState().setWorkingMessage(message),
-        setTranscriptDetailExpanded: (expanded) => app.advancedHostState().setTranscriptDetailExpanded(expanded),
-        setToolsExpanded: (expanded) => app.advancedHostState().setToolsExpanded(expanded),
-      })
-      // Phase 3: the UNSTABLE low-level surface seam (plan §10) — the
-      // selected host surface capabilities for low-level plugins (never
-      // TuiApp/screens/terminal). SURFACE-scoped like the other seams.
-      extensionService.setUnstableSurfaceSeam(extensionHost.surfaceId, app.unstableSurfaceHandle())
-      extensionHost.attach(
-        { header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) },
-        {
-          surfaceId: extensionHost.surfaceId,
-          generation: app.getSurfaceGeneration(),
-          width: process.stdout.columns ?? 80,
-          height: process.stdout.rows ?? 24,
-          fullscreen: false,
-          focusedSeat: 'editor',
-          themeId: 'dark',
-          themeRevision: 0,
-        },
-      )
-      app.refreshChrome()
-      const attached = extensionHost
-      // P1-1: attach the surface's RENDER SINK to the extension service —
-      // registry invalidations (register/unload/replace on commands,
-      // themes, autocomplete, settings, keybindings, renderers, editors
-      // and the ledger slots) flush through the service batcher into THIS
-      // surface's render path, so a dynamic registration repaints without
-      // any user input. The stale-detach lease protects a newer surface.
-      extensionService.attachSurface(
-        { subscribe: (listener) => attached.subscribeState(listener as never) },
-        extensionHost.capabilitiesOf() as ReadonlySet<string>,
-        // The attachment lease (P1): a stale detachSurface from an older
-        // generation must not tear down THIS surface's bridge.
-        attached.surfaceId,
-        (force) => {
-          // M2: registry invalidations (including plugin keybinding
-          // register/unload) flush through the batcher into this callback
-          // — sync the plugin rules into the effective keymap (a no-op
-          // when unchanged), re-synthesize the slash completions (a late
-          // client command contribution joins the menu), then repaint.
-          syncPluginKeybindings()
-          refreshCommandCompletions?.()
-          app.requestRender(force)
-        },
-      )
-    }
+    // M3: attach the extension host to the mounted surface chrome once per
+    // generation (F-1): the header/dock/footer merge extension content, and the
+    // service's capability set + state bridge become live. A4-5: the whole
+    // attach composition is surface-owned; the runner supplies only the
+    // late-bound command-completion refresh (a client command contribution may
+    // join the `/` menu after mount).
+    surface.attachSurfaceSeams({ refreshCommandCompletions: () => refreshCommandCompletions?.() })
     // (new installs default to 'on' — alt screen by default): boot applies
     // it FIRST so the alt screen owns the terminal input handler before any
     // theme query below targets "the active screen" — a query sent while the
@@ -8624,8 +8434,8 @@ export function apply(ctx: Context, config: Config): void {
       openRewindPicker,
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.
-      openPluginManager,
-      createPluginManagerSubmenu,
+      openPluginManager: () => pluginManager.open(),
+      createPluginManagerSubmenu: (done) => pluginManager.submenu(done),
       // The attachment-intake UX fence: the ONE production reader of the
       // transition gate. Staging an attachment while a transition is in flight
       // (quiesce → commit) would inject a draft into a session about to be

@@ -49,6 +49,17 @@ test('A4: the runner owns no surface construction or mount', () => {
     'the runner must create the surface owner')
   assert.match(indexSource, /surface\.start\(\{/u,
     'the runner must mount through the surface owner')
+  // A4-5 surface-owned constructions (plan §14/§20).
+  assert.doesNotMatch(indexSource, /new SurfaceHost\(/u,
+    'the runner must not construct the extension surface host')
+  assert.doesNotMatch(indexSource, /new PluginManagerController\(/u,
+    'the runner must not construct the Plugin Manager controller')
+  assert.doesNotMatch(indexSource, /new PluginManagerPanel\(/u,
+    'the runner must not construct a Plugin Manager panel')
+  assert.doesNotMatch(indexSource, /new PluginManagerHostRegistry\(/u,
+    'the runner must not construct the Plugin Manager host registry')
+  assert.match(indexSource, /surface\.attachPluginManager\(\{ port: backend\.pluginManager, diag \}\)/u,
+    'the runner must attach the Plugin Manager owner through the surface')
 })
 
 test('A4: the mounted TuiApp has exactly one lifetime owner', () => {
