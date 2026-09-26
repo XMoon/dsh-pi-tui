@@ -67,7 +67,6 @@ const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = [
   { name: 'steerNow', slice: 'A5b-4', owner: 'app/submission/controller' },
   { name: 'dispatchUserInput', slice: 'A5b-4', owner: 'app/submission/controller' },
   { name: 'surfaceEvents', slice: 'A5b-5', owner: 'app/surface/application-events' },
-  { name: 'applyFooterSettings', slice: 'A5b-2', owner: 'app/surface/settings-runtime' },
   { name: 'registerCommands', slice: 'A5b-3', owner: 'app/command/surface' },
   { name: 'openRewindPicker', slice: 'A5b-5', owner: 'app/surface/application-events' },
   { name: 'runner', slice: 'A5b-3', owner: 'app/command/surface' },
@@ -157,6 +156,15 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     ],
   ],
   [
+    'src/app/surface/settings-runtime.ts',
+    [
+      'userFooterCustomItemsForSave', 'footerCommandRunner', 'footerCommandUnsubscribe',
+      'footerDynamicItemRuntime', 'keybindings', 'applyUserKeybindings',
+      'footerWarningShown', 'customFooterWarningShown', 'footerCommandItemWarningShown',
+      'disableFooterCommand', 'applyFooterSettings', 'setDisplayPreset',
+    ],
+  ],
+  [
     'src/app/surface/input-history.ts',
     ['knownHistoryCwdSet', 'rememberHistoryCwd', 'knownHistoryCwds', 'lastHistoryContent'],
   ],
@@ -199,6 +207,7 @@ test('A5b: every extracted declaration lives in its named owner, never in the co
 const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/status-runtime.ts', 'createStatusRuntime', 'createStatusRuntime('],
   ['src/app/surface/input-history.ts', 'createInputHistory', 'createInputHistory('],
+  ['src/app/surface/settings-runtime.ts', 'createSettingsRuntime', 'createSettingsRuntime('],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
 ]

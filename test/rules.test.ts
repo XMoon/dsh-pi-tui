@@ -238,7 +238,9 @@ test('no keybinding settings watch callback crosses the config port (migration b
         if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'watch') {
           const receiver = unwrapParens(callee.expression)
           if (ts.isIdentifier(receiver)
-            && (receiver.text === 'tuiSettings' || receiver.text === 'settings' || settingsAliases.has(receiver.text))) {
+            && (receiver.text === 'tuiSettings' || receiver.text === 'settings'
+              || receiver.text === 'deps.tuiSettings' || receiver.text === 'deps.settingsForms'
+              || settingsAliases.has(receiver.text))) {
             return node
           }
         }
@@ -374,13 +376,23 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
 })
 
 test('the restored fullscreen startup path initializes custom-item persistence before its callback can run', () => {
-  const source = runnerSource()
-  const helper = source.indexOf('const userFooterCustomItemsForSave =')
-  const fullscreenBoot = source.indexOf("if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)")
+  // A5b-2: the projection and the fullscreen boot path both moved into the
+  // settings owner, so the ordering is now structural: the owner initializes
+  // the projection in its factory body (before `applyBootDisplay` can invoke the
+  // fullscreen persistence path), and the composition root only constructs the
+  // owner before calling that boot step.
+  const owner = readFileSync(new URL('../src/app/surface/settings-runtime.ts', import.meta.url), 'utf8')
+  const helper = owner.indexOf('const userFooterCustomItemsForSave =')
+  const fullscreenBoot = owner.indexOf("if (deps.tuiSettings?.get().fullscreen === 'on') deps.surface.app.setFullscreen(true)")
   assert.ok(helper >= 0, 'the custom-item save projection must exist')
   assert.ok(fullscreenBoot >= 0, 'the restored fullscreen startup path must exist')
   assert.ok(helper < fullscreenBoot,
     'fullscreen startup can synchronously invoke its persistence callback; the custom-item save projection must be initialized first')
+  const root = runnerSource()
+  const construction = root.indexOf('const settings = createSettingsRuntime(')
+  const bootApply = root.indexOf('settings.applyBootDisplay()')
+  assert.ok(construction >= 0, 'the composition root must construct the settings owner')
+  assert.ok(bootApply > construction, 'the boot display application must run after the owner is constructed')
 })
 
 test('legacy history moves to JSONL files and never re-enters Config', () => {
