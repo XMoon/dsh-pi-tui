@@ -38,11 +38,11 @@ export interface ShellSubmitDeps {
   /** Notice for a session switch detected mid-send. */
   staleNotice(): string
   /**
-   * The session-transition write fence: returns true while a session
-   * transition is in flight (quiesce → commit) — a followup in that
-   * window would target a session whose lock is about to be released
-   * (the old agent may be woken again between whenIdle and the lock
-   * handover). Optional; absent keeps the historical behavior.
+   * A post-admission LOCAL VALIDITY fence (surface lifetime / disposed). It runs
+   * only after the writer section was entered, so it MUST NOT read the session
+   * transition gate: an admitted writer is never truncated by a waiting
+   * transition — that admission belongs to `SessionRuntime.withWriter` alone.
+   * Optional; absent keeps the historical behavior.
    */
   fence?: () => boolean
   /** The fence refusal notice (defaults to {@link staleNotice}). */
@@ -113,11 +113,10 @@ async function submitShellResultCore(
     deps.notify(deps.staleNotice(), 'error')
     return 'stale'
   }
-  // The session-transition write fence: while a transition is in flight
-  // the old agent may be woken again — writing would target a session
-  // whose lock is about to be released (the two-writers race). The
-  // caller's card keeps the output visible; the `!` line can be re-run
-  // after the transition settles.
+  // The post-admission local validity fence (surface lifetime): the writer
+  // section was already entered, so this must never consult the session
+  // transition gate. The caller's card keeps the output visible; the `!` line
+  // can be re-run after the transition settles.
   if (deps.fence?.() === true) {
     deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'

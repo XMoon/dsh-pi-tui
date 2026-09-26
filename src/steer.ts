@@ -53,11 +53,11 @@ export interface SteerDeps {
    * submission changed, so no verbatim-retry promise can be made. */
   mergedNotice(): string
   /**
-   * The session-transition write fence: returns true while a session
-   * transition is in flight (quiesce → commit). The old agent may be
-   * woken again between whenIdle and the lock release, so a write in that
-   * window would target a session whose lock is about to be handed over —
-   * the two-writers race. Optional; absent keeps the historical behavior.
+   * A post-admission LOCAL VALIDITY fence (surface lifetime / disposed). It runs
+   * only after the writer section was entered, so it MUST NOT read the session
+   * transition gate: an admitted writer is never truncated by a waiting
+   * transition — that admission belongs to `SessionRuntime.withWriter` alone.
+   * Optional; absent keeps the historical behavior.
    */
   fence?: () => boolean
   /** The fence refusal notice (defaults to {@link staleNotice}). */
