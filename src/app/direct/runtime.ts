@@ -75,11 +75,12 @@ export interface DirectHostResolvers {
 /** Explicit Direct application composition dependencies. */
 export interface DirectApplicationRuntimeDeps {
   /**
-   * The Host context, forwarded to the Direct adapters and the stream
-   * installer. A1 performs no Direct application lookup here: the runner
-   * supplies every resolver callback in this deps object. By A5 the Direct Host
-   * lookups (`agents`/`sessions`/`agentDefaultModel`) move behind this module's
-   * composition seam; `app/bootstrap` only connects owners.
+   * The Host context, forwarded to the Direct adapters, the stream installer
+   * AND this module's own composition seam. A5-3 moved the Direct-only Host
+   * lookups (`agents`/`sessions` for the resolver and retirement seams,
+   * `subagents` for the descendant drain) behind that seam (plan §26): the
+   * composition root hands over the Context plus the verified owner/ledger
+   * seams, never a Direct fact it resolved itself.
    */
   readonly ctx: DirectBackendContextLike
   readonly diag: Diag
@@ -99,9 +100,6 @@ export interface DirectApplicationRuntimeDeps {
   readonly currentOwner: () => SessionOwnerRef | undefined
   /** Whether the runner lifecycle was aborted (shutdown cancel semantics). */
   readonly isLifecycleAborted: () => boolean
-  /** Drain one Direct Agent's continuable descendants (runner-supplied Host
-   *  operation; the Direct layer never reaches for the Host service itself). */
-  readonly drainContinuableDescendants: (agent: Agent) => Promise<void>
   /**
    * Build one preset composition, installing the runtime's Agent-scoped model
    * selection during setup. The runner supplies its `composeAgent` closure; the
@@ -113,10 +111,6 @@ export interface DirectApplicationRuntimeDeps {
   ) => Promise<CompositionLike>
   /** The interactive continuable child currently viewed, if any (live record). */
   readonly getViewedQueueAgent: () => DirectViewedQueueAgent | undefined
-  /** The registered Host Agent for a session id (exact identity comparison). */
-  readonly registeredAgentFor: (sessionId: string) => Agent | undefined
-  /** The Host Session/Agent accessors the Direct session reader projects. */
-  readonly resolvers: DirectHostResolvers
 }
 
 /** The Direct application runtime consumed by the runner. */
@@ -146,6 +140,50 @@ export interface DirectApplicationRuntime {
   readonly retirement: SessionOwnerRetirement
 }
 
+/** The Direct-only Host accessors this module's composition seam owns (plan
+ * §26): the resolver/retirement lookups and the descendant drain are Direct
+ * facts, so they are built HERE from the context contract instead of being
+ * handed in by the composition root. */
+interface DirectHostAccessors {
+  readonly registeredAgentFor: (sessionId: string) => Agent | undefined
+  readonly resolvers: DirectHostResolvers
+  readonly drainContinuableDescendants: (agent: Agent) => Promise<void>
+}
+
+/**
+ * Resolve the Direct-only Host accessors.
+ *
+ * The composition root's startup gate already required these services before
+ * this runtime is constructed, so they are read WITHOUT an optional fallback: a
+ * missing service fails loudly instead of quietly resolving a live session to
+ * `undefined`. The session-id brand is erased at runtime (`SessionId` is a pure
+ * compile-time brand — `@deepseek-ai/dsh-brand`), so the structural faces take
+ * the raw id string the runner holds.
+ */
+function directHostAccessors(ctx: DirectBackendContextLike): DirectHostAccessors {
+  const agents = ctx.get('agents') as { get(id: string): Agent | undefined }
+  const sessions = ctx.get('sessions') as {
+    get(id: string): unknown | undefined
+    flush(session: unknown): Promise<void>
+  }
+  return {
+    registeredAgentFor: sessionId => agents.get(sessionId),
+    resolvers: {
+      sessionOf: sessionId => sessions.get(sessionId),
+      agentOf: sessionId => agents.get(sessionId),
+      flushSession: async (session) => { await sessions.flush(session) },
+    },
+    // Resolved per call, never captured: the subagent registry may mount after
+    // this runtime, and an unmounted registry was always a no-op drain.
+    drainContinuableDescendants: async (agent) => {
+      const subagents = ctx.get('subagents') as {
+        drainContinuableDescendants?(parents: readonly unknown[]): Promise<void>
+      } | undefined
+      await subagents?.drainContinuableDescendants?.([agent])
+    },
+  }
+}
+
 /**
  * Compose the Direct application runtime. Behavior-preserving relocation of the
  * runner's Direct construction block: the model-selection owner, the Direct
@@ -154,6 +192,8 @@ export interface DirectApplicationRuntime {
  */
 export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDeps): DirectApplicationRuntime {
   const modelSelections = new DirectModelSelectionOwner(deps.defaultModel)
+  // The Direct-only Host lookups live behind this seam (A5-3, plan §26).
+  const host = directHostAccessors(deps.ctx)
 
   const installSessionModelSelection = (_agentCtx: unknown, agent: Agent): void => {
     modelSelections.installForAgent(agent)
@@ -179,17 +219,13 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     const viewed = deps.getViewedQueueAgent()
     if (viewed === undefined || viewed.childSessionId !== sessionId) return undefined
     if (live?.session.id !== viewed.parentSessionId) return undefined
-    const agent = deps.registeredAgentFor(sessionId)
+    const agent = host.registeredAgentFor(sessionId)
     if (agent === undefined || agent !== viewed.agent || agent.session.id !== sessionId) return undefined
     if (agent.session.header.parentSession !== viewed.parentSessionId) return undefined
     return agent
   }
 
-  const liveResolvers = {
-    sessionOf: (sessionId: string): unknown | undefined => deps.resolvers.sessionOf(sessionId),
-    agentOf: (sessionId: string): unknown | undefined => deps.resolvers.agentOf(sessionId),
-    flushSession: (session: unknown): Promise<void> => deps.resolvers.flushSession(session),
-  }
+  const liveResolvers = host.resolvers
 
   // The Direct owner pool is built and owned HERE (plan A2 §3.3): it keeps the
   // parked AgentHandle map and reads the ONE release ledger through the core's
@@ -230,8 +266,8 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     owners,
     diag: deps.diag,
     isLifecycleAborted: deps.isLifecycleAborted,
-    drainContinuableDescendants: deps.drainContinuableDescendants,
-    flushSession: (session) => deps.resolvers.flushSession(session),
+    drainContinuableDescendants: host.drainContinuableDescendants,
+    flushSession: host.resolvers.flushSession,
     parkHandle: (handle) => ownerPool.park(handle),
     takeAllParkedOwners,
   })
@@ -275,7 +311,7 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     compose,
     agentFor,
     queueAgentFor,
-    registeredAgentFor: deps.registeredAgentFor,
+    registeredAgentFor: host.registeredAgentFor,
     withPromptAdmission,
     installAssistantStream,
     owners,
