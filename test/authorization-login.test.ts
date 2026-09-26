@@ -38,6 +38,7 @@ import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 
 /** Flush the microtask queue (the flow's respond chain is promise-based). */
 async function settle(): Promise<void> {
@@ -187,6 +188,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         get liveAgent() { return undefined },
+        ...sessionScopeFacts(() => undefined, () => 0),
+        currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,

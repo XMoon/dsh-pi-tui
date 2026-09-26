@@ -29,6 +29,7 @@ import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
+import type { LiveSessionScope, SessionScope } from './app/session/scope.ts'
 import type { DefaultIntentRecord } from './default-intent.ts'
 import { SettingsList, type Component, type SettingItem } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
@@ -430,6 +431,19 @@ export interface TuiCommandRunner {
    * start) — sessionless commands must degrade, session commands call
    * {@link ensureSession} first. */
   readonly liveAgent: Agent | undefined
+  /** The current session id. SYNC display/diagnostics ONLY — never an operation
+   *  admission and never a fence (use a captured {@link SessionScope} there). */
+  readonly currentSessionId: string | undefined
+  /** ONE synchronous capture of `{ owner subject, generation, sessionId }` for
+   *  sessionless-ALLOWED paths (a sessionless capture is meaningful: it fails
+   *  once any Session appears, including mid-commit). */
+  captureSessionScope(): SessionScope
+  /** True only for the same exact owner AND generation — or, for a sessionless
+   *  capture, the same sessionless generation. */
+  isSessionScopeCurrent(scope: SessionScope): boolean
+  /** Ensure the lazy first session exists, then capture an atomic LIVE scope.
+   *  Throws when the surface is still sessionless (creation failed). */
+  requireLiveSessionScope(): Promise<LiveSessionScope>
   /** Create the first session lazily when none exists (deferred start). */
   ensureSession(): Promise<void>
   /**

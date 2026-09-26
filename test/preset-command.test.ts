@@ -25,6 +25,7 @@ import { customThemesDir, darkColors } from '../src/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -218,6 +219,11 @@ function stubRunner(options: {
     app: options.app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get liveAgent() { return options.state !== undefined ? options.state.agent : options.agent },
+    ...sessionScopeFacts(
+      () => options.state !== undefined ? options.state.agent : options.agent,
+      () => options.state?.generation ?? 0,
+    ),
+    get currentSessionId() { return (options.state !== undefined ? options.state.agent : options.agent)?.session.id },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,

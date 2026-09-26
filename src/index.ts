@@ -207,6 +207,7 @@ import {
 import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
+import { createSessionScopeAuthority } from './app/session/scope.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -1921,6 +1922,23 @@ export function apply(ctx: Context, config: Config): void {
     const ownership = createSessionOwnershipCore({
       isSurfaceDisposed: () => cleanedUp,
       resetForGeneration: () => resetForGeneration(),
+    })
+    // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
+    // capture of `{ owner subject, generation, sessionId }`, so no consumer can
+    // rebuild an identity from separate reads. A sessionless capture is
+    // meaningful: it pins "no owner + this generation" and fails once the first
+    // Session is created (including the publish-before-bump window).
+    const sessionScope = createSessionScopeAuthority({
+      current: () => {
+        const subject = ownership.captureSubject()
+        if (subject === undefined) {
+          return { subject: undefined, sessionId: undefined, generation: ownership.generation() }
+        }
+        const sessionId = ownership.currentSessionId()
+        if (sessionId === undefined) throw new Error('a live ownership subject must carry a session id')
+        return { subject, sessionId, generation: ownership.generation() }
+      },
+      isSubjectCurrent: (subject) => ownership.isSubjectCurrent(subject),
     })
     // Alt+Up may finish a queue mutation while a transition is waiting on the
     // same writer barrier. Keep its confirmed local representation until the
@@ -9250,6 +9268,15 @@ export function apply(ctx: Context, config: Config): void {
       app,
       diag,
       get liveAgent() { return agentNow() },
+      get currentSessionId() { return ownership.currentSessionId() },
+      captureSessionScope: () => sessionScope.capture(),
+      isSessionScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+      requireLiveSessionScope: async () => {
+        await sessionRuntime.ensureSession()
+        const scope = sessionScope.captureLive()
+        if (scope === undefined) throw new Error('session could not be created')
+        return scope
+      },
       // Completion-notification preference setters (the /settings panel
       // writes): the controller applies the parsed value immediately and
       // the panel persists the raw string through the config port.

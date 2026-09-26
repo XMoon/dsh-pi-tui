@@ -16,6 +16,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -179,6 +180,8 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
