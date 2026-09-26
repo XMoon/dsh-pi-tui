@@ -40,17 +40,22 @@ function methodBody(source: string, name: string): string {
 const surfaceMethodBody = (name: string): string => methodBody(surfaceSource, name)
 
 test('the per-method body slicer is exact (mutation guard for the focus locks)', () => {
-  // Prove the slicer isolates ONE member: emptying the OTHER focus path must
-  // not affect the target's body, while emptying the target must be visible.
-  const emptiedOther = surfaceSource.replace(
+  // Prove the slicer isolates ONE member with a unique SENTINEL — body content
+  // must appear in ITS OWN slice and in no other member's. (Emptying a method
+  // would not prove isolation: a degenerate whole-file slice would also stop
+  // finding the removed text.)
+  const SENTINEL = 'SENTINEL_TERMINAL_FOCUS_BODY'
+  const sentineled = surfaceSource.replace(
     /    handleTerminalFocus\(focused\) \{[\s\S]*?\n    \},/u,
-    '    handleTerminalFocus(focused) {\n    },',
+    `    handleTerminalFocus(focused) {\n      ${SENTINEL}\n    },`,
   )
-  assert.notEqual(emptiedOther, surfaceSource, 'the fixture must actually rewrite handleTerminalFocus')
-  assert.ok(methodBody(emptiedOther, 'noteUserInput').includes('terminalFocusTracker.markFocused()'),
-    'emptying handleTerminalFocus must not leak into the noteUserInput slice')
-  assert.ok(!methodBody(emptiedOther, 'handleTerminalFocus').includes('terminalFocusTracker.handleFocusReport('),
-    'a removed sync inside handleTerminalFocus must be visible to the slice')
+  assert.notEqual(sentineled, surfaceSource, 'the fixture must actually rewrite handleTerminalFocus')
+  const focusSlice = methodBody(sentineled, 'handleTerminalFocus')
+  assert.ok(focusSlice.includes(SENTINEL), 'the target method slice must contain its own body')
+  assert.ok(!focusSlice.includes('terminalFocusTracker.markFocused()'),
+    'the target slice must stop at its member boundary (no noteUserInput body)')
+  assert.ok(!methodBody(sentineled, 'noteUserInput').includes(SENTINEL),
+    'another member slice must never contain the sentinel — the slicer isolates one member')
 })
 
 test('the ONLY completion-controller feed is agent/status (turn/end can never notify)', () => {
