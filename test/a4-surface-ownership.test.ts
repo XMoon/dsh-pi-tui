@@ -18,6 +18,13 @@ import { compositionSource } from './support/composition-surface.ts'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')
 const indexSource = compositionSource()
+// A5b-1: the viewer lifetime and the live-session presentation policy moved
+// into their application owners, so the A4 locks follow the authority to those
+// modules instead of pinning the runner's transitional closures.
+const viewerSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'viewer-runtime.ts'),
+  'utf8',
+)
 
 /** Every TypeScript source under `src/app/surface`. */
 function surfaceSources(): Array<{ rel: string; source: string }> {
@@ -251,8 +258,12 @@ test('A4-4: the status commit and the pending-input presentation are surface-own
     'the runner must not hold the own-input memory')
   assert.doesNotMatch(indexSource, /buildPendingPresentation\(/u,
     'the runner must not hold the pending/submission join')
-  assert.match(indexSource, /pendingSubjectId: \(\) => activePendingSessionId\(\)/u,
-    'the runner must inject the active pending subject only')
+  assert.match(indexSource, /pendingSubjectId: \(\) => viewer\.pendingSubjectId\(\)/u,
+    'the runner must inject the active pending subject only (through the viewer owner)')
+  assert.match(viewerSource, /const activePendingSessionId = /u,
+    'the viewer owner must derive the active pending subject')
+  assert.doesNotMatch(indexSource, /const activePendingSessionId = /u,
+    'the runner must not derive the active pending subject')
   assert.match(indexSource, /pendingSnapshot: \(sessionId\) => backend\.pendingInputReader\.snapshot\(sessionId\)/u,
     'the runner must inject the semantic pending snapshot only')
   assert.match(indexSource, /submissionEchoes: \(sessionId\) => submissionPresentation\.snapshot\(sessionId\)/u,
@@ -291,7 +302,10 @@ test('A4-8: the active-target, repaint and search/transcript wiring are surface-
   assert.doesNotMatch(indexSource, /REPAINT_FLUSH_MS/u, 'the runner must not own the flush interval')
   assert.doesNotMatch(indexSource, /function repaint\(/u, 'the runner must not own the repaint algorithm')
   assert.doesNotMatch(indexSource, /\brepaint\(app,/u, 'the runner must not call the moved repaint algorithm')
-  assert.match(indexSource, /surface\.repaint\(\)/u, 'the runner must repaint through the surface')
+  assert.match(viewerSource, /deps\.surface\.repaint\(\)/u,
+    'the viewer owner must repaint through the surface')
+  assert.doesNotMatch(indexSource, /(?<!surface\.)\brepaint\(\)/u,
+    'the runner must not repaint directly')
   assert.match(surface, /schedulePaint\(\): void/u, 'the surface must expose schedulePaint()')
   assert.match(surface, /paintNow\(\): void/u, 'the surface must expose paintNow()')
 

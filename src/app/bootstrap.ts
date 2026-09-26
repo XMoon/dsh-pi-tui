@@ -27,7 +27,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
@@ -59,6 +58,8 @@ import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-shell'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
+import { createSessionPresentation } from './surface/session-presentation.ts'
+import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
 import { renderTranscriptMarkdown } from '../transcript.ts'
@@ -67,14 +68,12 @@ import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomica
 import type { SaveLocationResult } from '../save-location.ts'
 import { completeDirectory } from '../file-completion/directory-completion.ts'
 import { LocalFileSource } from '../file-completion/local-file-source.ts'
-import { TranscriptWindowController } from '../transcript-window.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
 import { isDisplayPresetAvailable, isFocusDisplayPreset, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
-import { computeStats, formatStats, StatsFolder } from '../stats.ts'
+import { computeStats, formatStats } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
-import { hydrateSessionUi } from '../session-ui-hydrate.ts'
 import { plainSectionEqual } from '../status/equal.ts'
 import { deriveRunnerPermission } from '../status/derive-permission.ts'
 import { deriveAccessStatus } from '../status/derive-access.ts'
@@ -88,8 +87,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from '../footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from '../footer/dynamic-item-runtime.ts'
 import { color } from '../theme.ts'
-import { isEmptyAcceleratedViewerSubmit, type StreamingToolPreview, type TuiApp, type TuiAppEvents } from '../tui-app.ts'
-import { clearStreamingToolPreviewsForStep } from '../streaming-tool-preparing.ts'
+import { isEmptyAcceleratedViewerSubmit, type TuiApp, type TuiAppEvents } from '../tui-app.ts'
 import { parseUserKeybindings } from '../keybindings/config.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
 import { type ViewerAccess } from '../tasks-browser.ts'
@@ -100,7 +98,7 @@ import { DefaultWriteBarrier } from '../default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from '../theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from '../detached.ts'
-import { historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from '../history.ts'
+import { historyFilePath, loadHistoryFile, loadHistoryRecords } from '../history.ts'
 import { terminalTitleOf } from '../terminal-title.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../history-persist.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
@@ -156,7 +154,7 @@ import { SubmitLatencyTracker } from '../submit-latency.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from '../command-policy.ts'
 import { interruptAgent } from '../interrupt.ts'
-import { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall } from '../subagent-viewer.ts'
+import { viewerActionCapability } from '../subagent-viewer.ts'
 import { resolveInitialCatalog } from '../surface-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
 import { queueInboxMessageOf, queueTextOf } from '../pending-presentation.ts'
@@ -165,7 +163,6 @@ import { setTerminalTitle } from '../terminal-title.ts'
 import { gitBranch } from '../git-branch.ts'
 import { foldGoal } from '../status/derive-goal.ts'
 import { compactingFromLog, workingFromLog } from '../compaction-presentation.ts'
-import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput } from '../streaming-tool-preparing.ts'
 import { hostRunningProfile, resumeCommand } from '../dsh-profile.ts'
 
 import type { Config } from '../tui-config.ts'
@@ -177,53 +174,10 @@ interface AppExit {
   (code: number): void
 }
 
-/** Number of turns materialized by the transcript presentation window. */
-const TRANSCRIPT_WINDOW_TURNS = 20
-
-/** Overlapping turn step used when browsing older/newer history. */
-const TRANSCRIPT_WINDOW_STEP = 10
-
 /** Throttle for re-chaining a RUNNING local shell card's result to the
  * bounded tail (plan §5.1): the running preview refreshes at most this
  * often, so a high-throughput log cannot rebuild the view per chunk. */
 const LOCAL_SHELL_TAIL_FLUSH_MS = 200
-
-/** Apply one transient input to a presentation owner and its independent stats. */
-function applyAssistantLiveInput(
-  owner: TranscriptFolder,
-  stats: StatsFolder,
-  previews: Map<string, StreamingToolPreview>,
-  input: AssistantLiveInput,
-): void {
-  if (input.kind === 'end' && (input.status === 'abandoned' || input.settlement === 'attempt')) {
-    clearStreamingToolPreviewsForStep(previews, input.turn, input.step)
-  } else if (!(input.kind === 'chunk' && owner.turnActivity(input.turn)?.completed === true)) {
-    applyStreamingToolPreviewInput(previews, input)
-  }
-  owner.applyLiveInput(input)
-  stats.applyLiveInput(input)
-}
-
-/** Join a durable observation with the opening journal after its snapshot cut. */
-function mergeSessionEventCut(
-  snapshot: readonly SessionEvent[],
-  opening: readonly SessionEvent[],
-): SessionEvent[] {
-  const cut = snapshot.length === 0 ? -1 : Number(snapshot[snapshot.length - 1]!.seq)
-  return [...snapshot, ...opening.filter(event => Number(event.seq) > cut)]
-}
-
-/** Time one cold-bootstrap fold without changing its authoritative semantics. */
-function timedBootstrapScan<T>(diag: Diag, name: string, eventCount: number, scan: () => T): T {
-  const started = performance.now()
-  const result = scan()
-  diag.debug('session bootstrap scan', {
-    scan: name,
-    eventCount,
-    elapsedMs: Number((performance.now() - started).toFixed(3)),
-  })
-  return result
-}
 
 /** Read the official `RemoteError` code off a refused preset switch. */
 function presetErrorCode(error: unknown): string | undefined {
@@ -368,7 +322,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // race the DSH agent-loop owner disposer.
     const ownership = createSessionOwnershipCore({
       isSurfaceDisposed: () => cleanedUp,
-      resetForGeneration: () => resetForGeneration(),
+      resetForGeneration: () => presentation.resetForGeneration(),
     })
     // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
     // capture of `{ owner subject, generation, sessionId }`, so no consumer can
@@ -593,7 +547,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         initLiveSession: (owner) => {
           const agent = directAgentOfOwner(owner)
           if (agent === undefined) throw new Error('initLiveSession requires a Direct owner attachment')
-          return initLiveSession(agent)
+          return presentation.initLiveSession(agent)
         },
         refreshLiveCatalog: (owner) => {
           const agent = directAgentOfOwner(owner)
@@ -982,16 +936,46 @@ export function applyRunner(ctx: Context, config: Config): void {
       // projection name or the turn-boundary reducer.
       return backend.sessionReader.blank(agent.session.id)
     }
-    // Incremental fold state for the live session's log; reset on switch. A
-    // resumed session is hydrated only by initLiveSession below, so startup
-    // wiring never pre-folds the same event log a second time.
-    let folder = new TranscriptFolder()
-    let windowController = new TranscriptWindowController({
-      windowTurns: TRANSCRIPT_WINDOW_TURNS,
-      stepTurns: TRANSCRIPT_WINDOW_STEP,
-      turns: folder.groupedTurns(),
+    // A5b-1: the live-session presentation owner (main transcript/stats folds,
+    // the main presentation target, the generation reset and the ONE cold
+    // hydration path) is constructed here, where its folds used to live.
+    // `viewerRef` is the late-binding seam for the generation reset: the
+    // presentation owner owns the reset ORDER, the viewer owner owns its own
+    // teardown.
+    let viewerRef: ViewerRuntime<SessionEvent, Agent> | undefined
+    const presentation = createSessionPresentation<SessionEvent>({
+      surface,
+      diag,
+      isCleanedUp: () => cleanedUp,
+      folds: { title: (events) => foldSessionTitle(events)?.title },
+      direct: {
+        installModelSelection: (agent) => { directRuntime.modelSelections.installForAgent(agent as Agent) },
+        assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent as Agent),
+        planActive: (agent) => projectedPlanActive(
+          ctx.get('sessionProjections') as PlanProjectionLike | undefined,
+          (agent as unknown as Agent).session,
+        ) ?? false,
+      },
+      status: {
+        setGoalText: (text) => { goalText = text },
+        refresh: () => refreshStatusCheap(),
+        refreshTerminalTitle: () => refreshTerminalTitle(),
+        updateWelcomeCard: () => updateWelcomeCard(),
+        scheduleInitialMeasurement: (agent) => scheduleInitialContextMeasure(agent as Agent),
+      },
+      history: {
+        rememberCwd: (cwd) => rememberHistoryCwd(cwd),
+        currentCwd: () => sessionCwd(),
+        records: (cwd) => loadHistoryRecords(historyFilePath(dshHome(process.env), cwd)),
+        setLastContent: (content) => { lastHistoryContent = content },
+      },
+      commands: { register: () => registerCommands({ snapshot: initialSnapshot, skills: initialSkills }) },
+      submission: { clearPending: () => pendingSubmissions.clear() },
+      viewer: {
+        resetAutoPop: () => viewerRef?.resetAutoPop(),
+        teardownForSessionSwap: () => viewerRef?.teardownForSessionSwap(),
+      },
     })
-    let statsFolder = new StatsFolder()
     /**
      * The opening-session JOURNAL (A2 seam; the concrete state is A4 surface
      * ownership — `surface.openingJournal`). Presentation-only: it fences which
@@ -1205,7 +1189,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // owns that coupling).
     const refreshStatusCheap = (): void => {
       if (cleanedUp) return
-      const stats = statsFolder.snapshot()
+      const stats = presentation.mainStats().snapshot()
       // The CACHED context pressure of the live session (the only measured
       // subject — never a fresh measurement here). While the subagent
       // viewer is open, the usage PROJECTION below still refuses to ride
@@ -1225,7 +1209,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       // SUBJECT's facts feed the sections — while the subagent viewer is
       // open that is the viewed child's own fold and workspace, so the
       // footer layout never changes, only the data source.
-      const displayCwd = viewing?.cwd ?? liveCwd
+      const displaySubject = viewer.read()
+      const displayCwd = displaySubject?.cwd ?? liveCwd
       // While the subagent viewer is open the DISPLAY SUBJECT is the
       // viewed CHILD: the parent's session-owned sections (composition/
       // access/plan) are NOT the child's — the child's are not derivable
@@ -1239,8 +1224,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       // not churn the store's revision (the store compares by identity) nor
       // wake the command runner's refresh on every streaming event.
       const current = surface.status.snapshot()
-      const composition = viewing === undefined ? deriveCompositionStatus() : {}
-      const access = viewing === undefined
+      const composition = displaySubject === undefined ? deriveCompositionStatus() : {}
+      const access = displaySubject === undefined
         ? deriveAccessStatus(
             {
               permissionPresets: permission,
@@ -1250,11 +1235,11 @@ export function applyRunner(ctx: Context, config: Config): void {
             agentNow()?.session,
           )
         : {}
-      const collaboration = viewing === undefined
+      const collaboration = displaySubject === undefined
         ? { plan: derivePlanStatus(ctx.get('planMode'), agentNow(), ctx.get('sessionProjections'), agentNow()?.session) }
         : { plan: { effective: false } }
       const workspace = deriveWorkspaceStatus(displayCwd)
-      const usage = usageFromStats(viewing?.stats.snapshot() ?? stats, viewing === undefined ? contextTokens : undefined)
+      const usage = usageFromStats(displaySubject?.stats.snapshot() ?? stats, displaySubject === undefined ? contextTokens : undefined)
       const host = deriveHostStatus()
       const patch: {
         composition?: typeof composition
@@ -2013,72 +1998,6 @@ export function applyRunner(ctx: Context, config: Config): void {
         }
       })
     }
-    // Coalesced repaint is surface-owned (A4-8): the runner no longer owns
-    // the flush timer; the surface routing schedules its own repaint.
-    // Ephemeral previews are isolated per presentation owner: the main live
-    // session and a mounted child viewer never share call ids or rows.
-    const mainStreamingToolPreviews = new Map<string, StreamingToolPreview>()
-    // P7d: subagent viewer — while set, the transcript shows another live
-    // session's log and Esc returns to the parent session. The target is
-    // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
-    // submits human prompts through ctx.subagents.prompt), a one-shot
-    // child's viewer stays read-only. The parent session id is pinned at
-    // open time — follow-ups require the exact live direct parent, and
-    // the viewer never guesses it from the current live agent.
-    let viewing: {
-      id: SessionId
-      folder: TranscriptFolder
-      /** Independent presentation state while browsing the child. */
-      window: TranscriptWindowController
-      /** The child's OWN event stats (turns/steps/tokens) for the footer. */
-      stats: StatsFolder
-      parentSessionId: SessionId
-      label: string
-      mode: 'one-shot' | 'continuable'
-      activity: 'running' | 'inactive'
-      /** The viewer's surface authority (plan §6.10): mode is the durable
-       * semantic, access is what THIS surface may do — a nested descendant
-       * is read-only even when continuable. */
-      access: ViewerAccess
-      /** The child session's workspace ('' when unknown, e.g. a cold child). */
-      cwd: string
-      /** Live-only preparing rows for this child presentation owner. */
-      previews: Map<string, StreamingToolPreview>
-      /** The EXACT current Agent object owning the viewed session, rebound on
-       * same-session Activation rollover. The live seam's
-       * identity fence compares Agent object identity (never a
-       * re-derived session id), so a late frame from a retired child agent
-       * can never reach the viewer after a replacement. */
-      viewAgent?: Agent
-    } | undefined
-    const setViewedQueueAgent = (agent: Agent | undefined): void => {
-      const current = viewing
-      if (agent !== undefined
-        && current !== undefined
-        && current.mode === 'continuable'
-        && current.access === 'interactive-direct-child'
-        && current.parentSessionId === ownership.currentSessionId()
-        && agent.session.id === current.id
-        && agent.session.header.parentSession === current.parentSessionId) {
-        viewedQueueAgent = { parentSessionId: current.parentSessionId, childSessionId: current.id, agent }
-        return
-      }
-      viewedQueueAgent = undefined
-    }
-    // The queue pane consumes the same active semantic pending-input subject as
-    // Ctrl+S: the live main session on the main surface, or the exact
-    // interactive continuable child while its viewer is mounted. A child whose
-    // authority is unavailable yields an empty pane; it never falls back to the
-    // main session's queue. Non-interactive viewers expose no queue subject.
-    const activePendingSessionId = (): string | undefined => {
-      const viewer = viewing
-      if (viewer !== undefined) {
-        return viewer.mode === 'continuable' && viewer.access === 'interactive-direct-child'
-          ? viewer.id
-          : undefined
-      }
-      return agentNow()?.session.id
-    }
     /** The display text of one client-local submission echo: the draft text
      * with its attachment placeholders expanded to compact markers, so an
      * attachment-only submission is never an empty pending row. The SAME
@@ -2103,22 +2022,27 @@ export function applyRunner(ctx: Context, config: Config): void {
     // being displayed yet; enterView replays this exact-agent baseline before
     // mounting the child surface.
     let assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[] = () => []
-    // Unsettled subagent delegations in the live session, in tool/call order.
-    // The viewer matches one of these by description when the user opens a
-    // child transcript, so the child's tool/result can pop the viewer back.
-    const pendingSubagentCalls: { callId: string; description: string }[] = []
-    // callId → child session id, established when the user opens a child's
-    // transcript (see enterView). Consumed on the matching tool/result.
-    const viewCallToChild = new Map<string, SessionId>()
-    const applyOwnerStreamingToolPreviewEvent = (
-      previews: Map<string, StreamingToolPreview>,
-      ownerFolder: TranscriptFolder,
-      event: SessionEvent,
-    ): void => {
-      applyStreamingToolPreviewEvent(previews, event)
-    }
-    // Tool-call arguments by callId, for the approval-preview dialog.
-    const callArgs = new Map<ToolCallId, string>()
+    // A5b-1: the subagent viewer owner. The exact-Agent facts stay in the
+    // composition root (the Direct registry + the assistant-stream install) and
+    // reach the viewer through these narrow capabilities.
+    const viewer = createViewerRuntime<SessionEvent, Agent>({
+      surface,
+      isCleanedUp: () => cleanedUp,
+      currentSessionId: () => ownership.currentSessionId(),
+      liveParentSessionId: () => agentNow()?.session.id,
+      childSession: (childId) => sessions.get(SessionId(childId)),
+      observeChild: (childId) => {
+        const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+        if (query?.observeSession === undefined) return undefined
+        return query.observeSession(SessionId(childId), { projectionMode: 'none' })
+      },
+      childAgent: (childId) => agents.get(SessionId(childId)),
+      assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
+      publishQueueAuthority: (authority) => { viewedQueueAgent = authority },
+      refreshStatus: () => refreshStatusCheap(),
+      restoreMainTranscriptAnchor: () => presentation.restoreMainTranscriptAnchor(),
+    })
+    viewerRef = viewer
     // Transcript search presentation state and the repaint binding are
     // surface-owned (A4-8, plan §17); the runner keeps only the folder
     // instances (behind the routing source) and calls
@@ -2174,300 +2098,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       const selection = defaultIntent.intent
       if (selection === undefined) return undefined
       return { selection, status: defaultIntent.outcome === 'unresolved' ? 'unresolved' : 'pending' }
-    }
-    /**
-     * The synchronous surface reset that follows a generation bump (A2 seam).
-     * MUST stay synchronous — no await, no microtask — and MUST run while the
-     * OLD owner is still current: the session runtime publishes the new owner
-     * only AFTER this returns (see the four commit shapes in the A2 plan §4).
-     */
-    const resetForGeneration = (): void => {
-      callArgs.clear()
-      mainStreamingToolPreviews.clear()
-      // The new session's subagent delegations are a fresh namespace: stale
-      // pending calls from the old session would consume viewer match slots,
-      // and dead callId→child maps would silently disable the auto-pop.
-      pendingSubagentCalls.length = 0
-      viewCallToChild.clear()
-      // A4-8: the search presentation state is surface-owned.
-      surface.resetSearchPresentation()
-      windowController.latest()
-      windowController.setTurns(folder.groupedTurns())
-      app.setSearchResult(0, 0)
-      app.clearSessionOverrides()
-      // A new session owns the surface: the whole Task Center (the Job child
-      // overlay FIRST, then the browser, then the cached catalog + the
-      // synchronous badge/summary/row mirrors) is reset by the surface owner
-      // (A4-6). Its rows would otherwise go stale — the runtime refresh is
-      // fenced to the old root — and the new session's first listing is async,
-      // so the old session's running badge must not hang on the footer until
-      // it lands (a failed listing must never leave a stale badge either).
-      surface.resetTasks()
-      // The pending-input presentation is session-scoped too: clear old
-      // semantic rows AND local submission echoes at the synchronous
-      // generation boundary before the new subject is published. The
-      // own-input memory is surface-owned (A4-4).
-      pendingSubmissions.clear()
-      surface.resetPendingPresentation()
-      // A new session owns the surface: tear down the subagent viewer. The
-      // old viewer's parent session is gone (the continuation contract
-      // requires the EXACT live parent), so the child transcript, the
-      // viewer editor and the per-child drafts must not leak into the new
-      // session. The teardown is UNCONDITIONAL — an open may still be
-      // loading when nothing is mounted, and the swap must still cancel
-      // it — and closes the mounted viewer when there is one. The MAIN
-      // draft (the user's unsent text) restores into the new session's
-      // editor — cross-session draft retention is the existing behavior.
-      teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
-        openingViewer = undefined
-        viewing = undefined
-        viewedQueueAgent = undefined
-        viewerSessionAbort?.abort()
-        viewerSessionAbort = undefined
-        app.clearLocalMessages()
-        app.clearNotify()
-        app.setViewerMode(undefined)
-        // setViewerFooter(undefined) returns the display subject to main
-        // (projected BEFORE its paint).
-        app.setViewerFooter(undefined)
-        // Session swap: the OLD parent session is gone — its parked Focus
-        // disclosures must be DISCARDED, never restored into the new
-        // session (clearSessionOverrides already dropped the stack; this
-        // keeps the teardown's intent explicit and ordering-safe). The
-        // Esc path uses exitFocusViewerScope instead (restore).
-        app.discardFocusViewerScope()
-        surface.repaint()
-        windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
-        // The new session's own measurement comes from its initLiveSession
-        // deferred path — the teardown refresh is UI-only.
-        refreshStatusCheap()
-      })
-    }
-    // The search-overlay stale refresh, the navigation presentation and the
-    // jump commit are surface-owned (A4-8, plan §17). The matching/stepping
-    // algorithms stay in transcript.ts / search-overlay.ts.
-    /** Enter the subagent viewer for one session (live or persisted). The
-     * target carries the catalog MODE (continuable = interactive editor,
-     * one-shot = read-only — never guessed from running/inactive) and the
-     * exact direct-parent session id the follow-up write path is pinned
-     * to. The open is ASYNC (a cold child's log is read from persistence);
-     * a viewer open/close/child switch — or a session swap — that lands
-     * while the inspection is in flight invalidates this request (the
-     * viewerOpen token), so a slow open can never commit an obsolete child
-     * over the current surface (round-4/5 findings). */
-    const viewerOpen = createViewerOpenToken()
-    /** Events for the child are buffered while its cold observation is in flight.
-     * The buffer closes the snapshot → live opening gap; the request token fences
-     * stale opens so an exited/superseded viewer never retains another child's events. */
-    let openingViewer: { request: number; childId: SessionId; events: SessionEvent[] } | undefined
-    /** The CURRENT viewer session's abort source: aborted when the viewer
-     * session ends (Esc / child switch / session swap), so an in-flight
-     * follow-up that has NOT reached inbox acceptance is cancelled (the
-     * rejected send restores the draft into the child's slot). Once a
-     * follow-up is accepted the DSH continuation contract hands ownership
-     * to the child — the signal no longer matters. */
-    let viewerSessionAbort: AbortController | undefined
-    /** Push the viewed child's OWN identity into the footer (label/mode/
-     * activity/cwd + the child's own turns/steps/stats line) — the parent
-     * session's status describes a session the user is not looking at.
-     * M1: the unified status store follows the same display subject — the
-     * view/workspace/usage sections switch to the child's facts. */
-    const refreshViewerFooter = (): void => {
-      if (cleanedUp || viewing === undefined) return
-      const stats = viewing.stats.snapshot()
-      // setViewerFooter projects the display-subject sections (view/
-      // workspace/usage) BEFORE its paint — the first frame after
-      // entering (or leaving) the viewer already shows the new subject.
-      app.setViewerFooter({
-        label: viewing.label,
-        childSessionId: viewing.id,
-        mode: viewing.mode,
-        activity: viewing.activity,
-        cwd: viewing.cwd,
-        turns: stats.turns,
-        steps: stats.steps,
-        statsLine: formatStats(stats),
-        usage: usageFromStats(stats),
-      })
-    }
-    const enterView = async (
-      childId: SessionId,
-      label: string | undefined,
-      mode: 'one-shot' | 'continuable',
-      parentSessionId: SessionId,
-      activity: 'running' | 'inactive',
-      depth = 1,
-    ): Promise<void> => {
-      if (cleanedUp) return
-      // Surface authority (plan §6.10): mode is the durable semantic, the
-      // access is what THIS surface may do — only a direct (depth 1)
-      // continuable child is interactive from the root.
-      const access: ViewerAccess = depth > 1
-        ? 'readonly-nested'
-        : mode === 'one-shot' ? 'readonly-one-shot' : 'interactive-direct-child'
-      const request = viewerOpen.open()
-      const opening = { request, childId, events: [] as SessionEvent[] }
-      openingViewer = opening
-       try {
-      const childFolder = new TranscriptFolder()
-      const childWindow = new TranscriptWindowController({
-        windowTurns: TRANSCRIPT_WINDOW_TURNS,
-        stepTurns: TRANSCRIPT_WINDOW_STEP,
-        turns: childFolder.groupedTurns(),
-      })
-      const childStats = new StatsFolder()
-      const childPreviews = new Map<string, StreamingToolPreview>()
-      let childCwd = ''
-      // Only the child's OWN events enter the viewer: a fork provider seeds
-      // the child with the parent's inherited prefix (ending at the
-      // session/end-seed boundary plus child-owned repair), and the parent's
-      // records — its subagent completion
-      // notices included — must never render as the child's transcript.
-      const initialChild = sessions.get(childId)
-      let observedEvents: readonly SessionEvent[] = initialChild?.snapshotEvents() ?? []
-      let observedHeader: { cwd?: unknown } | undefined = initialChild?.header
-      if (initialChild !== undefined) {
-        observedHeader = initialChild.header
-      } else {
-        // An inactive child is no longer in the live store; load its log
-        // through the semantic session-query seam (the raw persistence
-        // fallback is removed legacy on the master baseline).
-        const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-        if (query?.observeSession !== undefined) {
-          try {
-            const observation = await query.observeSession(SessionId(childId), { projectionMode: 'none' })
-            try {
-              observedEvents = observation.events
-              observedHeader = observation.header
-            } finally {
-              observation[Symbol.dispose]()
-            }
-          } catch {
-            // No persisted log either: the view stays empty.
-          }
-        }
-      }
-      // If the child cold-resumed while observation was in flight, its live
-      // Session snapshot is the authoritative durable cut. Otherwise append
-      // only buffered events beyond the observation cut, never replaying a
-      // duplicated seq from the snapshot.
-      const currentChild = sessions.get(childId)
-      const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)
-      const own = childOwnEvents(durableEvents)
-      childFolder.hydrate(own)
-      childStats.hydrate(own)
-      const header = currentChild?.header ?? observedHeader
-      // The live/cold child's session header carries its workspace (the child
-      // may have been born in another directory).
-      childCwd = typeof header?.cwd === 'string' ? header.cwd : ''
-      const childAgent = agents.get(childId)
-      let childActivity: 'running' | 'inactive' = childAgent === undefined
-        ? activity
-        : childAgent.status === 'running' ? 'running' : 'inactive'
-      if (childAgent === undefined) {
-        for (const event of own) {
-          if (event.type === 'turn/start') childActivity = 'running'
-          else if (event.type === 'turn/end') childActivity = 'inactive'
-        }
-      }
-      // A live child may already have emitted transient assistant frames before
-      // the viewer existed. Replay only the exact Agent's active baseline after
-      // durable hydration and before the child surface is mounted.
-      if (childAgent !== undefined) {
-        for (const input of assistantStreamBaselineFor(childAgent)) {
-          applyAssistantLiveInput(childFolder, childStats, childPreviews, input)
-        }
-      }
-      // The user's deliberate look is the anchor for the auto-pop: match the
-      // child's durable label (the delegation's description) against the
-      // unsettled subagent calls so this child's tool/result can pop the
-      // viewer back. Duplicate labels take the MOST RECENT call (the one the
-      // user is most likely watching); an empty/absent label falls back to a
-      // lone pending call, and no match simply disables the auto-pop (the
-      // user exits with Esc as before).
-      //
-      // STALE-OPEN GUARD: while the inspection above was in flight the user
-      // may have exited, switched children, or swapped sessions — every one
-      // of those invalidates the viewerOpen token. A stale request must not
-      // commit its child over the current surface (no viewing write, no
-      // repaint, no viewer mount, no auto-pop match).
-      if (cleanedUp || !viewerOpen.isCurrent(request)) {
-        if (openingViewer === opening) openingViewer = undefined
-        return
-      }
-      openingViewer = undefined
-      // The viewer replaces the main transcript presentation owner, but the
-      // main session's live preview state continues updating off-screen.
-      const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
-      if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
-      viewerSessionAbort = new AbortController()
-      viewing = {
-        id: childId,
-        folder: childFolder,
-        window: childWindow,
-        stats: childStats,
-        parentSessionId,
-        label: label ?? childId,
-        mode,
-        activity: childActivity,
-        access,
-        cwd: childCwd,
-        previews: childPreviews,
-        ...(childAgent === undefined ? {} : { viewAgent: childAgent }),
-      }
-      // The child's turn numbers are its OWN namespace: the parent's Focus
-      // disclosures must not leak into the child transcript (plan §26).
-      setViewedQueueAgent(childAgent)
-      app.enterFocusViewerScope()
-      surface.repaint()
-      // The viewer bar covers the editor (a read-only placeholder for
-      // one-shot, the child's own draft for continuable) and the header
-      // badges the mode — the transient notify is no longer the only "you
-      // are elsewhere" signal. The FOOTER switches to the child's own
-      // identity at the same time.
-      app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: childActivity, access })
-      // The queue pane follows the child only after the viewer and its exact
-      // queue authority are both published.
-      surface.refreshPendingInput()
-
-       } finally {
-         if (openingViewer === opening) openingViewer = undefined
-       }
-      refreshViewerFooter()
-    }
-    /** Leave the subagent viewer (single Esc). Returns whether it exited.
-     * Invalidates any in-flight viewer OPEN UNCONDITIONALLY — an Esc (or a
-     * session swap, which routes through this) must prevent a slow
-     * transcript inspection from reopening the viewer afterwards, even when
-     * no viewer is currently mounted (the open is still in flight). */
-    const exitView = (): boolean => {
-      viewerOpen.invalidate()
-      openingViewer = undefined
-      if (viewing === undefined) return false
-      const previousViewing = viewing
-      previousViewing.previews.clear()
-      viewing = undefined
-      viewedQueueAgent = undefined
-      viewerSessionAbort?.abort() // cancel an in-flight, not-yet-accepted follow-up
-      viewerSessionAbort = undefined
-      app.clearLocalMessages()
-      app.clearNotify() // a viewer notify (if any) is stale now
-      app.setViewerMode(undefined)
-      // setViewerFooter(undefined) returns the display subject to main
-      // (projected BEFORE its paint); the parent's facts follow on the
-      // refreshStatus below.
-      app.setViewerFooter(undefined)
-      // Restore the parent's Focus disclosures BEFORE the repaint so the
-      // projection uses them (plan §26).
-      app.exitFocusViewerScope()
-      surface.repaint()
-      // The main transcript may have grown while the viewer covered it (the
-      // child's result, the parent's streaming): restore the parent's semantic latest/history position
-      // so the pop never loses an intentional history anchor.
-      windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
-      refreshStatusCheap()
-      surface.refreshPendingInput()
-      return true
     }
     /** Error sink for a failed session creation: restore the draft and
      * surface the reason instead of silently dropping the submission. The
@@ -3398,7 +3028,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // settlement; the runner supplies the narrow TUI hooks.
       const deps: SteerSubmissionDeps = {
         isDisposed: () => cleanedUp,
-        isViewing: () => viewing !== undefined,
+        isViewing: () => viewer.isViewing(),
         currentAgent: () => agentNow() as unknown as SteerSubmissionAgent | undefined,
         currentGeneration: () => ownership.generation(),
         captureOwnerToken: () => ownership.captureSubject(),
@@ -3543,7 +3173,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       }
       // The subagent viewer is READ-ONLY: submitting while viewing would
       // silently send to the PARENT session. Refuse with a notice instead.
-      if (viewing !== undefined) {
+      if (viewer.isViewing()) {
         app.setEditorText(mergeDraft(app.getDraft(), text))
         app.notify('viewing a subagent — Esc returns before submitting', 'info')
         return
@@ -4031,7 +3661,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         // route to the CHILD through the viewer-aware submitDraft (a
         // one-shot viewer hard-rejects them), toggle-fullscreen is
         // surface-local; every other action is consumed as a no-op.
-        if (viewing !== undefined && !viewerActionCapability(action, { mode: viewing.mode })) {
+        if (viewer.isViewing() && !viewerActionCapability(action, { mode: viewer.read()!.mode })) {
           return
         }
         switch (action) {
@@ -4225,7 +3855,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // transcript.ts and the stepping policy in search-overlay.ts.
       // P7d: a single Esc with no overlay up exits the subagent viewer
       // instead of arming the double-Esc cancel.
-      onSingleEscape: () => exitView(),
+      onSingleEscape: () => viewer.exitView(),
       // Shift+Tab: cycle the permission preset through the composed table
       // (read-only → workspace-write → danger-full-access). The switch goes
       // through the official service (sandbox + approval + preset log in one
@@ -4263,7 +3893,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         // supplies the narrow queue/TUI hooks.
         pullBackQueue({
           isDisposed: () => cleanedUp,
-          isViewing: () => viewing !== undefined,
+          isViewing: () => viewer.isViewing(),
           currentAgent: () => agentNow(),
           captureOwnerToken: () => ownership.captureSubject(),
           isOwnerTokenCurrent: (token) => captureMatches(token as SessionSubject | undefined),
@@ -4362,16 +3992,16 @@ export function applyRunner(ctx: Context, config: Config): void {
         const delivery = submit.gesture === 'explicit-queue'
           ? 'queue'
           : resolveComposerDelivery(
-            viewing?.id === submit.childSessionId
-              && viewing.parentSessionId === submit.parentSessionId
-              && viewing.activity === 'running',
+            viewer.read()?.id === submit.childSessionId
+              && viewer.read()?.parentSessionId === submit.parentSessionId
+              && viewer.read()?.activity === 'running',
             submit.gesture,
             tuiSettings?.get().busyEnter,
           )
         // Empty accelerated input is the child-scoped Ctrl+S steer-all
         // gesture. It must operate on the live child inbox, never call the
         // ordinary human prompt API, and never manufacture an empty prompt.
-        const viewerTarget = viewing
+        const viewerTarget = viewer.read()
         if (isEmptyAcceleratedViewerSubmit(submit.text, submit.gesture)) {
           if (viewerTarget === undefined
             || viewerTarget.id !== submit.childSessionId
@@ -4383,7 +4013,7 @@ export function applyRunner(ctx: Context, config: Config): void {
           const restoreChildDraft = (text: string): boolean => {
             if (text === '' || childDraftRestored) return true
             childDraftRestored = true
-            const current = viewing
+            const current = viewer.read()
             if (!cleanedUp
               && app.getViewerGeneration() === childViewerGeneration
               && current?.id === submit.childSessionId
@@ -4406,7 +4036,8 @@ export function applyRunner(ctx: Context, config: Config): void {
             currentGeneration: () => app.getViewerGeneration(),
             notify: (message, kind) => {
               if (cleanedUp || app.getViewerGeneration() !== childViewerGeneration) return
-              if (viewing?.id !== submit.childSessionId || viewing.parentSessionId !== submit.parentSessionId) return
+              const read = viewer.read()
+              if (read?.id !== submit.childSessionId || read.parentSessionId !== submit.parentSessionId) return
               app.notify(message, kind)
             },
             restoreDraft: restoreChildDraft,
@@ -4435,8 +4066,8 @@ export function applyRunner(ctx: Context, config: Config): void {
           delivery,
           content: [{ type: 'text', text: submit.text }],
         }
-        const promptViewerAbort = viewerSessionAbort
-        const promptViewerCwd = viewing?.cwd
+        const promptViewerAbort = viewer.followUpSignal()
+        const promptViewerCwd = viewer.read()?.cwd
         runOwned('subagent prompt', () => backend.subagent.prompt(request, {
           // The caller signal owns lookup/materialization/admission only
           // until inbox acceptance (the official prompt contract): a TUI
@@ -4447,7 +4078,7 @@ export function applyRunner(ctx: Context, config: Config): void {
           // whose signal can never fire.
           makeSignal: () => promptViewerAbort === undefined
             ? lifecycleController.signal
-            : AbortSignal.any([lifecycleController.signal, promptViewerAbort.signal]),
+            : AbortSignal.any([lifecycleController.signal, promptViewerAbort]),
           // Same `@`-file mention canonicalization as the main session's
           // submissions (the editor keeps `@src/foo.ts`, the child model
           // receives the absolute path). The scope is the VIEWED CHILD's
@@ -4462,8 +4093,8 @@ export function applyRunner(ctx: Context, config: Config): void {
         }), {
           diag,
           sessionId: () => agentNow()?.session.id,
-          onResult: (outcome) => settleSubagentSubmit(request, submit.text, outcome, viewerGeneration),
-          onError: (error) => settleSubagentSubmit(
+          onResult: (outcome) => viewer.settleSubmit(request, submit.text, outcome, viewerGeneration),
+          onError: (error) => viewer.settleSubmit(
             request,
             submit.text,
             { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } },
@@ -4576,90 +4207,6 @@ export function applyRunner(ctx: Context, config: Config): void {
     // rules, so the rebuild is cheap) and releases the subscription with the
     // surface teardown.
     surface.bindPluginKeybinds()
-    /**
-     * One follow-up send settled (plan §10/§11/§12):
-     * - ACCEPTED: the child inbox owns the message — never restore the
-     *   draft, never insert a fake transcript row; the child's OWN session
-     *   events update the viewer transcript through the normal folding.
-     *   Only a transient `sent` notice is shown, and only while the SAME
-     *   child is still being viewed.
-     * - REJECTED: the user's text must NEVER be lost. It is restored into
-     *   the CHILD's own draft slot, merged with whatever the user typed
-     *   while the request was in flight. The current surface is touched
-     *   ONLY while the same child is still being viewed — a viewer
-     *   closed/switched during the send restores into the OLD child's
-     *   slot and never pollutes the new surface (the generation guard).
-     */
-    const settleSubagentSubmit = (
-      request: SubagentViewerSubmitRequest,
-      text: string,
-      outcome: SubagentPromptOutcome,
-      viewerGeneration: number,
-    ): void => {
-      if (cleanedUp) return
-      // The viewer target is CURRENT only while the SAME child is still
-      // being viewed AND the viewer generation is unchanged (a viewer
-      // open/close/switch bumps it — a close → reopen of the SAME child
-      // is therefore STALE) AND the parent session is still the one the
-      // viewer was opened from. The shared pure decision keeps the
-      // current/stale split unit-testable (test/subagent-viewer-submit).
-      const settleTarget = resolveSubagentSettleTarget(request, {
-        viewingChildId: viewing?.id,
-        viewingLabel: viewing?.label,
-        viewingParentSessionId: viewing?.parentSessionId,
-        viewerGenerationAtSend: viewerGeneration,
-        viewerGenerationNow: app.getViewerGeneration(),
-        liveParentSessionId: agentNow()?.session.id,
-      })
-      const disposition = subagentPromptDisposition(outcome)
-      if (disposition.kind === 'sent') {
-        if (settleTarget.kind === 'current') {
-          app.notify(request.delivery === 'steer'
-            ? `sent to ${settleTarget.label} — steered into the current turn`
-            : `sent to ${settleTarget.label} — queued for the next turn`, 'info')
-        }
-        return
-      }
-      if (disposition.kind === 'uncertain') {
-        // The message may already own the child. Never restore it as an
-        // unsent draft or claim it was not delivered; the child's
-        // authoritative state decides. No automatic replay.
-        if (settleTarget.kind === 'current') {
-          app.notify(`send to ${settleTarget.label} is unconfirmed — do not retry automatically`, 'error')
-        }
-        return
-      }
-      if (disposition.kind === 'cancelled') {
-        // Aborted before inbox acceptance: the message never entered the
-        // child's inbox — restore. Current viewer session: visible merge;
-        // stale viewer (closed/switched/reopened): map-only (never the
-        // current surface).
-        if (settleTarget.kind === 'current') {
-          app.setEditorText(mergeDraft(app.getDraft(), text))
-        } else {
-          app.restoreSubagentDraft(request.childSessionId, text)
-        }
-        return
-      }
-      if (settleTarget.kind === 'stale') {
-        app.restoreSubagentDraft(request.childSessionId, text)
-        return
-      }
-      app.setEditorText(mergeDraft(app.getDraft(), text))
-      app.notify(subagentPromptNotice(disposition.reason, settleTarget.label), 'error')
-    }
-
-    /** The user-facing reason for a rejected follow-up (plan §18). */
-    const subagentPromptNotice = (reason: SubagentPromptReject, label: string): string => {
-      switch (reason.kind) {
-        case 'parent-unavailable': return 'Cannot send: parent session is no longer active'
-        case 'stale-child': return 'Cannot continue this subagent'
-        case 'unauthorized': return 'Cannot send: subagent ownership changed'
-        case 'unavailable': return 'Subagent continuation is temporarily unavailable'
-        case 'error': return `could not send to ${label}: ${reason.message}`
-        case 'cancelled': return 'send cancelled — draft restored'
-      }
-    }
 
     // The Task Browser opener, the browser-scope reset and the Workflow card
     // action sink are A4-6 surface-owned (`surface.openTasksBrowser` /
@@ -4991,46 +4538,6 @@ export function applyRunner(ctx: Context, config: Config): void {
     app.resetInputHistory([...bootHistoryEntries].reverse())
     // Fresh/deferred startup title: no session yet — cwd identity only.
     refreshTerminalTitle()
-
-    // The TUI-owned slash commands are registered by registerCommands()
-    // inside initLiveSession, exactly once after the first session exists.
-    // The initial status projection is committed after session hydration (or
-    // in the deferred branch below), so a resumed session never paints a
-    // temporary empty stats projection.
-    // A4-7 (plan §16): the presentation event routing is SURFACE-owned. The
-    // runner keeps only the Cordis registrations (thin delegations) plus the
-    // Direct assistant-stream INSTALL and the Direct/domain bookkeeping
-    // supplied through this narrow capability bundle. A4-4/A4-8: the same
-    // bundle also carries the pending-input capabilities, the presentation
-    // targets (folder/window/previews) and the repaint/search refresh
-    // coordination, so it is attached BEFORE the startup calls into
-    // `surface.refreshPendingInput()`.
-    const mainPresentation = {
-      get folder() { return folder },
-      get stats() { return statsFolder },
-      get window() { return windowController },
-      get previews() { return mainStreamingToolPreviews },
-      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(mainStreamingToolPreviews, folder, event),
-    }
-    const viewedChildPresentation = {
-      get id() { return viewing!.id },
-      get folder() { return viewing!.folder },
-      get stats() { return viewing!.stats },
-      get window() { return viewing!.window },
-      get previews() { return viewing!.previews },
-      applyToolPreview: (event: SessionEvent) => applyOwnerStreamingToolPreviewEvent(viewing!.previews, viewing!.folder, event),
-      beginTurn: () => {
-        const target = viewing!
-        target.activity = 'running'
-        // A cold child or same-session rollover becomes queue-authorized
-        // at its lifecycle boundary, before the first assistant frame.
-        const current = agents.get(target.id)
-        target.viewAgent = current
-        setViewedQueueAgent(current)
-      },
-      endTurn: () => { viewing!.activity = 'inactive' },
-      refreshFooter: () => refreshViewerFooter(),
-    }
     surface.attachEventRouting({
       isCleanedUp: () => cleanedUp,
       isAttachedSession: (session) => {
@@ -5048,7 +4555,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // and the viewed-child settle map all stay runner-owned.
       observeMainEvent: (sessionId, event) => {
         const runtimeAgent = agents.get(SessionId(sessionId)) as Agent | undefined
-        let settledViewChildId: SessionId | undefined
+        let settledViewChildId: string | undefined
         let refreshAgents = false
         const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
         if (selectionEvent.type === 'model/selection') {
@@ -5064,7 +4571,7 @@ export function applyRunner(ctx: Context, config: Config): void {
           }
         }
         if (event.type === 'tool/call') {
-          callArgs.set(event.data.callId, typeof event.data.arguments === 'string'
+          presentation.setToolArgs(event.data.callId, typeof event.data.arguments === 'string'
             ? event.data.arguments
             : JSON.stringify(event.data.arguments))
           if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
@@ -5084,43 +4591,35 @@ export function applyRunner(ctx: Context, config: Config): void {
             } catch {
               // A non-JSON arguments payload carries no matchable description.
             }
-            pendingSubagentCalls.push({ callId: event.data.callId, description })
+            viewer.noteSubagentCall(event.data.callId, description)
           }
         } else if (event.type === 'tool/result') {
           // Session V4: the durable tool-role message owns the call identity
           // directly (no user-role wrapper to unwrap).
           const callId = event.data.message.toolCallId
-          callArgs.delete(callId)
-          const callIndex = pendingSubagentCalls.findIndex(call => call.callId === callId)
-          if (callIndex !== -1) pendingSubagentCalls.splice(callIndex, 1)
-          settledViewChildId = viewCallToChild.get(callId)
-          viewCallToChild.delete(callId)
+          presentation.deleteToolArgs(callId)
+          settledViewChildId = viewer.settleSubagentCall(callId)
         }
         return { settledViewChildId, refreshAgents }
       },
       // The opening viewer's buffer stays runner-owned (`openingViewer` /
       // `viewerOpen`); the surface owns the decision to route into it.
       appendOpeningViewerEvent: (sessionId, event) => {
-        const opening = openingViewer
-        if (opening !== undefined && viewerOpen.isCurrent(opening.request) && sessionId === opening.childId) {
-          opening.events.push(event)
-          return true
-        }
-        return false
+        return viewer.appendOpeningEvent(sessionId, event)
       },
-      main: () => mainPresentation,
-      viewedChildId: () => viewing?.id,
-      viewedChild: () => viewedChildPresentation,
-      mainFolder: () => folder,
-      viewedChildFolder: () => viewing!.folder,
+      main: () => presentation.main,
+      viewedChildId: () => viewer.read()?.id,
+      viewedChild: () => viewer.presentation(),
+      mainFolder: () => presentation.mainFolder(),
+      viewedChildFolder: () => viewer.read()!.folder,
       // A4-4 pending-input capabilities: the semantic subject + snapshot read,
       // the client-local submission echoes and the text projection. The
       // presentation join/own-input/viewport policy is surface-owned.
-      pendingSubjectId: () => activePendingSessionId(),
+      pendingSubjectId: () => viewer.pendingSubjectId(),
       pendingSnapshot: (sessionId) => backend.pendingInputReader.snapshot(sessionId),
       submissionEchoes: (sessionId) => submissionPresentation.snapshot(sessionId),
       queueTextOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
-      exitView: () => { exitView() },
+      exitView: () => { viewer.exitView() },
       refreshStatusCheap: () => refreshStatusCheap(),
       refreshStatusAndWelcome: () => {
         refreshStatusCheap()
@@ -5141,17 +4640,13 @@ export function applyRunner(ctx: Context, config: Config): void {
       // in the surface).
       registeredAgentIs: (sessionId, agent) => directRuntime.registeredAgentFor(sessionId) === agent,
       isCurrentOwnerAgent: (agent) => isCurrentOwnerAgent(agent as Agent),
-      viewedChildAgent: () => viewing?.viewAgent,
-      setViewedChildAgent: (agent) => { if (viewing !== undefined) viewing.viewAgent = agent as Agent },
-      setViewedQueueAgent: (agent) => setViewedQueueAgent(agent as Agent),
+      viewedChildAgent: () => viewer.viewedChildAgent(),
+      setViewedChildAgent: (agent) => viewer.setViewedChildAgent(agent as Agent),
+      setViewedQueueAgent: (agent) => viewer.setViewedQueueAgent(agent as Agent),
       agentForSession: (sessionId) => agents.get(SessionId(sessionId)),
-      applyViewedChildAssistantInput: (input) => {
-        const target = viewing
-        if (target === undefined) return
-        applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
-      },
+      applyViewedChildAssistantInput: (input) => viewer.applyAssistantInput(input),
       applyMainAssistantInput: (input, sessionId) => {
-        applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
+        presentation.applyAssistantInput(input)
         if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
           submitLatencyTracker.mark(sessionId, 'assistant.first')
         }
@@ -5175,8 +4670,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       subjectMatches: (subject) => captureMatches(subject),
       // The viewer target carries the row's OWN parent; only a direct child
       // falls back to the live main session (already resolved in the surface).
-      enterView: (childId, label, mode, parentSessionId, activity, depth) =>
-        enterView(childId as SessionId, label, mode, parentSessionId as SessionId, activity, depth),
+      enterView: (childId: SessionId, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: SessionId, activity: 'running' | 'inactive') =>
+        viewer.enterView(childId, label, mode, parentSessionId, activity),
       // The scope-bound writer admission (A3-4) stays in the runner: the
       // Task-Center subagent interrupt is not a submission write, so only its
       // admission moves through SessionRuntime.withWriter.
@@ -5237,118 +4732,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       isCleanedUp: () => cleanedUp,
     })
     surface.refreshPendingInput()
-    // The TUI-owned slash commands are registered as soon as the runner
-    // surface exists — the commands service's GLOBAL layer needs no agent,
-    // so the whole command surface (and the editor's tab completion) is
-    // available before the first session (deferred start). Session-backed
-    // handlers call runner.ensureSession() themselves (the facade delegates to
-    // the session runtime); the runner surface re-reads the live agent on every
-    // access, so a session swap mid-flight is always reflected.
-    /**
-     * Rebuild every live-session surface after resume, create, or swap.
-     * The surface catalog is NOT touched here: the initial owner's catalog
-     * came from the pre-mount prefetch/probe, and the first deferred create
-     * plus every switch await the coordinator refresh themselves.
-     */
-    const initLiveSession = async (agent: Agent): Promise<void> => {
-      if (cleanedUp) return
-      // Session transitions invalidate transient keyboard confirmation before
-      // any asynchronous hydration or bootstrap work begins.
-      app.clearExitConfirmation()
-      // Setup installs this before publication; the idempotent call also
-      // covers test/direct adapters that hand an already-live Agent back to
-      // the runner. Its fold is the resume source of truth.
-      directRuntime.modelSelections.installForAgent(agent)
-      // The session's own workspace joins the known-cwd set (Rule 2 for
-      // the all-directory search): a legacy-only history file in this cwd
-      // becomes recoverable immediately, even if it predates this process.
-      rememberHistoryCwd(agent.session.header.cwd ?? '')
-      const opening = surface.openingJournal.cut(agent.session.id)
-       const events = opening === undefined
-         ? agent.session.snapshotEvents()
-         : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
-      // This is the single cold-hydration path for a live session. Do not
-      // pre-apply the same event log during runner wiring: a resumed session
-      // otherwise pays for two full transcript and stats replays before its
-      // first usable frame.
-      const hydrated = hydrateSessionUi(events)
-      folder = hydrated.folder
-       windowController.setTurns(folder.groupedTurns())
-      statsFolder = hydrated.statsFolder
-       for (const input of assistantStreamBaselineFor(agent)) {
-         applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
-       }
-      diag.debug('session bootstrap scan', {
-        scan: 'transcript',
-        eventCount: events.length,
-        elapsedMs: Number(hydrated.scanTimings.transcriptMs.toFixed(3)),
-      })
-      diag.debug('session bootstrap scan', {
-        scan: 'stats',
-        eventCount: events.length,
-        elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
-      })
-      goalText = timedBootstrapScan(diag, 'goal', events.length, () => foldGoal(events))
-      const working = timedBootstrapScan(diag, 'working', events.length, () => workingFromLog(events))
-      const planMode = timedBootstrapScan(diag, 'plan', events.length, () => projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, agent.session) ?? false)
-      const title = timedBootstrapScan(diag, 'title', events.length, () => foldSessionTitle(events)?.title)
-      app.setPlanMode(planMode)
-      app.setWorking(working)
-      app.setBusy(working)
-      app.setSessionTitle(title)
-      // Session-local bootstrap state must not leak across a switch. Fold the
-      // latest todo snapshot once from the same log (an empty log clears it).
-      const todos = timedBootstrapScan(diag, 'todo', events.length, () => {
-        for (let index = events.length - 1; index >= 0; index -= 1) {
-          const event = events[index]
-          if (event?.type === 'todo/write') return event.data.todos
-        }
-        return []
-      })
-      app.setTodoSummary(todos)
-      // A resumed session may be mid-compaction. Reset the old phase first;
-      // then re-arm only the newest live bracket, matching the log fold.
-      const resumedCompaction = timedBootstrapScan(diag, 'compaction', events.length, () => compactingFromLog(events))
-      // A4-7: the `compactingId` routing state and the phase/busy/working
-      // presentation are surface-owned (plan §16).
-      surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
-      app.clearLocalMessages()
-      app.clearNotify() // a notice from the previous session is stale here
-      // Issue #8: a stale keyboard exit confirmation must not exit the NEW
-      // session.
-      app.clearExitConfirmation()
-      surface.repaint()
-      // PR D2: the first usable frame paints with the cached measurement
-      // (or none); the context measure is deferred one event-loop turn so
-      // cold resume never blocks first paint on a long-session scan.
-      refreshStatusCheap()
-      surface.refreshPendingInput()
-      scheduleInitialContextMeasure(agent)
-      // Repaint both task channels (the JobRegistry roster + the subagent
-      // catalog): the dock/badge are owner-fenced,
-      // and a session switch must not leave the previous session's tasks
-      // or subagents on screen until the next registry event.
-      surface.refreshTasks()
-      surface.refreshAgents()
-      // The recall history is per-workspace AND per-session: REPLACE it
-      // with the live session's rows ONLY (the CWD file's rows filtered to
-      // this sessionId — session-scoped editor recall), so ↑/↓ in a live
-      // session never recalls another session's inputs from the same cwd.
-      // The CANONICAL last row stays the cwd file's actual last row (the
-      // persistence dedupe anchor stays cwd-scoped — docs/input-history.md);
-      // only the EDITOR's recall is the session projection.
-      const historyCwd = sessionCwd()
-      const historyFile = historyFilePath(dshHome(process.env), historyCwd)
-      const historyRecords = loadHistoryRecords(historyFile)
-      lastHistoryContent = historyRecords.at(-1)?.content
-      // File order is oldest-first; TuiApp's recall API takes newest-first,
-      // so the session-filtered projection is reversed at the seed.
-      const sessionRecall = recallHistoryForSession(historyRecords, agent.session.id)
-      app.resetInputHistory([...sessionRecall].reverse())
-      refreshTerminalTitle()
-      updateWelcomeCard()
-      registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
-    }
     // The TUI-owned slash commands live on the commands service's global
     // layer, which needs no agent — register them up front so the whole
     // surface (including Tab completion) works before the first session
@@ -5844,7 +5227,8 @@ export function applyRunner(ctx: Context, config: Config): void {
             submissionRuntime.settleQueueRecalls(false)
           }
         })),
-      enterView,
+      enterView: (childId: SessionId, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: SessionId, activity: 'running' | 'inactive') =>
+        viewer.enterView(childId, label, mode, parentSessionId, activity),
       requestExit,
       exit,
     }
@@ -5956,7 +5340,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     if (startupAgent !== undefined) {
       // The initial owner's catalog was prefetched before mount: no
       // duplicate refresh.
-      await initLiveSession(startupAgent)
+      await presentation.initLiveSession(startupAgent)
     } else {
       app.setWelcomeIdle(true)
       refreshStatusCheap()
@@ -6070,7 +5454,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // (the surface never reads the session-event feed) and the pure
     // dangerous-command predicate.
     surface.attachInteraction(backend.interaction, {
-      lookupCallArgs: (callId) => callArgs.get(callId as never),
+      lookupCallArgs: (callId) => presentation.toolArgs(callId),
       dangerCommand,
     })
   }

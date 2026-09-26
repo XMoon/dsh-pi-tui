@@ -457,6 +457,12 @@ const indexSource = compositionSource()
 // A4-6: the Task Browser / Job viewer / Workflow-action wiring moved into the
 // surface owner, so these locks are re-anchored to the new owner (the runner
 // keeps only the narrow injected capability + the runner-side event routing).
+// A5b-1: the synchronous session-generation bump moved into the
+// session-presentation owner, so the bump lock follows the authority there.
+const presentationSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'session-presentation.ts'),
+  'utf8',
+)
 const surfaceSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'runtime.ts'),
   'utf8',
@@ -500,11 +506,11 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   // The session bump delegates its synchronous Task Center reset to the surface
   // owner (`surface.resetTasks`, A4-6); the invariant spans the runner seam and
   // the surface implementation.
-  const bumpStart = indexSource.indexOf('const resetForGeneration')
-  const bumpEnd = indexSource.indexOf('const viewerOpen')
-  assert.ok(bumpStart >= 0, 'the session-generation bump must exist in the runner composition')
-  assert.ok(bumpEnd > bumpStart, 'the bump slice must end at the next runner-scope declaration')
-  const bump = indexSource.slice(bumpStart, bumpEnd)
+  const bumpStart = presentationSource.indexOf('const resetForGeneration')
+  const bumpEnd = presentationSource.indexOf('const initLiveSession')
+  assert.ok(bumpStart >= 0, 'the session-generation bump must exist in the session-presentation owner')
+  assert.ok(bumpEnd > bumpStart, 'the bump slice must end at the next owner declaration')
+  const bump = presentationSource.slice(bumpStart, bumpEnd)
   assert.ok(bump.includes('surface.resetTasks()'), 'the session bump must reset the surface-owned Task Center')
   const reset = surfaceSource.slice(surfaceSource.indexOf('resetTasks() {'))
   assert.ok(reset.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')

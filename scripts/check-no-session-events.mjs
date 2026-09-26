@@ -67,10 +67,10 @@ export const DEPRECATED_READER_PATTERNS = [
 // `src/app/bootstrap.ts`; the debt moved WITH them, never doubled and never
 // absorbed by the surface.
 export const DEPRECATED_READER_ALLOWLIST = [
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly SessionEvent[] = initialChild?.snapshotEvents() ?? []', why: 'Direct child-viewer observed history seed' },
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'Direct child-viewer durable history merge' },
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'Direct resume history branch' },
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: ': mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)', why: 'Direct resume history merge branch' },
+  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly Event[] = initialChild?.snapshotEvents() ?? []', why: 'child-viewer observed history seed (A5b-1 viewer owner)' },
+  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'child-viewer durable history merge (A5b-1 viewer owner)' },
+  { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'live-session resume history branch (A5b-1 presentation owner)' },
+  { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: ': mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)', why: 'live-session resume history merge branch (A5b-1 presentation owner)' },
   { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'const candidates = collectRewindCandidates(source.session.snapshotEvents())', why: 'Direct rewind candidate fold' },
   // A3-2 relocated the two command-fact reads from commands.ts into the
   // scope-bound facade providers (the Direct implementation is now localized

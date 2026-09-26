@@ -36,6 +36,8 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   { rel: 'src/index.ts', role: 'composition' },
   { rel: 'src/app/bootstrap.ts', role: 'composition' },
   // A5b-1: viewer + live-session presentation.
+  { rel: 'src/app/surface/session-presentation.ts', role: 'owner' },
+  { rel: 'src/app/surface/viewer-runtime.ts', role: 'owner' },
   // A5b-2: status/settings/history/client state.
   // A5b-3: command authority/registration/catalog.
   // A5b-4: submission/input + local shell.
