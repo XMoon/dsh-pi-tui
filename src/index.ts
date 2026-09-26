@@ -49,7 +49,6 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 // The approval/request waterfall merge: the TUI is the interactive answerer.
 import type {} from '@deepseek-ai/dsh-user-approval'
-import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 // The commands service merge: ctx.commands typing for execute()/register().
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
@@ -138,13 +137,8 @@ import {
 import { parseUserKeybindings } from './keybindings/config.ts'
 
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
-import {
-  buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, isViewerAccessInteractive, workflowMemberViewerTarget,
-  type TaskBrowserRow, type ViewerAccess,
-} from './tasks-browser.ts'
-import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
-import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
-import type { ComposerSubmitGesture, ComposerSubmitRequest, TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
+import { isViewerAccessInteractive, type ViewerAccess } from './tasks-browser.ts'
+import type { ComposerSubmitGesture, ComposerSubmitRequest } from './tui-app.ts'
 import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
 import { DefaultIntentTracker } from './default-intent.ts'
 import { DefaultWriteBarrier } from './default-write-barrier.ts'
@@ -204,7 +198,6 @@ import { bindSubmissionRuntime, deliverBusy, executeHostCommandSubmission, pullB
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { createSurfaceRuntime } from './app/surface/runtime.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
-import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
@@ -1703,73 +1696,6 @@ function setTerminalTitle(title: string): void {
   if (process.stdout.isTTY === true) process.stdout.write(`\x1b]0;${title}\x07`)
 }
 
-/**
- * The task-browser row → panel-item projection (runner glue, module-level
- * so the open browser AND the runtime refresh coordinator share ONE
- * mapping). JOB rows keep their status/detail; SUBAGENT rows carry the
- * projected runtime activity as the status word, the durable mode as the
- * non-truncatable suffix, and the tree connector from the catalog depth.
- * The Stop capability is advertised ONLY for a continuable child with a
- * LIVE running driver (`isSubagentRowInterruptible`) — an idle
- * continuable has no driver to stop. `has children` is deliberately NOT
- * a detail line: the tree connector already expresses parenthood.
- */
-function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
-  const labels = new Map<string, string>()
-  for (const row of target) {
-    if (row.kind === 'subagent') labels.set(row.childId, row.label)
-  }
-  return target.map(row => row.kind === 'job'
-    ? {
-        value: row.value,
-        // A `subagent`-kind job is the registry's reliable contract
-        // for a background one-shot delegation: its `one-shot` mode
-        // rides as the non-truncatable suffix, like the child rows.
-        label: row.jobKind === 'subagent' ? `subagent job · ${row.label}` : taskRowLabel(row),
-        suffix: row.jobKind === 'subagent' ? 'one-shot' : undefined,
-        status: row.status,
-        detail: row.detail,
-        startedAt: row.startedAt,
-        finishedAt: row.finishedAt,
-        group: rowGroup(row),
-        source: 'job' as const,
-        active: isActiveJobStatus(row.status),
-        attention: row.attention ?? (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'),
-        canOpen: true,
-        canStop: isActiveJobStatus(row.status),
-        // The Tab type filter: job rows filter by their job kind.
-        type: row.jobKind,
-      }
-    : {
-        value: row.value,
-        // The mode rides as the panel's non-truncatable SUFFIX
-        // (`subagent · <label> · continuable`): the label itself may
-        // truncate on a narrow screen, the mode never silently does.
-        label: `subagent · ${row.label}`,
-        suffix: row.mode,
-        status: row.activity,
-        group: rowGroup(row),
-        source: 'subagent' as const,
-        type: 'subagent',
-        active: row.activity === 'running',
-        canOpen: true,
-        // Only a continuable row with a LIVE running driver is Stop-capable
-        // (one-shot ids are accepted no-ops for the interrupt transport; an
-        // idle continuable has no driver to stop — the UI must not advertise
-        // a dead stop verb).
-        canStop: isSubagentRowInterruptible(row),
-        parentId: row.parentId === '' ? undefined : `agent:${row.parentId}`,
-        parentLabel: row.parentId === '' ? undefined : labels.get(row.parentId),
-        depth: row.depth,
-        hasChildren: row.hasChildren,
-        mode: row.mode,
-        access: viewerAccessHint(row.mode, viewerAccessOf(row)),
-        // The durable descendant tree connector: indentation + branch
-        // glyph from the catalog's `depth` (plan §6.7) — a fixed
-        // region that never scrolls with the selected label.
-        treePrefix: taskTreePrefix(row.depth),
-      })
-}
 
 /**
  * Mount the TUI: resolve the model selection, create or resume the agent,
@@ -3082,22 +3008,12 @@ export function apply(ctx: Context, config: Config): void {
     // mid-startup HMR unload must never reference it while it is still in
     // the temporal dead zone; it is assigned during command registration.
     let catalogCoordinator: CatalogRefreshCoordinator | undefined
-    // Hoisted before final teardown so disposal can invalidate the task-browser
-    // surface and its delayed action token before the app is disposed.
-    let activeTaskBrowser: TaskBrowserHandle | undefined
-    let activeTaskBrowserToken: object | undefined
-    // The Job status viewer is a CHILD overlay of the Task Browser: its closer
-    // must be tracked so a session transition can tear the whole Task Center
-    // stack down (closing the hidden parent alone would leave the child
-    // alive).
-    let activeJobViewerClose: (() => void) | undefined
-    // C1: the runner-level Job event subscription's disposer. Hoisted so
-    // disposeSurface can release it before the app dies — no Job listener
-    // may fire a refresh into a disposed surface (the refreshes also fence
-    // on cleanedUp; this makes the release explicit and idempotent).
-    let jobsEventsDispose: (() => void) | undefined
+    // The Task Browser handle/token, the Job-viewer closer and the jobs-event
+    // subscription are A4-6 surface-owned (`surface.attachTasks` +
+    // `surface.disposeJobEvents` / `disposeJobObservation` / `disposeTaskBrowser`);
+    // the runner no longer holds their slots.
     // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
-    // guards: cleanup releases them, and — unlike the two slots above —
+    // guards: cleanup releases them, and — unlike the slots above —
     // `onTerminalResize` (handed to the surface mount below) READS
     // footerCommandRunner during startup itself: the first surface-geometry
     // sync fires it (lastCommandWidth starts at 0), and a keybinding
@@ -3173,18 +3089,13 @@ export function apply(ctx: Context, config: Config): void {
       }
       shellTempFiles.clear()
       // TuiApp.dispose() hides overlays without invoking their user cancel
-      // callbacks. Invalidate the browser handle and token first so an action
-      // already waiting on Direct/Host work cannot notify or repaint the dead
-      // surface after this teardown.
-      jobsEventsDispose?.()
-      jobsEventsDispose = undefined
-      // Release the selected-Job follow stream explicitly: TuiApp.dispose()
-      // does not invoke the viewer's onClose, so the observer would otherwise
-      // outlive the surface.
-      activeJobViewerClose?.()
-      activeJobViewerClose = undefined
-      activeTaskBrowser = undefined
-      activeTaskBrowserToken = undefined
+      // callbacks. The Task Center / Job viewer resources are surface-owned
+      // (A4-6) and released in their original order: the jobs-event
+      // subscription first (no Job listener may refresh a dying surface), then
+      // the selected-Job observation, then the browser handle/token.
+      surface.disposeJobEvents()
+      surface.disposeJobObservation()
+      surface.disposeTaskBrowser()
       // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
       // and the extension surface bridge are released by their surface owner
       // (A4): the runner steps around this call release only what the runner
@@ -3978,32 +3889,14 @@ export function apply(ctx: Context, config: Config): void {
       windowController.setTurns(folder.groupedTurns())
       app.setSearchResult(0, 0)
       app.clearSessionOverrides()
-      // A new session owns the surface: close the task browser opened for
-      // the old session (its rows would otherwise go stale — the runtime
-      // refresh is fenced to the old root) and CLEAR the subagent badge
-      // SYNCHRONOUSLY — the new session's first listing is async, and the
-      // old session's running badge must not hang on the footer until it
-      // lands (a failed listing must never leave a stale badge either).
-      // The cached catalog is dropped too, so stale-session
-      // `agent/status` flips find no membership and the next refresh
-      // reads the new root. The coordinator is re-populated by
-      // initLiveSession → refreshAgents.
-      // The Job status viewer is a CHILD overlay of the browser: close it
-      // FIRST, so closing the hidden parent cannot leave the child alive (the
-      // child closer clears its own reference through onClose).
-      activeJobViewerClose?.()
-      activeJobViewerClose = undefined
-      activeTaskBrowser?.close()
-      activeTaskBrowser = undefined
-      activeTaskBrowserToken = undefined
-      taskRuntime?.reset()
-      // The dataset scope is session-scoped too: a switched-in session
-      // must never inherit a Workflow-scoped browser (PR2 plan §10.8).
-      taskBrowserScope = { kind: 'all' }
-      app.setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
-      app.setTasks([])
-      app.setAgents([])
-      taskBrowserRows = []
+      // A new session owns the surface: the whole Task Center (the Job child
+      // overlay FIRST, then the browser, then the cached catalog + the
+      // synchronous badge/summary/row mirrors) is reset by the surface owner
+      // (A4-6). Its rows would otherwise go stale — the runtime refresh is
+      // fenced to the old root — and the new session's first listing is async,
+      // so the old session's running badge must not hang on the footer until
+      // it lands (a failed listing must never leave a stale badge either).
+      surface.resetTasks()
       // The pending-input presentation is session-scoped too: clear old
       // semantic rows AND local submission echoes at the synchronous
       // generation boundary before the new subject is published.
@@ -6388,7 +6281,7 @@ export function apply(ctx: Context, config: Config): void {
       // the merged list + search is the single command-side entry, with
       // row-level `S` = confirmed Stop on capable rows (kimi's stop-on-row
       // pattern; the old /subagents SettingsList-submenu panel is gone).
-      onOpenTasks: () => openTasksBrowser('quick'),
+      onOpenTasks: () => surface.openTasksBrowser('quick'),
       // A submit gesture in an INTERACTIVE (continuable) subagent viewer:
       // resolve queue/steer delivery, then deliver the human prompt through
       // the OFFICIAL ctx.subagents.prompt control
@@ -6562,10 +6455,6 @@ export function apply(ctx: Context, config: Config): void {
       // M5: a material width change refreshes the command surface (the runner
       // coalesces to its interval).
       onTerminalResize: () => footerCommandRunner?.requestRefresh(),
-      // PR2: the semantic Workflow card actions (member open / scoped agent
-      // browse). The handler is declared below (it needs the task browser +
-      // viewer openers); the closure only runs on a user click.
-      handleWorkflowAction: (action) => handleWorkflowAction(action),
       // Issue #7: the fullscreen drag selection and `/copy` are the SAME user
       // copy intent and share ONE clipboard policy. That policy delivers
       // through two independent legs (terminal-client OSC 52 + native/helper
@@ -6713,373 +6602,11 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    // ↓ with an empty editor: the task browser over the JobRegistry roster
-    // merged with the subagent descendant catalog. The registry may
-    // include provisional foreground shell work while it runs; when DSH
-    // removes that record after the foreground result is collected, the
-    // row leaves the Task Center with the registry (the Transcript tool
-    // card keeps the execution history), while handed-out background jobs
-    // that remain in jobs.list() stay available in TRACKED after
-    // settlement. Job rows (shell + background one-shot subagent jobs) are
-    // status-only: the bash output read cursor belongs to the model's
-    // job_output and a subagent job record carries no child session id, so
-    // Enter opens the status viewer (never the output). Subagent rows (live
-    // children from the subagent registry) deliver no result to the parent,
-    // so Enter opens the child transcript directly: continuable children
-    // always, and one-shot children while RUNNING (a foreground delegation
-    // is the parent's pending tool call, so the trigger would otherwise
-    // look dead). A running BACKGROUND one-shot appears twice — its job row
-    // and its child row — because the two records have no cross-reference
-    // to dedup; the viewable child row is the more useful one. The children
-    // half enriches asynchronously: listChildren may read persistence for
-    // cold children, so the picker opens on the CURRENT state and setItems
-    // merges the fresh listing in.
-    //
-    // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
-    // the merged list + search is the single command-side entry, with
-    // row-level `S` = confirmed Stop on capable rows (the old /subagents
-    // SettingsList submenu is gone).
-    const openTasksBrowser = (
-      viewMode: 'quick' | 'full',
-      restoreState?: TaskBrowserViewState,
-      scope?: TaskBrowserDatasetScope,
-      header?: string,
-    ): void => {
-      const browserSession = agentNow()
-      if (cleanedUp || browserSession === undefined) return
-      // PR2 plan §10.5/§10.8: an EXPLICIT scope (a Workflow phase/run
-      // dataset) becomes the browser's dataset scope; a transition
-      // (Quick→Full / Full→Quick) without one keeps the current scope; a
-      // fresh ordinary open after a close always starts from `all` (the
-      // close paths reset it). The scope applies at EVERY runtime commit.
-      if (scope !== undefined) taskBrowserScope = scope
-      taskRuntime?.setScope(taskBrowserScope)
-      // The destructive-intent fence is captured at OPEN time: a Stop
-      // confirmed later belongs to THIS surface's session. Comparing the
-      // generation/session AT dispatch against values captured AT dispatch
-      // (as in an earlier revision) could never fail — the intent must be
-      // bound to the browser that hosted the confirmation (PR review P1).
-      const browserSubject = ownership.captureSubject()
-      const browserToken = {}
-      activeTaskBrowserToken = browserToken
-      let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
-      if (jobs !== undefined) {
-        try {
-          // Job ownership is the Session id (DSH 0.1.7 JobRegistry): the
-          // agentNow() object is only the id source here.
-          jobSnapshots = jobs.list(browserSession.session.id)
-        } catch {
-          // The registry read is best-effort; the jobs half stays empty.
-        }
-      }
-      // The trigger only fires while something is ACTIVE (jobs or live
-      // children), so an empty jobs half is NOT an empty browser: the
-      // children half enriches below. Never early-return on row count —
-      // a children-only session would never open the browser. The row
-      // identity source is the RUNNER-level `taskBrowserRows` (kept fresh
-      // by every coordinator commit), so the select/action paths below
-      // never contradict a runtime refresh that already repainted.
-      //
-      // FIRST FRAME: seed from the coordinator's CURRENT state instead of
-      // flashing a jobs-only list — refreshRuntime() is synchronous, never
-      // touches persistence, reuses the cached catalog and re-reads the
-      // current jobs + registry statuses (activeTaskBrowser is not set
-      // yet, so it only seeds taskBrowserRows + the badge). The badge and
-      // the panel therefore agree from the first frame, and a FAILED fresh
-      // listing below cannot leave a panel that contradicts the badge.
-      // Without the runtime (no subagents service) the jobs-only fallback
-      // applies.
-      const runtime = taskRuntime
-      if (runtime !== undefined) {
-        runtime.refreshRuntime()
-        taskBrowserRows = [...runtime.rows()]
-      } else {
-        taskBrowserRows = buildTaskRows(jobSnapshots, [])
-      }
-      const selectRow = (value: string): 'close' | 'keep-open' => {
-        if (cleanedUp) return 'close'
-        const row = taskBrowserRows.find(candidate => candidate.value === value)
-        if (row === undefined) return taskRowSelectionDisposition(undefined, 'keep-open')
-        if (row.kind === 'subagent') {
-          // The viewer target carries the row's OWN parent (plan §6.10:
-          // childId + parentId + depth + mode + activity — never just
-          // childId + mode). A nested row's durable parent is the exact
-          // direct parent recorded by DSH; only a direct child falls back
-          // to the browser root (the live main session).
-          const parentSessionId = row.parentId !== '' ? row.parentId as SessionId : agentNow()?.session.id
-          if (parentSessionId === undefined) return 'close'
-          // The row carries the catalog MODE + projected activity + DEPTH:
-          // the viewer target is pinned to them (continuable → interactive
-          // editor only at depth 1, one-shot → read-only, depth > 1 →
-          // nested read-only), and the follow-up write path to the exact
-          // parent.
-          runOwned('subagent view from tasks', () => enterView(
-            row.childId as SessionId, row.label, row.mode, parentSessionId, row.activity, row.depth,
-          ), {
-            diag,
-            sessionId: () => agentNow()?.session.id,
-            onError: (error) => {
-              if (cleanedUp) return
-              app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-            },
-          })
-          // The subagent transcript is a session/viewer surface, not a
-          // child overlay of the browser: it REPLACES the Task Center and
-          // keeps its own Esc semantics.
-          return taskRowSelectionDisposition(row, 'keep-open')
-        }
-        // A Job View is the selected row's DETAIL: it opens as a child
-        // overlay (hiding this browser, not destroying it) and returns to
-        // the exact browser state on Esc. A job that has already vanished
-        // simply opens nothing — the parent stays usable either way.
-        return taskRowSelectionDisposition(row, openJobView(row.jobId))
-      }
-      const stopRow = (value: string): void => {
-        if (cleanedUp) return
-        const row = taskBrowserRows.find(candidate => candidate.value === value)
-        if (row === undefined) return
-        const actionBrowserToken = activeTaskBrowserToken
-        if (actionBrowserToken !== browserToken) return
-        // The SURFACE fence: the user's destructive intent is bound to the
-        // session that owned this browser when it opened. A session that
-        // switched after the browser opened (or while a confirmation was
-        // pending) must never be stopped by the stale confirmation — the
-        // captured browser values, not the dispatch-time values, are the
-        // comparison side that can actually fail.
-        if (!captureMatches(browserSubject)) return
-        if (row.kind === 'subagent') {
-          if (!isSubagentRowInterruptible(row)) return
-          // Re-read the live driver at confirmation time; the panel row is
-          // only a snapshot and may have become idle since it was rendered.
-          if (agents?.get(row.childId as SessionId)?.status !== 'running') return
-          // The interrupt authority names the child's DURABLE DIRECT parent;
-          // deep descendants must not be addressed through the main root.
-          const interruptParent = subagentInterruptParent(row, browserSession.session.id) as SessionId
-          // The scope-bound writer admission (A3-4): the Task-Center subagent
-          // interrupt is NOT a submission write, so its business ownership stays
-          // here — only the admission moves through SessionRuntime.withWriter.
-          runOwned('subagent interrupt', function () {
-            return sessionRuntime.withWriter(requireLiveScope(), () => backend.subagent.interrupt({
-              parentSessionId: interruptParent,
-              childSessionId: row.childId as SessionId,
-              mode: 'continuable',
-            }))
-          }, {
-            diag,
-            sessionId: () => browserSession.session.id,
-            onResult: (outcome) => {
-              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || !captureMatches(browserSubject)) return
-              if (outcome.kind === 'committed') {
-                app.notify(`stopping ${row.label}`, 'info')
-                return
-              }
-              if (outcome.kind === 'indeterminate') {
-                // A dispatched interrupt whose settlement is unknown must not
-                // be reported as "not stopped"; the authoritative task/read
-                // state decides and no automatic replay happens.
-                app.notify(`could not confirm stopping ${row.label} — the session state will decide`, 'error')
-                return
-              }
-              const reason = outcome.reason.kind === 'error'
-                ? outcome.reason.message
-                : outcome.reason.message ?? (outcome.reason.kind === 'unauthorized'
-                  ? 'subagent interrupt unauthorized'
-                  : 'subagent service unavailable')
-              app.notify(`could not stop ${row.label}: ${reason}`, 'error')
-            },
-            onError: (error) => {
-              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || !captureMatches(browserSubject)) return
-              app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-            },
-          })
-          return
-        }
-        // Job stop is capability-gated to an actually active current record.
-        // The registry authorizes by the owning Session id (DSH 0.1.7
-        // JobRegistry); no output/read cursor is touched by the UI.
-        if (jobs === undefined || !isActiveJobStatus(row.status)) return
-        try {
-          const current = jobs.get(row.jobId as JobId, browserSession.session.id)
-          if (current === undefined || !isActiveJobStatus(current.status)) return
-          const result = jobs.kill(row.jobId as JobId, browserSession.session.id, 'stopped from Task Center')
-          app.notify(result === 'already-finished' ? `${row.label} already finished` : `stopping ${row.label}`, 'info')
-        } catch (error) {
-          app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-        }
-      }
-      const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
-      const initialQuery = restoreState?.searchQuery ?? ''
-      const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
-      const initialPreferred = initialSelected
-        ?? taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
-        ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
-      const handle = app.openTaskBrowser(
-        taskPanelItems(taskBrowserRows),
-        // Selection disposition decides whether the browser survives: a Job
-        // detail keeps it MOUNTED underneath (the overlay stack hides and
-        // restores the exact instance/state on Esc); a terminal navigation
-        // (subagent transcript, row left the dataset) drops the
-        // active-handle reference so a later runtime refresh cannot repaint
-        // a closed browser, and resets the dataset scope (PR2 plan §10.8 —
-        // the next ordinary Task Center must see the global dataset).
-        (value) => {
-          if (cleanedUp) return 'close'
-          const disposition = selectRow(value)
-          if (disposition === 'keep-open') return 'keep-open'
-          activeTaskBrowser = undefined
-          activeTaskBrowserToken = undefined
-          resetTaskBrowserScope()
-          return 'close'
-        },
-        () => {
-          if (cleanedUp) return
-          const current = activeTaskBrowser?.getViewState?.()
-          activeTaskBrowser = undefined
-          activeTaskBrowserToken = undefined
-          resetTaskBrowserScope()
-          if (viewMode === 'full' && restoreState !== undefined) {
-            // Esc from a promoted full view returns to Quick with the latest
-            // shared context, not the state from the promotion moment.
-            const state = current ?? quickTaskState ?? restoreState
-            openTasksBrowser('quick', state)
-          }
-        },
-        {
-          header: header ?? 'Tasks',
-          enableSearch: true,
-          mode: viewMode,
-          openedFrom: viewMode === 'full' && restoreState !== undefined ? 'quick' : 'command',
-          scope: initialScope,
-          typeFilter: restoreState?.typeFilter,
-          initialQuery,
-          initialSearchMode: restoreState?.searchMode,
-          expandedIds: [...(restoreState?.expandedIds ?? [])],
-          collapsedIds: [...(restoreState?.collapsedIds ?? [])],
-          selectedId: initialSelected,
-          preferredValue: initialPreferred,
-          maxVisible: viewMode === 'quick' ? 8 : 18,
-          loading: runtime !== undefined && taskBrowserRows.length === 0,
-          groupLabels: true,
-          onRefresh: () => {
-            if (cleanedUp) return
-            if (runtime === undefined) {
-              refreshTasks()
-              return
-            }
-            // Refresh state is SINGLE-OWNER: only the coordinator's
-            // commitRefreshState (fenced by session key + request epoch)
-            // may set loading/ready/stale on the presentation. The runner
-            // must never touch setRefreshState directly — an unfenced
-            // onError here could mark a NEW session's browser as failed
-            // when the OLD session's listing rejects (PR review P1).
-            runOwned('task browser descendants', () => runtime.refreshCatalog(), {
-              diag,
-              sessionId: () => agentNow()?.session.id,
-            })
-          },
-          onViewFull: state => {
-            if (cleanedUp) return
-            activeTaskBrowser = undefined
-            activeTaskBrowserToken = undefined
-            quickTaskState = state
-            openTasksBrowser('full', state)
-          },
-          onStop: stopRow,
-          onViewportExpose: ids => { if (!cleanedUp) runtime?.acknowledge(ids) },
-        },
-      )
-      activeTaskBrowser = handle
-      // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
-      // panel reports each attention row the first time it enters the
-      // open viewport (first frame AND every later scroll/page/jump), and
-      // the runtime acknowledges exactly those ids (PR review P1/P2). Only
-      // rows the user can actually see lose their footer attention;
-      // Quick's Active scope leaves terminal failures pending while live
-      // work is present, so its badge stays useful.
-      // The open triggers a CATALOG refresh (membership may have drifted
-      // since the last listing): the coordinator fences it against a
-      // session switch and commits through the ACTIVE handle — a browser
-      // closed while the listing is in flight is never repainted. The
-      // body above is synchronous, so the `runtime` captured for the
-      // first-frame seed is still the current coordinator. Refresh state
-      // is single-owner: the coordinator's fenced commitRefreshState is
-      // the ONLY path that sets loading/ready/stale (an unfenced onError
-      // here could mark a new session's browser failed when an old
-      // session's listing rejects — PR review P1).
-      if (runtime !== undefined) {
-        runOwned('task browser descendants', () => runtime.refreshCatalog(), {
-          diag,
-          sessionId: () => agentNow()?.session.id,
-        })
-      }
-    }
-
-    /** Reset the task-browser dataset scope to the global dataset (PR2
-     * plan §10.8): every close path (Esc, row selection) clears the scope
-     * so the next ordinary `/tasks` / ↓ Task Center sees `all` again. */
-    const resetTaskBrowserScope = (): void => {
-      taskBrowserScope = { kind: 'all' }
-      taskRuntime?.setScope({ kind: 'all' })
-    }
-
-    /** The Workflow card action sink (PR2 plan §9/§10/§14.5): the TUI
-     * emits semantic intents; THIS handler resolves them against the real
-     * Task Center / Subagent catalog and opens the existing surfaces —
-     * never a Workflow-specific viewer or browser. */
-    const handleWorkflowAction = (action: WorkflowAction): void => {
-      const agent = agentNow()
-      if (agent === undefined) return
-      switch (action.kind) {
-        case 'open-member': {
-          // Direct member navigation (plan §9.2): the SINGLE authority
-          // resolver checks the catalog facts (row exists, subagent,
-          // direct child of the current session, driver running) — the
-          // model-side `member.status === running` was already verified by
-          // the app at click time. A missing catalog row (agent-start
-          // before the listing) or any failed condition is a no-op — the
-          // row simply does not open (plan §9.5).
-          const row = taskBrowserRows.find(candidate =>
-            candidate.kind === 'subagent' && candidate.childId === action.childId)
-          const target = workflowMemberViewerTarget(
-            { status: 'running', childId: action.childId },
-            row,
-            agent.session.id,
-          )
-          if (target === undefined) return
-          runOwned('workflow member view', () => enterView(
-            target.childSessionId as SessionId,
-            target.label,
-            target.mode,
-            target.parentSessionId as SessionId,
-            target.activity,
-            target.depth,
-          ), {
-            diag,
-            sessionId: () => agentNow()?.session.id,
-            onError: (error) => {
-              if (cleanedUp) return
-              app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-            },
-          })
-          return
-        }
-        case 'open-phase-agents':
-        case 'open-run-agents': {
-          // Scoped Task Viewer (plan §10): the EXACT workflow child-id set
-          // becomes the browser's dataset scope; the existing Task Center
-          // provides search/filter/browse and the existing cold-view
-          // semantics for terminal children (plan §10.7).
-          if (taskRuntime === undefined) return
-          const count = action.childIds.length
-          const header = action.kind === 'open-phase-agents'
-            ? `Workflow · ${action.name} · ${action.phaseLabel} · ${count} agent${count === 1 ? '' : 's'}`
-            : `Workflow · ${action.name} · ${count} agent${count === 1 ? '' : 's'}`
-          openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }, header)
-          return
-        }
-      }
-    }
-
+    // The Task Browser opener, the browser-scope reset and the Workflow card
+    // action sink are A4-6 surface-owned (`surface.openTasksBrowser` /
+    // `surface.resetTasks` / the surface-internal workflow handler wired as the
+    // app's `onWorkflowAction`); the runner only forwards the `/tasks` entry
+    // below.
     // M3: attach the extension host to the mounted surface chrome once per
     // generation (F-1): the header/dock/footer merge extension content, and the
     // service's capability set + state bridge become live. A4-5: the whole
@@ -7411,144 +6938,48 @@ export function apply(ctx: Context, config: Config): void {
     // The initial status projection is committed after session hydration (or
     // in the deferred branch below), so a resumed session never paints a
     // temporary empty stats projection.
-    // The persistent dock's task lines + the footer badge follow the
-    // JobRegistry roster (membership authority — it may temporarily list
-    // foreground shell work, and rows leave when DSH removes them): every
-    // change refreshes the active-task snapshot (no polling).
-    // `refreshTasks` is hoisted so the task browser
-    // (openJobView, defined earlier in this closure) can refresh the badge
-    // after stop/close.
-    let refreshTasks: () => void = () => {}
-    // The subagent half of the dock badge + the open task browser. Two
-    // refresh modes, both hoisted like refreshTasks (the browser is
-    // defined earlier in this closure):
-    // - `refreshAgents` — a CATALOG refresh (listDescendants + commit):
-    //   subagent lifecycle events, subagent tool calls and jobs changes;
-    // - `refreshAgentRuntimeOnly` — a RUNTIME-only refresh (no listing):
-    //   the `agent/status` handler re-projects the cached catalog.
-    let refreshAgents: () => void = () => {}
-    let refreshAgentRuntimeOnly: () => void = () => {}
-    // The ACTIVE task-browser overlay handle (one at a time — the ↓
-    // trigger and /tasks share the same surface) and the row-identity
-    // source the open browser's select/action paths read. Tracked at
-    // runner scope so the runtime refresh repaints the OPEN panel and a
-    // session switch closes it (see bumpSessionGeneration).
-    let taskBrowserRows: TaskBrowserRow[] = []
-    let taskRuntime: TaskBrowserRuntime | undefined
-    /** The dataset scope of the OPEN task browser (PR2 plan §10.5): `all`
-     * for the ordinary Task Center, an exact child-id set for a Workflow
-     * phase/run scope. Reset to `all` on every close (see
-     * resetTaskBrowserScope) and on session switch. */
-    let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
-    /** Context retained only while the full center was promoted from Quick. */
-    let quickTaskState: TaskBrowserViewState | undefined
+    // A4-6: the Task Browser + Job viewer wiring is surface-owned. The runner
+    // injects the narrow production capability the surface needs (plan §15.2):
+    // the live session id, the ownership-subject fence, the jobs registry reads,
+    // the subagent `TaskBrowserRuntime` hooks, the child viewer + the
+    // writer-admitted interrupt, the selected-Job observation port and the root
+    // row-disposition helpers. No new Backend port and no second task model.
     const jobs = ctx.get('jobs')
-    if (jobs !== undefined) {
-      refreshTasks = (): void => {
-        if (cleanedUp) return
-        let snapshots: ReturnType<NonNullable<typeof jobs>['list']>
-        try {
-          // Keep terminal records in the catalog — the registry IS the
-          // membership authority, and TRACKED is its current roster (not a
-          // session history): retained terminal rows stay, upstream
-          // `remove()`d rows leave. Active/tracked separation is a
-          // presentation fact; dropping completed/failed jobs here made
-          // the full Task Center's tracked rows and failure attention
-          // impossible. Job
-          // ownership is the Session id; without a live agent the registry
-          // read is the unowned-only view (caller omitted).
-          snapshots = jobs.list(agentNow()?.session.id)
-        } catch {
-          // Best-effort: a failed registry read is NOT an authoritative empty
-          // catalog. Keeping the previous snapshot matters most for a Job
-          // detail's retained parent browser — the close-time refresh must not
-          // blank the rows/selection it is about to restore.
-          return
-        }
-        const tasks = snapshots.map(job => ({
-          id: job.id,
-          label: job.label,
-          status: job.status,
-          kind: job.kind,
-          startedAt: job.startedAt,
-          finishedAt: job.finishedAt,
-        }))
-        app.setTasks(tasks)
-        // A jobs-only session has no catalog coordinator, so this is the ONLY
-        // refresh channel for an OPEN browser. Keep it in step with the
-        // registry, or a Job detail's hidden parent returns with stale status
-        // (the subagents path commits through TaskBrowserRuntime.commitRows).
-        if (taskRuntime === undefined && activeTaskBrowser !== undefined) {
-          taskBrowserRows = buildTaskRows(snapshots, [])
-          activeTaskBrowser.setItems(taskPanelItems(taskBrowserRows))
-        }
-      }
-      // A jobs change usually means a delegation settled; the subagent half
-      // of the dock may have changed with it. `{ owners: 'scope' }` names
-      // every owner composed under this runner's composition — the TUI's own
-      // agents — rather than process-global observation; the refreshes
-      // themselves re-fence on the live session. The disposer is released by
-      // disposeSurface so no listener survives the runner (the effect scope
-      // would also reclaim it at plugin unload — this makes the surface
-      // teardown order explicit).
-      //
-      // Events route by SEMANTICS, mirroring the TaskBrowserRuntime's own
-      // catalog/runtime split (the upstream Job Controller keeps output off
-      // the roster path the same way):
-      // - `output` is a ring APPEND — one per streamed chunk — and changes
-      //   no roster or status fact: ignored entirely.
-      // - `progress` (a producer's live progress line) and `stopping` (a
-      //   kill request acknowledged) change only JobView runtime facts:
-      //   the runtime-only refresh re-projects rows from the cached
-      //   descendant catalog, never re-listing (listDescendants may read
-      //   persistence).
-      // - `registered` / `settled` / `removed` (and any future vocabulary)
-      //   may move Task membership or one-shot subagent lifecycle: the
-      //   full catalog refresh runs.
-      jobsEventsDispose = jobs.events.subscribe({ owners: 'scope' }, (event: { type: string }) => {
-        switch (event.type) {
-          case 'output':
-            return
-          case 'progress':
-          case 'stopping':
-            refreshTasks()
-            refreshAgentRuntimeOnly()
-            return
-          default:
-            refreshTasks()
-            refreshAgents()
-        }
-      })
-      refreshTasks()
-    }
-    // Continuable children and foreground one-shot children never register
-    // jobs records (AGENTS.md), so the dock badge and the task browser need
-    // their own channel into the subagent registry. The
-    // TaskBrowserRuntime coordinator owns the split:
-    // - `refreshAgents` (CATALOG): event-driven — subagent lifecycle events
-    //   (start/end), subagent tool calls in the live session, and every
-    //   jobs change (a one-shot settlement implies membership may have
-    //   moved). listDescendants is async and may read persistence for
-    //   cold children, so the commit is session-key fenced and never lands
-    //   on a newer session.
-    // - `refreshAgentRuntimeOnly` (RUNTIME): the `agent/status` handler —
-    //   NEVER re-lists. The catalog's store-presence `activity` is not an
-    //   execution state: an idle continuable child stays live in the
-    //   session store and would otherwise keep the row and the badge stuck
-    //   on `running` forever. Every child's `running`/`inactive` is
-    //   re-projected from the Agent registry (`ctx.agents.get(id)?.status`)
-    //   AT COMMIT TIME, so a slow catalog response can never overwrite a
-    //   newer runtime state (plan §7.3). The badge counts every RUNNING
-    //   descendant (plan §6.13) — the user cares that a deep agent is
-    //   still working — while durable inactive children never keep it
-    //   permanently armed.
     const subagents = ctx.get('subagents')
-    if (subagents !== undefined) {
-      // The last SUCCESSFUL jobs read, FENCED to the session identity: a
-      // transient registry failure must keep the retained Job rows, but a
-      // switched-in session must never inherit the old session's rows.
-      let jobSnapshot: { key: string; rows: ReturnType<NonNullable<typeof jobs>['list']> } | undefined
-      taskRuntime = new TaskBrowserRuntime({
+    // The last SUCCESSFUL jobs read, FENCED to the session identity: a
+    // transient registry failure must keep the retained Job rows, but a
+    // switched-in session must never inherit the old session's rows.
+    let jobSnapshot: { key: string; rows: ReturnType<NonNullable<typeof jobs>['list']> } | undefined
+    surface.attachTasks({
+      sessionId: () => agentNow()?.session.id,
+      captureSubject: () => ownership.captureSubject(),
+      subjectMatches: (subject) => captureMatches(subject),
+      // The viewer target carries the row's OWN parent; only a direct child
+      // falls back to the live main session (already resolved in the surface).
+      enterView: (childId, label, mode, parentSessionId, activity, depth) =>
+        enterView(childId as SessionId, label, mode, parentSessionId as SessionId, activity, depth),
+      // The scope-bound writer admission (A3-4) stays in the runner: the
+      // Task-Center subagent interrupt is not a submission write, so only its
+      // admission moves through SessionRuntime.withWriter.
+      interruptSubagent: (parentSessionId, childSessionId) =>
+        sessionRuntime.withWriter(requireLiveScope(), () => backend.subagent.interrupt({
+          parentSessionId: parentSessionId as SessionId,
+          childSessionId: childSessionId as SessionId,
+          mode: 'continuable',
+        })),
+      rowSelectionDisposition: taskRowSelectionDisposition,
+      subagentJobTranscriptId,
+      subagentJobViewHint,
+      jobObservation: backend.jobObservation,
+      jobs: jobs === undefined ? undefined : {
+        // Job ownership is the Session id (DSH 0.1.7 JobRegistry); the caller
+        // may be omitted (the unowned-only view) when no session is live.
+        list: (sessionId) => jobs.list(sessionId as SessionId | undefined),
+        subscribe: (listener) => jobs.events.subscribe({ owners: 'scope' }, listener),
+        get: (jobId, sessionId) => jobs.get(jobId as JobId, sessionId as SessionId),
+        kill: (jobId, sessionId, reason) => jobs.kill(jobId as JobId, sessionId as SessionId, reason),
+      },
+      agents: subagents === undefined ? undefined : {
         // The session fence key: generation + session id, captured when a
         // refresh starts and re-checked after the async listing.
         currentKey: () => {
@@ -7559,8 +6990,8 @@ export function apply(ctx: Context, config: Config): void {
           const sessionId = agentNow()?.session.id
           return sessionId === undefined ? Promise.resolve([]) : subagents.listDescendants(sessionId)
         },
-        // The merged rows re-read the CURRENT jobs snapshot at every
-        // commit, so a job settlement repaints an open browser too.
+        // The merged rows re-read the CURRENT jobs snapshot at every commit,
+        // so a job settlement repaints an open browser too.
         readJobs: () => {
           const sessionId = ownership.currentSessionId()
           if (jobs === undefined || sessionId === undefined) return []
@@ -7572,246 +7003,20 @@ export function apply(ctx: Context, config: Config): void {
           } catch {
             // The registry read is best-effort: a failed read is NOT an
             // authoritative empty catalog. Returning the last successful
-            // snapshot preserves the retained Job rows (and the totals /
-            // selection derived from them) across a transient failure — but
-            // ONLY for the same session identity, so a switched-in session
-            // never inherits the old session's rows.
+            // snapshot preserves the retained Job rows — but ONLY for the same
+            // session identity, so a switched-in session never inherits the
+            // old session's rows.
             return jobSnapshot?.key === key ? jobSnapshot.rows : []
           }
         },
         // The LIVE runtime fact, read at COMMIT time: the Agent registry,
         // never the catalog's store-presence activity.
         agentStatusOf: (childId) => agents?.get(childId as SessionId)?.status,
-        commitRows: (rows, preferred) => {
-          if (cleanedUp) return
-          // The row-identity source for the open browser's select path
-          // always reflects the latest commit (a runtime refresh that
-          // repainted the panel is never contradicted by a stale local
-          // snapshot), and the repaint targets ONLY the open handle.
-          taskBrowserRows = [...rows]
-          activeTaskBrowser?.setItems(taskPanelItems(rows), preferred)
-        },
-        commitBadge: (running) => {
-          if (cleanedUp) return
-          app.setAgents(running.map(entry => ({
-            id: entry.id,
-            label: entry.label,
-            activity: 'running',
-          })))
-        },
-        commitSummary: (summary) => {
-          if (cleanedUp) return
-          app.setTaskSummary(summary)
-        },
-        commitRefreshState: (state, error) => {
-          if (cleanedUp) return
-          activeTaskBrowser?.setRefreshState?.(state, error)
-        },
-      })
-      // Seed the summary synchronously from jobs before the durable catalog
-      // listing lands; this prevents a terminal/jobs-only first frame from
-      // claiming every record is still running.
-      taskRuntime.refreshRuntime()
-      refreshAgents = (): void => {
-        if (cleanedUp) return
-        if (agentNow() === undefined) {
-          app.setAgents([])
-          return
-        }
-        runOwned('task browser agents refresh', () => taskRuntime!.refreshCatalog(), {
-          diag,
-          sessionId: () => agentNow()?.session.id,
-        })
-      }
-      refreshAgentRuntimeOnly = (): void => {
-        if (cleanedUp) return
-        if (agentNow() === undefined) {
-          app.setAgents([])
-          return
-        }
-        taskRuntime!.refreshRuntime()
-      }
-      refreshAgents()
-    }
-    /**
-     * Open one job from the task browser: an ordinary Job opens the detail
-     * viewer, which shows a NON-CONSUMING live output preview through the
-     * official JobController.follow() stream (never `jobs.read()`), so it can
-     * never leave the model an incomplete `job_output` result or swallow the
-     * completion notice; a subagent job whose stable child session id is
-     * unknown shows the same Job detail with a /tasks hint. The job record
-     * carries no child session id, so label/order/time heuristics cannot
-     * distinguish a background child from a same-label foreground one-shot;
-     * the task browser therefore never opens a transcript by guess.
-     * `jobs` and `refreshTasks` are declared later in this closure; the
-     * browser only fires on user input, by which time both are initialized.
-     * Returns the navigation disposition for the selecting browser: the
-     * transcript path REPLACES the Task Center (`'close'`); a Job detail is
-     * a child overlay of it (`'keep-open'`), as is a vanished job (the
-     * parent stays usable, nothing was opened).
-     */
-    const openJobView = (jobId: string): 'close' | 'keep-open' => {
-      const owner = agentNow()
-      if (jobs === undefined || owner === undefined) return 'keep-open'
-      let snapshot: ReturnType<NonNullable<typeof jobs>['get']>
-      try {
-        snapshot = jobs.get(jobId as JobId, owner.session.id)
-      } catch {
-        return 'keep-open'
-      }
-      if (snapshot.kind === 'subagent') {
-        const childSessionId = subagentJobTranscriptId(snapshot)
-        if (childSessionId !== undefined) {
-          // The jobs registry's `subagent` kind IS the reliable contract
-          // for a background ONE-SHOT delegation (the registry never
-          // records continuable children): the transcript viewer opens
-          // read-only. The parent is the job owner.
-          runOwned('subagent view from tasks', () => enterView(
-            childSessionId as SessionId, snapshot.label, 'one-shot', owner.session.id, 'inactive',
-          ), {
-            diag,
-            sessionId: () => owner.session.id,
-            onError: (error) => {
-              if (cleanedUp) return
-              app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-            },
-          })
-          // The transcript viewer is a session surface, not a Job child
-          // overlay: it keeps its own Esc semantics (browser closed).
-          return 'close'
-        }
-        // Current JobSnapshot has no stable child id. Use the reliable status
-        // fallback and let /tasks (which owns child identities through
-        // the merged browser) perform
-        // transcript selection; never substitute label/order/time matching.
-        openJobStatusViewer(jobId, `subagent ${snapshot.id} · ${snapshot.label}`, snapshot)
-        return 'keep-open'
-      }
-      openJobStatusViewer(jobId, `${snapshot.kind} ${snapshot.id} · ${snapshot.label}`, snapshot)
-      return 'keep-open'
-    }
-    /**
-     * Selected-Job detail viewer. It opens one official non-consuming
-     * observation stream for exactly this Job and repaints the latest local
-     * snapshot on the viewer's timer (the tick never reads Host output). The
-     * subagent variant appends the /tasks hint because a transcript cannot
-     * always be matched. If the jobController service is absent the detail
-     * degrades to the status-only view with an explicit note.
-     */
-    const openJobStatusViewer = (
-      jobId: string,
-      title: string,
-      snapshot: {
-        readonly kind?: string
-        readonly id: string
-        readonly label: string
-        readonly status: string
-        readonly detail?: string
       },
-    ): void => {
-      // One viewer at a time, and a fresh selection replaces the previous.
-      activeJobViewerClose?.()
-      const owner = agentNow()
-      if (owner === undefined) return
-      // The viewer belongs to the session it was OPENED for: capture that
-      // owning Session id so a leaked viewer can never refresh/stop a
-      // same-id job in a different session (the registry fences every read
-      // and kill against the owner, on top of the close-on-transition
-      // below).
-      const ownerSessionId = owner.session.id
-      const fallbackText = snapshot.kind === 'subagent'
-        ? subagentJobViewHint(snapshot.status, snapshot.detail)
-        : jobStatusHint(snapshot.status, snapshot.detail)
-      // The selected Job is the ONLY observed Job (P1-B1). The observer is
-      // event-driven at its data source: the official follow stream updates
-      // this local snapshot and the viewer's existing refresh timer merely
-      // repaints it — the tick never reads Host output.
-      let observed: JobObservedSnapshot | undefined
-      let observationError: string | undefined
-      let closeObserver: () => void = () => {}
-      try {
-        closeObserver = backend.jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
-      } catch (error) {
-        // A composition without the official job-controller row (the injected
-        // production row guarantees it) degrades to the status-only detail —
-        // the documented P1-B safety valve — and says so explicitly.
-        observationError = safeErrorMessage(error)
-      }
-      const refreshBody = (): string => {
-        if (observed !== undefined) return formatJobObservation(observed)
-        const current = jobs === undefined ? undefined : (() => {
-          try {
-            return jobs.get(jobId as JobId, ownerSessionId)
-          } catch {
-            // The job left the registry (or the session switched): freeze.
-            return undefined
-          }
-        })()
-        const base = current === undefined
-          ? fallbackText
-          : current.kind === 'subagent'
-            ? subagentJobViewHint(current.status, current.detail)
-            : jobStatusHint(current.status, current.detail)
-        return observationError === undefined ? base : `${base}\nlive observation unavailable: ${observationError}`
-      }
-      activeJobViewerClose = app.openOutputViewer({
-        title,
-        initial: fallbackText,
-        refresh: refreshBody,
-        onStop: () => {
-          if (jobs === undefined) return
-          try {
-            jobs.kill(jobId as JobId, ownerSessionId, 'stopped from the task browser')
-          } catch {
-            // Already finished: nothing to stop.
-          }
-          refreshTasks()
-        },
-        // Live capability: the Stop hint and the Stop key both read the
-        // CURRENT registry record, so a job that settles while the viewer
-        // is open stops advertising/handling Stop.
-        canStop: () => {
-          if (jobs === undefined) return false
-          try {
-            return isActiveJobStatus(jobs.get(jobId as JobId, ownerSessionId).status)
-          } catch {
-            // The job left the registry: nothing can be stopped.
-            return false
-          }
-        },
-        // The viewer was opened from the Task Center browser: Esc returns
-        // to the parent browser, not to the editor.
-        closeHint: 'back',
-        onClose: () => {
-          // Closing the viewer always releases the observer (Esc, the parent
-          // browser closing, a session transition, or surface teardown).
-          closeObserver()
-          activeJobViewerClose = undefined
-          refreshTasks()
-        },
-      })
-    }
-    /**
-     * The Job detail body from the detached observation (never a Host read).
-     * The official controller provides a best-effort retained preview, not an
-     * archival terminal log — say so.
-     */
-    const formatJobObservation = (observed: JobObservedSnapshot): string => {
-      const lines: string[] = [observed.status]
-      if (observed.progress !== undefined) lines.push(`progress: ${observed.progress}`)
-      if (observed.detail !== undefined) lines.push(`detail: ${observed.detail}`)
-      if (observed.gapBefore) lines.push('note: earlier output was evicted before this retained preview')
-      if (observed.error !== undefined) lines.push(`follow error: ${observed.error}`)
-      lines.push('', 'best-effort retained output preview (not a complete transcript):', '', observed.text)
-      return lines.join('\n')
-    }
-    /** One-line viewer hint for a job state (never touches the read cursor). */
-    const jobStatusHint = (status: string, detail: string | undefined): string => {
-      const tail = status === 'running' || status === 'stopping'
-        ? ' — opening the non-consuming retained-output stream…'
-        : ` — final output is delivered to the agent via job_output${detail === undefined ? '' : ` (${detail})`}`
-      return `${status}${tail}`
-    }
+    }, {
+      diag,
+      isCleanedUp: () => cleanedUp,
+    })
     refreshPendingInput()
     // The TUI-owned slash commands are registered as soon as the runner
     // surface exists — the commands service's GLOBAL layer needs no agent,
@@ -7907,8 +7112,8 @@ export function apply(ctx: Context, config: Config): void {
       // catalog): the dock/badge are owner-fenced,
       // and a session switch must not leave the previous session's tasks
       // or subagents on screen until the next registry event.
-      refreshTasks()
-      refreshAgents()
+      surface.refreshTasks()
+      surface.refreshAgents()
       // The recall history is per-workspace AND per-session: REPLACE it
       // with the live session's rows ONLY (the CWD file's rows filtered to
       // this sessionId — session-scoped editor recall), so ↑/↓ in a live
@@ -8393,10 +7598,10 @@ export function apply(ctx: Context, config: Config): void {
       // the /status port call directly).
       refreshStatus: refreshStatusCheap,
       updateWelcomeCard,
-      openJobView,
+      openJobView: (jobId) => surface.openJobView(jobId),
       // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
       // it opens the FULL browser explicitly.
-      openTasksBrowser: () => openTasksBrowser('full'),
+      openTasksBrowser: () => surface.openTasksBrowser('full'),
       openRewindPicker,
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.
@@ -8586,7 +7791,7 @@ export function apply(ctx: Context, config: Config): void {
             ? event.data.arguments
             : JSON.stringify(event.data.arguments))
           if (typeof event.data.name === 'string' && event.data.name.startsWith('subagent')) {
-            refreshAgents()
+            surface.refreshAgents()
             let description = ''
             try {
               const parsed = JSON.parse(event.data.arguments)
@@ -8884,11 +8089,11 @@ export function apply(ctx: Context, config: Config): void {
     // a redundant safety net. These are CATALOG events: membership/tree
     // may have changed, so they re-list.
     ctx.on('subagent/start', () => {
-      refreshAgents()
+      surface.refreshAgents()
       queueMicrotask(refreshPendingInput)
     })
     ctx.on('subagent/end', () => {
-      refreshAgents()
+      surface.refreshAgents()
       queueMicrotask(refreshPendingInput)
     })
     // `agent/status` is the LIVE runtime channel: a child's driver
@@ -8916,8 +8121,8 @@ export function apply(ctx: Context, config: Config): void {
         queueMicrotask(refreshPendingInput)
         return
       }
-      if (taskRuntime?.has(agent.id) !== true) return
-      refreshAgentRuntimeOnly()
+      if (!surface.hasTask(agent.id)) return
+      surface.refreshAgentRuntimeOnly()
       if (viewing?.id === agent.id) queueMicrotask(refreshPendingInput)
     })
     // Provider-topology and credential events refresh the footer model row
@@ -8958,40 +8163,14 @@ export function apply(ctx: Context, config: Config): void {
     // session-owned bootstrap work there avoids a second full-log scan on
     // resume and also makes session switches restore the same state.
 
-    // The interactive answerer: every approval ask becomes a dialog. An
-    // already-aborted request settles cancelled synchronously; otherwise the
-    // prompt's own abort signal withdraws it (turn cancel). P7c: the dialog
-    // previews the paired tool call's arguments and flags dangerous commands.
-    backend.interaction.onApprovalRequest((req, next) => {
-      if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
-      const args = req.callId === undefined ? undefined : callArgs.get(req.callId as never)
-      return app.showApprovalPrompt({
-        toolName: req.toolName,
-        reason: req.reason,
-        signal: req.signal,
-        ...args === undefined ? {} : { arguments: args },
-        ...args !== undefined && req.toolName === 'bash' && dangerCommand(args) ? { danger: true } : {},
-      })
-    })
-    // The interactive question answerer: ask_user_question tool calls become
-    // dialog flows; the tool receives the structured answers.
-    backend.interaction.registerQuestionProvider(async (request) => {
-      const answers = await app.askQuestions(request.questions.map(question => ({
-        id: question.id,
-        question: question.question,
-        ...question.header !== undefined ? { header: question.header } : {},
-        ...question.detail !== undefined ? { detail: question.detail } : {},
-        ...question.options !== undefined ? { options: question.options } : {},
-        ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
-        ...question.intent !== undefined ? { intent: question.intent } : {},
-      })), request.signal)
-      return {
-        answers: answers.map(answer => ({
-          id: answer.id,
-          selected: answer.selected,
-          ...answer.custom !== undefined ? { custom: answer.custom } : {},
-        })),
-      }
+    // The approval/question presentation providers are A4-7 surface-owned
+    // (`surface.attachInteraction`, plan §13.3/§16). The runner injects only
+    // the narrow presentation inputs: the paired tool-call argument lookup
+    // (the surface never reads the session-event feed) and the pure
+    // dangerous-command predicate.
+    surface.attachInteraction(backend.interaction, {
+      lookupCallArgs: (callId) => callArgs.get(callId as never),
+      dangerCommand,
     })
   })().catch(async (error: unknown) => {
     // Terminal-total final catch of the startup lifecycle root: error
