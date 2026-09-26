@@ -152,7 +152,6 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     openRewindPicker: () => {},
     sessionTransitionPending: options.transitionPending ?? (() => false),
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},

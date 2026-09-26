@@ -16,7 +16,7 @@ import { createDiag } from '../src/diag.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../src/index.ts'
 import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../src/surface-catalog.ts'
 import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
-import { SessionOperationBarrier } from '../src/session-operation-barrier.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -184,8 +184,12 @@ function stubRunner(
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
-    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
+    // The scope-bound writer admission IS the transition refusal now (A3-4):
+    // a pending transition makes withWriter throw before the task runs.
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => {
+      if (options.transitionPending === true) throw new TransitionInProgressError()
+      return task()
+    },
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
@@ -623,7 +627,7 @@ test('a transition started after the skill writer entered waits for the skill to
   // Park AFTER the barrier counted this writer but BEFORE the skill task runs:
   // the pre-fix in-writer `sessionTransitionPending()` re-check runs at the very
   // start of the task, so it must observe the transition that starts now.
-  runner.withSessionWriter = (sessionId, task) => barrier.runWriter(sessionId, async () => {
+  runner.withWriter = (_scope, task) => barrier.runWriter('session-a', async () => {
     order.push('writer-entered')
     await writerGate
     return task()

@@ -28,7 +28,7 @@ import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
-import type { LiveSessionScope, SessionScope } from './app/session/scope.ts'
+import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import type { DefaultIntentRecord } from './default-intent.ts'
 import { SettingsList, type Component, type SettingItem } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
@@ -806,13 +806,6 @@ export interface TuiCommandRunner {
    * loudly (it would deadlock).
    */
   withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
-  /**
-   * Run one TUI-owned session write inside the session operation barrier
-   * (convergence plan phase 3): a transition started while this write
-   * awaits drains it first; a write entering during a transition throws
-   * TransitionInProgressError (the caller refuses with the fence UX).
-   */
-  withSessionWriter<T>(sessionId: string, task: () => Promise<T> | T): Promise<T>
   /**
    * Run one scope-bound TUI session write (A3 §1.3): the captured scope is
    * validated ONCE, synchronously, before the operation barrier is entered, so
@@ -3545,25 +3538,18 @@ export function registerTuiCommands(
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage | undefined
     try {
       // A transition ALREADY pending when this invocation is about to enter the
-      // writer is refused up front (draft restored). Once the writer owns the
-      // barrier, a transition that starts LATER MUST wait for this writer to
-      // drain — `SessionOperationBarrier`'s writer-first contract — so there is
-      // deliberately NO transition re-check inside the section (a re-check
-      // would let a later transition cancel a writer that started first).
-      if (runner.sessionTransitionPending()) {
-        const merged = mergeDraft(app.getDraft(), line)
-        app.setEditorText(merged)
-        recordCommandDraftDisposition(commandId, 'restored')
-        return { kind: 'error', text: merged === line
-          ? 'a session transition is in progress — try again in a moment'
-          : 'the draft changed while transitioning — review it before submitting again' }
-      }
+      // writer is refused by the admission itself (draft restored by the catch
+      // below). Once the writer owns the barrier, a transition that starts LATER
+      // MUST wait for this writer to drain — `SessionOperationBarrier`'s
+      // writer-first contract — so there is deliberately NO transition re-check
+      // inside the section (a re-check would let a later transition cancel a
+      // writer that started first).
       // The whole image admission + commit runs inside the operation barrier
       // (transition drain) and, when the invocation references an image draft,
       // inside the SAME per-Agent serialization window as a `/model` selection
       // (rc.2 `serializeImageAdmission`): a concurrent model switch can never
       // change the model between the image capability check and the commit.
-      const admission = await runner.withSessionWriter(scope.sessionId, () =>
+      const admission = await runner.withWriter(scope, () =>
         runner.withPromptAdmission(scope, line, async (): Promise<
           | { readonly kind: 'stale' }
           | { readonly kind: 'written'; readonly outcome: Awaited<ReturnType<typeof runner.sessionWriter.prompt>> | undefined }
@@ -3625,6 +3611,12 @@ export function registerTuiCommands(
         return { kind: 'error', text: merged === line
           ? 'a session transition is in progress — try again in a moment'
           : 'the draft changed while transitioning — review it before submitting again' }
+      }
+      // A stale capture is refused at the writer admission (BEFORE the task
+      // body) with its OWN signal — never the frozen-transition refusal. It
+      // takes the same user-visible stale path as the in-task scope checks.
+      if (error instanceof SessionScopeSupersededError) {
+        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
       }
       throw error
     } finally {
@@ -4006,6 +3998,10 @@ export function registerTuiCommands(
       // silently if either moved (v2 §0.2.5/§0.3.1) — never hydrate a picker
       // with another Session's catalog.
       const scope = runner.captureSessionScope()
+      // The SAME synchronous capture for the live write path: a live picker's
+      // model write enters the writer section through the exact owner scope,
+      // never a bare session id re-resolved after an await.
+      const liveScope = runner.captureLiveSessionScope()
       const ownerCurrent = (): boolean => runner.isSessionScopeCurrent(scope)
       /** Commit a selection (model, optional effort) and resolve with its
        *  semantic settlement so the picker stays truthful: a rejected write
@@ -4083,14 +4079,17 @@ export function registerTuiCommands(
         // pending marker are the whole owned state.
         // The picker-open subject; re-fenced after EVERY await.
         const ownerLost = (): boolean => !runner.isSessionScopeCurrent(scope)
+        // The live picker's ONE captured owner scope (the same synchronous
+        // capture as `scope`, which was live because `liveSessionId` is).
+        if (liveScope === undefined) return 'superseded'
         runner.setModelSelectionPending(next, token)
         let result: Awaited<ReturnType<typeof models.selectSessionModel>>
         try {
           // The whole semantic write runs inside the writer barrier: a
           // transition that started first refuses it before dispatch, and a
           // transition that starts after must wait for it (plan §11.1).
-          result = await runner.withSessionWriter(
-            liveSessionId,
+          result = await runner.withWriter(
+            liveScope,
             () => models.selectSessionModel(liveSessionId, next, runner.signal),
           )
         } catch (error) {
@@ -4699,7 +4698,7 @@ export function registerTuiCommands(
       // semantic writer. Both checks fence a delayed command result from a
       // session that has already been replaced.
       try {
-        const outcome = await runner.withSessionWriter(scope.sessionId, async () => {
+        const outcome = await runner.withWriter(scope, async () => {
           if (!current()) return undefined
           return runner.sessionWriter.rename(scope.sessionId, name)
         })
@@ -4718,14 +4717,14 @@ export function registerTuiCommands(
           return { kind: 'error', text: message }
         }
       } catch (error) {
-        if (error instanceof TransitionInProgressError) return stale()
+        if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) return stale()
         if (isCancellation(error)) throw error
         return { kind: 'error', text: safeErrorMessage(error) }
       }
       return { kind: 'success', text: `title set: ${acceptedTitle}` }
     }
     try {
-      const outcome = await runner.withSessionWriter(scope.sessionId, async () => {
+      const outcome = await runner.withWriter(scope, async () => {
         if (!current()) return undefined
         return runner.sessionWriter.refreshTitle(scope.sessionId, invocation.signal)
       })
@@ -4740,7 +4739,7 @@ export function registerTuiCommands(
       app.notify(`title regenerated: ${outcome.title}`, 'info')
       return { kind: 'success' }
     } catch (error) {
-      if (error instanceof TransitionInProgressError) return stale()
+      if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) return stale()
       if (isCancellation(error)) throw error
       return { kind: 'error', text: safeErrorMessage(error) }
     }

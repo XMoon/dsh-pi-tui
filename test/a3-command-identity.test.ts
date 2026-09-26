@@ -72,7 +72,7 @@ test('loadSkill uses the captured scope for every session-scoped operation', () 
     'the Host skill-pre-step probe is scope-bound')
   assert.equal(body.includes('catalog.skills.'), false,
     'loadSkill must not reach into the raw catalog port with a bare session id')
-  assert.ok(body.includes('withSessionWriter(scope.sessionId,'), 'the writer section uses the scope id')
+  assert.ok(body.includes('withWriter(scope,'), 'the writer section uses the captured scope')
   assert.ok(body.includes('sessionWriter.prompt(scope.sessionId,'), 'the prompt writes use the scope id')
   // The prompt admission rides the SAME captured scope; its provider reads the
   // CURRENT Direct attachment inside the writer section (§10.1) — no agent
@@ -131,7 +131,7 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
     assert.ok(at > 0, `${facades[index]} provider not found`)
     const next = index + 1 < facades.length
       ? indexSource.indexOf(`${facades[index + 1]}: `, at)
-      : indexSource.indexOf('\n      withSessionWriter:', at)
+      : indexSource.indexOf('\n      withWriter:', at)
     assert.ok(next > at, `${facades[index]} provider span not found`)
     const body = indexSource.slice(at, next)
     assert.ok(body.includes('agentForLiveScope(scope)'),

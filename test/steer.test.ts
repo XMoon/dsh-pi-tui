@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
 interface FakeAgent extends SteerAgentLike {
@@ -145,14 +146,14 @@ function makeDeps(options: {
   generation?: () => number
   notices?: string[]
   restored?: string[]
-  barrier?: SessionOperationBarrier
+  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
 }): SteerDeps {
   return {
     currentAgent: options.agent,
     currentGeneration: options.generation ?? (() => 1),
     pendingInputReader: pendingReaderFor(options.agent),
     writer: writerFor(options.agent),
-     barrier: options.barrier,
+     writerSection: options.writerSection,
     notify: (message, kind) => options.notices?.push(`${kind}: ${message}`),
     restoreDraft: (text) => { options.restored?.push(text); return true },
     createDraft: (text) => ({ id: `draft:${text}`, text }),
@@ -461,7 +462,7 @@ test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier t
   const events: string[] = []
   let releaseFirst!: () => void
   const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
-  const deps = makeDeps({ agent: () => agent, barrier })
+  const deps = makeDeps({ agent: () => agent, writerSection: (task) => barrier.runWriter('session-steer', task) })
   deps.writer = {
     prompt: async () => {
       events.push('draft')
@@ -814,15 +815,27 @@ test('a TransitionInProgressError from the barrier refuses with the fence notice
   const notices: string[] = []
   const restored: string[] = []
   const deps = makeDeps({ agent: () => agent, notices, restored })
-  deps.barrier = {
-    runWriter: async () => { throw new TransitionInProgressError() },
-  } as unknown as SessionOperationBarrier
+  deps.writerSection = async () => { throw new TransitionInProgressError() }
   deps.fenceNotice = () => 'a session transition is in progress — try again in a moment'
   const outcome = await steerAll(deps, 'draft')
   assert.equal(outcome, 'stale')
   assert.deepEqual(agent.steered, [], 'no delivery during a transition')
   assert.deepEqual(restored, ['draft'], 'the draft comes back')
   assert.deepEqual(notices, ['info: a session transition is in progress — try again in a moment'])
+})
+
+test('a stale writer admission (SessionScopeSupersededError) refuses stale and restores the draft', async () => {
+  const agent = fakeAgent([])
+  const notices: string[] = []
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices, restored })
+  deps.writerSection = async () => { throw new SessionScopeSupersededError() }
+  const outcome = await steerAll(deps, 'draft')
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(agent.steered, [], 'no delivery for a superseded capture')
+  assert.deepEqual(restored, ['draft'], 'the draft comes back')
+  assert.deepEqual(notices, ['info: changed while sending'],
+    'a stale capture takes the refusal path (the draft is restored)')
 })
 
 test('the fence is a no-op when no transition is in flight', async () => {
