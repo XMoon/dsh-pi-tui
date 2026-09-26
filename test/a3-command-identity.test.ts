@@ -19,6 +19,9 @@ import { readFileSync } from 'node:fs'
 
 const commandsSource = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
 const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+// A3-5 relocated the semantic, scope-bound command facades (and their ONE
+// stale-throwing admission) out of the runner into the bound command runtime.
+const commandRuntimeSource = readFileSync(new URL('../src/app/command/runtime.ts', import.meta.url), 'utf8')
 
 function span(source: string, start: string, end: string): string {
   const from = source.indexOf(start)
@@ -84,10 +87,10 @@ test('loadSkill uses the captured scope for every session-scoped operation', () 
 })
 
 test('requireLiveSessionScope ensures the session then captures the scope atomically', () => {
-  const facade = span(indexSource, 'requireLiveSessionScope: async () => {', '\n      },')
-  assert.ok(facade.includes('await sessionRuntime.ensureSession()'),
+  const facade = span(commandRuntimeSource, 'requireLiveSessionScope: async () => {', '\n    listScopedCommands:')
+  assert.ok(facade.includes('await deps.session.ensureSession()'),
     'the facade must ensure the lazy session first')
-  assert.ok(facade.includes('const scope = sessionScope.captureLive()'), 'the ONE synchronous capture')
+  assert.ok(facade.includes('const scope = deps.scope.captureLive()'), 'the ONE synchronous capture')
   assert.ok(facade.includes("if (scope === undefined) throw new Error('session could not be created')"))
   assert.equal(count(facade, 'await'), 1,
     'only the ensureSession await: the scope capture is a single synchronous step')
@@ -100,21 +103,24 @@ test('sessionGeneration no longer exists in the command layer', () => {
 })
 
 test('scope-bound reads admit through ONE stale-throwing helper, never a raw current read', () => {
+  // A3-5: the helper lives in the bound command runtime; the runner resolves
+  // the exact Direct attachment in the SAME synchronous step the helper's
+  // fence proved current (the surface hooks take the fenced session id).
   const admission = span(
-    indexSource,
-    'const agentForLiveScope = (scope: SessionScope): Agent => {',
-    '\n    const runner: TuiCommandRunner = {',
+    commandRuntimeSource,
+    'const liveSessionId = (scope: SessionScope): string => {',
+    '\n  return {',
   )
   // A stale scope THROWS (never returns a value, never retargets to the current
-  // owner) and the exact attachment is resolved in the SAME synchronous step.
+  // owner) and a sessionless capture is refused for a live read.
   assert.ok(admission.includes('throw new SupersededReadError('),
     'a stale scope must throw SupersededReadError')
-  assert.ok(admission.includes('sessionScope.isCurrent(scope)'),
+  assert.ok(admission.includes('deps.scope.isCurrent(scope)'),
     'currentness must come from the scope authority')
-  assert.ok(admission.includes('const agent = agentNow()'),
-    'the exact attachment is resolved inside the same synchronous admission')
-  // Every scope-bound read provider routes through that admission (the provider
-  // spans are delimited by the NEXT facade declaration, in source order).
+  assert.ok(admission.includes("if (sessionId === undefined) throw new Error('a live read requires a Session scope')"),
+    'a sessionless capture has no live read')
+  // Every scope-bound read facade routes through that admission (the facade
+  // spans are delimited by the NEXT declaration, in source order).
   const facades = [
     'resolveScopedSkill',
     'hostLoadsSkillBody',
@@ -127,28 +133,41 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
     'refreshSessionCatalog',
   ]
   for (let index = 0; index < facades.length; index += 1) {
-    const at = indexSource.indexOf(`${facades[index]}: `)
+    const at = commandRuntimeSource.indexOf(`${facades[index]}: `)
     assert.ok(at > 0, `${facades[index]} provider not found`)
     const next = index + 1 < facades.length
-      ? indexSource.indexOf(`${facades[index + 1]}: `, at)
-      : indexSource.indexOf('\n      withWriter:', at)
+      ? commandRuntimeSource.indexOf(`${facades[index + 1]}: `, at)
+      : commandRuntimeSource.indexOf('\n    withWriter:', at)
     assert.ok(next > at, `${facades[index]} provider span not found`)
-    const body = indexSource.slice(at, next)
-    assert.ok(body.includes('agentForLiveScope(scope)'),
-      `${facades[index]} must admit through agentForLiveScope`)
+    const body = commandRuntimeSource.slice(at, next)
+    assert.ok(body.includes('liveSessionId(scope)'),
+      `${facades[index]} must admit through the ONE stale-throwing helper`)
     assert.ok(!body.includes('agentNow()'),
       `${facades[index]} must not read the current attachment directly`)
     // The ASYNC skill reads validate BEFORE the dispatch AND re-validate the
     // ORIGINAL scope after the await, so a superseded read is never presented.
     if (facades[index] === 'resolveScopedSkill' || facades[index] === 'listScopedSkills') {
       const awaitAt = body.indexOf('await ')
-      const recheckAt = body.indexOf('sessionScope.isCurrent(scope)')
+      const recheckAt = body.indexOf('deps.scope.isCurrent(scope)')
       assert.ok(awaitAt > 0 && recheckAt > awaitAt,
         `${facades[index]} must re-validate the ORIGINAL scope AFTER its await`)
       assert.ok(body.includes('throw new SupersededReadError('),
         `${facades[index]} must refuse a superseded read`)
     }
   }
+  // Across the boundary, the runner's Direct-fact surface hooks resolve the
+  // EXACT attachment (`attachmentForSession`) in the same synchronous step the
+  // fence proved current — only the display scoped-command read may consult the
+  // raw current attachment.
+  const surfaceAt = indexSource.indexOf('const commandRuntime = bindCommandRuntime({')
+  assert.ok(surfaceAt > 0, 'the command runtime binding was not found')
+  const surfaceEnd = indexSource.indexOf('\n    const runner: TuiCommandRunner = {', surfaceAt)
+  assert.ok(surfaceEnd > surfaceAt, 'the command runtime surface span was not found')
+  const surfaceBody = indexSource.slice(surfaceAt, surfaceEnd)
+  assert.equal(count(surfaceBody, 'attachmentForSession('), 7,
+    'every Direct-fact surface hook must resolve the exact fenced attachment')
+  assert.equal(count(surfaceBody, 'agentNow()'), 1,
+    'only listScopedCommands may read the raw current attachment (a display read)')
 })
 
 test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId', () => {

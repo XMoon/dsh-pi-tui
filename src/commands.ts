@@ -122,7 +122,7 @@ import {
   type AuthorizationTarget,
   type LoginTarget,
 } from './authorization.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshRequest, CatalogRefreshSource } from './skill-catalog-refresh.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshSource } from './skill-catalog-refresh.ts'
 import {
   commandSummaryOf,
   listGlobalCommands,
@@ -650,12 +650,6 @@ export interface TuiCommandRunner {
    * the runner's ensureSession uses); undefined = the saved/default preset
    * applies. */
   readonly effectivePresetId: string | undefined
-  /** Run one catalog refresh through the coordinator (the surface's only
-   * post-mount refresh path: live-agent targets and sessionless standing
-   * preset targets — composition probes are disabled in this deployment,
-   * see docs/surface-catalog.md). Never rejects: outcomes are `applied`,
-   * `failed` or `superseded`. */
-  refreshCatalog(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /**
    * The scoped command view of the CURRENT surface: the live Session's
    * effective view (global + its scoped shadows) when one exists, else the

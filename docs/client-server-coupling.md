@@ -52,10 +52,10 @@ semantic ports / the `Backend` / narrow injected callbacks. Status below is
 
 | Owner | Owns | Host coupling | Status |
 |---|---|---|---|
-| `src/app/direct/**` | Direct application runtime: the Direct resolver POLICY and facades (the ONE `DirectModelSelectionOwner`, `agentFor`/`queueAgentFor`, the semantic `Backend` call, the assistant-stream install, model-selection/image-admission facade) | allowed zone — the Direct application coupling owner: the concrete Host lookups (`agents.get`/`sessions.get`/`agentDefaultModel`) move behind this module's composition seam; in A1 they are still supplied temporarily by the runner | current policy (A1); scoped-catalog/stats facades planned A3 |
-| `src/app/session/**` | current session subject/generation, transition gate + operation barrier ownership, ordinary create/open/switch and fork adoption orchestration, opaque `SessionSubject` authority | none | planned (A2) |
-| `src/app/submission/**` | submit/queue/steer writer orchestration, writer-barrier admission, prompt admission, draft restore/consume, Host-command orchestration | none | planned (A3) |
-| `src/app/command/**` | `TuiCommandRunner` facade implementation over session/submission/backend/surface | none | planned (A3) |
+| `src/app/direct/**` | Direct application runtime: the Direct resolver POLICY and facades (the ONE `DirectModelSelectionOwner`, `agentFor`/`queueAgentFor`, the semantic `Backend` call, the assistant-stream install, model-selection/image-admission facade) | allowed zone — the Direct application coupling owner: the concrete Host lookups (`agents.get`/`sessions.get`/`agentDefaultModel`) move behind this module's composition seam; in A1 they are still supplied temporarily by the runner | current policy (A1); the A3 scope-bound stats/routing/approval reads land as command-runtime surface hooks resolved by the runner (A3-5) |
+| `src/app/session/**` | current session subject/generation, transition gate + operation barrier ownership, ordinary create/open/switch and fork adoption orchestration, opaque `SessionSubject` authority | none | current (A2) |
+| `src/app/submission/**` | submit/queue/steer writer orchestration, writer-barrier admission, prompt admission, draft restore/consume, Host-command orchestration | none | current (A3-3/A3-4) |
+| `src/app/command/**` | the SEMANTIC `TuiCommandRunner` facade: scope/currentness facts, scoped catalog, skill execution, stats/read, catalog refresh, prompt admission and the writer exposure (the presentation dependency bag is finalized in A5) | none | current (A3-5) |
 | `src/app/surface/**` | `TuiApp` construction/start/dispose, pending input, task/job/plugin wiring, status/transcript/search refresh coordination, extension `SurfaceHost` attachment | none | planned (A4) |
 | `src/app/bootstrap.ts` | runner composition root: construct/connect/select owners, install lifetime, dispose | none — MUST NOT become a new Host-business-coupling zone (the Direct lookups belong to `app/direct`) | planned (A5) |
 
@@ -71,6 +71,14 @@ injected callbacks; the single proven historical exception is the type-only
 import of the same target still fails). `app/surface/**` must not construct
 Direct adapters, and experimental Remote composition must not be statically
 reachable from `startup.ts`.
+
+The A3 application owners confirm the boundary: `src/app/submission/runtime.ts`
+and `src/app/command/runtime.ts` hold NO Host coupling (no `ctx.get`/`ctx.<service>`
+and no `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session` import). Every
+Direct fact they read arrives as a narrow injected surface hook, and the
+session/skill writes go through `SessionRuntime.withWriter` / the semantic
+`SkillCatalogCapability` port. The boundary gate therefore still reports
+26 coupled files, and `scripts/client-boundary-baseline.json` is unchanged.
 
 ## Categories
 

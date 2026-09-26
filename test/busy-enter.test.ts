@@ -216,7 +216,6 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },

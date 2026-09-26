@@ -71,8 +71,10 @@ export const DEPRECATED_READER_ALLOWLIST = [
   { file: 'src/index.ts', call: 'snapshotEvents', site: 'const candidates = collectRewindCandidates(source.session.snapshotEvents())', why: 'Direct rewind candidate fold' },
   // A3-2 relocated the two command-fact reads from commands.ts into the
   // scope-bound facade providers (the Direct implementation is now localized
-  // in the runner): the debt moved WITH the call site, never doubled.
-  { file: 'src/index.ts', call: 'snapshotEvents', site: 'currentSessionStats: (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),', why: '/status Direct stats fold over the in-process session log (A3-2 facade provider)' },
+  // in the runner); the debt moved WITH the call site, never doubled. A3-5
+  // relocated the provider bodies into the runner's command-runtime surface
+  // hooks, so the same two call sites now read through `attachmentForSession`.
+  { file: 'src/index.ts', call: 'snapshotEvents', site: 'sessionStats: (sessionId) => computeStats(attachmentForSession(sessionId).session.snapshotEvents()),', why: '/status Direct stats fold over the in-process session log (A3-5 command-runtime surface hook)' },
   { file: 'src/index.ts', call: 'eventAt', site: 'const event = session.eventAt(SessionSeq(seq))', why: '/copy last assistant-message read over the Direct in-process session log (A3-2 facade provider)' },
   { file: 'src/index.ts', call: 'snapshotEvents', site: "settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(agent.session.snapshotEvents()))", why: 'Direct compaction-end context re-measure from the in-process log' },
   { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },

@@ -204,6 +204,7 @@ import {
   type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
+import { bindCommandRuntime } from './app/command/runtime.ts'
 import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
@@ -9190,20 +9191,102 @@ export function apply(ctx: Context, config: Config): void {
       }
       return agent
     }
+    /**
+     * The exact Direct attachment of an already-fenced live session id: the
+     * command runtime's synchronous `liveSessionId` fence proved the scope
+     * current in the SAME stack, so this only resolves the attachment and
+     * asserts the exact-owner invariant loudly.
+     */
+    const attachmentForSession = (sessionId: string): Agent => {
+      const agent = agentNow()
+      if (agent === undefined || agent.session.id !== sessionId) {
+        throw new Error('a current live scope must resolve its exact Direct owner')
+      }
+      return agent
+    }
+    /**
+     * The BOUND semantic command runtime (A3-5): it owns the scope/currentness
+     * fence and the facade shapes; every Direct fact is injected here as a
+     * narrow surface hook, and the Host skill catalog reads go through the
+     * semantic capability. The runner keeps the Direct composition and the
+     * presentation dependency bag.
+     */
+    const commandRuntime = bindCommandRuntime({
+      scope: sessionScope,
+      session: {
+        ensureSession: () => sessionRuntime.ensureSession(),
+        withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
+      },
+      skills: backend.catalog.skills,
+      surface: {
+        listScopedCommands: () => {
+          const commands = ctx.get('commands') as CommandRegistryLike | undefined
+          if (commands === undefined) throw new Error('commands service unavailable')
+          return commands.list(agentNow()).map(commandSummaryOf)
+        },
+        sessionRunning: (sessionId) => attachmentForSession(sessionId).status === 'running',
+        sessionRouting: (sessionId) => {
+          const agent = attachmentForSession(sessionId)
+          // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
+          // the Direct composition may leave them unset: their absence is real
+          // semantic optionality, never an invariant break.
+          return {
+            provider: agent.options.provider,
+            model: agent.options.model,
+            cwd: agent.session.header.cwd ?? cwd,
+          }
+        },
+        approvalOverride: (sessionId) => {
+          attachmentForSession(sessionId)
+          return backend.config.permissions.approvalOverrideOf(sessionId)
+        },
+        sessionStats: (sessionId) => computeStats(attachmentForSession(sessionId).session.snapshotEvents()),
+        lastAssistantText: (sessionId) => {
+          const session = attachmentForSession(sessionId).session
+          // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
+          // materialize the whole log for one message.
+          for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
+            const event = session.eventAt(SessionSeq(seq))
+            if (event?.type !== 'assistant/message') continue
+            return event.data.message.content
+              .filter(block => block.type === 'text')
+              .map(block => block.text)
+              .join('')
+          }
+          return undefined
+        },
+        refreshLiveCatalog: async (sessionId, source) => {
+          // SYNC admission: the exact Direct owner is captured HERE, before the
+          // read awaits (§10.2).
+          const agent = attachmentForSession(sessionId)
+          const refresh = catalogRefreshRequest
+          if (refresh === undefined) return { kind: 'failed', error: 'catalog refresh unavailable' }
+          return refresh({ source, target: { kind: 'agent', key: ownership.generation() }, agent })
+        },
+        refreshStandingCatalog: (presetId, source) => {
+          const refresh = catalogRefreshRequest
+          return refresh === undefined
+            ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
+            : refresh({ source, target: { kind: 'preset', presetId } })
+        },
+        promptAdmission: (sessionId, line, task) => {
+          // The caller already holds this scope's writer section, so this
+          // synchronous read of the CURRENT Direct attachment IS the scope's
+          // exact Agent (§10.1); a transition cannot swap it here.
+          const agent = attachmentForSession(sessionId)
+          return directRuntime.withPromptAdmission(agent, draftHasImages(line, draftImages), async () => task())
+        },
+      },
+    })
     const runner: TuiCommandRunner = {
       ctx,
       app,
       diag,
       get currentSessionId() { return ownership.currentSessionId() },
-      captureSessionScope: () => sessionScope.capture(),
-      captureLiveSessionScope: () => sessionScope.captureLive(),
-      isSessionScopeCurrent: (scope) => sessionScope.isCurrent(scope),
-      requireLiveSessionScope: async () => {
-        await sessionRuntime.ensureSession()
-        const scope = sessionScope.captureLive()
-        if (scope === undefined) throw new Error('session could not be created')
-        return scope
-      },
+      // The A3-5 semantic command runtime (scope/currentness, scoped catalog,
+      // skill execution, stats/read, catalog refresh, prompt admission and the
+      // writer exposure) — the runner delegates these members to it.
+      ...commandRuntime,
       // Completion-notification preference setters (the /settings panel
       // writes): the controller applies the parsed value immediately and
       // the panel persists the raw string through the config port.
@@ -9318,98 +9401,6 @@ export function apply(ctx: Context, config: Config): void {
        * precedence ensureSession uses); undefined = the saved/default
        * preset applies. */
       get effectivePresetId() { return pendingPreset ?? launchPreset },
-      refreshCatalog: (request) => {
-        const refresh = catalogRefreshRequest
-        return refresh === undefined
-          ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
-          : refresh(request)
-      },
-      // The scoped command view of the CURRENT surface: the live owner's
-      // effective view, or the global layer while sessionless. A synchronous
-      // current read (display/collision baseline), never a fence.
-      listScopedCommands: () => {
-        const commands = ctx.get('commands') as CommandRegistryLike | undefined
-        if (commands === undefined) throw new Error('commands service unavailable')
-        return commands.list(agentNow()).map(commandSummaryOf)
-      },
-      // The skill catalog reads of the owner the scope pins: validate BEFORE
-      // dispatching (never downgraded to a bare session id handed to a
-      // current-owner resolver) and re-validate the ORIGINAL scope after the
-      // await, so a superseded read is never presented.
-      resolveScopedSkill: async (scope, name) => {
-        agentForLiveScope(scope)
-        const resolved = await backend.catalog.skills.resolveSkill(scope.sessionId, name)
-        if (!sessionScope.isCurrent(scope)) {
-          throw new SupersededReadError('the session changed while loading the skill')
-        }
-        return resolved
-      },
-      hostLoadsSkillBody: (scope) => {
-        agentForLiveScope(scope)
-        return backend.catalog.skills.hostLoadsSkillBody(scope.sessionId)
-      },
-      listScopedSkills: async (scope, signal) => {
-        agentForLiveScope(scope)
-        const catalog = await backend.catalog.skills.listHumanSkills(scope.sessionId, signal)
-        if (!sessionScope.isCurrent(scope)) {
-          throw new SupersededReadError('the session changed while reading the skill catalog')
-        }
-        return catalog
-      },
-      currentSessionActivity: (scope) => ({ running: agentForLiveScope(scope).status === 'running' }),
-      currentSessionRouting: (scope) => {
-        const agent = agentForLiveScope(scope)
-        // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract (and
-        // the Direct composition may leave them unset): their absence is real
-        // semantic optionality, never an invariant break — the presentation
-        // renders "unconfigured".
-        return {
-          provider: agent.options.provider,
-          model: agent.options.model,
-          cwd: agent.session.header.cwd ?? cwd,
-        }
-      },
-      currentApprovalOverride: (scope) => {
-        // The scope's owner is proven current before the read; the port
-        // resolves the session id to its exact live Agent internally.
-        agentForLiveScope(scope)
-        return backend.config.permissions.approvalOverrideOf(scope.sessionId)
-      },
-      currentSessionStats: (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
-      lastAssistantText: (scope) => {
-        const session = agentForLiveScope(scope).session
-        // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
-        // materialize the whole log for one message.
-        for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
-          const event = session.eventAt(SessionSeq(seq))
-          if (event?.type !== 'assistant/message') continue
-          return event.data.message.content
-            .filter(block => block.type === 'text')
-            .map(block => block.text)
-            .join('')
-        }
-        return undefined
-      },
-      refreshSessionCatalog: async (scope, source) => {
-        // SYNC admission: the scope must still be the current owner, and the
-        // exact Direct Agent is captured HERE, before the read awaits (§10.2).
-        const agent = agentForLiveScope(scope)
-        const refresh = catalogRefreshRequest
-        if (refresh === undefined) return { kind: 'failed', error: 'catalog refresh unavailable' }
-        const outcome = await refresh({ source, target: { kind: 'agent', key: ownership.generation() }, agent })
-        // Judge staleness with the ORIGINAL scope after settle; a read that
-        // did not own the surface must not present its result.
-        if (!sessionScope.isCurrent(scope)) {
-          throw new SupersededReadError('the session changed during the catalog refresh')
-        }
-        return outcome
-      },
-      refreshStandingCatalog: (presetId, source) => {
-        const refresh = catalogRefreshRequest
-        return refresh === undefined
-          ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
-          : refresh({ source, target: { kind: 'preset', presetId } })
-      },
       applyPermissionPreset: async (scope, presetId, presetSignal) => {
         // A stale scope BEFORE the dispatch proves nothing ran: report `refused`.
         if (!sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }
@@ -9468,15 +9459,6 @@ export function apply(ctx: Context, config: Config): void {
             submissionRuntime.settleQueueRecalls(false)
           }
         })),
-      withWriter: <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> =>
-        sessionRuntime.withWriter(scope, task),
-      withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T> | T) => {
-        // The caller already holds this scope's writer section, so this
-        // synchronous read of the CURRENT Direct attachment IS the scope's
-        // exact Agent (§10.1); a transition cannot swap it here.
-        const agent = agentForLiveScope(scope)
-        return directRuntime.withPromptAdmission(agent, draftHasImages(line, draftImages), async () => task())
-      },
       enterView,
       requestExit,
       exit,
@@ -9540,7 +9522,8 @@ export function apply(ctx: Context, config: Config): void {
         withCommandDelivery = installed.withDelivery
         takeCommandDraftDisposition = installed.takeCommandDraftDisposition
         // The coordinator's surface hooks point INTO the command surface;
-        // the runner's refreshCatalog routes every post-mount refresh here.
+        // the command runtime's refresh facades (and the switch/first-session
+        // path) route every post-mount refresh through `catalogRefreshRequest`.
         catalogCoordinator = new CatalogRefreshCoordinator({
           readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, ctx as unknown as SurfaceCatalogContext),
           // The sessionless (preset) target reads the STANDING skill catalog
