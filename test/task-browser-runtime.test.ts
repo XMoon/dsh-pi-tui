@@ -500,10 +500,11 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   // The session bump delegates its synchronous Task Center reset to the surface
   // owner (`surface.resetTasks`, A4-6); the invariant spans the runner seam and
   // the surface implementation.
-  const bump = indexSource.slice(
-    indexSource.indexOf('const resetForGeneration'),
-    indexSource.indexOf('const viewerOpen'),
-  )
+  const bumpStart = indexSource.indexOf('const resetForGeneration')
+  const bumpEnd = indexSource.indexOf('const viewerOpen')
+  assert.ok(bumpStart >= 0, 'the session-generation bump must exist in the runner composition')
+  assert.ok(bumpEnd > bumpStart, 'the bump slice must end at the next runner-scope declaration')
+  const bump = indexSource.slice(bumpStart, bumpEnd)
   assert.ok(bump.includes('surface.resetTasks()'), 'the session bump must reset the surface-owned Task Center')
   const reset = surfaceSource.slice(surfaceSource.indexOf('resetTasks() {'))
   assert.ok(reset.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')

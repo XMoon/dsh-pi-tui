@@ -38,36 +38,21 @@ export const name = 'tui-runner'
 /** Core services required before the TUI can mount. */
 export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SERVICE]
 
-import { Config } from './tui-config.ts'
-export { Config }
+import type { Config } from './tui-config.ts'
+export { Config } from './tui-config.ts'
 
 // Relocated root helpers (A5-1/A5-1b, plan §27): every helper implementation
 // lives in its natural top-level module; the package-root exports are preserved
 // here unchanged.
-import { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from './command-policy.ts'
-export {
-  SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG,
-  isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery,
-  normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand,
-}
-import { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './interrupt.ts'
-export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike }
-import { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
-export {
-  createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall,
-  type PendingSubagentCall, type ViewerOpenToken,
-}
-import { resolveInitialCatalog, type InitialCatalogResolution, type ResolveInitialCatalogOptions } from './surface-catalog.ts'
-export { resolveInitialCatalog, type InitialCatalogResolution, type ResolveInitialCatalogOptions }
-import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './task-presentation.ts'
-export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint }
-import { foldQueueRows, type QueueFoldResult, type QueueInboxMessage } from './pending-presentation.ts'
-export { foldQueueRows, type QueueFoldResult, type QueueInboxMessage }
-import { compactingFromLog } from './compaction-presentation.ts'
-export { compactingFromLog }
+export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from './command-policy.ts'
+export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './interrupt.ts'
+export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
+export { resolveInitialCatalog, type InitialCatalogResolution, type ResolveInitialCatalogOptions } from './surface-catalog.ts'
+export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './task-presentation.ts'
+export { foldQueueRows, type QueueFoldResult, type QueueInboxMessage } from './pending-presentation.ts'
+export { compactingFromLog } from './compaction-presentation.ts'
 
-import { runningProfile, hostRunningProfile, resumeCommand, type ProfileContextReadLike } from './dsh-profile.ts'
-export { runningProfile, hostRunningProfile, resumeCommand, type ProfileContextReadLike }
+export { runningProfile, hostRunningProfile, resumeCommand, type ProfileContextReadLike } from './dsh-profile.ts'
 
 // A4-7: the compaction/context presentation folds live in the top-level
 // compaction-presentation module (plan §16/§27) and are consumed by the
