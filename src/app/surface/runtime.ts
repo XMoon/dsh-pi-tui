@@ -11,26 +11,50 @@
  *   input routes, resize/workflow hooks);
  * - the extension surface host, its theme-unload hook, the plugin keybinding
  *   sync and the Plugin Manager controller/panel wiring live here (A4-5);
+ * - the completion-notification/terminal-focus presentation lives here (A4-4);
+ * - the Task Center (`TaskBrowserRuntime` + the browser state/panels + the Job
+ *   viewer/observer) and the approval/question providers live here (A4-6);
  * - the runner still owns the application input contract: it hands the
  *   `TuiAppEvents` table in at `start()`, because that table is the
  *   session/submission/command owners' contract with the surface (A5 moves the
  *   composition into `app/bootstrap.ts`).
  *
- * The mount is TWO-PHASE by lifecycle necessity: the status store and the
- * opening journal exist long before the surface mounts (startup derives
- * status, the first transition opens a journal), while the mount needs
+ * The mount is TWO-PHASE by lifecycle necessity: the status store, the opening
+ * journal and the notification presentation exist long before the surface
+ * mounts (startup derives status, the first transition opens a journal and the
+ * resume commit resets the completion owner), while the mount needs
  * capabilities that only resolve later in startup. `createSurfaceRuntime`
- * therefore owns the early state, the `attach*` methods acquire the surface
- * resources at their ORIGINAL startup positions (startup order is behavior),
- * and `start()` performs the mount once the capabilities exist.
+ * therefore owns the early state, the `attach*`/`bind*` methods acquire the
+ * surface resources at their ORIGINAL startup positions (startup order is
+ * behavior), and `start()` performs the mount once the capabilities exist.
  *
- * Teardown order is behavior too (plan §12.2): `dispose()` releases exactly the
- * surface-owned resources that the runner's cleanup used to release AFTER the
- * mounted app (app, plugin keybinding sync, theme-unload hook, extension
- * surface detach), and `disposePluginManager()` releases the Plugin Manager
- * subscription at its original EARLY position. The remaining interleaved
- * runner-owned steps stay with their owners and the runner orchestrates them
- * around these hooks.
+ * Resource lifetime (plan §12.2/§38) — one acquire point and one release owner
+ * per resource; the runner only ORCHESTRATES the release order:
+ *
+ * | Resource | Acquired by | Released by |
+ * |---|---|---|
+ * | status store, journal, notification presentation | `createSurfaceRuntime` | process end (no release step) |
+ * | extension host + theme-unload hook | `attachExtensionHost()` | `dispose()` |
+ * | Plugin Manager controller + subscription | `attachPluginManager()` | `disposePluginManager()` (early position) |
+ * | plugin keybinding sync | `bindPluginKeybinds()` | `dispose()` |
+ * | mounted `TuiApp` | `start()` | `dispose()` |
+ * | jobs-event subscription | `attachTasks()` | `disposeJobEvents()` |
+ * | Job observer + viewer | `openJobView()`/`openJobStatusViewer()` | `disposeJobObservation()` |
+ * | task browser handle/token/rows/scope | `openTasksBrowser()` | `disposeTaskBrowser()` |
+ *
+ * `disposePluginManager()` and `dispose()` are idempotent, and every release
+ * hook is safe before its acquire ran (the slots are optional). Teardown order
+ * is behavior too: `dispose()` releases exactly the surface-owned resources the
+ * runner's cleanup used to release AFTER the mounted app (app, plugin keybinding
+ * sync, theme-unload hook, extension surface detach) while
+ * `disposePluginManager()` releases the Plugin Manager subscription at its
+ * original EARLY position, and the Task Center hooks run in the original
+ * `jobsEvents -> jobObservation -> taskBrowser` order. The remaining
+ * interleaved runner-owned steps stay with their owners and the runner
+ * orchestrates them around these hooks. There is deliberately NO
+ * partial-acquire rollback beyond that: `start()` is the last acquire and a
+ * throwing mount leaves the process on the runner's fatal path, which runs the
+ * same ordered cleanup.
  *
  * Host coupling: this module reads NO Host business service and imports NO
  * Direct wiring (plan §4.3). Everything it needs arrives as a narrow injected
