@@ -31,20 +31,17 @@ export function compositionFile(rel: (typeof COMPOSITION_FILES)[number]): string
 }
 
 /**
- * The composition-surface contents: `[rel, source]` for every file that exists.
- * `src/index.ts` must exist; `src/app/bootstrap.ts` is absent before A5-1.
+ * The composition-surface contents: `[rel, source]` for BOTH files, in
+ * composition order. Both are REQUIRED (A5a review P2): an ownership lock must
+ * fail — not silently shrink its scope — if the composition root disappears or
+ * is renamed.
  */
 export function compositionSources(): Array<{ rel: string; source: string }> {
-  const out: Array<{ rel: string; source: string }> = []
-  for (const rel of COMPOSITION_FILES) {
+  return COMPOSITION_FILES.map((rel) => {
     const path = join(ROOT, rel)
-    if (!existsSync(path)) continue
-    out.push({ rel, source: readFileSync(path, 'utf8') })
-  }
-  if (out.length === 0 || out[0].rel !== 'src/index.ts') {
-    throw new Error('the package entry src/index.ts must exist')
-  }
-  return out
+    if (!existsSync(path)) throw new Error(`the composition surface requires ${rel}`)
+    return { rel, source: readFileSync(path, 'utf8') }
+  })
 }
 
 /** The composition-surface contents joined with file banners, for order and count locks. */

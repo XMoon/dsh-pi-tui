@@ -15,6 +15,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SurfaceCatalogContext } from '../src/surface-catalog.ts'
+import type { Diag } from '../src/diag.ts'
 
 import {
   apply,
@@ -89,6 +92,29 @@ type FrozenPublicTypes = [
   CompactionSettleSurface,
   AgentComposition,
 ]
+
+/**
+ * Compile-time SHAPE pins (A5a review P1). A public option type whose
+ * implementation moved out of the entry must not be NARROWED: `liveAgent` stays
+ * the Host `Agent`, so a consumer that READS the property (`options.liveAgent
+ * ?.status`) keeps compiling. The frozen-name tuple above only proves the name
+ * exists; this pins the shape.
+ */
+type AssertExact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never
+
+type ExpectedResolveInitialCatalogOptions = {
+  readonly liveAgent?: Agent
+  readonly presetId?: string
+  readonly signal: AbortSignal
+  readonly ctx: SurfaceCatalogContext
+  readonly diag: Diag
+  readonly onLog?: () => void
+}
+
+const _resolveInitialCatalogOptionsShape: AssertExact<
+  ResolveInitialCatalogOptions,
+  ExpectedResolveInitialCatalogOptions
+> = true
 
 /** Value exports are asserted at runtime; the array is the frozen list. */
 const VALUE_EXPORTS: ReadonlyArray<readonly [string, unknown]> = [

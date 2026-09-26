@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
+import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -88,6 +88,45 @@ test('A5: every composition responsibility still has a site', () => {
   const source = compositionSource()
   for (const [name, site] of COMPOSITION_INVENTORY) {
     assert.ok(source.includes(site), `the composition surface must still own ${name} (${site})`)
+  }
+})
+
+test('A5a: the composition ROOT owns every composition site (the entry owns none)', () => {
+  // Ownership LOCATION, not just "somewhere in the composition surface". The
+  // aggregate counts below cannot catch a regression that moves a construction
+  // back into the entry while deleting it from the composition root — the
+  // count stays 1 and every aggregate lock stays green (A5a review P2).
+  assert.deepEqual(
+    compositionSources().map(({ rel }) => rel),
+    ['src/index.ts', 'src/app/bootstrap.ts'],
+    'the composition surface must be exactly the package entry plus the composition root',
+  )
+  const entry = compositionFile('src/index.ts')
+  const root = compositionFile('src/app/bootstrap.ts')
+
+  // Plan §29 markers: the entry carries no composition/assembly at all.
+  for (const marker of [
+    'createDirectApplicationRuntime(',
+    'createSessionOwnershipCore(',
+    'createSessionScopeAuthority(',
+    'bindSessionRuntime(',
+    'bindSubmissionRuntime(',
+    'bindCommandRuntime(',
+    'createSurfaceRuntime<',
+    'surface.start(',
+    'ctx.get(',
+  ]) {
+    assert.equal(entry.includes(marker), false, `src/index.ts must not contain ${marker} (§29)`)
+  }
+
+  // Every inventoried responsibility and single-owner site lives in the ROOT.
+  for (const [name, site] of COMPOSITION_INVENTORY) {
+    assert.equal(entry.includes(site), false, `the entry must not own ${name}`)
+    assert.ok(root.includes(site), `the composition root must own ${name} (${site})`)
+  }
+  for (const [site] of SINGLE_OWNER_SITES) {
+    assert.equal(entry.includes(site), false, `the entry must not construct ${site}`)
+    assert.ok(root.includes(site), `the composition root must construct ${site}`)
   }
 })
 
