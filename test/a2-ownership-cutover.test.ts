@@ -88,9 +88,9 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'fork admission captures the navigation identity through the core')
   assert.ok(!forkAdmission.includes('agentNow('), 'fork admission must not read the Direct attachment')
 
-  // switch no-op
-  const switchLocked = span('const switchSessionLocked = ', '// Draft cleanup happens ONLY after')
-  assert.ok(switchLocked.includes('if (ownership.currentSessionId() === sessionId) {'),
+  // switch no-op (bound runtime)
+  const switchLocked = spanOf(sessionRuntimeSource, 'const switchSessionLocked = ', '// Draft cleanup happens ONLY after')
+  assert.ok(switchLocked.includes('if (core.currentSessionId() === sessionId) {'),
     'the switch no-op compares the CORE session id')
   assert.ok(!switchLocked.includes('agentNow('), 'the switch no-op must not read the Direct attachment')
 

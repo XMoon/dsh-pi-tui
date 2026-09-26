@@ -2111,6 +2111,7 @@ export function apply(ctx: Context, config: Config): void {
     const sessionRuntime = bindSessionRuntime(ownership, {
       owners: directRuntime.owners,
       retirement: directRuntime.retirement,
+      lifecycle: directRuntime.backend.sessionLifecycle,
       lifecycleSignal: lifecycleController.signal,
       surface: {
         warnRetirement: (report) => {
@@ -2151,6 +2152,14 @@ export function apply(ctx: Context, config: Config): void {
             to: agent?.session.id,
             seq: agent === undefined ? undefined : Number(agent.session.seq),
           })
+        },
+        clearUnpinnedDrafts: () => {
+          draftImages.clearUnpinned()
+          draftFiles.clearUnpinned()
+        },
+        reportSwitchFailure: (sessionId, message) => {
+          ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
+          diag.error('switch failed', { session: sessionId, error: message })
         },
       },
       diag,
@@ -2594,86 +2603,6 @@ export function apply(ctx: Context, config: Config): void {
 // (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
 // the exact extraction the transition commit uses.
 
-    /** Hand the TUI over to another persisted session. Never throws: every
-     * failure (unknown session, broken log, preset mount) returns an error
-     * string so callers' `.then(error => ...)` need no rejection path. The
-     * whole switch (compose → resume → commit) runs inside the
-     * session-transition gate, so it can never interleave with another
-     * ordinary transition (the single-writer rule). */
-    const switchSession = (sessionId: string): Promise<string | undefined> => {
-      ownership.bumpNavigationEpoch()
-      return ownership.gate.run(() => ownership.barrier.runTransition(async () => {
-        try {
-          return await switchSessionLocked(sessionId)
-        } finally {
-          // Preflight can fail before transitionTo is reached; settle any
-          // recall that was waiting on this transition in that case.
-          settlePendingQueueRecalls(false)
-        }
-      }))
-    }
-
-    const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
-      // A switch INTO the session we are already on is a no-op.
-      if (ownership.currentSessionId() === sessionId) {
-        return 'already on this session'
-      }
-      // Draft cleanup happens ONLY after the switch committed (the
-      // transaction returned ok): a refused/failed switch keeps the CURRENT
-      // session and its staged drafts intact — clearing up front would
-      // orphan the editor's placeholders on every failed switch (review
-      // finding 2).
-      try {
-        // The unified transaction: the OLD session is flushed FIRST, then
-        // the resume publishes the child. A failure anywhere before the
-        // create leaves the current session live — there is nothing to
-        // re-acquire (the DSH SessionWriteLease is the only writer
-        // authority).
-        // The recorded preset drives the Direct adapter's internal resume
-        // composition; the cross-backend open request carries only the
-        // Session identity (D2.3 convergence).
-        if (lifecycleController.signal.aborted) return undefined
-        const result = await sessionRuntime.transitionTo({
-          target: { id: sessionId },
-          // A rejected open leaves the target untouched: no pin, no retry —
-          // the CURRENT session stays live and the user can retry the switch.
-          create: async () => requireOpened(await backend.sessionLifecycle.open({
-            sessionId,
-            signal: lifecycleController.signal,
-          })),
-        })
-        if (!result.ok) {
-          if (result.error instanceof LifecycleError) {
-            // Preserve the machine-readable cause even on the silent path.
-            diag.warn('session switch did not own the surface', {
-              settlement: result.error.settlement,
-              ownership: result.error.ownership,
-              publishedSessionId: result.error.publishedSessionId,
-              requestedSessionId: result.error.requestedSessionId,
-            })
-            // A locally SUPERSEDED open/switch emits no error notice (§0.2.1):
-            // the surface moved, so the message belongs to a stale operation.
-            if (result.error.ownership === 'superseded') return undefined
-          }
-          // The resume failed: the CURRENT session is still live.
-          return result.message
-        }
-        // The switch COMMITTED: staged drafts are per-session UI state —
-        // drop the unpinned ones now (never durable attachments, plan
-        // §14). In-flight submissions keep their pinned drafts so a stale
-        // submission can still restore its text with a live backing draft
-        // (review finding: clear() would orphan the restored placeholders).
-        draftImages.clearUnpinned()
-        draftFiles.clearUnpinned()
-        return undefined
-      } catch (error) {
-        const message = safeErrorMessage(error)
-        ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
-        diag.error('switch failed', { session: sessionId, error: message })
-        // The CURRENT session is still live.
-        return `switch failed: ${message}`
-      }
-    }
 
     // Footer state: model label, cwd, git branch, turn/step counters, and
     // the stats line (LLM timing, tokens, context pressure).
@@ -9602,7 +9531,7 @@ export function apply(ctx: Context, config: Config): void {
           ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
           : refresh(request)
       },
-      switchSession,
+      switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
       forkSession,
       transitionTo: (steps) => sessionRuntime.transitionTo(steps),
       currentPreset,
