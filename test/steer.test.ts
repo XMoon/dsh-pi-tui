@@ -830,6 +830,9 @@ test('a stale writer admission (SessionScopeSupersededError) refuses stale and r
   const restored: string[] = []
   const deps = makeDeps({ agent: () => agent, notices, restored })
   deps.writerSection = async () => { throw new SessionScopeSupersededError() }
+  // The PRODUCTION wiring configures a transition-specific fence notice: a stale
+  // capture must still take the STALE notice, never the transition one.
+  deps.fenceNotice = () => 'a session transition is in progress — try again in a moment'
   const outcome = await steerAll(deps, 'draft')
   assert.equal(outcome, 'stale')
   assert.deepEqual(agent.steered, [], 'no delivery for a superseded capture')

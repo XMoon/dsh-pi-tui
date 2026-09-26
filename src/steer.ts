@@ -239,12 +239,18 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
     try {
       return await writerSection(() => steerAllCore(deps, text, options))
     } catch (error) {
-      // A frozen transition and a superseded capture are DIFFERENT refusals,
-      // but both mean "this gesture did not send": restore the draft and let
-      // the user retry. Never report one as the other.
-      if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) {
+      // A frozen transition and a superseded capture are DIFFERENT refusals
+      // (both mean "this gesture did not send"): restore the draft and report the
+      // refusal that actually happened — never the transition notice for a stale
+      // capture.
+      if (error instanceof TransitionInProgressError) {
         deps.restoreDraft(text)
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      if (error instanceof SessionScopeSupersededError) {
+        deps.restoreDraft(text)
+        deps.notify(deps.staleNotice(), 'info')
         return 'stale'
       }
       throw error
