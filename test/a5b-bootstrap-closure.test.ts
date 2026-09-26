@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { compositionFile } from './support/composition-surface.ts'
-import { ownerSource } from './support/owner-modules.ts'
+import { ownerFile, ownerSource } from './support/owner-modules.ts'
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -134,5 +134,120 @@ test('A5b: exactly one TuiAppEvents implementation exists across the owner surfa
     surface.split('const surfaceEvents: TuiAppEvents = {').length - 1,
     1,
     'exactly one TuiAppEvents implementation must exist across the owner surface',
+  )
+})
+
+/**
+ * Extracted declarations and the module that must own them.
+ *
+ * The aggregate `ownerOccurrences()`/`ownerSource()` locks prove "exactly once
+ * SOMEWHERE across the owner surface" — and that surface includes
+ * `src/app/bootstrap.ts`, so a construction or state machine moving back into
+ * the composition root would still satisfy the count. These rows pin the
+ * ownership LOCATION per module (A5b-1 review P2): the named owner must declare
+ * the symbol and the composition root must not.
+ */
+const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  [
+    'src/app/surface/viewer-runtime.ts',
+    [
+      'viewing', 'setViewedQueueAgent', 'activePendingSessionId',
+      'pendingSubagentCalls', 'viewCallToChild', 'viewerOpen', 'openingViewer',
+      'viewerSessionAbort', 'refreshViewerFooter', 'enterView', 'exitView',
+      'viewedChildPresentation', 'settleSubagentSubmit', 'subagentPromptNotice',
+    ],
+  ],
+  [
+    'src/app/surface/session-presentation.ts',
+    [
+      'folder', 'windowController', 'statsFolder', 'mainStreamingToolPreviews',
+      'mainPresentation', 'callArgs', 'resetForGeneration', 'initLiveSession',
+      'TRANSCRIPT_WINDOW_TURNS', 'TRANSCRIPT_WINDOW_STEP', 'applyAssistantLiveInput',
+      'mergeSessionEventCut',
+    ],
+  ],
+]
+
+test('A5b: every extracted declaration lives in its named owner, never in the composition root', () => {
+  const root = compositionFile('src/app/bootstrap.ts')
+  for (const [rel, names] of EXTRACTED_DECLARATIONS) {
+    const owner = ownerFile(rel)
+    for (const name of names) {
+      assert.ok(declares(owner, name), `${name} must be declared in the owner ${rel}`)
+      assert.equal(
+        declares(root, name),
+        false,
+        `src/app/bootstrap.ts must not declare ${name} — it belongs to ${rel}`,
+      )
+    }
+  }
+})
+
+/** Each extracted owner's construction sits in the composition root exactly once. */
+const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
+  ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
+  ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
+]
+
+test('A5b: each extracted owner is constructed exactly once, from the composition root', () => {
+  const root = compositionFile('src/app/bootstrap.ts')
+  for (const [rel, factory, site] of OWNER_CONSTRUCTIONS) {
+    assert.ok(
+      new RegExp(`export function ${factory}<`).test(ownerFile(rel)),
+      `${rel} must export the ${factory} factory`,
+    )
+    assert.equal(root.split(site).length - 1, 1, `the composition root must construct ${factory} exactly once`)
+  }
+})
+
+/**
+ * Owner-internal presentation constructors and the modules that must hold them.
+ *
+ * `SINGLE_OWNER_SITES` in the A5 composition inventory counts across the whole
+ * owner surface (which includes the composition root), so moving one of these
+ * back into bootstrap would keep the aggregate count green (A5b-1 review P2).
+ * These rows pin the concrete module set.
+ */
+const EXTRACTED_CONSTRUCTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['src/app/surface/session-presentation.ts', ['new TranscriptFolder(', 'new StatsFolder(', 'new TranscriptWindowController(']],
+  ['src/app/surface/viewer-runtime.ts', ['new TranscriptFolder(', 'new StatsFolder(', 'new TranscriptWindowController(']],
+]
+
+test('A5b: the moved presentation constructors live in their owners, not in the composition root', () => {
+  const root = compositionFile('src/app/bootstrap.ts')
+  for (const [rel, sites] of EXTRACTED_CONSTRUCTIONS) {
+    const owner = ownerFile(rel)
+    for (const site of sites) {
+      assert.ok(owner.includes(site), `${rel} must construct ${site}`)
+      assert.equal(
+        root.includes(site),
+        false,
+        `src/app/bootstrap.ts must not construct ${site} — its owner is ${rel}`,
+      )
+    }
+  }
+})
+
+test('A5b: the Direct-facing viewed-queue slot stays a composition connector', () => {
+  // `viewedQueueAgent` is deliberately NOT extracted: the Direct runtime reads
+  // it through `getViewedQueueAgent`, so the composition root keeps the single
+  // mutable slot and the viewer owner publishes into it (narrow seam).
+  const root = compositionFile('src/app/bootstrap.ts')
+  assert.ok(declares(root, 'viewedQueueAgent'), 'the composition root keeps the Direct viewed-queue slot')
+  assert.match(root, /publishQueueAuthority: \(authority\) => \{ viewedQueueAgent = authority \}/u,
+    'the viewer owner publishes the queue authority through the narrow composition callback')
+})
+
+test('A5b: the Task Center viewer adapter forwards the nested depth to the viewer owner', () => {
+  // A5b-1 review P2: the task-browser seam declares an optional 6th `depth`
+  // (`TaskSurfaceSource.enterView`) and the surface routes nested/workflow
+  // members through it. A composition adapter that drops it silently defaults
+  // `depth` to 1, so a nested continuable child would be treated as an
+  // interactive direct child and lose the read-only policy (plan §4.3).
+  const root = compositionFile('src/app/bootstrap.ts')
+  assert.match(
+    root,
+    /enterView: \(childId: string, label: string \| undefined, mode: 'one-shot' \| 'continuable', parentSessionId: string, activity: 'running' \| 'inactive', depth\?: number\) =>\n\s*viewer\.enterView\(childId, label, mode, parentSessionId, activity, depth\)/u,
+    'the Task Center enterView adapter must forward `depth` to the viewer owner',
   )
 })

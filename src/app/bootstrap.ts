@@ -4670,8 +4670,12 @@ export function applyRunner(ctx: Context, config: Config): void {
       subjectMatches: (subject) => captureMatches(subject),
       // The viewer target carries the row's OWN parent; only a direct child
       // falls back to the live main session (already resolved in the surface).
-      enterView: (childId: SessionId, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: SessionId, activity: 'running' | 'inactive') =>
-        viewer.enterView(childId, label, mode, parentSessionId, activity),
+      // `depth` is the nested-authority input the viewer owner turns into the
+      // read-only `readonly-nested` access; it is the optional 6th parameter
+      // `TaskSurfaceSource.enterView` declares, so it must be forwarded — never
+      // defaulted at the composition seam.
+      enterView: (childId: string, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: string, activity: 'running' | 'inactive', depth?: number) =>
+        viewer.enterView(childId, label, mode, parentSessionId, activity, depth),
       // The scope-bound writer admission (A3-4) stays in the runner: the
       // Task-Center subagent interrupt is not a submission write, so only its
       // admission moves through SessionRuntime.withWriter.
