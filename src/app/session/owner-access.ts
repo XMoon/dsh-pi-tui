@@ -23,11 +23,6 @@ export interface SessionOwnerAccess {
   sessionId(owner: SessionOwnerRef): string
   /** The backend's stable completion identity for one owner. */
   completionIdentity(owner: SessionOwnerRef): string | undefined
-  /**
-   * A2 TRANSITIONAL attachment escape. ONLY the A2 live-session provider may
-   * read it, and NEVER for identity/currentness.
-   */
-  surfaceAttachment(owner: SessionOwnerRef): unknown
 }
 
 /** One contained retirement failure. `phase` is a BACKEND-defined diagnostic

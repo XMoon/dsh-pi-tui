@@ -138,8 +138,6 @@ export interface DirectApplicationRuntime {
     readonly isCurrentAgent: (agent: unknown) => boolean
     readonly onInput: (input: AssistantLiveInput) => void
   }) => AssistantStreamDirectHandle
-  /** The Direct Session ownership pool (lifecycle retirement/claim). */
-  readonly ownerPool: DirectOwnerPoolLike
   /** The Direct Agent↔OwnerRef registry (opaque owner mapping + A2 escapes). */
   readonly owners: DirectOwnerRegistry
   /** Whether any Direct owner handle is currently parked for a future reopen. */
@@ -280,7 +278,6 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     registeredAgentFor: deps.registeredAgentFor,
     withPromptAdmission,
     installAssistantStream,
-    ownerPool,
     owners,
     hasParkedOwners: () => parkedDirectOwners.size > 0,
     retirement,

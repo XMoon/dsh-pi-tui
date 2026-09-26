@@ -39,7 +39,6 @@ test('the same exact Agent through different SessionHandle wrappers yields the S
   assert.equal(first, second, 'a re-wrapped parked owner must keep exactly one identity')
   assert.equal(registry.completionIdentity(first!), 'a1')
   assert.equal(registry.sessionId(first!), 's1')
-  assert.equal(registry.surfaceAttachment(first!), agent)
   const newestHandle = (handleB as unknown as { direct: { ownerHandle: unknown } }).direct.ownerHandle
   assert.equal(registry.handleOf(first!), newestHandle,
     're-wrapping the same Agent must refresh the handle record to the NEWEST wrapper')

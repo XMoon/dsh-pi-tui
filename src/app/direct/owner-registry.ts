@@ -73,7 +73,6 @@ export function createDirectOwnerRegistry(currentOwner: () => SessionOwnerRef | 
     },
     sessionId: (owner) => recordOf(owner).agent.session.id,
     completionIdentity: (owner) => byOwner.get(owner)?.agent.id,
-    surfaceAttachment: (owner) => byOwner.get(owner)?.agent,
     attachmentOf: (owner) => byOwner.get(owner),
     handleOf: (owner) => byOwner.get(owner)?.handle,
     currentDirectAttachment: () => {
