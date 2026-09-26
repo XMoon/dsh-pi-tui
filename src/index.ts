@@ -208,6 +208,7 @@ import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
 import { createSessionScopeAuthority, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
+import { bindSubmissionRuntime, type SubmissionRuntime } from './app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -1942,21 +1943,13 @@ export function apply(ctx: Context, config: Config): void {
       },
       isSubjectCurrent: (subject) => ownership.isSubjectCurrent(subject),
     })
-    // Alt+Up may finish a queue mutation while a transition is waiting on the
-    // same writer barrier. Keep its confirmed local representation until the
-    // transition outcome is known: commit drops it, failure restores it.
-    type PendingQueueRecall = {
-      commit(): void
-      abort(): void
-    }
-    const pendingQueueRecalls: PendingQueueRecall[] = []
-    const settlePendingQueueRecalls = (committed: boolean): void => {
-      const recalls = pendingQueueRecalls.splice(0)
-      for (const recall of recalls) {
-        if (committed) recall.commit()
-        else recall.abort()
-      }
-    }
+    // The BOUND submission runtime (A3 §4.1/§4.3): it owns the plain-prompt
+    // write orchestration and the deferred queue-recall state. It is BOUND
+    // after the runner facade below (its surface reads the runner and the
+    // SessionRuntime writer); the session runtime's settlement seam reaches it
+    // through this closure, which only runs once a transition starts (after
+    // binding).
+    let submissionRuntime!: SubmissionRuntime
     // The abort-aware quiesce mechanism lives in the Direct owner retirement;
     // the runner only decides WHEN to quiesce.
 
@@ -2151,7 +2144,7 @@ export function apply(ctx: Context, config: Config): void {
         isSurfaceDisposed: () => cleanedUp,
         beginOpening: (sessionId) => beginOpening(sessionId),
         clearOpening: (token) => clearOpening(token as OpeningToken),
-        settlePendingQueueRecalls: (committed) => settlePendingQueueRecalls(committed),
+        settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
         resetSubmitLatency: () => submitLatencyTracker.reset(),
         setCompletionOwner: (identity) => setCompletionOwner(identity),
@@ -2200,6 +2193,7 @@ export function apply(ctx: Context, config: Config): void {
         currentOpening: () => currentOpening(),
         resetOpening: () => resetOpening(),
       },
+      isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
       diag,
     })
     // The fatal startup catch reaches the ONE memoized retirement through this
@@ -5095,13 +5089,15 @@ export function apply(ctx: Context, config: Config): void {
           }
         // Capture THIS agent's session identity so the write below can
         // never target a session a switch already left behind (the async
-        // admission below yields).
+        // admission below yields). ONE atomic scope capture: the same record
+        // fences the write and admits it through `SessionRuntime.withWriter`.
         const generation = ownership.generation()
-        const sessionSubject = ownership.captureSubject()
+        const scope = sessionScope.captureLive()
+        if (scope === undefined) throw new Error('a resolved live submission must carry a live session scope')
         // TOCTOU re-validation: the session must still be the exact one the
         // identity was captured from, or the submission is aborted for a
         // retry against the new session.
-        if (!captureMatches(sessionSubject)) {
+        if (!sessionScope.isCurrent(scope)) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
           settleLocalSubmission(submitRequestId)
@@ -5354,7 +5350,7 @@ export function apply(ctx: Context, config: Config): void {
               // the session moved on while the command ran, restore the
               // draft instead of posting into a session the user has left.
               if (execution === undefined) {
-                if (captureMatches(sessionSubject)) {
+                if (sessionScope.isCurrent(scope)) {
                   // The fallback is a REAL submission: prepare (admit
                   // images when present) and follow up — an owned workflow
                   // so a failed image admission restores the draft instead
@@ -5372,86 +5368,17 @@ export function apply(ctx: Context, config: Config): void {
                     // finally (review finding — double pinning leaked the
                     // handoff pin forever).
                     reserve: () => fallbackPin,
-                    run: async () => {
-                      // The WHOLE write (admission → identity check →
-                      // followup) runs inside the operation barrier: a
-                      // transition started while the admission awaits waits
-                      // for this writer to drain, and a writer entering
-                      // during a transition is refused (convergence plan
-                      // phase 3).
-                      try {
-                        await ownership.barrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
-                          agent,
-                          draftHasImages(text, draftImages),
-                          async () => {
-                          // Install the local echo before the first async
-                          // admission await when the gesture did not already
-                          // install it synchronously (a deferred start, or a
-                          // line the final catalog resolved as an ordinary
-                          // prompt after a command-claim change).
-                          if (!localEchoInstalled) {
-                            beginLocalSubmission(
-                              submitRequestId,
-                              text,
-                              submissionPlacement('queue', agent.status === 'running'),
-                              agent.session.id,
-                              generation,
-                              submitAckToken,
-                            )
-                            localEchoInstalled = true
-                          }
-                          const message = await prepareUserMessage(text, draftImages, submitDeps, { requestId: submitRequestId })
-                          if (cleanedUp) return
-                          // Re-check the captured session identity AFTER the
-                          // async admission (the guard-window rule, AGENTS.md).
-                          if (!captureMatches(sessionSubject)) {
-                            const merged = mergeDraft(app.getDraft(), text)
-                            app.setEditorText(merged)
-                            settleLocalSubmission(submitRequestId)
-                            settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-                            app.notify(merged === text
-                              ? 'the session changed while sending — try again'
-                              : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-                            return
-                          }
-                          // T1 BEFORE the write (see the direct path above).
-                          submitLatencyTracker.mark(agent.session.id, 'dispatch')
-                          const outcome = await backend.sessionWriter.prompt(agent.session.id, message, 'queue')
-                          if (cleanedUp) return
-                          if (outcome.kind !== 'committed') {
-                            if (outcome.kind === 'indeterminate') {
-                              if (cleanedUp) return
-                              settleLocalSubmission(submitRequestId)
-                              settleLocalSubmitAck('session write result indeterminate', { token: submitAckToken, terminal: true })
-                              app.notify('session write result is indeterminate — do not retry automatically', 'error')
-                              return
-                            }
-                            if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
-                            const failure = outcome.kind === 'rejected'
-                              ? outcome.error.message
-                              : outcome.reason
-                            throw new Error(failure)
-                          }
-                          // Consume ONLY the referenced drafts — a concurrent
-                          // intake's newer image survives (round-5 finding 1).
-                          consumeDraftAttachments(text, draftImages, draftFiles)
-                          },
-                        ))
-                      } catch (error) {
-                        if (cleanedUp) {
-                          fallbackPin()
-                          return
-                        }
-                        if (error instanceof TransitionInProgressError) {
-                          fallbackPin()
-                          settleLocalSubmission(submitRequestId)
-                          refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
-                          settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
-                          return
-                        }
-                        throw error
-                      }
-                    },
+                    // The submission runtime owns the ordered write
+                    // (writer admission → capability → prepare → write →
+                    // settlement → consume) and its terminal ack/echo.
+                    run: () => submissionRuntime.submitPrompt({
+                      text,
+                      scope,
+                      requestId: submitRequestId,
+                      ackToken: submitAckToken,
+                      generation,
+                      echoInstalled: localEchoInstalled,
+                    }),
                     restore: (t) => restoreSubmissionDraft(t),
                     }, text)
                     // This nested submission starts one callback later than the
@@ -5571,77 +5498,17 @@ export function apply(ctx: Context, config: Config): void {
         }
         // No commands service: direct follow-up on the CAPTURED agent (see
         // the note above — never a re-read closure variable). Images ride
-        // the same prepared message as every other path (§13). The WHOLE
-        // write runs inside the operation barrier (convergence plan
-        // phase 3): a transition started during the admission waits for
-        // this writer to drain; a writer entering during a transition is
-        // refused.
-        try {
-          await ownership.barrier.runWriter(agent.session.id, () => directRuntime.withPromptAdmission(
-            agent,
-            draftHasImages(text, draftImages),
-            async () => {
-            // Install the local echo before the first async admission await
-            // (same handoff contract as the command-fallback path above).
-            if (!localEchoInstalled) {
-              beginLocalSubmission(
-                submitRequestId,
-                text,
-                submissionPlacement('queue', agent.status === 'running'),
-                agent.session.id,
-                generation,
-                submitAckToken,
-              )
-              localEchoInstalled = true
-            }
-            const message = await prepareUserMessage(text, draftImages, submitDeps, { requestId: submitRequestId })
-            if (cleanedUp) return
-            // Re-check the captured session identity AFTER the async
-            // admission (the guard-window rule, AGENTS.md).
-            if (!captureMatches(sessionSubject)) {
-              const merged = mergeDraft(app.getDraft(), text)
-              app.setEditorText(merged)
-              settleLocalSubmission(submitRequestId)
-              settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-              app.notify(merged === text
-                ? 'the session changed while sending — try again'
-                : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-              return
-            }
-            // T1 BEFORE the write call: a synchronously-emitted inbox/turn
-            // event (Direct in-process) must never log ahead of dispatch.
-            submitLatencyTracker.mark(agent.session.id, 'dispatch')
-            const outcome = await backend.sessionWriter.prompt(agent.session.id, message, 'queue')
-            if (cleanedUp) return
-            if (outcome.kind !== 'committed') {
-              if (outcome.kind === 'indeterminate') {
-                if (cleanedUp) return
-                settleLocalSubmission(submitRequestId)
-                settleLocalSubmitAck('session write result indeterminate', { token: submitAckToken, terminal: true })
-                app.notify('session write result is indeterminate — do not retry automatically', 'error')
-                return
-              }
-              if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
-              const failure = outcome.kind === 'rejected'
-                ? outcome.error.message
-                : outcome.reason
-              throw new Error(failure)
-            }
-            // Consume ONLY the referenced drafts — a concurrent intake's
-            // newer image survives (round-5 finding 1).
-            consumeDraftAttachments(text, draftImages, draftFiles)
-            },
-          ))
-        } catch (error) {
-          if (cleanedUp) return
-          if (error instanceof TransitionInProgressError) {
-            settleLocalSubmission(submitRequestId)
-            settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
-            refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
-            return
-          }
-          throw error
-        }
+        // the same prepared message as every other path (§13). The submission
+        // runtime owns the ordered writer admission (transition drain +
+        // per-Agent image window) and its terminal ack/echo settlement.
+        await submissionRuntime.submitPrompt({
+          text,
+          scope,
+          requestId: submitRequestId,
+          ackToken: submitAckToken,
+          generation,
+          echoInstalled: localEchoInstalled,
+        })
         },
         restore: (t) => restoreSubmissionDraft(t),
       }, text), {
@@ -7188,7 +7055,7 @@ export function apply(ctx: Context, config: Config): void {
         const deferRecalledToTransition = (count: number): void => {
           discardStaged(count)
           const restoreText = recalledEntries.slice(0, count).map(entry => entry.text).join('\n\n')
-          pendingQueueRecalls.push({
+          submissionRuntime.deferQueueRecall({
             commit: () => {
               discardStaged()
               releaseRecalled()
@@ -9559,9 +9426,11 @@ export function apply(ctx: Context, config: Config): void {
           } finally {
             // A command may fail during preflight before it calls
             // transitionTo; do not leave a deferred recall unresolved.
-            settlePendingQueueRecalls(false)
+            submissionRuntime.settleQueueRecalls(false)
           }
         })),
+      withWriter: <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> =>
+        sessionRuntime.withWriter(scope, task),
       withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
         ownership.barrier.runWriter(sessionId, async () => task()),
       withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T> | T) => {
@@ -9575,6 +9444,51 @@ export function apply(ctx: Context, config: Config): void {
       requestExit,
       exit,
     }
+    /**
+     * Bind the submission runtime (A3-3). Its surface is the runner's narrow
+     * hooks; every write it performs enters through `SessionRuntime.withWriter`
+     * and the owner-resolved prompt admission, so the writer-first contract and
+     * the per-Agent image window are unchanged.
+     */
+    submissionRuntime = bindSubmissionRuntime({
+      surface: {
+        withWriter: <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> =>
+          sessionRuntime.withWriter(scope, task),
+        withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T>): Promise<T> =>
+          runner.withPromptAdmission(scope, line, task),
+        isDisposed: () => cleanedUp,
+        isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        mergeDraftIntoEditor: (text) => {
+          const merged = mergeDraft(app.getDraft(), text)
+          app.setEditorText(merged)
+          return merged === text
+        },
+        consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
+        markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
+        beginLocalSubmission: ({ requestId, text, scope, generation, ackToken }) => {
+          const agent = agentForLiveScope(scope)
+          beginLocalSubmission(
+            requestId,
+            text,
+            submissionPlacement('queue', agent.status === 'running'),
+            agent.session.id,
+            generation,
+            ackToken,
+          )
+        },
+        settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
+        settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
+        notify: (message, kind) => app.notify(message, kind),
+        refuseByTransitionFence: (text) => refuseByTransitionFence(
+          text,
+          () => app.getDraft(),
+          (t) => app.setEditorText(t),
+          (m, k) => app.notify(m, k),
+        ),
+        prepareMessage: (text, requestId) => prepareUserMessage(text, draftImages, submitDeps, { requestId }),
+        prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
+      },
+    })
     const registerCommands = (initial?: InitialCommandCatalog): void => {
       if (commandsRegistered) return
       const commands = ctx.get('commands')

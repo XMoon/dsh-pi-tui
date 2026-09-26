@@ -31,6 +31,7 @@ import type {
   SessionRetirementReport,
 } from './owner-access.ts'
 import type { ForkSourcePin, SessionOwnershipCore } from './ownership-core.ts'
+import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './scope.ts'
 import type { SessionOwnerRef } from './subject.ts'
 import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from '../../transition.ts'
 
@@ -95,6 +96,8 @@ export interface SessionRuntimeDeps {
   /** The runner lifecycle abort signal (the quiesces observe it). */
   readonly lifecycleSignal: AbortSignal
   readonly surface: SessionRuntimeSurface
+  /** Synchronous scope-currentness read (the runner's scope authority). */
+  isScopeCurrent(scope: SessionScope): boolean
   /** Diagnostics; the runtime logs per-owner retirement failures and disposes
    *  the sink at the end of the exit retirement (its last consumer). */
   readonly diag: Diag
@@ -111,6 +114,16 @@ export type SessionForkOutcome =
 
 /** The narrow entries the runner consumes. */
 export interface SessionRuntime {
+  /**
+   * Run one scope-bound TUI writer. The admission is a NO-YIELD section:
+   * `isScopeCurrent(scope)` and the barrier occupancy happen in the SAME
+   * synchronous call stack, so a transition started immediately after this
+   * returns must wait for the writer. A stale scope is refused with
+   * {@link SessionScopeSupersededError} (never the barrier's
+   * `TransitionInProgressError`) BEFORE the task runs; a frozen transition
+   * keeps the barrier's own refusal (no auto retry).
+   */
+  withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
   /** Run one ordinary session transition/switch (plan §4A). */
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
   /** Hand the TUI over to another persisted session (never throws). */
@@ -162,6 +175,18 @@ export interface SessionRuntime {
 
 export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRuntimeDeps): SessionRuntime {
   let retirementPromise: Promise<SessionRetirementReport> | undefined
+
+  /**
+   * The scope-bound writer admission (A3 §1.3). The stale check and the
+   * barrier occupancy run in the same synchronous stack: there is deliberately
+   * NO await between them, so a writer that has already admitted CANNOT be
+   * overtaken by a transition that starts right after this returns. A stale
+   * scope rejects with its OWN signal before the task body runs.
+   */
+  const withWriter = <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> => {
+    if (!deps.isScopeCurrent(scope)) return Promise.reject(new SessionScopeSupersededError())
+    return core.barrier.runWriter(scope.sessionId, async () => task())
+  }
 
   /**
    * Run one ordinary session transition/switch: quiesce + flush the old owner,
@@ -893,6 +918,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return creating
   }
   return {
+    withWriter,
     transitionTo,
     switchSession,
     adoptFork,
