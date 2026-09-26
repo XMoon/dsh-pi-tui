@@ -9277,6 +9277,17 @@ export function apply(ctx: Context, config: Config): void {
         if (scope === undefined) throw new Error('session could not be created')
         return scope
       },
+      requireLiveAgentScope: async () => {
+        await sessionRuntime.ensureSession()
+        // ONE synchronous step: the Direct agent and its scope must describe the
+        // SAME owner, so no session switch can interleave between the two reads
+        // (a separate `await requireLiveSessionScope()` + `liveAgent` read would
+        // resume in a later microtask and could pair A's agent with B's scope).
+        const scope = sessionScope.captureLive()
+        const agent = agentNow()
+        if (scope === undefined || agent === undefined) throw new Error('session could not be created')
+        return { agent, scope }
+      },
       // Completion-notification preference setters (the /settings panel
       // writes): the controller applies the parsed value immediately and
       // the panel persists the raw string through the config port.

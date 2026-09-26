@@ -15,6 +15,7 @@
  * @module @xmoon76/dsh-pi-tui/session-scope-facts
  */
 
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   createSessionScopeAuthority,
   type LiveSessionScope,
@@ -33,17 +34,19 @@ export interface SessionScopeFacts {
   captureSessionScope(): SessionScope
   isSessionScopeCurrent(scope: SessionScope): boolean
   requireLiveSessionScope(): Promise<LiveSessionScope>
+  /** The transitional paired resolution (`Agent` + its scope, one sync step). */
+  requireLiveAgentScope(): Promise<{ readonly agent: Agent; readonly scope: LiveSessionScope }>
 }
 
 /**
- * Build the three scope CAPTURE members over a stub's live state.
+ * Build the scope CAPTURE members over a stub's live state.
  *
  * @param currentAgent - re-reads the stub's live agent (its OWNER is the agent
  *   object itself, so swapping the agent invalidates a capture).
  * @param currentGeneration - re-reads the stub's current generation.
  */
 export function sessionScopeFacts(
-  currentAgent: () => { session: { id: string } } | undefined,
+  currentAgent: () => Agent | undefined,
   currentGeneration: () => number,
 ): SessionScopeFacts {
   const subjectAuthority = createSessionSubjectAuthority(() => {
@@ -72,6 +75,13 @@ export function sessionScopeFacts(
       const scope = scopeAuthority.captureLive()
       if (scope === undefined) throw new Error('session could not be created')
       return scope
+    },
+    requireLiveAgentScope: async () => {
+      // Mirrors the production facade: ONE synchronous step for both identities.
+      const scope = scopeAuthority.captureLive()
+      const agent = currentAgent()
+      if (scope === undefined || agent === undefined) throw new Error('session could not be created')
+      return { agent, scope }
     },
   }
 }
