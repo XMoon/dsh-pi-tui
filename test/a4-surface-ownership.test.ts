@@ -60,6 +60,13 @@ test('A4: the runner owns no surface construction or mount', () => {
     'the runner must not construct the Plugin Manager host registry')
   assert.match(indexSource, /surface\.attachPluginManager\(\{ port: backend\.pluginManager, diag \}\)/u,
     'the runner must attach the Plugin Manager owner through the surface')
+  // A4-4 notification presentation ownership (plan §13.3).
+  assert.doesNotMatch(indexSource, /new CompletionNotificationController\(/u,
+    'the runner must not construct the completion-notification controller')
+  assert.doesNotMatch(indexSource, /new TerminalNotifier\(/u,
+    'the runner must not construct the terminal notifier')
+  assert.doesNotMatch(indexSource, /new TerminalFocusTracker\(/u,
+    'the runner must not construct the terminal focus tracker')
 })
 
 test('A4: the mounted TuiApp has exactly one lifetime owner', () => {

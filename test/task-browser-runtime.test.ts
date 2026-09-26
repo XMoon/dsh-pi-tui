@@ -472,8 +472,9 @@ test('the runner wires agent/status to the membership-gated RUNTIME-only refresh
     'agent/status must never trigger a catalog re-listing')
   // The MAIN agent's transitions route to the completion-notification
   // controller (the settled boundary) BEFORE the child membership gate —
-  // children still never repaint and never notify.
-  assert.ok(handler.includes('completionController.onAgentStatus(agent.id, status)'),
+  // children still never repaint and never notify. A4-4: the controller is
+  // surface-owned, so the handler routes through the surface entry.
+  assert.ok(handler.includes('surface.onAgentStatus(agent.id, status)'),
     'the main agent\'s status must feed the completion controller')
 })
 
