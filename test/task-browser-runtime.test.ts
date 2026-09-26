@@ -451,11 +451,9 @@ test('the open-browser FIRST FRAME reuses the cached catalog and survives a fail
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { compositionSource } from './support/composition-surface.ts'
 
-const indexSource = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.ts'),
-  'utf8',
-)
+const indexSource = compositionSource()
 // A4-6: the Task Browser / Job viewer / Workflow-action wiring moved into the
 // surface owner, so these locks are re-anchored to the new owner (the runner
 // keeps only the narrow injected capability + the runner-side event routing).
@@ -504,7 +502,7 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   // the surface implementation.
   const bump = indexSource.slice(
     indexSource.indexOf('const resetForGeneration'),
-    indexSource.indexOf('const jumpToSearchMatch'),
+    indexSource.indexOf('const viewerOpen'),
   )
   assert.ok(bump.includes('surface.resetTasks()'), 'the session bump must reset the surface-owned Task Center')
   const reset = surfaceSource.slice(surfaceSource.indexOf('resetTasks() {'))

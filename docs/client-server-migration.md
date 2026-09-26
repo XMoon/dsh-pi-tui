@@ -1556,8 +1556,15 @@ TypeScript restructure. It is structural only:
   `liveAgent`/`viewedQueueAgent` state and passes live getters, and in A1 still
   supplies the concrete Host lookups (`agents.get`/`sessions.get`) for the
   resolver callbacks. Those lookups belong to `app/direct`'s Direct composition
-  seam (A5 moves them behind it); `app/bootstrap` only connects owners and is not
-  a Host-coupling zone. No second current-session truth exists.
+  seam (A5 moves them behind it). `src/app/bootstrap.ts` is the application
+  composition root (A5-2): it resolves the Host services the owners are built
+  from and connects them (plan §23/§26), while every Direct-only fact stays
+  behind `app/direct`. No second current-session truth exists.
+- **A5-2 — composition root + facade.** `src/app/bootstrap.ts` owns the runner
+  composition (`applyRunner`); `src/index.ts` keeps the Cordis contract, the
+  `Config` re-export and the public root surface, and `apply` delegates. The
+  entry's Host coupling is now only the `@deepseek-ai/dsh-agent` types its frozen
+  public `composeAgent` overloads declare.
 - **Ownership targets** (`src/app/**`): `bootstrap` (composition root),
   `direct` (Direct application-side Host coupling + Direct-only facades),
   `session` (session navigation/lifetime + opaque `SessionSubject` authority),

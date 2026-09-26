@@ -206,8 +206,8 @@ refused (`TransitionInProgressError`).
 
 Every TUI-owned session writer enters the barrier through the BOUND session
 runtime (`src/app/session/runtime.ts`, `SessionRuntime.withWriter(scope, task)`).
-This is the ONE writer-admission owner: `src/index.ts` holds no direct
-`barrier.runWriter` call. No semantic writer re-checks the transition gate
+This is the ONE writer-admission owner: the package entry and the composition
+root (`src/app/bootstrap.ts`) hold no direct `barrier.runWriter` call. No semantic writer re-checks the transition gate
 AFTER it was admitted: the submission-facing entrypoints (plain prompt, busy
 delivery, steer, queue pull-back, `HostCommandPort` submission, shell submit)
 admit through the bound runtime and, once admitted, carry only the

@@ -33,6 +33,7 @@ const SCANNED_FILES = ['src/tui-app.ts']
  * resurface in anything the user sees). */
 const SCANNED_STRING_FILES = [
   'src/index.ts',
+  'src/app/bootstrap.ts',
   'src/commands.ts',
   'src/tui-app.ts',
   'src/local-shell-card.ts',

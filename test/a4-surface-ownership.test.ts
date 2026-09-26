@@ -3,6 +3,7 @@ import test from 'node:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { compositionSource } from './support/composition-surface.ts'
 
 /**
  * A4 surface-ownership locks (plan §18/§20).
@@ -16,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')
-const indexSource = read('src/index.ts')
+const indexSource = compositionSource()
 
 /** Every TypeScript source under `src/app/surface`. */
 function surfaceSources(): Array<{ rel: string; source: string }> {
