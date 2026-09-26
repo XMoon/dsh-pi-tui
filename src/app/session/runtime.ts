@@ -18,6 +18,7 @@ import { observeSettled, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import {
   LifecycleError,
+  requireCreated,
   requireOpened,
   type SessionHandle,
   type SessionLifecycle,
@@ -63,6 +64,25 @@ export interface SessionRuntimeSurface {
   clearUnpinnedDrafts(): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
+  // First-session (deferred creation) runner operations.
+  /** Build the launch composition for the first session. */
+  launchComposition(): Promise<{ failure?: string; composition: { agentPreset?: string } }>
+  /** Record a first-session failure for the next resume notice. */
+  setResumeFailure(failure: string): void
+  /** Report a failed first-session create (the runner logs + records it). */
+  reportFirstSessionCreateFailure(message: string): void
+  /** Show (and clear) the pending resume notice. */
+  notifyResumeFailure(): void
+  /** Quiesce every sessionless `/model` default write before the create. */
+  awaitPendingDefaultWrite(signal: AbortSignal): Promise<void>
+  /** Generate the first session's id (the runner owns the Host id type). */
+  newSessionId(): string
+  /** The cwd the first-session create request carries. */
+  sessionCreateCwd(): string
+  /** The current opening-journal token (opaque to the session layer). */
+  currentOpening(): unknown
+  /** Reset the whole opening journal (the first-session finally). */
+  resetOpening(): void
 }
 
 export interface SessionRuntimeDeps {
@@ -126,6 +146,8 @@ export interface SessionRuntime {
   /** Run the first-session commit (plan §4C). Returns whether the child
    *  committed (`false` = the lifecycle aborted during its quiesce). */
   commitFirstSession(handle: SessionHandle): Promise<boolean>
+  /** Create the first session lazily (deferred session creation). */
+  ensureSession(): Promise<void>
   /** Publish the startup-resume owner synchronously (plan §4D: publish →
    *  completion → pre-mount quiesce). Returns the quiesce promise only when the
    *  runner's hook produced one, so a sessionless startup stays synchronous. */
@@ -784,6 +806,92 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return retirementPromise
   }
 
+  let creating: Promise<void> | undefined
+
+  /**
+   * Create the FIRST session lazily — the first user message triggers it
+   * (deferred session creation). Opening the TUI with no `--session` carries zero
+   * session side-effects: no agent, no log, no persistence. The creation is a
+   * session transition too, so it runs inside the single-writer gate and can
+   * never interleave with an ordinary transition already in flight.
+   */
+  const ensureSession = async (): Promise<void> => {
+    if (core.owner() !== undefined) return
+    if (creating !== undefined) return creating
+    creating = core.gate.run(() => core.barrier.runTransition(async () => {
+      const launched = await deps.surface.launchComposition()
+      if (launched.failure !== undefined) deps.surface.setResumeFailure(launched.failure)
+      // The first-session creation follows the same transaction shape as every
+      // other transition: the id is pre-generated and the DSH create publishes
+      // the session; a create failure leaves the surface sessionless — the next
+      // user input starts a NEW attempt (no pin, no second fresh fallback).
+      let created: SessionHandle
+      try {
+        const sessionId = deps.surface.newSessionId()
+        deps.surface.beginOpening(sessionId)
+        // Quiesce EVERY sessionless `/model` default write (and its fenced
+        // correction) BEFORE the create: the Direct adapter captures the settled
+        // persisted Host default for Agent activation. A failed latest intent is
+        // NOT seeded — the fresh Session uses the actual Host default, not a
+        // fabricated choice.
+        await deps.surface.awaitPendingDefaultWrite(deps.lifecycleSignal)
+        deps.lifecycleSignal.throwIfAborted()
+        created = requireCreated(await deps.lifecycle.create({
+          sessionId,
+          // The semantic `agentPreset` is the sole preset authority; the Direct
+          // adapter writes the actually composed preset into the durable header
+          // (never a duplicated meta field).
+          cwd: deps.surface.sessionCreateCwd(),
+          agentPreset: launched.composition.agentPreset,
+          signal: deps.lifecycleSignal,
+        }))
+      } catch (error) {
+        if (error instanceof LifecycleError && error.ownership === 'superseded') {
+          // A superseded first-session create is UI-silent — no degradation
+          // notice; the surface simply stays sessionless.
+          deps.diag.warn('first session creation superseded', {
+            settlement: error.settlement,
+            publishedSessionId: error.publishedSessionId,
+            requestedSessionId: error.requestedSessionId,
+          })
+          return
+        }
+        // A failed create leaves the surface sessionless — the next user input
+        // starts a NEW attempt (no pin, no second fresh fallback). Preset mount
+        // failures are no longer auto-replaced; the resolve-level fallback
+        // (requested → default) already happened inside `launchComposition`,
+        // BEFORE any DSH call.
+        const message = safeErrorMessage(error)
+        deps.surface.reportFirstSessionCreateFailure(message)
+        throw error
+      }
+      const opening = deps.surface.currentOpening()
+      const committed = await commitFirstSession(created)
+      if (!committed) {
+        // The lifecycle aborted during the first-session quiesce: the surface is
+        // disposed and the retirement takes over — skip the surface
+        // initialization below.
+        return
+      }
+      if (opening !== undefined) deps.surface.clearOpening(opening)
+      const owner = core.owner()
+      if (owner === undefined) throw new Error('first-session commit published no owner')
+      // The first real session's catalog comes from the REAL owner: await the
+      // coordinator refresh so the first submission rides the live scope (the
+      // probe snapshot is never execution authorization). Provider issues degrade
+      // fields inside the snapshot; a failed attempt is warned, never fatal.
+      try {
+        await deps.surface.refreshLiveCatalog(owner)
+      } catch (error) {
+        deps.diag.warn('first session catalog refresh failed', { error: safeErrorMessage(error) })
+      }
+      deps.surface.notifyResumeFailure()
+    })).finally(() => {
+      creating = undefined
+      deps.surface.resetOpening()
+    })
+    return creating
+  }
   return {
     transitionTo,
     switchSession,
@@ -798,6 +906,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     abortCommandSettlement,
     settleCommandSettlement,
     commitFirstSession,
+    ensureSession,
     publishResumedOwner,
     retireOwnedSession,
     preCancelOwnedSession,
