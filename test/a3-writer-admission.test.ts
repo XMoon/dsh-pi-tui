@@ -393,11 +393,12 @@ test('A3-4 static exit: SessionRuntime is the SOLE operation-barrier writer admi
 })
 
 test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a transition', () => {
-  // The pull-back captures its live scope well before the writer entry, so the
-  // admission can refuse with `SessionScopeSupersededError` after the queue
-  // reconciliation started. That refusal must drop the staged refs and report the
-  // STALE notice — never the transition one, which would leave staged attachments
-  // behind and mislabel the refusal.
+  // DEFENSIVE branch: this path is currently synchronous from the scope capture
+  // to the writer entry, so only a frozen transition can land in the outer catch
+  // today. The stale branch exists because the two refusals are DIFFERENT signals
+  // (plan §1.3): if a future refactor introduces an await in that window, a stale
+  // capture must drop the staged refs and report the STALE notice — never leave
+  // them behind while claiming a transition is in progress.
   const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
   const pullBack = source.slice(
     source.indexOf("runOwned('queue pull-back'"),
