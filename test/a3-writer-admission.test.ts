@@ -445,3 +445,24 @@ test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a
   assert.ok(source.includes('the session changed while pulling messages back'),
     'the stale notice text is the session change, not a transition')
 })
+
+test('every transition-gate read is a PRE-admission quick refusal', () => {
+  const runtime = readFileSync(new URL('../src/app/submission/runtime.ts', import.meta.url), 'utf8')
+  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  // Exactly TWO gate reads exist in the runner: the attachment-intake UX fence
+  // (`sessionTransitionPending`) and the command-dispatch refusal handed to the
+  // submission runtime. Both refuse BEFORE a writer section is entered.
+  assert.equal((index.match(/ownership\.gate\.busy/g) ?? []).length, 2,
+    'the gate may be read only by the intake fence and the command-dispatch binding')
+  // The submission runtime reads it exactly once (plus the interface declaration).
+  assert.equal((runtime.match(/isTransitionBusy/g) ?? []).length, 2,
+    'the submission runtime reads the gate once, as a pre-admission refusal')
+  const command = runtime.slice(
+    runtime.indexOf('export function executeHostCommandSubmission'),
+    runtime.indexOf("runOwned('command execution'"),
+  )
+  assert.ok(command.includes('if (deps.isTransitionBusy())'),
+    'the command dispatch keeps its pre-admission gate refusal')
+  assert.equal(command.includes('withWriter('), false,
+    'that refusal must precede the writer section (never an in-writer re-read)')
+})
