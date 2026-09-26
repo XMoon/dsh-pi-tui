@@ -80,6 +80,15 @@ export interface SessionRuntimeDeps {
   readonly diag: Diag
 }
 
+/**
+ * The outcome of one fork navigation. Structurally a `CommandResult` (the
+ * command layer renders it), but defined here so `app/session` never imports
+ * the Host command package.
+ */
+export type SessionForkOutcome =
+  | { readonly kind: 'success'; readonly text?: string }
+  | { readonly kind: 'error'; readonly text: string }
+
 /** The narrow entries the runner consumes. */
 export interface SessionRuntime {
   /** Run one ordinary session transition/switch (plan §4A). */
@@ -93,6 +102,14 @@ export interface SessionRuntime {
     onAdopted?: () => void,
     pin?: ForkSourcePin,
   ): Promise<boolean>
+  /** Fork one source Session (capture → pin → Host fork → supersession fence →
+   *  adopt/park). Never throws. */
+  forkSession(
+    sourceSessionId: string,
+    atSeq?: number,
+    onAdopted?: () => void,
+    pickerIdentity?: RewindLiveIdentity,
+  ): Promise<SessionForkOutcome>
   /** Park one refused fork's owner for a later claim. */
   parkForkOwner(handle: SessionHandle | undefined): void
   /** Whether a captured fork/rewind identity still owns the visible surface. */
@@ -533,6 +550,86 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   /**
+   * Fork one source Session: capture the navigation identity, claim the
+   * operation epoch, pin the source for the whole fork, dispatch the Host fork,
+   * apply the supersession fence to every outcome, then adopt or park the child.
+   * Never throws.
+   */
+  const forkSession = async (
+    sourceSessionId: string,
+    atSeq?: number,
+    onAdopted?: () => void,
+    pickerIdentity?: RewindLiveIdentity,
+  ): Promise<SessionForkOutcome> => {
+    // A rewind picker captures identity BEFORE its overlay can yield to a newer
+    // navigation. Validate that capture against the live surface before claiming
+    // a fresh operation epoch; A → B → A must not revive A's row.
+    const before = core.captureNavigationIdentity()
+    const pickerCurrent = pickerIdentity === undefined || isRewindIdentityCurrent(before, pickerIdentity)
+    const expectedSessionId = pickerIdentity?.sessionId ?? before.sessionId
+    // Reject an obsolete picker before consuming an epoch. A stale A picker must
+    // not invalidate a newer legitimate A fork that already admitted.
+    if (deps.surface.isSurfaceDisposed() || !pickerCurrent || expectedSessionId !== sourceSessionId) {
+      return { kind: 'error' as const, text: 'the session changed before fork dispatch' }
+    }
+    const expected: RewindLiveIdentity = {
+      sessionId: expectedSessionId,
+      generation: pickerIdentity?.generation ?? before.generation,
+      navigationEpoch: core.bumpNavigationEpoch(),
+    }
+    // Pin the source for the WHOLE fork (from admission, before the child is
+    // created): an open/resume of it must wait until the fork settles and, if it
+    // committed, until the source owner has been retired.
+    const pin = core.beginForkSourcePin(sourceSessionId)
+    let settleFork!: () => void
+    let forkedHandle: SessionHandle | undefined
+    const pending = new Promise<void>(resolve => { settleFork = resolve })
+    trackFork(pending)
+    try {
+      const result = await deps.lifecycle.fork({
+        sourceSessionId,
+        ...atSeq === undefined ? {} : { atSeq },
+      })
+      const outcome = result.outcome
+      if (outcome.kind === 'unavailable') {
+        // Client-local pre-dispatch refusal: nothing reached the Host, so there
+        // is no child to park and no Host settlement to report.
+        if (result.ownership === 'superseded' || !isNavigationCurrent(expected)) return { kind: 'success' as const }
+        return { kind: 'error' as const, text: outcome.message }
+      }
+      if (outcome.kind === 'rejected' || outcome.kind === 'indeterminate' || outcome.kind === 'published-with-error') {
+        if (outcome.kind === 'published-with-error') parkForkOwner(outcome.handle)
+        // A Direct failure is still returned as `current` because Direct has no
+        // transport generation to supersede it. Navigation owns whether that
+        // failure may be shown, so apply the same fence as success.
+        if (result.ownership === 'superseded' || !isNavigationCurrent(expected)) {
+          return { kind: 'success' as const }
+        }
+        return { kind: 'error' as const, text: `${outcome.error.message} (${outcome.error.code})` }
+      }
+      if (result.ownership === 'superseded' || !isNavigationCurrent(expected)) {
+        parkForkOwner(outcome.handle)
+        return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}; navigation stayed on the newer session` }
+      }
+      forkedHandle = outcome.handle
+      const adopted = await adoptFork(outcome.handle, expected, onAdopted, pin)
+      if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
+      deps.surface.clearUnpinnedDrafts()
+      return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
+    } catch (error) {
+      if (forkedHandle !== undefined) parkForkOwner(forkedHandle)
+      if (!isNavigationCurrent(expected)) return { kind: 'success' as const }
+      return { kind: 'error' as const, text: `fork failed: ${safeErrorMessage(error)}` }
+    } finally {
+      settleFork()
+      // If the fork committed, its source retirement owns the pin (released when
+      // that retirement finishes); otherwise the source was never detached and
+      // is immediately reopenable.
+      if (!pin.state.retirementOwnsRelease) pin.release()
+    }
+  }
+
+  /**
    * Run the first-session commit (plan §4C: publish → completion → await the
    * child's idle → bump → init). Post-create initialization is best-effort: the
    * child is committed, so a failure is warned (never a fallback), the same
@@ -691,6 +788,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     transitionTo,
     switchSession,
     adoptFork,
+    forkSession,
     parkForkOwner,
     isNavigationCurrent,
     trackFork,
