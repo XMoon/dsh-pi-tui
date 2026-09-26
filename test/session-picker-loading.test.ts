@@ -130,7 +130,6 @@ function harness(sessionReader: SessionReader): Harness {
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},

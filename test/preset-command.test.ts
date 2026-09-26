@@ -288,10 +288,6 @@ function stubRunner(options: {
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
     get effectivePresetId() { return pending.value ?? options.effectivePresetId },
-    refreshCatalog: async (request) => {
-      refreshes.push(request)
-      return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
-    },
     refreshSessionCatalog: async (_scope, source) => {
       const agent = options.state !== undefined ? options.state.agent : options.agent
       const request: CatalogRefreshRequest = {

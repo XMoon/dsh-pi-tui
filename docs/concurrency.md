@@ -193,6 +193,34 @@ transition waits for in-flight writers to drain before it quiesces the old
 agent, and writers that start while a transition holds the barrier are
 refused (`TransitionInProgressError`).
 
+### SessionRuntime.withWriter — the writer-admission owner
+
+Every TUI-owned session writer enters the barrier through the BOUND session
+runtime (`src/app/session/runtime.ts`, `SessionRuntime.withWriter(scope, task)`).
+This is the ONE writer-admission owner: `src/index.ts` holds no direct
+`barrier.runWriter` call, and the command layer never re-checks the transition
+gate for a semantic write (only the attachment-intake UX fence still reads
+`transitionGate.busy`).
+
+- The admission is SCOPE-BOUND and a NO-YIELD section: the scope-currentness
+  read (`SessionScopeAuthority.isCurrent`) and the barrier occupancy run in the
+  SAME synchronous call stack — there is deliberately no `await` between them,
+  so a transition started immediately after the writer returns must wait for it,
+  and a stale capture cannot be overtaken by a transition that commits in a
+  later microtask.
+- The two refusals are DISTINCT signals and must never be conflated. A STALE
+  capture (the owner/generation the scope pinned is gone) rejects with
+  `SessionScopeSupersededError` (exported from `src/app/session/scope.ts`)
+  BEFORE the task body runs; a writer arriving after a transition already FROZE
+  the barrier keeps the barrier's own `TransitionInProgressError` (no automatic
+  retry — the caller restores its draft). Collapsing them would misreport a
+  stale owner as a frozen transition.
+- The M3 `session/writer-held` caller/UI insertion point is
+  `src/app/submission/runtime.ts`: its `withWriter` is the submission domain's
+  single seam delegating to `SessionRuntime.withWriter`, so the future Remote
+  writer-held recovery hangs off ONE caller-side insertion point rather than
+  every writer site.
+
 ### D2.1 write settlement
 
 D2.1 makes the current Direct writes asynchronous at the semantic boundary
@@ -270,8 +298,9 @@ attachment preparation cannot let a later gesture overtake an earlier one.
 
 - A live Session model selection is a Session WRITE: `/model` dispatches
   `ModelCatalog.selectSessionModel` INSIDE the writer barrier
-  (`withSessionWriter`), so a transition that started first refuses the write
-  before dispatch and a transition that starts after waits for it. The picker
+  (`SessionRuntime.withWriter(scope, …)`), so a transition that started first
+  refuses the write before dispatch and a transition that starts after waits for
+  it. The picker
   itself enters an in-place `Selecting…` state (a duplicate apply is never a
   second commit) and the footer shows the in-flight choice as `(selecting…)`
   while keeping the authoritative current value. The

@@ -160,7 +160,6 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
