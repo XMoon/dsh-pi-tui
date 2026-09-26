@@ -90,7 +90,6 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -131,7 +130,6 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()

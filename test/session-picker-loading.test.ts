@@ -85,7 +85,6 @@ function harness(sessionReader: SessionReader): Harness {
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return state.agent },
     ...sessionScopeFacts(() => state.agent, () => 1),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
@@ -123,7 +122,6 @@ function harness(sessionReader: SessionReader): Harness {
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 1 },
     switchSession: async (id: string): Promise<string | undefined> => {
       switched.push(id)
       return undefined

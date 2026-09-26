@@ -19,6 +19,7 @@ import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from
 import { KeybindingEditorController } from '../src/keybinding-ui/controller.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
+import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
 import { SESSIONLESS_COMMANDS } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { customThemesDir, darkColors } from '../src/theme.ts'
@@ -218,11 +219,13 @@ function stubRunner(options: {
     ctx: options.ctx,
     app: options.app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return options.state !== undefined ? options.state.agent : options.agent },
     ...sessionScopeFacts(
       () => options.state !== undefined ? options.state.agent : options.agent,
       () => options.state?.generation ?? 0,
     ),
+    // /help and the collision baseline read the FAKE registry through the
+    // scoped-command facade, exactly like the production provider.
+    listScopedCommands: () => (options.ctx.get('commands') as unknown as { list(): readonly SurfaceCommandSummary[] }).list(),
     get currentSessionId() { return (options.state !== undefined ? options.state.agent : options.agent)?.session.id },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -276,7 +279,6 @@ function stubRunner(options: {
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return options.state?.generation ?? 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -287,6 +289,21 @@ function stubRunner(options: {
     set pendingPreset(id: string | undefined) { pending.value = id },
     get effectivePresetId() { return pending.value ?? options.effectivePresetId },
     refreshCatalog: async (request) => {
+      refreshes.push(request)
+      return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
+    },
+    refreshSessionCatalog: async (_scope, source) => {
+      const agent = options.state !== undefined ? options.state.agent : options.agent
+      const request: CatalogRefreshRequest = {
+        source,
+        target: { kind: 'agent', key: options.state?.generation ?? 0 },
+        agent,
+      }
+      refreshes.push(request)
+      return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
+    },
+    refreshStandingCatalog: async (presetId, source) => {
+      const request: CatalogRefreshRequest = { source, target: { kind: 'preset', presetId } }
       refreshes.push(request)
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
     },

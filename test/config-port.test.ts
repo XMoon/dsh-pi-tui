@@ -660,17 +660,17 @@ test('credential onChanged returns a disposer (a remount never accumulates liste
 
 // ── approval override (alpha.4 session-oriented read) ─────────────────────
 
-test('permissions approvalOverrideOf reads the official approval service session override', () => {
+test('permissions approvalOverrideOf resolves the session id to its live Agent and reads the official override', () => {
   const overrides = new Map<string, 'ask' | 'never'>([['session-live', 'never']])
   const config = port({
     approval: { overrideOf: (session: { id?: string }) => overrides.get(session?.id ?? '') },
   }).permissions
-  assert.equal(config.approvalOverrideOf({ id: 'session-live' }), 'never')
-  assert.equal(config.approvalOverrideOf({ id: 'session-other' }), undefined, 'no override stays undefined (no configured default applied)')
+  assert.equal(config.approvalOverrideOf('session-live'), 'never')
+  assert.equal(config.approvalOverrideOf('session-ghost'), undefined, 'no live Agent for the session stays undefined')
   const without = port({}).permissions
-  assert.equal(without.approvalOverrideOf({ id: 'x' }), undefined, 'a missing approval service degrades')
+  assert.equal(without.approvalOverrideOf('session-live'), undefined, 'a missing approval service degrades')
   const throwing = port({ approval: { overrideOf: () => { throw new Error('boom') } } }).permissions
-  assert.equal(throwing.approvalOverrideOf({ id: 'x' }), undefined, 'a throwing service degrades to undefined')
+  assert.equal(throwing.approvalOverrideOf('session-live'), undefined, 'a throwing service degrades to undefined')
 })
 
 // ── subagent model selection (the official settings section) ──────────────

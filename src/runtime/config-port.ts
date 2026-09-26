@@ -348,12 +348,13 @@ export interface PermissionConfig {
   defaultPreset(): string | undefined
   /** Persist the default preset for future sessions. */
   setDefaultPreset(name: string): Promise<void>
-  /** The session's own approval-policy override (the official approval
-   * service's `overrideOf(session)` read — alpha.4; the configured default
-   * is deliberately NOT applied, an override-less session answers
-   * undefined and the consumer shows its own default). Degrades to
-   * undefined when the approval service is absent. */
-  approvalOverrideOf(session: unknown): 'ask' | 'never' | undefined
+  /** The session's own approval-policy override, resolved from the EXACT
+   * live Agent of `sessionId` (the official approval service's
+   * `overrideOf(session)` read — alpha.4; the configured default is
+   * deliberately NOT applied, an override-less session answers undefined
+   * and the consumer shows its own default). Degrades to undefined when
+   * the approval service is absent or the session has no live Agent. */
+  approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
    * takes the exact host path — sandbox + approval writer + policy-change
