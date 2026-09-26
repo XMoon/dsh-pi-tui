@@ -150,6 +150,24 @@ pnpm test
 Use the smallest relevant validation for the current change. Prefer targeted
 tests first; do not run expensive compatibility suites mechanically.
 
+A stage-final validation must not run the same suite twice. `pnpm verify:prepush`
+is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
+`test:fork`, `test:docs`, `test:tooling`, the architecture / boundary /
+keybinding / naming / session-event / installation-doc / pi-divergence /
+pi-vendor gates, `pnpm audit`, and finally `pnpm pack:release`. `pack:release`
+is NOT packaging-only: its `prepack` runs `clean` + `build` +
+`typecheck:bundle` + `test:product`, and its `postpack` runs the eight
+public-package smokes (tarball, extension fixture, advanced, phase4, unstable,
+vim, examples, composeAgent). So in one pass never also run `typecheck:bundle`,
+`test:product`, `scripts/tarball-smoke.mjs` or
+`scripts/compose-agent-compat-smoke.mjs` by hand, and never invoke
+`pnpm pack`/`pack:release` while a build or an artifact-dependent gate is
+running. `pnpm test` already contains `test:fork` + `test:product` +
+`test:tooling` + `test:docs`; prefer it over the individual pieces. What a
+stage-final pass still needs ON TOP of `verify:prepush`: the migration contract
+smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, and
+`git diff --check` (unstaged and staged).
+
 Validation mechanics for this toolchain:
 
 * `packages/pi-tui/dist` is a build INPUT to the root bundle and to the tests:
