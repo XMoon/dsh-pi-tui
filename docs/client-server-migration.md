@@ -1564,7 +1564,7 @@ TypeScript restructure. It is structural only:
   PR) is the bootstrap/facade cutover: `src/app/bootstrap.ts` owns the runner
   composition (`applyRunner` → the named coordinator `startRunner()` → the
   terminal `handleStartupFailure`; `registerRunnerDisposal` for the fiber
-  disposal), `src/index.ts` is a 173-line package facade (Cordis contract,
+  disposal), `src/index.ts` is a thin package facade (Cordis contract,
   `Config` re-export, public root re-exports, the frozen `composeAgent` /
   `recordedPreset` declarations delegating to `app/direct/composition.ts`, and
   `apply`), every root helper implementation lives in its natural top-level
