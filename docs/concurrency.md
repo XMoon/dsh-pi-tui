@@ -207,12 +207,21 @@ refused (`TransitionInProgressError`).
 Every TUI-owned session writer enters the barrier through the BOUND session
 runtime (`src/app/session/runtime.ts`, `SessionRuntime.withWriter(scope, task)`).
 This is the ONE writer-admission owner: `src/index.ts` holds no direct
-`barrier.runWriter` call. No semantic writer re-checks the transition gate:
-the submission-facing entrypoints (plain prompt, busy delivery, steer, queue
-pull-back, `HostCommandPort` submission, shell submit) admit through the bound
-runtime and, once admitted, carry only the surface-lifetime fence. Only the
-attachment-intake UX fence still reads `transitionGate.busy`
-(`sessionTransitionPending()`).
+`barrier.runWriter` call. No semantic writer re-checks the transition gate
+AFTER it was admitted: the submission-facing entrypoints (plain prompt, busy
+delivery, steer, queue pull-back, `HostCommandPort` submission, shell submit)
+admit through the bound runtime and, once admitted, carry only the
+surface-lifetime fence — an admitted writer is never truncated by a waiting
+transition. Reading `transitionGate.busy` is therefore allowed ONLY as a
+PRE-admission quick refusal, in exactly two places:
+
+1. the attachment-intake UX fence (`sessionTransitionPending()`, `src/commands.ts`), and
+2. the command-dispatch refusal in `app/submission/runtime.ts`'s
+   `executeHostCommandSubmission`, which fires BEFORE its writer section is
+   entered (a command about to execute during a transition's pre-freeze window
+   would write an agent that is being retired).
+
+Both are pre-admission refusals: nothing committed is ever truncated by them.
 
 - The admission is SCOPE-BOUND and a NO-YIELD section: the scope-currentness
   read (`SessionScopeAuthority.isCurrent`) and the barrier occupancy run in the

@@ -127,7 +127,10 @@ export interface SubmissionRuntime {
    * through the raw barrier. It delegates to `SessionRuntime.withWriter`, so a
    * stale scope is refused with `SessionScopeSupersededError` and a frozen
    * transition with `TransitionInProgressError` — the writer-first contract is
-   * unchanged, and no caller reads `transitionGate.busy` to decide admission.
+   * unchanged. No caller re-reads `transitionGate.busy` AFTER it was admitted:
+   * the gate is read only as a PRE-admission quick refusal (the command-dispatch
+   * check below and the attachment-intake UX fence), never inside an admitted
+   * writer section.
    */
   withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
   /**
