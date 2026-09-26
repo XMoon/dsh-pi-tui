@@ -3032,80 +3032,6 @@ export function apply(ctx: Context, config: Config): void {
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
 
-    const forkSession = async (
-      sourceSessionId: string,
-      atSeq?: number,
-      onAdopted?: () => void,
-      pickerIdentity?: RewindLiveIdentity,
-    ) => {
-      // A rewind picker captures identity BEFORE its overlay can yield to a
-      // newer navigation. Validate that capture against the live surface before
-      // claiming a fresh operation epoch; A → B → A must not revive A's row.
-      const before = ownership.captureNavigationIdentity()
-      const pickerCurrent = pickerIdentity === undefined || isRewindIdentityCurrent(before, pickerIdentity)
-      const expectedSessionId = pickerIdentity?.sessionId ?? before.sessionId
-      // Reject an obsolete picker before consuming an epoch. A stale A picker
-      // must not invalidate a newer legitimate A fork that already admitted.
-      if (cleanedUp || !pickerCurrent || expectedSessionId !== sourceSessionId) {
-        return { kind: 'error' as const, text: 'the session changed before fork dispatch' }
-      }
-      const expected: RewindLiveIdentity = {
-        sessionId: expectedSessionId,
-        generation: pickerIdentity?.generation ?? before.generation,
-        navigationEpoch: ownership.bumpNavigationEpoch(),
-      }
-      // Pin the source for the WHOLE fork (from admission, before the child is
-      // created): an open/resume of it must wait until the fork settles and, if
-      // it committed, until the source owner has been retired.
-      const pin = ownership.beginForkSourcePin(sourceSessionId)
-      let settleFork!: () => void
-      let forkedHandle: SessionHandle | undefined
-      const pending = new Promise<void>(resolve => { settleFork = resolve })
-      sessionRuntime.trackFork(pending)
-      try {
-        const result = await backend.sessionLifecycle.fork({
-          sourceSessionId,
-          ...atSeq === undefined ? {} : { atSeq },
-        })
-        const outcome = result.outcome
-        if (outcome.kind === 'unavailable') {
-          // Client-local pre-dispatch refusal: nothing reached the Host, so
-          // there is no child to park and no Host settlement to report.
-          if (result.ownership === 'superseded' || !sessionRuntime.isNavigationCurrent(expected)) return { kind: 'success' as const }
-          return { kind: 'error' as const, text: outcome.message }
-        }
-        if (outcome.kind === 'rejected' || outcome.kind === 'indeterminate' || outcome.kind === 'published-with-error') {
-          if (outcome.kind === 'published-with-error') sessionRuntime.parkForkOwner(outcome.handle)
-          // A Direct failure is still returned as `current` because Direct has
-          // no transport generation to supersede it. Navigation owns whether
-          // that failure may be shown, so apply the same fence as success.
-          if (result.ownership === 'superseded' || !sessionRuntime.isNavigationCurrent(expected)) {
-            return { kind: 'success' as const }
-          }
-          return { kind: 'error' as const, text: `${outcome.error.message} (${outcome.error.code})` }
-        }
-        if (result.ownership === 'superseded' || !sessionRuntime.isNavigationCurrent(expected)) {
-          sessionRuntime.parkForkOwner(outcome.handle)
-          return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}; navigation stayed on the newer session` }
-        }
-        forkedHandle = outcome.handle
-        const adopted = await sessionRuntime.adoptFork(outcome.handle, expected, onAdopted, pin)
-        if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
-        draftImages.clearUnpinned()
-        draftFiles.clearUnpinned()
-        return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
-      } catch (error) {
-        if (forkedHandle !== undefined) sessionRuntime.parkForkOwner(forkedHandle)
-        if (!sessionRuntime.isNavigationCurrent(expected)) return { kind: 'success' as const }
-        return { kind: 'error' as const, text: `fork failed: ${safeErrorMessage(error)}` }
-      } finally {
-        settleFork()
-        // If the fork committed, its source retirement owns the pin (released
-        // when that retirement finishes); otherwise the source was never
-        // detached and is immediately reopenable.
-        if (!pin.state.retirementOwnsRelease) pin.release()
-      }
-    }
 
     // Abort handle for the currently running `!` shell command.
     let localShellController: AbortController | undefined
@@ -9361,7 +9287,7 @@ export function apply(ctx: Context, config: Config): void {
           const candidate = candidates.find(item => String(item.turnStartSeq) === value)
           if (candidate === undefined) return
           let adopted = false
-          runOwned('conversation rewind', () => forkSession(
+          runOwned('conversation rewind', () => sessionRuntime.forkSession(
             sourceId,
             candidate.forkAtSeq,
             () => {
@@ -9532,7 +9458,7 @@ export function apply(ctx: Context, config: Config): void {
           : refresh(request)
       },
       switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
-      forkSession,
+      forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
       transitionTo: (steps) => sessionRuntime.transitionTo(steps),
       currentPreset,
       sessionBlank,

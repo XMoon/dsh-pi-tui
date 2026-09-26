@@ -83,8 +83,8 @@ test('currentness identity comes from the ownership core, never from the Direct 
   assert.ok(forkFence.includes('isRewindIdentityCurrent(core.captureNavigationIdentity(), expected)'),
     'the fork navigation fence captures through the core')
   assert.ok(!forkFence.includes('agentNow('), 'the fork navigation fence must not read the Direct attachment')
-  const forkAdmission = span('// newer navigation. Validate that capture', 'const pickerCurrent = ')
-  assert.ok(forkAdmission.includes('const before = ownership.captureNavigationIdentity()'),
+  const forkAdmission = spanOf(sessionRuntimeSource, 'const forkSession = async (', 'const pin = core.beginForkSourcePin(')
+  assert.ok(forkAdmission.includes('const before = core.captureNavigationIdentity()'),
     'fork admission captures the navigation identity through the core')
   assert.ok(!forkAdmission.includes('agentNow('), 'fork admission must not read the Direct attachment')
 
