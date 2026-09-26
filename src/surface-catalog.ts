@@ -10,9 +10,12 @@
  * BODIES never enter a snapshot, and nothing here holds an Agent, a service,
  * or a provider. Execution always re-binds to the live agent later.
  *
- * The module also owns the pre-mount catalog RESOLUTION
+ * The module also owns the pre-mount catalog RESOLUTION implementation
  * (`resolveInitialCatalog`): the resume prefetch or the cold standing-scope
- * skill read, with their one-shot degradation notices.
+ * skill read, with their one-shot degradation notices. Its options are
+ * STRUCTURAL here (`SurfaceCatalogResolutionOptions`); the published
+ * `ResolveInitialCatalogOptions` (which keeps the Host `Agent` type for
+ * compatibility) is declared in `src/index.ts`, which delegates.
  * @module @xmoon76/dsh-pi-tui/surface-catalog
  */
 
@@ -244,8 +247,14 @@ export interface InitialCatalogResolution {
   readonly notice?: string
 }
 
-/** Options for {@link resolveInitialCatalog}. */
-export interface ResolveInitialCatalogOptions {
+/**
+ * The STRUCTURAL resolution options the implementation consumes. The PUBLISHED
+ * `ResolveInitialCatalogOptions` (which declares `liveAgent?: Agent`) is the
+ * package entry's declaration; `src/index.ts` delegates here with the same
+ * object, so this presentation module never imports a Host type (A5a review P1:
+ * the public property shape must not change).
+ */
+export interface SurfaceCatalogResolutionOptions {
   /** The resumed live agent, if any (prefetch path). */
   readonly liveAgent?: SurfaceCatalogAgent
   /** The effective preset id for the cold standing read (undefined = the
@@ -285,10 +294,10 @@ export interface ResolveInitialCatalogOptions {
  *   Agent, never a startup failure;
  * - an ordinary provider read failure never rejects here: it becomes an
  *   empty field + detached issue inside the catalog.
- * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
+ * @param options - injected dependencies (see {@link SurfaceCatalogResolutionOptions}).
  * @returns the snapshot / skill catalog to install and an optional notice.
  */
-export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
+export async function resolveInitialCatalog(options: SurfaceCatalogResolutionOptions): Promise<InitialCatalogResolution> {
   const { liveAgent, presetId, signal, ctx, diag, onLog } = options
   if (liveAgent !== undefined) {
     try {

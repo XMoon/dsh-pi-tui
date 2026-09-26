@@ -29,6 +29,11 @@ import { type ProgressUpdatesState, type ResponseStyleState } from './communicat
 import { type DisplayState } from './display-preset.ts'
 
 import { type Diag } from './diag.ts'
+import {
+  resolveInitialCatalog as resolveInitialCatalogImpl,
+  type InitialCatalogResolution,
+  type SurfaceCatalogContext,
+} from './surface-catalog.ts'
 import { applyRunner } from './app/bootstrap.ts'
 import { composeDirectAgent, recordedDirectPreset } from './app/direct/composition.ts'
 
@@ -47,7 +52,48 @@ export { Config } from './tui-config.ts'
 export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from './command-policy.ts'
 export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './interrupt.ts'
 export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
-export { resolveInitialCatalog, type InitialCatalogResolution, type ResolveInitialCatalogOptions } from './surface-catalog.ts'
+export type { InitialCatalogResolution } from './surface-catalog.ts'
+
+/**
+ * Options for {@link resolveInitialCatalog}.
+ *
+ * The public declaration stays here (A5a review P1): `liveAgent` keeps the Host
+ * `Agent` type it has always had, so consumers that READ the property keep
+ * compiling. The implementation consumes the structural
+ * `SurfaceCatalogResolutionOptions` in `surface-catalog.ts`.
+ */
+export interface ResolveInitialCatalogOptions {
+  /** The resumed live agent, if any (prefetch path). */
+  readonly liveAgent?: Agent
+  /** The effective preset id for the cold standing read (undefined = the
+   * deployment default; only consulted for the deferred start). */
+  readonly presetId?: string
+  readonly signal: AbortSignal
+  /** The context surface the collectors read services from. */
+  readonly ctx: SurfaceCatalogContext
+  readonly diag: Diag
+  /** Suspend the pre-mount startup status before an ordinary log write
+   * (the status owns the current terminal line; a TTY shares one cursor
+   * between stdout and stderr). Called right before every diag.warn this
+   * function may emit. */
+  readonly onLog?: () => void
+}
+
+/**
+ * The pre-mount surface catalog resolution (plan §27): the published entry for
+ * {@link ResolveInitialCatalogOptions}. An explicit `--session` start
+ * prefetches the resumed agent's effective catalog; the deferred start reads the
+ * cold HUMAN SKILL catalog through the preset's STANDING SCOPE — no Agent, no
+ * session, no turn — so the first input sees human-invocable skills without any
+ * durable side effect. The implementation and its failure taxonomy live in
+ * `surface-catalog.ts`.
+ * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
+ * @returns the snapshot / skill catalog to install and an optional notice.
+ */
+export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
+  return resolveInitialCatalogImpl(options)
+}
+
 export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './task-presentation.ts'
 export { foldQueueRows, type QueueFoldResult, type QueueInboxMessage } from './pending-presentation.ts'
 export { compactingFromLog } from './compaction-presentation.ts'

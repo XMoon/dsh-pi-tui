@@ -165,8 +165,11 @@ vim, examples, composeAgent). So in one pass never also run `typecheck:bundle`,
 running. `pnpm test` already contains `test:fork` + `test:product` +
 `test:tooling` + `test:docs`; prefer it over the individual pieces. What a
 stage-final pass still needs ON TOP of `verify:prepush`: the migration contract
-smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, and
-`git diff --check` (unstaged and staged).
+smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, the
+published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
+— `verify:prepush` does NOT contain them), `git diff --check` (unstaged and
+staged), plus whatever stage-specific validation the authority plan for the
+current stage requires (e.g. the Pre-M3 plan's §35.5/§35.6 matrix).
 
 Validation mechanics for this toolchain:
 
