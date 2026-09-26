@@ -1556,7 +1556,7 @@ TypeScript restructure. It is structural only:
   `liveAgent`/`viewedQueueAgent` state and passes live getters, and in A1 still
   supplies the concrete Host lookups (`agents.get`/`sessions.get`) for the
   resolver callbacks. Those lookups belong to `app/direct`'s Direct composition
-  seam (A5 moves them behind it). `src/app/bootstrap.ts` is the application
+  seam (A5-3 moved them behind it). `src/app/bootstrap.ts` is the application
   composition root (A5-2): it resolves the Host services the owners are built
   from and connects them (plan §23/§26), while every Direct-only fact stays
   behind `app/direct`. No second current-session truth exists.

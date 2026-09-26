@@ -31,7 +31,10 @@
     "import:dsh-agent"
   ],
   "app/direct/runtime.ts": [
-    "import:dsh-agent"
+    "agents",
+    "import:dsh-agent",
+    "sessions",
+    "subagents"
   ],
   "commands.ts": [
     "import:dsh-agent",

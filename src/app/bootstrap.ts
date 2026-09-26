@@ -517,25 +517,11 @@ export function applyRunner(ctx: Context, config: Config): void {
       waitForRelease: ownership.waitForOwnerRelease,
       currentOwner: () => ownership.owner(),
       isLifecycleAborted: () => lifecycleController.signal.aborted,
-      // The runner supplies the Host operations the Direct retirement needs;
-      // the Direct layer never reaches for the Host service itself.
-      drainContinuableDescendants: async (agent) => {
-        const subagents = ctx.get('subagents') as {
-          drainContinuableDescendants?(parents: readonly unknown[]): Promise<void>
-        } | undefined
-        await subagents?.drainContinuableDescendants?.([agent])
-      },
       // Behavior preserved: the same `composeDirectAgent` wiring, now with the
       // runtime's Agent-scoped model-selection install.
       compose: (installSelection, presetId) =>
         composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState),
       getViewedQueueAgent: () => viewedQueueAgent,
-      registeredAgentFor: sessionId => agents.get(SessionId(sessionId)),
-      resolvers: {
-        sessionOf: sessionId => sessions.get(SessionId(sessionId)),
-        agentOf: sessionId => agents.get(SessionId(sessionId)),
-        flushSession: async session => { await sessions.flush(session as never) },
-      },
     })
     /**
      * The Direct attachment of the CURRENT owner (A2 transitional projection):
