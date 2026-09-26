@@ -39,6 +39,7 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   { rel: 'src/app/surface/session-presentation.ts', role: 'owner' },
   { rel: 'src/app/surface/viewer-runtime.ts', role: 'owner' },
   // A5b-2: status/settings/history/client state.
+  { rel: 'src/app/surface/status-runtime.ts', role: 'owner' },
   // A5b-3: command authority/registration/catalog.
   // A5b-4: submission/input + local shell.
   // A5b-5: TuiApp application events.

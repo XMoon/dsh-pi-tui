@@ -35,7 +35,7 @@ import type {} from '@deepseek-ai/dsh-tool-todo'
 import { selectBlankSessionPreset, sessionPresetOf } from '../runtime/direct/session-preset-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui-settings-direct.ts'
 import type { DefaultModelServiceLike } from '../runtime/direct/model-selection-direct.ts'
-import { rawSelectionFromRequestHeader, sameModelSelection } from '../model-selection.ts'
+import { rawSelectionFromRequestHeader, sameModelSelection, type ModelSelectionValue } from '../model-selection.ts'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -59,6 +59,7 @@ import type {} from '@deepseek-ai/dsh-shell'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
+import { createStatusRuntime } from './surface/status-runtime.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
@@ -72,14 +73,9 @@ import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, ty
 import { isDisplayPresetAvailable, isFocusDisplayPreset, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
-import { computeStats, formatStats } from '../stats.ts'
+import { computeStats } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
-import { plainSectionEqual } from '../status/equal.ts'
-import { deriveRunnerPermission } from '../status/derive-permission.ts'
-import { deriveAccessStatus } from '../status/derive-access.ts'
-import { derivePlanStatus, projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
-import { usageFromStats } from '../status/derive-usage.ts'
-import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from '../status/context-measurement.ts'
+import { projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from '../status/types.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from '../footer/layout.ts'
@@ -99,7 +95,6 @@ import { normalizePersistedTheme, resolveThemeSelection } from '../theme-source.
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from '../detached.ts'
 import { historyFilePath, loadHistoryFile, loadHistoryRecords } from '../history.ts'
-import { terminalTitleOf } from '../terminal-title.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../history-persist.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
@@ -158,10 +153,7 @@ import { viewerActionCapability } from '../subagent-viewer.ts'
 import { resolveInitialCatalog } from '../surface-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
 import { queueInboxMessageOf, queueTextOf } from '../pending-presentation.ts'
-import { bundleVersion, packageVersion, versionDisplay } from '../dsh-version.ts'
-import { setTerminalTitle } from '../terminal-title.ts'
-import { gitBranch } from '../git-branch.ts'
-import { foldGoal } from '../status/derive-goal.ts'
+import { bundleVersion, packageVersion } from '../dsh-version.ts'
 import { compactingFromLog, workingFromLog } from '../compaction-presentation.ts'
 import { hostRunningProfile, resumeCommand } from '../dsh-profile.ts'
 
@@ -957,15 +949,15 @@ export function applyRunner(ctx: Context, config: Config): void {
         ) ?? false,
       },
       status: {
-        setGoalText: (text) => { goalText = text },
-        refresh: () => refreshStatusCheap(),
-        refreshTerminalTitle: () => refreshTerminalTitle(),
-        updateWelcomeCard: () => updateWelcomeCard(),
-        scheduleInitialMeasurement: (agent) => scheduleInitialContextMeasure(agent as Agent),
+        setGoalText: (text) => status.setGoal(text),
+        refresh: () => status.refresh(),
+        refreshTerminalTitle: () => status.refreshTerminalTitle(),
+        updateWelcomeCard: () => status.updateWelcomeCard(),
+        scheduleInitialMeasurement: (agent) => status.scheduleInitialMeasurement(agent.session.id),
       },
       history: {
         rememberCwd: (cwd) => rememberHistoryCwd(cwd),
-        currentCwd: () => sessionCwd(),
+        currentCwd: () => status.sessionCwd(),
         records: (cwd) => loadHistoryRecords(historyFilePath(dshHome(process.env), cwd)),
         setLastContent: (content) => { lastHistoryContent = content },
       },
@@ -976,35 +968,6 @@ export function applyRunner(ctx: Context, config: Config): void {
         teardownForSessionSwap: () => viewerRef?.teardownForSessionSwap(),
       },
     })
-    /**
-     * The opening-session JOURNAL (A2 seam; the concrete state is A4 surface
-     * ownership — `surface.openingJournal`). Presentation-only: it fences which
-     * pre-commit events belong to the target being opened, and `initLiveSession`
-     * merges its cut into the cold hydration. The mutable event array stays
-     * PRIVATE behind the surface module's API; callers only ever hold the opaque
-     * identity token, and read events through `cut`.
-     */
-     let goalText: string | undefined
-
-    /** Repaint the welcome card from the live agent's current facts. Re-read
-     * on every call so a still-blank session's preset switch shows up. */
-    const updateWelcomeCard = (): void => {
-      const agent = agentNow()
-      if (agent === undefined) {
-        app.setWelcomeIdle(true)
-        return
-      }
-      const current = selected.current
-      const provider = current?.provider ?? agent.options.provider
-      const model = current?.model ?? agent.options.model
-      app.setWelcomeCard({
-        cwd: sessionCwd(),
-        sessionId: agent.session.id,
-        model: `${provider}/${model}`,
-        version: versionDisplay(),
-        ...currentPreset() === undefined ? {} : { preset: currentPreset() },
-      })
-    }
 
     /** The transition gate protects ordinary session surface changes — `/new`,
      * `/sessions` switch/open and first-session creation — from interleaving.
@@ -1038,32 +1001,35 @@ export function applyRunner(ctx: Context, config: Config): void {
     // Footer state: model label, cwd, git branch, turn/step counters, and
     // the stats line (LLM timing, tokens, context pressure).
     const cwd = process.cwd()
-    /**
-     * The LIVE session's workspace: each session carries its own header cwd
-     * (fixed at creation, e.g. a session birthed by the web in another
-     * directory). The footer/welcome/completions AND `!`/`!!` shell runs
-     * follow THIS cwd, so a session switch moves the whole surface with the
-     * session (pi parity: `executeBash` runs in the session cwd) and a
-     * shell command executes where the completions suggest files; `cwd`
-     * (the process cwd) stays for launch-relative concerns (/export paths).
-     */
-    const sessionCwd = (): string => agentNow()?.session.header.cwd ?? cwd
-    /**
-     * Derive + write the terminal window title from the CURRENT surface
-     * identity (the title policy in terminal-title.ts): session
-     * presentation title first, the session (or launch) short cwd as the
-     * fallback — never the full session UUID / model / preset. Called at
-     * every identity change: fresh startup, session create/resume/switch,
-     * and session/title events (the session title event lands in the
-     * header through setSessionTitle; the OSC title follows).
-     */
-    const refreshTerminalTitle = (): void => {
-      const title = terminalTitleOf({
-        sessionTitle: app.getSessionTitle(),
-        cwd: sessionCwd(),
-      })
-      setTerminalTitle(title)
-    }
+    // A5b-2: the surface status owner (footer/status derivation, the context
+    // measurement cache and its deferred initial measure). The Direct facts and
+    // the official Host service values arrive as narrow capabilities; the
+    // viewer owner is late-bound (it is constructed after the presentation).
+    const status = createStatusRuntime({
+      surface,
+      isCleanedUp: () => cleanedUp,
+      liveAgent: () => agentNow(),
+      generation: () => ownership.generation(),
+      currentSessionId: () => ownership.currentSessionId(),
+      measureContext: (sessionId) => backend.sessionReader.measureContext(sessionId),
+      model: {
+        selection: () => selected.current,
+        currentOf: (agent) => directRuntime.modelSelections.current(agent as Agent),
+        defaultSelection: () => defaultModel.currentSelection() as ModelSelectionValue | undefined,
+        marker: () => currentModelSelectionMarker(),
+        preset: () => currentPreset(),
+      },
+      host: () => ({
+        permissionPresets: ctx.get('permissionPresets'),
+        sandboxPolicy: ctx.get('sandboxPolicy'),
+        approval: ctx.get('approval'),
+        planMode: ctx.get('planMode'),
+        sessionProjections: ctx.get('sessionProjections'),
+      }),
+      presentation: { mainStats: () => presentation.mainStats() },
+      viewer: { read: () => viewerRef?.read() },
+      clientCwd: cwd,
+    })
     /**
      * Every cwd this process has EVER known (launch cwd + every live
      * session's header cwd, accumulated across creates/resumes/swaps).
@@ -1094,263 +1060,13 @@ export function applyRunner(ctx: Context, config: Config): void {
         map.set(hash, dir)
       }
       for (const dir of knownHistoryCwdSet) seed(dir)
-      seed(sessionCwd())
+      seed(status.sessionCwd())
       return map
     }
-    /** The footer model label: the live selection (with effort) when one exists,
-     *  plus the in-flight selection while a semantic write settles. The
-     *  authoritative current value stays visible; the pending one is explicit
-     *  and never painted as committed. */
-    const modelLabel = (): string => {
-      const labelOf = (selection: ModelSelection): string => selection.reasoningEffort === undefined
-        ? `${selection.provider}/${selection.model}`
-        : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
-      // The base is the AUTHORITATIVE current selection: for a sessionless
-      // surface that is the persisted Host default, NOT the optimistic intent
-      // (which is shown only by the marker below). Otherwise a pending
-      // sessionless save would paint m1 as both base and pending.
-      const agent = agentNow()
-      const selection = agent === undefined
-        ? (defaultModel.currentSelection() as ModelSelection | undefined)
-        : directRuntime.modelSelections.current(agent)
-      const base = selection !== undefined
-        ? labelOf(selection)
-        : agent === undefined ? 'no model' : `${agent.options.provider}/${agent.options.model}`
-      const marker = currentModelSelectionMarker()
-      if (marker === undefined) return base
-      const pendingLabel = labelOf(marker.selection)
-      // An ambiguous write keeps an EXPLICIT unresolved marker until a Host
-      // read/reconnect establishes truth (v2 §0.3.2) — never "committed".
-      if (marker.status === 'unresolved') {
-        return pendingLabel === base ? `${base} (unconfirmed)` : `${base} → ${pendingLabel} (unconfirmed)`
-      }
-      // A sessionless intent is also the optimistic base, so avoid the
-      // redundant `m1 → m1`; still mark it as in flight.
-      return pendingLabel === base ? `${base} (selecting…)` : `${base} → ${pendingLabel} (selecting…)`
-    }
-    /** M0: the composition section (how the agent is composed — NOT
-     * permission, NOT plan). */
-    const deriveCompositionStatus = (): CompositionStatus => {
-      const selection = selected.current
-      const agent = agentNow()
-      const model = selection !== undefined
-        ? {
-            provider: selection.provider,
-            id: selection.model,
-            displayName: selection.model,
-            ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
-          }
-        : agent === undefined || agent.options.provider === undefined || agent.options.model === undefined
-          ? undefined
-          : {
-              provider: agent.options.provider,
-              id: agent.options.model,
-              displayName: agent.options.model,
-            }
-      const preset = currentPreset()
-      return {
-        ...model === undefined ? {} : { model },
-        ...preset === undefined ? {} : { agentPreset: { id: preset, label: preset } },
-      }
-    }
-    /** M0: the workspace section (cwd/project/branch — project and cwd are
-     * deliberately separate facts). */
-    const deriveWorkspaceStatus = (cwd: string): WorkspaceStatus => {
-      const parts = cwd.split('/').filter(Boolean)
-      return {
-        cwd,
-        ...parts.length === 0 ? {} : { project: parts[parts.length - 1]! },
-        ...gitBranch(cwd) === '' ? {} : { branch: gitBranch(cwd) },
-      }
-    }
-    /** M0: the host section (dsh + bundle versions). tuiVersion is the
-     * BUNDLE's own version (bundleVersion), never the dsh version — the
-     * welcome-card helper prefers dsh for display, which would show the
-     * harness version under `version(format=tui)` (review finding). */
-    const deriveHostStatus = (): HostStatus => ({
-      ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
-      tuiVersion: bundleVersion(),
-    })
-    // PR D2: the session-bound context-measurement cache. The coordinator
-    // owns the value/dirty/session identity; the runner owns the event
-    // classification (which events mark dirty, which only repaint cheaply).
-    const contextMeasurement = new ContextMeasurementCoordinator()
-    const markContextDirty = (): void => { contextMeasurement.markDirty() }
 
     // Surface lifetime fence: every callback below can outlive the TUI
     // surface, so the guard is initialized before any refresh callback exists.
     let cleanedUp = false
-    // PR D2: the cheap status refresh NEVER measures context. UI-only
-    // events (theme, keybinding, permission, focus, resize, search,
-    // credential/llm surface changes, …) read the CACHED measurement; the
-    // only measuring path is refreshContextMeasurement below, driven by
-    // model-visible lifecycle events through the semantic SessionReader
-    // port (never a direct ctx.get('tokenMeter') read — the Direct adapter
-    // owns that coupling).
-    const refreshStatusCheap = (): void => {
-      if (cleanedUp) return
-      const stats = presentation.mainStats().snapshot()
-      // The CACHED context pressure of the live session (the only measured
-      // subject — never a fresh measurement here). While the subagent
-      // viewer is open, the usage PROJECTION below still refuses to ride
-      // the parent's measurement on the child's stats (same rule as before
-      // the split); the legacy setStatus field keeps carrying the parent's
-      // cached value exactly like the old path.
-      const contextTokens = contextMeasurement.valueFor(agentNow()?.session.id)
-      // The footer's [yolo]/[workspace-write]/[read-only]/[custom] mode badge
-      // rides the effective preset (derived from the sandbox+approval knob
-      // folds).
-      const permission = ctx.get('permissionPresets')
-      const liveCwd = sessionCwd()
-      // M0: project the DSH-derived facts into the unified status store
-      // FIRST — the footer paints the store (setStatus below repaints it),
-      // so the derived sections must be committed before the paint or the
-      // footer always shows the previous cycle's facts. The DISPLAY
-      // SUBJECT's facts feed the sections — while the subagent viewer is
-      // open that is the viewed child's own fold and workspace, so the
-      // footer layout never changes, only the data source.
-      const displaySubject = viewer.read()
-      const displayCwd = displaySubject?.cwd ?? liveCwd
-      // While the subagent viewer is open the DISPLAY SUBJECT is the
-      // viewed CHILD: the parent's session-owned sections (composition/
-      // access/plan) are NOT the child's — the child's are not derivable
-      // here, so the sections are cleared (unavailable) instead of leaking
-      // the parent's facts into the snapshot the footer items, extension
-      // items and the command status surface read. The child's OWN facts
-      // (workspace/usage) follow the display subject below; the parent
-      // context measurement must not ride the child's usage either.
-      // The derivations mint fresh objects every call: only sections whose
-      // CONTENT actually changed are committed — an identical refresh must
-      // not churn the store's revision (the store compares by identity) nor
-      // wake the command runner's refresh on every streaming event.
-      const current = surface.status.snapshot()
-      const composition = displaySubject === undefined ? deriveCompositionStatus() : {}
-      const access = displaySubject === undefined
-        ? deriveAccessStatus(
-            {
-              permissionPresets: permission,
-              sandboxPolicy: ctx.get('sandboxPolicy'),
-              approval: ctx.get('approval'),
-            },
-            agentNow()?.session,
-          )
-        : {}
-      const collaboration = displaySubject === undefined
-        ? { plan: derivePlanStatus(ctx.get('planMode'), agentNow(), ctx.get('sessionProjections'), agentNow()?.session) }
-        : { plan: { effective: false } }
-      const workspace = deriveWorkspaceStatus(displayCwd)
-      const usage = usageFromStats(displaySubject?.stats.snapshot() ?? stats, displaySubject === undefined ? contextTokens : undefined)
-      const host = deriveHostStatus()
-      const patch: {
-        composition?: typeof composition
-        access?: typeof access
-        collaboration?: typeof collaboration
-        workspace?: typeof workspace
-        usage?: typeof usage
-        host?: typeof host
-      } = {}
-      if (!plainSectionEqual(current.composition, composition)) patch.composition = composition
-      if (!plainSectionEqual(current.access, access)) patch.access = access
-      if (!plainSectionEqual(current.collaboration, collaboration)) patch.collaboration = collaboration
-      if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
-      if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
-      if (!plainSectionEqual(current.host, host)) patch.host = host
-      // A4-4 (plan §13.1): the semantic derivation stays here; the surface
-      // owns the commit coordination (`status.update` then `setStatus`).
-      surface.commitStatus(patch, {
-        model: modelLabel(),
-        // The FULL cwd lands in the structured workspace section (the
-        // footer cwd ITEM shortens for display itself); the legacy
-        // display value (tail segments) is derived from it.
-        cwd: liveCwd,
-        branch: gitBranch(liveCwd),
-        goal: goalText,
-        turns: stats.turns,
-        steps: stats.steps,
-        statsLine: formatStats(stats),
-        // EXPLICITLY clear the permission when the service/agent is
-        // unavailable: the legacy merge keeps the old value otherwise,
-        // and syncExtensionState would publish a STALE permission to the
-        // extension snapshot (a state transition where the permission
-        // preset service or the live agent is momentarily gone).
-        permission: deriveRunnerPermission(permission, agentNow()),
-        // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
-        // TuiApp merge keeps old fields otherwise, and the session
-        // switch / cold-resume window before the deferred measurement
-        // would show the PREVIOUS session's context pressure — exactly the
-        // permission policy above (P1 finding: the previous conditional
-        // spread skipped the fields, leaving session A's measurement on
-        // session B's first frames, indefinitely when B's measurement
-        // fails).
-        contextTokens,
-        contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
-      })
-    }
-
-    // PR D2: the explicit, event-driven context measurement path. Call
-    // sites FIRST mark the cache dirty (markContextDirty — only
-    // model-visible lifecycle events may), then this function measures
-    // through the semantic SessionReader port and repaints cheaply. A
-    // clean cache skips the reader (same-sync-chain dedupe); a failed or
-    // unavailable measurement keeps the last-good value and the footer
-    // falls back — never a dialog, never a stale foreign session value
-    // (the coordinator is session-bound).
-    const refreshContextMeasurement = (_reason: ContextMeasureReason): void => {
-      const session = agentNow()?.session
-      if (session === undefined) return
-      contextMeasurement.bind(session.id)
-      contextMeasurement.measure(session.id, (id) => backend.sessionReader.measureContext(id))
-      refreshStatusCheap()
-    }
-
-    // The /status explicit force: a user asking for status expects the
-    // FRESH context (plan §15.1 — explicit-status may force). Measures now
-    // through the coordinator so the panel AND the cached footer value
-    // agree (round-8 finding: a direct sessionReader read from the command
-    // surface bypassed the cache and could duplicate the deferred initial
-    // measurement).
-    const forceContextMeasurement = (): number | undefined => {
-      const session = agentNow()?.session
-      if (session === undefined) return undefined
-      contextMeasurement.bind(session.id)
-      contextMeasurement.markDirty()
-      const value = contextMeasurement.measure(session.id, (id) => backend.sessionReader.measureContext(id))
-      refreshStatusCheap()
-      return value
-    }
-
-    // The initial/post-switch measurement is deferred one event-loop turn
-    // past the first usable paint: cold resume must never block the first
-    // frame on a long-session context scan (plan §16.2 — setImmediate, not
-    // a microtask). The fence captures the session generation + id: a
-    // switch,/new, viewer swap or dispose before the callback runs makes it
-    // a no-op (a stale deferred measurement can never commit).
-    let cancelDeferredContextMeasure: (() => void) | undefined
-    const scheduleInitialContextMeasure = (agent: Agent): void => {
-      const generation = ownership.generation()
-      const sessionId = agent.session.id
-      cancelDeferredContextMeasure?.()
-      cancelDeferredContextMeasure = deferInitialContextMeasure(
-        (callback) => setImmediate(callback),
-        () => generation === ownership.generation() && ownership.currentSessionId() === sessionId,
-        () => {
-          // Bind the captured session BEFORE the dirty guard: on a cold
-          // resume the coordinator is still UNBOUND (reads as not dirty),
-          // and on a switch it is still bound to the PREVIOUS session —
-          // guarding before the bind would turn the deferred initial
-          // measure into a permanent no-op (round-10 finding). Binding a
-          // new identity clears the old value and arms a fresh measure;
-          // binding the same session is a no-op, so an earlier successful
-          // force/lifecycle measurement (dirty cleared) still makes this
-          // deferral redundant (round-9 finding), while a FAILED earlier
-          // attempt (dirty stays) is retried here.
-          contextMeasurement.bind(sessionId)
-          if (!contextMeasurement.isDirty()) return
-          markContextDirty()
-          refreshContextMeasurement('initial')
-        },
-      )
-    }
 
     let app: TuiApp
     // The extension service + surface host (M3 wiring); declared here so
@@ -1557,8 +1273,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       surface.disposePluginManager()
       // PR D2: cancel the deferred initial context measure — a stale
       // callback must never measure/repaint into the disposed surface.
-      cancelDeferredContextMeasure?.()
-      cancelDeferredContextMeasure = undefined
+      status.cancelDeferred()
       // M5: release the footer command surface BEFORE the app dies — a
       // late status-store notification must not refresh into a disposed
       // surface. The lifecycle abort above already disposes an armed
@@ -1802,7 +1517,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         // failed run (plan D exit enumeration).
         let spec: ReturnType<typeof shell.resolve>
         try {
-          spec = shell.resolve({ command, workdir: sessionCwd(), signal: localSignal })
+          spec = shell.resolve({ command, workdir: status.sessionCwd(), signal: localSignal })
         } catch (error) {
           releaseController()
           settle(`failed: ${safeErrorMessage(error)}`, 'error')
@@ -1873,7 +1588,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // (plan D exit enumeration).
       let child: ReturnType<typeof spawn>
       try {
-        child = spawn(command, { cwd: sessionCwd(), stdio: ['ignore', 'pipe', 'pipe'], shell: true })
+        child = spawn(command, { cwd: status.sessionCwd(), stdio: ['ignore', 'pipe', 'pipe'], shell: true })
       } catch (error) {
         releaseController()
         settle(`failed: ${safeErrorMessage(error)}`, 'error')
@@ -2039,7 +1754,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       childAgent: (childId) => agents.get(SessionId(childId)),
       assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
       publishQueueAuthority: (authority) => { viewedQueueAgent = authority },
-      refreshStatus: () => refreshStatusCheap(),
+      refreshStatus: () => status.refresh(),
       restoreMainTranscriptAnchor: () => presentation.restoreMainTranscriptAnchor(),
     })
     viewerRef = viewer
@@ -2361,7 +2076,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // Send-time `@`-file canonicalization through the Host-file port
       // (migration M1.10): the live session's workspace is the scope.
       canonicalizeMentions: (text) => backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: agentNow()?.session.id ?? '' }, text),
-      sessionCwd: () => sessionCwd(),
+      sessionCwd: () => status.sessionCwd(),
       currentModel: () => {
         // The AUTHORITATIVE model for the next step is the mutable
         // selection's `current` (/model writes it; prompt assembly reads
@@ -3103,7 +2818,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       const historyHasAttachments = draftHasAttachments(text, draftImages, draftFiles)
       return (sessionId: string | undefined): void => {
         if (trimmed === '' || trimmed === lastHistoryContent || historyHasAttachments) return
-        const historyCwd = sessionCwd()
+        const historyCwd = status.sessionCwd()
         const file = historyFilePath(dshHome(process.env), historyCwd)
         runDetached('input history write', () => {
           const written = persistHistoryRecord({
@@ -3216,7 +2931,7 @@ export function applyRunner(ctx: Context, config: Config): void {
        * with the file hash.
        */
       const persistHistory = (sessionId: string | undefined): void => {
-        const historyCwd = sessionCwd()
+        const historyCwd = status.sessionCwd()
         const file = historyFilePath(dshHome(process.env), historyCwd)
         runDetached('input history write', () => {
           const written = persistHistoryRecord({
@@ -3719,7 +3434,7 @@ export function applyRunner(ctx: Context, config: Config): void {
               ? `⚠ ${next} — no approvals`
               : `permission: ${next}`,
             next === 'danger-full-access' ? 'error' : 'info')
-            refreshStatusCheap()
+            status.refresh()
             break
           }
         }
@@ -3749,7 +3464,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // refreshes the OSC title immediately.
       onTitleChanged: () => {
         if (cleanedUp) return
-        refreshTerminalTitle()
+        status.refreshTerminalTitle()
       },
       // Terminal focus reports (CSI ? 1004): the completion-notification
       // focus tracker observes them. The report is consumed host-side in
@@ -3878,7 +3593,7 @@ export function applyRunner(ctx: Context, config: Config): void {
           ? `⚠ ${next} — no approvals`
           : `permission: ${next}`,
         next === 'danger-full-access' ? 'error' : 'info')
-        refreshStatusCheap()
+        status.refresh()
       },
       // Alt+↑: on the main surface, run the TUI-only recall-all extension:
       // remove every semantic `queued` occurrence and pull its content back
@@ -4137,7 +3852,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
       },
       present,
-      sessionCwd: () => sessionCwd(),
+      sessionCwd: () => status.sessionCwd(),
       // The session scope's identity — a GETTER like the cwd: a session switch
       // must make the next Ctrl+R search the NEW session (the panel captures it
       // once at open time).
@@ -4537,7 +4252,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // File order is oldest-first; TuiApp's recall API takes newest-first.
     app.resetInputHistory([...bootHistoryEntries].reverse())
     // Fresh/deferred startup title: no session yet — cwd identity only.
-    refreshTerminalTitle()
+    status.refreshTerminalTitle()
     surface.attachEventRouting({
       isCleanedUp: () => cleanedUp,
       isAttachedSession: (session) => {
@@ -4620,18 +4335,18 @@ export function applyRunner(ctx: Context, config: Config): void {
       submissionEchoes: (sessionId) => submissionPresentation.snapshot(sessionId),
       queueTextOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
       exitView: () => { viewer.exitView() },
-      refreshStatusCheap: () => refreshStatusCheap(),
+      refreshStatusCheap: () => status.refresh(),
       refreshStatusAndWelcome: () => {
-        refreshStatusCheap()
-        updateWelcomeCard()
+        status.refresh()
+        status.updateWelcomeCard()
       },
-      applyGoalChange: (event) => { goalText = foldGoal([event]) },
+      applyGoalChange: (event) => status.applyGoalChange(event),
       sessionTitleOf: (event) => foldSessionTitle([event])?.title,
       settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
       markSubmitLatency: (sessionId, phase) => { submitLatencyTracker.mark(sessionId, phase) },
       observeDurableSubmission: (rpcId) => pendingSubmissions.observeDurable(rpcId),
-      markContextDirty: () => markContextDirty(),
-      refreshContextMeasurement: (reason) => refreshContextMeasurement(reason),
+      markContextDirty: () => status.markContextDirty(),
+      refreshContextMeasurement: (reason) => status.refreshContextMeasurement(reason),
       // Bound late: these helpers are declared AFTER the startup calls that
       // read the routing source (they only run from the live event firehose).
       currentWorkingFromLog: () => currentWorkingFromLog(),
@@ -4844,7 +4559,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // `unchanged` still means the canonical preset was accepted; it must
       // continue through persistence so a failed migration write can be
       // retried while the runtime is already on that preset.
-      if (result.kind === 'applied') refreshStatusCheap()
+      if (result.kind === 'applied') status.refresh()
       const settings = tuiSettings
       if (settingsForms !== undefined) {
         runDetached('settings display preset write', () => serializeTuiSettingsMutation(
@@ -5097,7 +4812,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // Panel and footer share ONE cached measurement: no duplicate reads
       // against the coordinator's cache, no stale footer after an explicit
       // status (round-8 finding).
-      forceContextMeasurement,
+      forceContextMeasurement: () => status.forceContextMeasurement(),
       // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
       // delivery, exact queue removal, cancel and title ops go through the port.
       sessionWriter: backend.sessionWriter,
@@ -5154,7 +4869,7 @@ export function applyRunner(ctx: Context, config: Config): void {
        * process cwd before any session exists; the footer/welcome/
        * completions/history follow it so a session switch updates the
        * whole surface. */
-      sessionCwd,
+      sessionCwd: () => status.sessionCwd(),
       signal,
       progressUpdatesState,
       responseStyleState,
@@ -5199,8 +4914,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       // PR D2: the command surface's generic refresh is UI-only (a
       // measurement-triggering command uses refreshContextMeasurement or
       // the /status port call directly).
-      refreshStatus: refreshStatusCheap,
-      updateWelcomeCard,
+      refreshStatus: () => status.refresh(),
+      updateWelcomeCard: () => status.updateWelcomeCard(),
       openJobView: (jobId) => surface.openJobView(jobId),
       // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
       // it opens the FULL browser explicitly.
@@ -5347,8 +5062,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       await presentation.initLiveSession(startupAgent)
     } else {
       app.setWelcomeIdle(true)
-      refreshStatusCheap()
-      refreshTerminalTitle()
+      status.refresh()
+      status.refreshTerminalTitle()
     }
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred

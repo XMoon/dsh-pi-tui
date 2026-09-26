@@ -70,7 +70,6 @@ const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = [
   { name: 'applyFooterSettings', slice: 'A5b-2', owner: 'app/surface/settings-runtime' },
   { name: 'registerCommands', slice: 'A5b-3', owner: 'app/command/surface' },
   { name: 'openRewindPicker', slice: 'A5b-5', owner: 'app/surface/application-events' },
-  { name: 'refreshStatusCheap', slice: 'A5b-2', owner: 'app/surface/status-runtime' },
   { name: 'runner', slice: 'A5b-3', owner: 'app/command/surface' },
 ]
 
@@ -158,6 +157,15 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     ],
   ],
   [
+    'src/app/surface/status-runtime.ts',
+    [
+      'goalText', 'updateWelcomeCard', 'sessionCwd', 'refreshTerminalTitle', 'modelLabel',
+      'deriveCompositionStatus', 'deriveWorkspaceStatus', 'deriveHostStatus', 'contextMeasurement',
+      'markContextDirty', 'refreshStatusCheap', 'refreshContextMeasurement', 'forceContextMeasurement',
+      'cancelDeferredContextMeasure', 'scheduleInitialContextMeasure',
+    ],
+  ],
+  [
     'src/app/surface/session-presentation.ts',
     [
       'folder', 'windowController', 'statsFolder', 'mainStreamingToolPreviews',
@@ -185,6 +193,7 @@ test('A5b: every extracted declaration lives in its named owner, never in the co
 
 /** Each extracted owner's construction sits in the composition root exactly once. */
 const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
+  ['src/app/surface/status-runtime.ts', 'createStatusRuntime', 'createStatusRuntime('],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
 ]
@@ -193,7 +202,7 @@ test('A5b: each extracted owner is constructed exactly once, from the compositio
   const root = compositionFile('src/app/bootstrap.ts')
   for (const [rel, factory, site] of OWNER_CONSTRUCTIONS) {
     assert.ok(
-      new RegExp(`export function ${factory}<`).test(ownerFile(rel)),
+      new RegExp(`export function ${factory}(<|\\s*\\()`).test(ownerFile(rel)),
       `${rel} must export the ${factory} factory`,
     )
     assert.equal(root.split(site).length - 1, 1, `the composition root must construct ${factory} exactly once`)
