@@ -23,6 +23,9 @@ const indexSource = compositionSource()
 // A3-5 relocated the semantic, scope-bound command facades (and their ONE
 // stale-throwing admission) out of the runner into the bound command runtime.
 const commandRuntimeSource = readFileSync(new URL('../src/app/command/runtime.ts', import.meta.url), 'utf8')
+// A5b-3b-2 relocated the `runner: TuiCommandRunner` facade literal out of the
+// composition root into the command surface owner: the write guards live there.
+const commandSurfaceSource = readFileSync(new URL('../src/app/command/surface.ts', import.meta.url), 'utf8')
 
 function span(source: string, start: string, end: string): string {
   const from = source.indexOf(start)
@@ -162,7 +165,9 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
   // raw current attachment.
   const surfaceAt = indexSource.indexOf('const commandRuntime = bindCommandRuntime({')
   assert.ok(surfaceAt > 0, 'the command runtime binding was not found')
-  const surfaceEnd = indexSource.indexOf('\n    const runner: TuiCommandRunner = {', surfaceAt)
+  // A5b-3b-2: the runner facade moved to its owner, so the binding span now ends
+  // at the owner-side facade build call the composition root keeps.
+  const surfaceEnd = indexSource.indexOf('\n    command.buildRunner(commandRuntime)', surfaceAt)
   assert.ok(surfaceEnd > surfaceAt, 'the command runtime surface span was not found')
   const surfaceBody = indexSource.slice(surfaceAt, surfaceEnd)
   assert.equal(count(surfaceBody, 'attachmentForSession('), 7,
@@ -174,20 +179,21 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
 test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId', () => {
   // The frozen §3.2 write contract: a stale scope takes an EXPLICIT refusal path
   // and its sessionId is never dispatched to a replacement-owner resolver.
+  // A5b-3b-2: the facade (and its write guards) is owned by the command surface.
   const writes = ['applyPermissionPreset', 'setSessionApprovalPolicy']
-  const end = indexSource.indexOf('\n      switchSession:', indexSource.indexOf('setSessionApprovalPolicy: '))
+  const end = commandSurfaceSource.indexOf('\n      switchSession:', commandSurfaceSource.indexOf('setSessionApprovalPolicy: '))
   assert.ok(end > 0, 'the write provider span end was not found')
   for (let index = 0; index < writes.length; index += 1) {
-    const at = indexSource.indexOf(`${writes[index]}: `)
+    const at = commandSurfaceSource.indexOf(`${writes[index]}: `)
     assert.ok(at > 0, `${writes[index]} provider not found`)
     const next = index + 1 < writes.length
-      ? indexSource.indexOf(`${writes[index + 1]}: `, at)
+      ? commandSurfaceSource.indexOf(`${writes[index + 1]}: `, at)
       : end
-    const body = indexSource.slice(at, next)
+    const body = commandSurfaceSource.slice(at, next)
     // The exact-owner admission and the explicit refusal...
     assert.ok(body.includes('agentForLiveScope(scope)'),
       `${writes[index]} must admit through agentForLiveScope`)
-    assert.ok(body.includes('if (!sessionScope.isCurrent(scope)) return'),
+    assert.ok(body.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
       `${writes[index]} must REFUSE a stale scope explicitly (never retarget)`)
     // ...BOTH of which precede the ONLY sessionId dispatch.
     const guard = body.indexOf('agentForLiveScope(scope)')
@@ -197,12 +203,12 @@ test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId',
   }
   // The ASYNC permission write re-checks the ORIGINAL scope after its await, so
   // a settlement is never presented for a superseded owner.
-  const permissionWrite = indexSource.slice(
-    indexSource.indexOf('applyPermissionPreset: '),
-    indexSource.indexOf('setSessionApprovalPolicy: '),
+  const permissionWrite = commandSurfaceSource.slice(
+    commandSurfaceSource.indexOf('applyPermissionPreset: '),
+    commandSurfaceSource.indexOf('setSessionApprovalPolicy: '),
   )
   assert.ok(
-    (permissionWrite.match(/sessionScope\.isCurrent\(scope\)/g) ?? []).length >= 2,
+    (permissionWrite.match(/deps\.sessionScope\.isCurrent\(scope\)/g) ?? []).length >= 2,
     'the async write must re-check the ORIGINAL scope after its await',
   )
 })
@@ -229,13 +235,13 @@ test('a superseded skill/permission interaction is refused gracefully, never thr
 
 test('a dispatched permission write keeps its settlement; the refusal text never invites a blind retry', () => {
   const provider = span(
-    indexSource,
+    commandSurfaceSource,
     'applyPermissionPreset: async (scope, presetId, presetSignal) => {',
     '\n      setSessionApprovalPolicy: ',
   )
   // Pre-dispatch staleness proves nothing ran; a dispatched write keeps what the
   // port settled (the two axes of `src/runtime/write-outcome.ts` stay independent).
-  assert.ok(provider.includes("if (!sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }"),
+  assert.ok(provider.includes("if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }"),
     'a stale scope before the dispatch is REFUSED (nothing ran)')
   assert.ok(provider.includes("return { ownership: 'superseded' as const, outcome }"),
     'a dispatched write PRESERVES its settlement when the surface moves on')

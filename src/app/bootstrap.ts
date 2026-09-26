@@ -952,11 +952,12 @@ export function applyRunner(ctx: Context, config: Config): void {
     // Footer state: model label, cwd, git branch, turn/step counters, and
     // the stats line (LLM timing, tokens, context pressure).
     const cwd = process.cwd()
-    // A5b-3b: the command authority/state machine (claims, catalog coordinator,
-    // skills/change coalescing, registration and the exact-Agent admission
-    // helpers). Constructed before the surface cleanup closure can run; the
-    // TuiCommandRunner facade it registers is late-bound (assembled below).
-    const command = createCommandSurface<Agent>({
+    // A5b-3b-2: the command authority/state machine + the TuiCommandRunner
+    // facade owner. Constructed before the surface cleanup closure can run; the
+    // runner facade is built later, after the semantic command runtime binds.
+    // Every owner below is read live (getter/closure), so this site's order is
+    // irrelevant and no capability can go stale.
+    const command = createCommandSurface<ModelSelection, SessionId, Agent>({
       ctx,
       diag,
       signal: lifecycleController.signal,
@@ -964,15 +965,99 @@ export function applyRunner(ctx: Context, config: Config): void {
       liveAgent: () => agentNow(),
       sessionScope,
       ownership,
+      transition: {
+        pending: () => ownership.gate.busy,
+        run: <T>(task: () => Promise<T> | T): Promise<T> =>
+          ownership.gate.run(() => ownership.barrier.runTransition(async () => task())),
+      },
       commandsRegistry: () => ctx.get('commands'),
       catalog: backend.catalog,
-      launchPreset,
-      pendingPreset: () => pendingPreset,
-      clientCwd: process.cwd(),
-      runner: () => runner,
-      // The exact-Agent mapping the semantic catalog port needs; the Direct
-      // knowledge stays here in the composition root.
       toCatalogAgent: (agent) => agent,
+      presets: {
+        launch: launchPreset,
+        pending: () => pendingPreset,
+        setPending: (id) => { pendingPreset = id },
+        current: () => currentPreset(),
+        blank: () => sessionBlank(),
+      },
+      clientCwd: cwd,
+      surface: {
+        setNotificationMode: (mode) => surface.setNotificationMode(mode),
+        setNotificationMethod: (method) => surface.setNotificationMethod(method),
+        openJobView: (jobId) => surface.openJobView(jobId),
+        openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),
+      },
+      backend: {
+        sessionReader: backend.sessionReader,
+        sessionWriter: backend.sessionWriter,
+        interaction: backend.interaction,
+        catalog: backend.catalog,
+        config: backend.config,
+        hostFile: backend.hostFile,
+      },
+      session: {
+        ensureSession: () => sessionRuntime.ensureSession(),
+        switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
+        forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
+        transitionTo: (steps) => sessionRuntime.transitionTo(steps),
+      },
+      status: {
+        forceContextMeasurement: () => status.forceContextMeasurement(),
+        sessionCwd: () => status.sessionCwd(),
+        refresh: () => status.refresh(),
+        updateWelcomeCard: () => status.updateWelcomeCard(),
+      },
+      settings: {
+        applyFooterSettings: (doc, saved) => settings.applyFooterSettings(doc, saved),
+        setDisplayPreset: (preset) => settings.setDisplayPreset(preset),
+      },
+      model,
+      viewer: {
+        enterView: (childId, label, mode, parentSessionId, activity) =>
+          viewer.enterView(childId, label, mode, parentSessionId, activity),
+      },
+      drafts: {
+        get images() { return draftImages },
+        get files() { return draftFiles },
+      },
+      extensions: {
+        current: () => {
+          const service = extensionService
+          return service === undefined ? undefined : {
+            commands: service.commands,
+            themes: service.themes,
+            settings: service.settings,
+            autocomplete: service.autocomplete,
+            keybindings: service.keybindings,
+            renderers: service.renderers,
+            editors: service.editors,
+            api: () => service.api(),
+            health: () => service._ledger().healthSnapshot(),
+          }
+        },
+        recordError: (ref, error) => extensionService?._recordRegistryError(ref, error),
+        clearError: (ref) => extensionService?._clearRegistryError(ref),
+      },
+      pluginManager: {
+        open: () => pluginManager.open(),
+        submenu: (done) => pluginManager.submenu(done),
+      },
+      client: {
+        get runCopyCommand() { return runCopyCommand },
+        get copyEnv() { return copyEnv },
+      },
+      submission: {
+        prepareDeps: () => submitDeps,
+        settleQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
+      },
+      promptState: { progressUpdates: progressUpdatesState, responseStyle: responseStyleState },
+      tuiSettings,
+      displayState,
+      get agents() { return lifecycleAgents },
+      imageLimits: () => ctx.get('attachments')?.imageLimits as import('../image/intake.ts').ImageLimitsLike | undefined,
+      openRewindPicker: () => openRewindPicker(),
+      requestExit: () => requestExit(),
+      exit,
     })
     // A5b-2: the surface status owner (footer/status derivation, the context
     // measurement cache and its deferred initial measure). The Direct facts and
@@ -4139,192 +4224,10 @@ export function applyRunner(ctx: Context, config: Config): void {
         },
       },
     })
-    const runner: TuiCommandRunner = {
-      ctx,
-      app,
-      diag,
-      get currentSessionId() { return ownership.currentSessionId() },
-      // The A3-5 semantic command runtime (scope/currentness, scoped catalog,
-      // skill execution, stats/read, catalog refresh, prompt admission and the
-      // writer exposure) — the runner delegates these members to it.
-      ...commandRuntime,
-      // Completion-notification preference setters (the /settings panel
-      // writes): the controller applies the parsed value immediately and
-      // the panel persists the raw string through the config port.
-      setNotificationMode: (mode) => surface.setNotificationMode(mode),
-      setNotificationMethod: (method) => surface.setNotificationMethod(method),
-      ensureSession: () => sessionRuntime.ensureSession(),
-      get selected() { return model.selected },
-      // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
-      // or unresolved) falling back to the persisted global default. A fresh
-      // create never seeds from it — the Direct adapter captures the persisted
-      // Host default at admission.
-      defaultSelection: () => model.defaultIntent.intent ?? model.currentDefault(),
-      get defaultIntent() { return model.defaultIntent.intent },
-      get defaultIntentRecord() { return model.defaultIntent.record },
-      get defaultIntentOutcome() { return model.defaultIntent.outcome },
-      awaitPendingDefaultWrite: (signal) => model.awaitPendingDefaultWrite(signal),
-      trackDefaultWrite: (write) => model.trackDefaultWrite(write),
-      setModelSelectionPending: (selection, token, status) => model.setPending(selection, token, status),
-      reconcileDefaultIntent: (persisted) => model.reconcileDefaultIntent(persisted),
-      setDefaultIntent: (next) => model.setDefaultIntent(next),
-      settleIntent: (id, outcome) => model.settleIntent(id, outcome),
-      get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
-      // /new and /fork create through the session lifecycle port (semantic
-      // requests — the Direct adapter resolves the preset composition).
-      agents: lifecycleAgents,
-// M2: apply the persisted footer mode + layout (shared by /settings,
-      // /reload and the startup path).
-      applyFooterSettings: (doc, saved) => settings.applyFooterSettings(doc, saved),
-      // The session READ port (migration M1.3): /sessions, /resume, /search,
-      // the title batches, the context measurement and the export read go
-      // through the port, never ctx directly.
-      sessionReader: backend.sessionReader,
-      // PR D2: the /status explicit force — measure NOW through the
-      // coordinator (mark dirty + semantic reader), repaint the footer
-      // cheaply, and return the fresh (or last-good) value for the panel.
-      // Panel and footer share ONE cached measurement: no duplicate reads
-      // against the coordinator's cache, no stale footer after an explicit
-      // status (round-8 finding).
-      forceContextMeasurement: () => status.forceContextMeasurement(),
-      // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
-      // delivery, exact queue removal, cancel and title ops go through the port.
-      sessionWriter: backend.sessionWriter,
-      // The interaction port (migration M1.6): approval/question authority.
-      interaction: backend.interaction,
-      // The catalog port (migration M1.8): models/providers, presets and
-      // skills — commands read Host catalogs through semantic DTOs.
-      catalog: backend.catalog,
-      // The config port (migration M1.9): settings, provider profiles,
-      // credentials, authorization, permissions and the preset default.
-      config: backend.config,
-      // The Host-file port (migration M1.10): `@`-mention discovery and
-      // send-time canonicalization against the Host filesystem.
-      hostFile: backend.hostFile,
-      // The minimal commands registry for the TUI's OWN registrations
-      // (migration M1.11) — the runner assembly dependency, never a Host
-      // capability exposed to command handlers.
-      commandRegistry: ctx.get('commands') as import('../commands.ts').CommandRegistryLike | undefined,
-      cwd,
-      imageStore: draftImages,
-      fileStore: draftFiles,
-      // Issue #7: `/copy` uses the SAME shared user-clipboard delivery
-      // policy as the fullscreen selection (see copySelection above).
-      copyToClipboard: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
-      // The deployment image policy, re-read dynamically so a runtime
-      // reconfiguration is picked up (plan §10.1: never a cached copy).
-      imageLimits: () => ctx.get('attachments')?.imageLimits as import('../image/intake.ts').ImageLimitsLike | undefined,
-      insertIntoEditor: (text) => app.insertIntoEditor(text),
-      // The shared prepared-input pipeline (skills build their message
-      // through this — review finding 4).
-      prepareDraftMessage: (text) => prepareUserMessage(text, draftImages, submitDeps),
-      // M5: the extension registries (commands/themes/settings/autocomplete/
-      // keybindings), when the extension service is mounted. The /settings
-      // and /theme pickers read them; undefined degrades to the host-only
-      // panel.
-      get extensions() {
-        return extensionService === undefined ? undefined : {
-          commands: extensionService.commands,
-          themes: extensionService.themes,
-          settings: extensionService.settings,
-          autocomplete: extensionService.autocomplete,
-          keybindings: extensionService.keybindings,
-          renderers: extensionService.renderers,
-          editors: extensionService.editors,
-          api: () => extensionService.api(),
-          // P1-08: the live contribution-health snapshot (failed/shadowed
-          // states + lastError across every registry incl. renderers).
-          health: () => extensionService._ledger().healthSnapshot(),
-        }
-      },
-      recordExtensionError: (ref, error) => extensionService?._recordRegistryError(ref, error),
-      clearExtensionError: (ref) => extensionService?._clearRegistryError(ref),
-      /** The live session's workspace cwd (header), falling back to the
-       * process cwd before any session exists; the footer/welcome/
-       * completions/history follow it so a session switch updates the
-       * whole surface. */
-      sessionCwd: () => status.sessionCwd(),
-      signal,
-      progressUpdatesState,
-      responseStyleState,
-      /** Canonical display surface: /display and /focus compatibility both
-       * read and mutate the shared DisplayState through one setter. */
-      displayPreset: () => displayState.preset,
-      setDisplayPreset: (preset) => settings.setDisplayPreset(preset),
-      /** @deprecated Focus compatibility facade. */
-      focusEnabled: () => isFocusDisplayPreset(displayState.preset),
-      setFocusMode: (enabled) => { settings.setDisplayPreset(enabled ? 'focus' : 'full') },
-      get pendingPreset() { return pendingPreset },
-      set pendingPreset(id: string | undefined) { pendingPreset = id },
-      /** The effective preset id for COLD (sessionless) reads: the run-local
-       * pending override ahead of the launch-time --preset (the SAME
-       * precedence ensureSession uses); undefined = the saved/default
-       * preset applies. */
-      get effectivePresetId() { return pendingPreset ?? launchPreset },
-      applyPermissionPreset: async (scope, presetId, presetSignal) => {
-        // A stale scope BEFORE the dispatch proves nothing ran: report `refused`.
-        if (!sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }
-        command.agentForLiveScope(scope)
-        const outcome = await backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
-        // The operation WAS dispatched. Losing the surface after the fact must NOT
-        // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and
-        // settlement are independent axes) — the caller may not claim "not applied".
-        if (!sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
-        return { ownership: 'current' as const, outcome }
-      },
-      setSessionApprovalPolicy: (scope, value) => {
-        // Same contract for the synchronous write: validate, then dispatch in
-        // the SAME stack — the exact owner, never `sessionId` re-resolved later.
-        if (!sessionScope.isCurrent(scope)) return 'superseded' as const
-        command.agentForLiveScope(scope)
-        backend.interaction.setApprovalPolicy(scope.sessionId, value)
-        return 'applied' as const
-      },
-      switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
-      forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
-      transitionTo: (steps) => sessionRuntime.transitionTo(steps),
-      currentPreset,
-      sessionBlank,
-      // PR D2: the command surface's generic refresh is UI-only (a
-      // measurement-triggering command uses refreshContextMeasurement or
-      // the /status port call directly).
-      refreshStatus: () => status.refresh(),
-      updateWelcomeCard: () => status.updateWelcomeCard(),
-      openJobView: (jobId) => surface.openJobView(jobId),
-      // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
-      // it opens the FULL browser explicitly.
-      openTasksBrowser: () => surface.openTasksBrowser('full'),
-      openRewindPicker,
-      // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
-      // NOT session-owned: it never creates or switches a Session.
-      openPluginManager: () => pluginManager.open(),
-      createPluginManagerSubmenu: (done) => pluginManager.submenu(done),
-      // The attachment-intake UX fence: the ONE production reader of the
-      // transition gate. Staging an attachment while a transition is in flight
-      // (quiesce → commit) would inject a draft into a session about to be
-      // retired. Semantic session writes never read this flag — they admit
-      // through the operation barrier (SessionRuntime.withWriter).
-      sessionTransitionPending: () => ownership.gate.busy,
-      // The single-writer session-transition gate: ordinary /new and
-      // command-side switches run create AND commit inside one exclusive
-      // section via this seam. Host fork dispatch is outside this FIFO;
-      // forked-child adoption and rewind navigation use their own gated
-      // adoption path.
-      withSessionTransition: <T>(task: () => Promise<T> | T) =>
-        ownership.gate.run(() => ownership.barrier.runTransition(async () => {
-          try {
-            return await task()
-          } finally {
-            // A command may fail during preflight before it calls
-            // transitionTo; do not leave a deferred recall unresolved.
-            submissionRuntime.settleQueueRecalls(false)
-          }
-        })),
-      enterView: (childId: SessionId, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: SessionId, activity: 'running' | 'inactive') =>
-        viewer.enterView(childId, label, mode, parentSessionId, activity),
-      requestExit,
-      exit,
-    }
+    // A5b-3b-2: build the TuiCommandRunner facade owner-side. It is built here
+    // (after the bound semantic runtime, before registration), so every
+    // late-rebound slot resolves through the owner's accessor at call time.
+    command.buildRunner(commandRuntime)
     /**
      * Bind the submission runtime (A3-3). Its surface is the runner's narrow
      * hooks; every write it performs enters through `SessionRuntime.withWriter`
@@ -4336,7 +4239,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         withWriter: <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> =>
           sessionRuntime.withWriter(scope, task),
         withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T>): Promise<T> =>
-          runner.withPromptAdmission(scope, line, task),
+          command.runner().withPromptAdmission(scope, line, task),
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
         mergeDraftIntoEditor: (text) => {

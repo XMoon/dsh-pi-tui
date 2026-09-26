@@ -68,7 +68,6 @@ const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = [
   { name: 'dispatchUserInput', slice: 'A5b-4', owner: 'app/submission/controller' },
   { name: 'surfaceEvents', slice: 'A5b-5', owner: 'app/surface/application-events' },
   { name: 'openRewindPicker', slice: 'A5b-5', owner: 'app/surface/application-events' },
-  { name: 'runner', slice: 'A5b-3', owner: 'app/command/surface' },
 ]
 
 /** Does `source` declare `name` at any scope? */
@@ -161,7 +160,7 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
       'hostClaimOf', 'isSkillWrapperName', 'refreshCommandCompletions', 'withCommandDelivery',
       'takeCommandDraftDisposition', 'catalogRefreshRequest', 'skillsChangeSubscribed',
       'skillsChangeGate', 'subscribeSkillsChangeEvents', 'agentForLiveScope', 'attachmentForSession',
-      'refreshLiveCatalog', 'registerCommands',
+      'refreshLiveCatalog', 'registerCommands', 'runner',
     ],
   ],
   [
@@ -226,7 +225,7 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/input-history.ts', 'createInputHistory', 'createInputHistory('],
   ['src/app/surface/settings-runtime.ts', 'createSettingsRuntime', 'createSettingsRuntime('],
   ['src/app/command/model-selection.ts', 'createModelSelectionOwner', 'createModelSelectionOwner<'],
-  ['src/app/command/surface.ts', 'createCommandSurface', 'createCommandSurface<Agent>('],
+  ['src/app/command/surface.ts', 'createCommandSurface', 'createCommandSurface<ModelSelection, SessionId, Agent>('],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
 ]
