@@ -20,6 +20,7 @@ import { ThemeRegistry } from '../src/theme-registry.ts'
 import { SettingsRegistry } from '../src/settings-registry.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DefaultIntentTracker } from '../src/default-intent.ts'
 import { DirectModelSelectionOwner } from '../src/runtime/direct/model-selection-direct.ts'
@@ -103,6 +104,8 @@ function stubRunner(
     app,
     diag,
     get liveAgent() { return state.agent },
+    ...sessionScopeFacts(() => state.agent, () => state.generation),
+    get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => defaultIntent.intent

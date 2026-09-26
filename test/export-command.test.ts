@@ -31,6 +31,7 @@ import { DirectSessionArchive } from '../src/runtime/direct/session-archive-dire
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -55,6 +56,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         get liveAgent() { return state.agent },
+        ...sessionScopeFacts(() => state.agent, () => 1),
+        get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,

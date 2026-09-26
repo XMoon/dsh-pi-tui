@@ -23,6 +23,7 @@ import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -103,6 +104,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
