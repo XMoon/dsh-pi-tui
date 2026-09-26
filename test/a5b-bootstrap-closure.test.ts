@@ -157,6 +157,10 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     ],
   ],
   [
+    'src/app/surface/input-history.ts',
+    ['knownHistoryCwdSet', 'rememberHistoryCwd', 'knownHistoryCwds', 'lastHistoryContent'],
+  ],
+  [
     'src/app/surface/status-runtime.ts',
     [
       'goalText', 'updateWelcomeCard', 'sessionCwd', 'refreshTerminalTitle', 'modelLabel',
@@ -194,6 +198,7 @@ test('A5b: every extracted declaration lives in its named owner, never in the co
 /** Each extracted owner's construction sits in the composition root exactly once. */
 const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/status-runtime.ts', 'createStatusRuntime', 'createStatusRuntime('],
+  ['src/app/surface/input-history.ts', 'createInputHistory', 'createInputHistory('],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
 ]

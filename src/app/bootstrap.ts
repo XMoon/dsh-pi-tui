@@ -60,6 +60,7 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
 import { createStatusRuntime } from './surface/status-runtime.ts'
+import { createInputHistory } from './surface/input-history.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
@@ -94,7 +95,7 @@ import { DefaultWriteBarrier } from '../default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from '../theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from '../detached.ts'
-import { historyFilePath, loadHistoryFile, loadHistoryRecords } from '../history.ts'
+import { historyFilePath } from '../history.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../history-persist.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
@@ -956,10 +957,10 @@ export function applyRunner(ctx: Context, config: Config): void {
         scheduleInitialMeasurement: (agent) => status.scheduleInitialMeasurement(agent.session.id),
       },
       history: {
-        rememberCwd: (cwd) => rememberHistoryCwd(cwd),
+        rememberCwd: (cwd) => history.rememberCwd(cwd),
         currentCwd: () => status.sessionCwd(),
-        records: (cwd) => loadHistoryRecords(historyFilePath(dshHome(process.env), cwd)),
-        setLastContent: (content) => { lastHistoryContent = content },
+        records: (cwd) => history.records(cwd),
+        setLastContent: (content) => history.setLastContent(content),
       },
       commands: { register: () => registerCommands({ snapshot: initialSnapshot, skills: initialSkills }) },
       submission: { clearPending: () => pendingSubmissions.clear() },
@@ -1030,39 +1031,14 @@ export function applyRunner(ctx: Context, config: Config): void {
       viewer: { read: () => viewerRef?.read() },
       clientCwd: cwd,
     })
-    /**
-     * Every cwd this process has EVER known (launch cwd + every live
-     * session's header cwd, accumulated across creates/resumes/swaps).
-     * The Ctrl+R all-directory search resolves legacy files through this
-     * set (plan §6.2 Rule 2 — an IDENTITY match, never a hash break).
-     * A Set, not a Map, so the resolver below is rebuilt on every call:
-     * the all-scope search must see the NEWEST known cwds, not a snapshot
-     * from source construction.
-     */
-    const knownHistoryCwdSet = new Set<string>([cwd])
-    const rememberHistoryCwd = (dir: string): void => {
-      if (dir === '' || dir === undefined) return
-      knownHistoryCwdSet.add(dir)
-    }
-    /**
-     * The known-cwd identity map for Ctrl+R all-directory history recovery
-     * (plan §6.2 Rule 2): `md5(cwd) → cwd` for every workspace this process
-     * knows. Resolved fresh on EVERY call — the search source keeps the
-     * RESOLVER, so a session created/switched after startup is immediately
-     * recoverable (a legacy-only file in that cwd shows up on the next
-     * search, no restart needed).
-     */
-    const knownHistoryCwds = (): Map<string, string> => {
-      const map = new Map<string, string>()
-      const seed = (dir: string): void => {
-        if (dir === '' || dir === undefined) return
-        const hash = historyFilePath(dshHome(process.env), dir).split('/').pop()!.replace(/\.jsonl$/, '')
-        map.set(hash, dir)
-      }
-      for (const dir of knownHistoryCwdSet) seed(dir)
-      seed(status.sessionCwd())
-      return map
-    }
+    // A5b-2: the client-local input-history owner (known cwds, the canonical
+    // last row and the per-session recall projection). Constructed before the
+    // mount; it only touches the app inside `activateBootRecall`.
+    const history = createInputHistory({
+      surface: { get app() { return app } },
+      clientCwd: cwd,
+      sessionCwd: () => status.sessionCwd(),
+    })
 
     // Surface lifetime fence: every callback below can outlive the TUI
     // surface, so the guard is initialized before any refresh callback exists.
@@ -2794,12 +2770,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       else steer(deps, { text, persistHistory })
     }
     /**
-     * The newest input-history entry this process persisted (kimi's
-     * `lastHistoryContent` analogue): consecutive repeats are skipped per
-     * window, exactly like shell history.
-     */
-    let lastHistoryContent: string | undefined
-    /**
      * Build the steer-persist closure for a draft (Ctrl+S, the
      * steer-draft extension action, busy-Enter steer): the submission-time
      * facts — the ts (the row must record the USER's steer time, not the
@@ -2817,7 +2787,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       const historyTs = Date.now()
       const historyHasAttachments = draftHasAttachments(text, draftImages, draftFiles)
       return (sessionId: string | undefined): void => {
-        if (trimmed === '' || trimmed === lastHistoryContent || historyHasAttachments) return
+        if (trimmed === '' || trimmed === history.lastContent() || historyHasAttachments) return
         const historyCwd = status.sessionCwd()
         const file = historyFilePath(dshHome(process.env), historyCwd)
         runDetached('input history write', () => {
@@ -2826,11 +2796,11 @@ export function applyRunner(ctx: Context, config: Config): void {
             cwd: historyCwd,
             sessionId: historySessionIdFor('agent-facing', sessionId),
             ts: historyTs,
-            lastContent: lastHistoryContent,
+            lastContent: history.lastContent(),
             hasAttachments: historyHasAttachments,
             file,
           })
-          if (written) lastHistoryContent = trimmed
+          if (written) history.setLastContent(trimmed)
         }, {
           diag,
           notify: (message) => {
@@ -2939,11 +2909,11 @@ export function applyRunner(ctx: Context, config: Config): void {
             cwd: historyCwd,
             sessionId,
             ts: historyTs,
-            lastContent: lastHistoryContent,
+            lastContent: history.lastContent(),
             hasAttachments: historyHasAttachments,
             file,
           })
-          if (written) lastHistoryContent = trimmed
+          if (written) history.setLastContent(trimmed)
         }, {
           diag,
           notify: (message) => {
@@ -3838,7 +3808,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         dshHome: dshHome(process.env),
         // A RESOLVER, not a snapshot: the all-scope search must see the
         // newest known cwds (sessions created/switched after startup).
-        knownCwds: () => knownHistoryCwds(),
+        knownCwds: () => history.knownCwds(),
       }),
       // The durable-image read (plan M8/M10): history images resolve through
       // `ctx.attachments.readImage` only — never the draft store. The read
@@ -4247,10 +4217,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // run: seed the recall history from the LAUNCH cwd now, so ↑ works
     // immediately in a fresh window (the per-session reseed replaces it
     // when the first session is born).
-    const bootHistoryEntries = loadHistoryFile(historyFilePath(dshHome(process.env), cwd))
-    lastHistoryContent = bootHistoryEntries.at(-1)
-    // File order is oldest-first; TuiApp's recall API takes newest-first.
-    app.resetInputHistory([...bootHistoryEntries].reverse())
+    history.activateBootRecall()
     // Fresh/deferred startup title: no session yet — cwd identity only.
     status.refreshTerminalTitle()
     surface.attachEventRouting({
