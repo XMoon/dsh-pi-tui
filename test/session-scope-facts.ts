@@ -34,6 +34,8 @@ import {
   type SessionOwnerRef,
 } from '../src/app/session/subject.ts'
 import { SupersededReadError } from '../src/runtime/read-error.ts'
+import type { SkillDefinitionResult } from '../src/runtime/catalog-port.ts'
+import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/skill-catalog-refresh.ts'
 import { computeStats, type SessionStats } from '../src/stats.ts'
 import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
@@ -48,8 +50,15 @@ export interface SessionScopeFacts {
   isSessionScopeCurrent(scope: SessionScope): boolean
   requireLiveSessionScope(): Promise<LiveSessionScope>
   listScopedCommands(): readonly SurfaceCommandSummary[]
+  resolveScopedSkill(scope: LiveSessionScope, name: string): Promise<SkillDefinitionResult>
+  hostLoadsSkillBody(scope: LiveSessionScope): boolean
+  listScopedSkills(scope: LiveSessionScope, signal?: AbortSignal): Promise<HumanSkillCatalog | undefined>
   currentSessionActivity(scope: LiveSessionScope): { readonly running: boolean }
-  currentSessionRouting(scope: LiveSessionScope): { readonly provider: string; readonly model: string; readonly cwd: string }
+  currentSessionRouting(scope: LiveSessionScope): {
+    readonly provider: string | undefined
+    readonly model: string | undefined
+    readonly cwd: string
+  }
   currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
   currentSessionStats(scope: LiveSessionScope): SessionStats | undefined
   lastAssistantText(scope: LiveSessionScope): string | undefined
@@ -59,8 +68,15 @@ export interface SessionScopeFacts {
     scope: LiveSessionScope,
     presetId: string,
     signal?: AbortSignal,
-  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }>
-  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): void
+  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' } | { kind: 'superseded' }>
+  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
+}
+
+/** The skill catalog capability the scope-bound skill facades read through. */
+export interface ScopedSkillSource {
+  resolveSkill(sessionId: string, name: string): Promise<SkillDefinitionResult>
+  hostLoadsSkillBody(sessionId: string): boolean
+  listHumanSkills(sessionId: string, signal?: AbortSignal): Promise<HumanSkillCatalog | undefined>
 }
 
 /**
@@ -70,10 +86,13 @@ export interface SessionScopeFacts {
  * @param currentAgent - re-reads the stub's live agent (its OWNER is the agent
  *   object itself, so swapping the agent invalidates a capture).
  * @param currentGeneration - re-reads the stub's current generation.
+ * @param skills - the stub's REAL skill catalog port, when a suite exercises
+ *   the /skill paths (omitted stubs fail closed).
  */
 export function sessionScopeFacts(
   currentAgent: () => Agent | undefined,
   currentGeneration: () => number,
+  skills?: ScopedSkillSource,
 ): SessionScopeFacts {
   const subjectAuthority = createSessionSubjectAuthority(() => {
     const agent = currentAgent()
@@ -118,15 +137,38 @@ export function sessionScopeFacts(
     // The generic scoped view is empty; a suite that asserts scoped-command
     // collisions overrides this from its own commands registry.
     listScopedCommands: () => [],
+    // The skill catalog reads mirror the production validate-before-dispatch /
+    // re-validate-after-await shape; they delegate to the stub's real catalog
+    // port when one is wired, and fail closed otherwise.
+    resolveScopedSkill: async (scope, name) => {
+      agentForLiveScope(scope)
+      const resolved = skills === undefined ? { kind: 'unknown' as const } : await skills.resolveSkill(scope.sessionId, name)
+      if (!scopeAuthority.isCurrent(scope)) {
+        throw new SupersededReadError('the session changed while loading the skill')
+      }
+      return resolved
+    },
+    hostLoadsSkillBody: (scope) => {
+      agentForLiveScope(scope)
+      return skills === undefined ? false : skills.hostLoadsSkillBody(scope.sessionId)
+    },
+    listScopedSkills: async (scope, signal) => {
+      agentForLiveScope(scope)
+      const catalog = skills === undefined ? undefined : await skills.listHumanSkills(scope.sessionId, signal)
+      if (!scopeAuthority.isCurrent(scope)) {
+        throw new SupersededReadError('the session changed while reading the skill catalog')
+      }
+      return catalog
+    },
     currentSessionActivity: (scope) => ({ running: agentForLiveScope(scope).status === 'running' }),
     currentSessionRouting: (scope) => {
       const agent = agentForLiveScope(scope)
-      const provider = agent.options.provider
-      const model = agent.options.model
-      if (provider === undefined || model === undefined) {
-        throw new Error('a live session has no provider/model routing')
+      // `provider`/`model` stay OPTIONAL, exactly like the DSH contract.
+      return {
+        provider: agent.options.provider,
+        model: agent.options.model,
+        cwd: agent.session.header.cwd ?? '',
       }
-      return { provider, model, cwd: agent.session.header.cwd ?? '' }
     },
     currentApprovalOverride: (scope) => {
       agentForLiveScope(scope)
@@ -151,7 +193,17 @@ export function sessionScopeFacts(
       return { kind: 'failed', error: 'catalog refresh not wired in tests' }
     },
     refreshStandingCatalog: async () => ({ kind: 'failed', error: 'catalog refresh not wired in tests' }),
-    applyPermissionPreset: async () => ({ kind: 'applied' }),
-    setSessionApprovalPolicy: () => {},
+    // The writes mirror the production stale-before-dispatch refusal.
+    applyPermissionPreset: async (scope) => {
+      if (!scopeAuthority.isCurrent(scope)) return { kind: 'superseded' as const }
+      agentForLiveScope(scope)
+      if (!scopeAuthority.isCurrent(scope)) return { kind: 'superseded' as const }
+      return { kind: 'applied' as const }
+    },
+    setSessionApprovalPolicy: (scope) => {
+      if (!scopeAuthority.isCurrent(scope)) return 'superseded' as const
+      agentForLiveScope(scope)
+      return 'applied' as const
+    },
   }
 }

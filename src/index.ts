@@ -9426,17 +9426,42 @@ export function apply(ctx: Context, config: Config): void {
         if (commands === undefined) throw new Error('commands service unavailable')
         return commands.list(agentNow()).map(commandSummaryOf)
       },
+      // The skill catalog reads of the owner the scope pins: validate BEFORE
+      // dispatching (never downgraded to a bare session id handed to a
+      // current-owner resolver) and re-validate the ORIGINAL scope after the
+      // await, so a superseded read is never presented.
+      resolveScopedSkill: async (scope, name) => {
+        agentForLiveScope(scope)
+        const resolved = await backend.catalog.skills.resolveSkill(scope.sessionId, name)
+        if (!sessionScope.isCurrent(scope)) {
+          throw new SupersededReadError('the session changed while loading the skill')
+        }
+        return resolved
+      },
+      hostLoadsSkillBody: (scope) => {
+        agentForLiveScope(scope)
+        return backend.catalog.skills.hostLoadsSkillBody(scope.sessionId)
+      },
+      listScopedSkills: async (scope, signal) => {
+        agentForLiveScope(scope)
+        const catalog = await backend.catalog.skills.listHumanSkills(scope.sessionId, signal)
+        if (!sessionScope.isCurrent(scope)) {
+          throw new SupersededReadError('the session changed while reading the skill catalog')
+        }
+        return catalog
+      },
       currentSessionActivity: (scope) => ({ running: agentForLiveScope(scope).status === 'running' }),
       currentSessionRouting: (scope) => {
         const agent = agentForLiveScope(scope)
-        const provider = agent.options.provider
-        const model = agent.options.model
-        // A composed live Agent always carries its provider/model routing;
-        // its absence is an invariant break, not "no routing".
-        if (provider === undefined || model === undefined) {
-          throw new Error('a live session has no provider/model routing')
+        // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract (and
+        // the Direct composition may leave them unset): their absence is real
+        // semantic optionality, never an invariant break — the presentation
+        // renders "unconfigured".
+        return {
+          provider: agent.options.provider,
+          model: agent.options.model,
+          cwd: agent.session.header.cwd ?? cwd,
         }
-        return { provider, model, cwd: agent.session.header.cwd ?? cwd }
       },
       currentApprovalOverride: (scope) => {
         // The scope's owner is proven current before the read; the port
@@ -9479,12 +9504,23 @@ export function apply(ctx: Context, config: Config): void {
           ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
           : refresh({ source, target: { kind: 'preset', presetId } })
       },
-      applyPermissionPreset: (scope, presetId, presetSignal) =>
-        backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal),
+      applyPermissionPreset: async (scope, presetId, presetSignal) => {
+        // The stale-before-dispatch contract: a scope that no longer owns the
+        // surface is REFUSED, never dispatched to the replacement owner.
+        if (!sessionScope.isCurrent(scope)) return { kind: 'superseded' as const }
+        agentForLiveScope(scope)
+        const outcome = await backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
+        // Re-check the ORIGINAL scope before presenting any settlement.
+        if (!sessionScope.isCurrent(scope)) return { kind: 'superseded' as const }
+        return outcome
+      },
       setSessionApprovalPolicy: (scope, value) => {
-        // The write addresses the exact owner the scope pins (never the
-        // current replacement owner).
+        // Same contract for the synchronous write: validate, then dispatch in
+        // the SAME stack — the exact owner, never `sessionId` re-resolved later.
+        if (!sessionScope.isCurrent(scope)) return 'superseded' as const
+        agentForLiveScope(scope)
         backend.interaction.setApprovalPolicy(scope.sessionId, value)
+        return 'applied' as const
       },
       switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
       forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),

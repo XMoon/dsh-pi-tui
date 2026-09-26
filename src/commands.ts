@@ -103,6 +103,7 @@ import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, OpenSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
+import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort, CredentialProviderOption } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
 import {
@@ -647,12 +648,29 @@ export interface TuiCommandRunner {
    * never a fence.
    */
   listScopedCommands(): readonly SurfaceCommandSummary[]
+  /** Resolve ONE skill definition of the exact owner the scope pins: validated
+   *  BEFORE the dispatch and again after the read settles. A stale scope throws
+   *  {@link SupersededReadError}. */
+  resolveScopedSkill(scope: LiveSessionScope, name: string): Promise<SkillDefinitionResult>
+  /** Whether the Host's skill pre-step loads the body for the exact owner the
+   *  scope pins: validated BEFORE the synchronous read. A stale scope throws
+   *  {@link SupersededReadError}. */
+  hostLoadsSkillBody(scope: LiveSessionScope): boolean
+  /** Read the human skill catalog of the exact owner the scope pins: validated
+   *  BEFORE the dispatch and again after the read settles. A stale scope throws
+   *  {@link SupersededReadError}. */
+  listScopedSkills(scope: LiveSessionScope, signal?: AbortSignal): Promise<HumanSkillCatalog | undefined>
   /** Whether the live Session's owner is running. A stale scope throws
    *  {@link SupersededReadError}. */
   currentSessionActivity(scope: LiveSessionScope): { readonly running: boolean }
-  /** The routing facts of the exact owner the scope pins (provider, model,
-   *  workspace cwd). A stale scope throws {@link SupersededReadError}. */
-  currentSessionRouting(scope: LiveSessionScope): { readonly provider: string; readonly model: string; readonly cwd: string }
+  /** The routing facts of the exact owner the scope pins. `provider`/`model`
+   *  are OPTIONAL in the DSH AgentOptions contract (the presentation renders
+   *  "unconfigured"); a stale scope throws {@link SupersededReadError}. */
+  currentSessionRouting(scope: LiveSessionScope): {
+    readonly provider: string | undefined
+    readonly model: string | undefined
+    readonly cwd: string
+  }
   /** The pinned Session's approval-policy override, or `undefined` when it
    *  has none. A stale scope throws {@link SupersededReadError}. */
   currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
@@ -672,14 +690,16 @@ export interface TuiCommandRunner {
   /** Refresh the sessionless STANDING catalog of `presetId` (undefined = the
    *  deployment default) through the coordinator. */
   refreshStandingCatalog(presetId: string | undefined, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
-  /** Apply one permission preset to the Session the scope pins. */
+  /** Apply one permission preset to the Session the scope pins. A stale scope is
+   *  REFUSED (`superseded`) before any dispatch — never retargeted. */
   applyPermissionPreset(
     scope: LiveSessionScope,
     presetId: string,
     signal?: AbortSignal,
-  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }>
-  /** Set the approval-policy override of the owner the scope pins. */
-  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): void
+  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' } | { kind: 'superseded' }>
+  /** Set the approval-policy override of the owner the scope pins. A stale scope
+   *  is REFUSED (`superseded`) before any dispatch — never retargeted. */
+  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
   refreshStatus(): void
   /** PR D2: the /status explicit context force — measures NOW through the
    * runner's context coordinator (mark dirty + semantic SessionReader),
@@ -2243,7 +2263,14 @@ export function registerTuiCommands(
                 id: 'model',
                 label: color.textDim('Model'),
                 description: color.textDim('Provider and model routing this session'),
-                currentValue: color.textDim(`${routing.provider}/${routing.model}`),
+                // `provider`/`model` are optional in the DSH AgentOptions
+                // contract: an unconfigured owner renders as such instead of
+                // failing the whole panel.
+                currentValue: color.textDim(
+                  routing.provider === undefined || routing.model === undefined
+                    ? 'unconfigured'
+                    : `${routing.provider}/${routing.model}`,
+                ),
               },
               {
                 id: 'preset',
@@ -2285,7 +2312,14 @@ export function registerTuiCommands(
         (id, value, revert, navigate) => {
           if (id === 'approval') {
             if ((value === 'ask' || value === 'never') && liveScope !== undefined) {
-              runner.setSessionApprovalPolicy(liveScope, value)
+              // The write is REFUSED when the panel's captured owner no longer
+              // owns the surface: close the stale panel and tell the user,
+              // instead of dispatching the old scope to the replacement owner.
+              if (runner.setSessionApprovalPolicy(liveScope, value) === 'superseded') {
+                closeSettings()
+                app.notify('the session changed — the approval policy was not applied', 'error')
+                return
+              }
               // The footer's permission badge derives from the knob folds;
               // reflect the change immediately.
               runner.refreshStatus()
@@ -3406,10 +3440,18 @@ export function registerTuiCommands(
   ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
     const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
     skillSignal.throwIfAborted()
-    // The skill read goes through the catalog port (migration M1.8): the
-    // Direct adapter resolves the session's live skill target internally —
-    // the loaded definition is a detached DTO, never the registry object.
-    const resolved = await runner.catalog.skills.resolveSkill(scope.sessionId, name)
+    // The scope-bound catalog facade validates the captured owner BEFORE the
+    // dispatch and again after the read settles — the scope is never downgraded
+    // to a bare session id handed to a current-owner resolver.
+    let resolved: SkillDefinitionResult
+    try {
+      resolved = await runner.resolveScopedSkill(scope, name)
+    } catch (error) {
+      if (error instanceof SupersededReadError) {
+        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+      }
+      throw error
+    }
     skillSignal.throwIfAborted()
     if (!runner.isSessionScopeCurrent(scope)) {
       return { kind: 'error', text: 'the session changed while loading the skill — try again' }
@@ -3438,7 +3480,15 @@ export function registerTuiCommands(
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when its tool registration is visible to this agent. Probe
     // that semantic catalog fact before choosing the delivery path.
-    const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(scope.sessionId)
+    let hostLoadsSkillBody = false
+    try {
+      hostLoadsSkillBody = runner.hostLoadsSkillBody(scope)
+    } catch (error) {
+      if (error instanceof SupersededReadError) {
+        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+      }
+      throw error
+    }
     // When the Host skill pre-step is absent, deliver the original invocation
     // and its rendered body as two ordered single prompts. This preserves the
     // original-line-before-body ordering without bypassing the semantic writer.
@@ -3729,8 +3779,18 @@ export function registerTuiCommands(
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (the catalog port's
       // live read), so hostile or model-only entries never reach the
-      // picker.
-      const catalog = await runner.catalog.skills.listHumanSkills(scope.sessionId)
+      // picker. The read is SCOPE-BOUND: it validates the captured owner
+      // before the dispatch and after the await, so a switch mid-read never
+      // paints another Session's picker.
+      let catalog: HumanSkillCatalog | undefined
+      try {
+        catalog = await runner.listScopedSkills(scope, runner.signal)
+      } catch (error) {
+        if (error instanceof SupersededReadError) {
+          return { kind: 'error', text: 'the session changed while loading skills — try again' }
+        }
+        throw error
+      }
       if (catalog === undefined) return { kind: 'error', text: 'skill service unavailable' }
       if (catalog.skills.length === 0) return { kind: 'error', text: 'no skills available' }
       // SettingsList rows: Enter cycles the value, which fires onChange.
@@ -3750,8 +3810,21 @@ export function registerTuiCommands(
           // edited; a mode frozen at picker-open time would be stale. The
           // resolved mode is handed to the delivery, which never re-derives
           // it.
+          // The activity read is SCOPE-BOUND: a stale picker refuses the
+          // selection with a notice instead of throwing out of the overlay
+          // callback (or dispatching to the replacement owner).
+          let running: boolean
+          try {
+            running = runner.currentSessionActivity(scope).running
+          } catch (error) {
+            if (error instanceof SupersededReadError) {
+              app.notify('the session changed while loading skills — try again', 'error')
+              return
+            }
+            throw error
+          }
           const delivery = resolveComposerDelivery(
-            runner.currentSessionActivity(scope).running,
+            running,
             'enter',
             runner.tuiSettings?.get().busyEnter,
           )
@@ -4240,6 +4313,9 @@ export function registerTuiCommands(
       // message + the preset log) — the raw commands service never crosses
       // into the command surface.
       const outcome = await runner.applyPermissionPreset(scope, 'danger-full-access', signal)
+      if (outcome.kind === 'superseded') {
+        return { kind: 'error', text: 'the session changed before the permission preset could be applied — try again' }
+      }
       if (outcome.kind === 'unavailable') {
         return { kind: 'error', text: outcome.cause === 'commands'
           ? 'commands service unavailable'

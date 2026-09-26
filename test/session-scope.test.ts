@@ -236,3 +236,25 @@ test('a scope-bound read facade throws SupersededReadError on a stale scope; a v
   assert.throws(() => stableFacts.currentApprovalOverride(stableScope!),
     (error: unknown) => error instanceof SupersededReadError)
 })
+
+test('a scope-bound WRITE refuses a stale scope before dispatching (never retargets)', async () => {
+  // The §3.2 write contract: a stale scope takes an EXPLICIT refusal path
+  // (`superseded`) and its sessionId is never dispatched to the replacement
+  // owner — the exact failure mode a retained `/settings` panel scope hits.
+  const live = slot({ agent: fakeAgent('s1'), generation: 3 })
+  const facts = sessionScopeFacts(
+    () => live.agent() as unknown as Agent,
+    () => live.generation(),
+  )
+  const scope = facts.captureLiveSessionScope()
+  assert.notEqual(scope, undefined)
+  // A current scope applies.
+  assert.equal(facts.setSessionApprovalPolicy(scope!, 'never'), 'applied')
+  assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'), { kind: 'applied' })
+  // The SAME session id on a NEW owner object: both writes refuse.
+  live.setAgent(fakeAgent('s1'))
+  assert.equal(facts.setSessionApprovalPolicy(scope!, 'never'), 'superseded',
+    'a stale sync write must refuse, not dispatch to the replacement owner')
+  assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'), { kind: 'superseded' },
+    'a stale async write must refuse and never present a settlement')
+})
