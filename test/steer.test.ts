@@ -1096,3 +1096,45 @@ test('semantic steer indeterminate outcome stays absent and never retries', asyn
   assert.deepEqual(restored, [])
   assert.deepEqual(notices, ['error: the session write outcome is indeterminate — do not retry automatically'])
 })
+
+test('P1 lock: a proven rejection reaches the owner seam with its code/message and settles nothing itself', async () => {
+  const agent = fakeAgent([])
+  const restored: string[] = []
+  const notices: string[] = []
+  const rejected: { code: string; message: string; count: number }[] = []
+  const deps = makeDeps({ agent: () => agent, restored, notices })
+  deps.onRejected = (error, steeredCount) => { rejected.push({ code: error.code, message: error.message, count: steeredCount }) }
+  deps.writer = {
+    prompt: async () => ({
+      kind: 'rejected' as const,
+      error: { code: 'session/writer-held', message: 'session is held by another writer — wait for it to release' },
+    }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'stale')
+  assert.deepEqual(rejected, [{
+    code: 'session/writer-held',
+    message: 'session is held by another writer — wait for it to release',
+    count: 0,
+  }], 'the refusal identity reaches the owner BEFORE any settlement')
+  assert.deepEqual(restored, [], 'the helper does not restore behind the owner')
+  assert.deepEqual(notices, [], 'the helper emits no user-facing notice for a proven refusal')
+})
+
+test('P1 lock: a queue-occurrence rejection carries the steered count to the owner seam', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const rejected: { code: string; count: number }[] = []
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices })
+  deps.onRejected = (error, steeredCount) => { rejected.push({ code: error.code, count: steeredCount }) }
+  deps.writer = {
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async (_sessionId, messageId) => messageId === 'a'
+      ? { kind: 'committed' as const, value: undefined }
+      : { kind: 'rejected' as const, error: { code: 'session/writer-held', message: 'session is held' } },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'stale')
+  assert.deepEqual(rejected, [{ code: 'session/writer-held', count: 1 }],
+    'the owner learns how many occurrences were steered before the refusal')
+  assert.deepEqual(notices, [], 'the helper emits no generic queue-stopped notice')
+})

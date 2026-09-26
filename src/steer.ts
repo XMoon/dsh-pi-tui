@@ -20,7 +20,7 @@
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { SessionScopeSupersededError } from './app/session/scope.ts'
 import { cancellationError } from './detached.ts'
-import type { SessionWriter, WriteOutcome } from './runtime/session-writer-port.ts'
+import type { SessionWriter, WriteError, WriteOutcome } from './runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
 
 /** The minimal agent surface the steer needs (the runner's live agent).
@@ -78,6 +78,15 @@ export interface SteerDeps {
    * keeps the direct/unit-call behavior.
    */
   writerSection?: <T>(task: () => Promise<T>) => Promise<T>
+  /**
+   * The proven pre-dispatch refusal settlement (`rejected` only). The
+   * submission owner (`app/submission/runtime.ts`, the M3 `session/writer-held`
+   * insertion point) reads `error.code`/`error.message` and owns the
+   * user-facing settlement. When present, the helper invokes this INSTEAD of
+   * its historical stale restore/notice, so a proven refusal never becomes a
+   * blind "try again". Optional; absent keeps the direct/unit-call behavior.
+   */
+  onRejected?: (error: WriteError, steeredCount: number) => void
 }
 
 /** The notice for a submission refused by the session-transition fence. */
@@ -285,6 +294,13 @@ const handleWriteOutcome = (deps: SteerDeps, text: string, outcome: WriteOutcome
     deps.notify('the session write outcome is indeterminate — do not retry automatically', 'error')
     return 'indeterminate'
   }
+  // A PROVEN pre-dispatch refusal (e.g. a future Remote `session/writer-held`):
+  // hand the code/message to the submission owner BEFORE any user-facing
+  // settlement — never the generic stale/retry notice.
+  if (outcome.kind === 'rejected' && deps.onRejected !== undefined) {
+    deps.onRejected(outcome.error, 0)
+    return 'stale'
+  }
   const verbatim = deps.restoreDraft(text)
   deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
   return 'stale'
@@ -397,6 +413,13 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
       if (text !== '') deps.restoreDraft(text)
       deps.notify(`queue steering became indeterminate after ${steeredCount} message${steeredCount === 1 ? '' : 's'} — do not retry automatically`, 'error')
       return 'indeterminate'
+    }
+    // A PROVEN occurrence refusal: the submission owner settles it (restore +
+    // the refusal's own guidance); never the generic "queue steering stopped"
+    // retry notice.
+    if (outcome.kind === 'rejected' && deps.onRejected !== undefined) {
+      deps.onRejected(outcome.error, steeredCount)
+      return 'stale'
     }
     if (text !== '') deps.restoreDraft(text)
     deps.notify(`queue steering stopped after ${steeredCount} message${steeredCount === 1 ? '' : 's'}`, 'error')

@@ -212,16 +212,13 @@ AFTER it was admitted: the submission-facing entrypoints (plain prompt, busy
 delivery, steer, queue pull-back, `HostCommandPort` submission, shell submit)
 admit through the bound runtime and, once admitted, carry only the
 surface-lifetime fence — an admitted writer is never truncated by a waiting
-transition. Reading `transitionGate.busy` is therefore allowed ONLY as a
-PRE-admission quick refusal, in exactly two places:
-
-1. the attachment-intake UX fence (`sessionTransitionPending()`, `src/commands.ts`), and
-2. the command-dispatch refusal in `app/submission/runtime.ts`'s
-   `executeHostCommandSubmission`, which fires BEFORE its writer section is
-   entered (a command about to execute during a transition's pre-freeze window
-   would write an agent that is being retired).
-
-Both are pre-admission refusals: nothing committed is ever truncated by them.
+transition. Reading `transitionGate.busy` is therefore NOT a writer-admission
+mechanism at all: it has exactly ONE production reader, the attachment-intake
+UX fence (`sessionTransitionPending()`, `src/commands.ts`). Every semantic
+writer — including the `HostCommandPort` submission — admits only through the
+bound runtime, and a `TransitionInProgressError` raised there is settled as a
+PROVEN pre-dispatch refusal (draft restored + the transition notice), never as
+a generic command failure.
 
 - The admission is SCOPE-BOUND and a NO-YIELD section: the scope-currentness
   read (`SessionScopeAuthority.isCurrent`) and the barrier occupancy run in the

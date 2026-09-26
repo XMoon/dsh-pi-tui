@@ -5127,7 +5127,6 @@ export function apply(ctx: Context, config: Config): void {
             settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
             notifySubmissionFailure: (error) => notifySubmissionFailure(error),
             isScopeCurrent: (value) => sessionScope.isCurrent(value),
-            isTransitionBusy: () => ownership.gate.busy,
             refuseByTransitionFence: (value) => refuseByTransitionFence(
               value,
               () => app.getDraft(),
@@ -8676,10 +8675,11 @@ export function apply(ctx: Context, config: Config): void {
       // NOT session-owned: it never creates or switches a Session.
       openPluginManager,
       createPluginManagerSubmenu,
-      // The transition write fence: agent-write entry points (plain
-      // submits, steers, skill invocations, shell submits) refuse while a
-      // transition is in flight (quiesce → commit) — the old agent may be
-      // woken again between whenIdle and the retire.
+      // The attachment-intake UX fence: the ONE production reader of the
+      // transition gate. Staging an attachment while a transition is in flight
+      // (quiesce → commit) would inject a draft into a session about to be
+      // retired. Semantic session writes never read this flag — they admit
+      // through the operation barrier (SessionRuntime.withWriter).
       sessionTransitionPending: () => ownership.gate.busy,
       // The single-writer session-transition gate: ordinary /new and
       // command-side switches run create AND commit inside one exclusive

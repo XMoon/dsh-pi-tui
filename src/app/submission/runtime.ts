@@ -127,10 +127,10 @@ export interface SubmissionRuntime {
    * through the raw barrier. It delegates to `SessionRuntime.withWriter`, so a
    * stale scope is refused with `SessionScopeSupersededError` and a frozen
    * transition with `TransitionInProgressError` — the writer-first contract is
-   * unchanged. No caller re-reads `transitionGate.busy` AFTER it was admitted:
-   * the gate is read only as a PRE-admission quick refusal (the command-dispatch
-   * check below and the attachment-intake UX fence), never inside an admitted
-   * writer section.
+   * unchanged. `app/submission` never reads `transitionGate.busy`: the gate has
+   * exactly ONE production reader, the attachment-intake UX fence in the
+   * command layer, and `SessionRuntime.withWriter` is the sole writer-admission
+   * authority.
    */
   withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
   /**
@@ -794,6 +794,9 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
   // steerAll owns restoration for queue-level cancellation; keep the enclosing
   // submit flow from restoring that same draft a second time.
   let steerRestored = false
+  // The proven pre-dispatch refusal's code, captured by the settlement seam
+  // below so the ack reason names it — never a generic `steer stale`.
+  let steerRejectionCode: string | undefined
   // Capture the session identity before the first awaited preparation or
   // deferred-start operation.
   const submittedAgent = deps.currentAgent()
@@ -936,6 +939,19 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             fence: () => deps.isDisposed(),
             writerSection: deps.writerSection,
             fenceNotice: () => 'a session transition is in progress — try again in a moment',
+            // PROVEN pre-dispatch refusal (the M3 `session/writer-held`
+            // insertion point): the submission owner restores the draft and
+            // surfaces the refusal's OWN message/guidance — never "try again".
+            onRejected: (error, steeredCount) => {
+              if (deps.isDisposed()) return
+              deps.mergeDraftIntoEditor(text)
+              steerRestored = true
+              steerRejectionCode = error.code
+              const steered = steeredCount > 0
+                ? ` (${steeredCount} message${steeredCount === 1 ? '' : 's'} already steered)`
+                : ''
+              deps.notify(`${error.message}${steered}`, 'error')
+            },
             createDraft: () => prepared,
             staleNotice: () => 'the queue or session changed while sending — try again',
             mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
@@ -959,7 +975,10 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       // authoritative inbox event.
       if (outcome !== 'ok') {
         deps.settleLocalSubmission(steerRequestId)
-        deps.settleSubmitAck(`steer ${outcome}`, { token: steerAckToken, terminal: true })
+        deps.settleSubmitAck(
+          steerRejectionCode === undefined ? `steer ${outcome}` : `steer rejected: ${steerRejectionCode}`,
+          { token: steerAckToken, terminal: true },
+        )
       }
     },
     restore: (t) => {
@@ -1005,7 +1024,6 @@ export interface HostCommandSubmissionDeps {
   readonly settleSubmitAck: (reason: string, options: { readonly token: number; readonly terminal: true }) => void
   readonly notifySubmissionFailure: (error: unknown) => void
   readonly isScopeCurrent: (scope: LiveSessionScope) => boolean
-  readonly isTransitionBusy: () => boolean
   readonly refuseByTransitionFence: (text: string) => void
   /** The FINAL-catalog attachment refusal for this line (`undefined` = allowed). */
   readonly lateAttachmentRefusal: () => string | undefined
@@ -1077,17 +1095,11 @@ export function executeHostCommandSubmission(
     deps.settleSubmitAck('attachments refused by the command declaration', { token: submitAckToken, terminal: true })
     return
   }
-  // The session-transition write fence: the identity check above can yield
-  // across a concurrent /new, /fork, rewind or switch — once a transition is
-  // in flight, executing the command would write an agent that is about to be
-  // retired. Refuse and restore the draft instead.
-  if (deps.isTransitionBusy()) {
-    fallbackPin()
-    deps.refuseByTransitionFence(text)
-    deps.settleLocalSubmission(submitRequestId)
-    deps.settleSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
-    return
-  }
+  // The session-transition write fence is the WRITER ADMISSION itself
+  // (`SessionRuntime.withWriter`): the old pre-dispatch `transitionGate.busy`
+  // quick refusal is gone, so a frozen transition surfaces as the barrier's own
+  // `TransitionInProgressError` and is settled below as a proven pre-dispatch
+  // refusal.
   deps.markTurnTransferred()
   // Assigned inside the runOwned factory (invocation-time capture) and read by
   // the settlement sinks below.
@@ -1251,6 +1263,16 @@ export function executeHostCommandSubmission(
       fallbackPin()
       submitTurn.release()
       if (deps.isDisposed()) return
+      // A frozen transition refused the writer admission BEFORE any command
+      // dispatch: a PROVEN pre-dispatch refusal (nothing ran), never the generic
+      // command-failure / command-health-error path. Restore the draft, settle
+      // the ack and surface the transition notice.
+      if (error instanceof TransitionInProgressError) {
+        deps.refuseByTransitionFence(text)
+        deps.settleLocalSubmission(submitRequestId)
+        deps.settleSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
+        return
+      }
       const indeterminateSkill = deps.isIndeterminateSkillWrite(error)
       const draftDisposition = deps.readCommandDraftDisposition()
       if (!indeterminateSkill && draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {

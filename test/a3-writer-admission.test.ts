@@ -33,10 +33,15 @@ import type { SessionOwnershipCore } from '../src/app/session/ownership-core.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../src/app/session/scope.ts'
 import {
   bindSubmissionRuntime,
+  deliverBusy,
+  executeHostCommandSubmission,
+  type HostCommandSubmissionDeps,
   type PromptSubmission,
+  type SteerSubmissionDeps,
   type SubmissionRuntimeSurface,
 } from '../src/app/submission/runtime.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 
 const SCOPE = { sessionId: 's1' } as unknown as LiveSessionScope
 
@@ -446,23 +451,155 @@ test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a
     'the stale notice text is the session change, not a transition')
 })
 
-test('every transition-gate read is a PRE-admission quick refusal', () => {
+test('the transition gate has exactly ONE production reader: the intake UX fence', () => {
   const runtime = readFileSync(new URL('../src/app/submission/runtime.ts', import.meta.url), 'utf8')
   const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
-  // Exactly TWO gate reads exist in the runner: the attachment-intake UX fence
-  // (`sessionTransitionPending`) and the command-dispatch refusal handed to the
-  // submission runtime. Both refuse BEFORE a writer section is entered.
-  assert.equal((index.match(/ownership\.gate\.busy/g) ?? []).length, 2,
-    'the gate may be read only by the intake fence and the command-dispatch binding')
-  // The submission runtime reads it exactly once (plus the interface declaration).
-  assert.equal((runtime.match(/isTransitionBusy/g) ?? []).length, 2,
-    'the submission runtime reads the gate once, as a pre-admission refusal')
+  // The gate has exactly ONE production reader in `src`: the attachment-intake
+  // UX fence (`sessionTransitionPending`). The HostCommand quick fence was
+  // removed; `SessionRuntime.withWriter` is the sole writer-admission authority.
+  assert.equal((index.match(/ownership\.gate\.busy/g) ?? []).length, 1,
+    'the gate may be read only by the attachment-intake UX fence')
+  assert.equal(runtime.includes('isTransitionBusy'), false,
+    'app/submission must not read the transition gate')
   const command = runtime.slice(
     runtime.indexOf('export function executeHostCommandSubmission'),
     runtime.indexOf("runOwned('command execution'"),
   )
-  assert.ok(command.includes('if (deps.isTransitionBusy())'),
-    'the command dispatch keeps its pre-admission gate refusal')
-  assert.equal(command.includes('withWriter('), false,
-    'that refusal must precede the writer section (never an in-writer re-read)')
+  assert.equal(command.includes('isTransitionBusy'), false,
+    'the command dispatch no longer pre-checks the transition gate')
+})
+
+test('the HostCommand path maps a frozen transition to the proven-refusal settlement', async () => {
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const deps = {
+    isDisposed: () => false,
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    loggerError: (message: string) => { calls.push(`log:${message}`) },
+    readDraft: () => '',
+    mergeDraftIntoEditor: () => true,
+    restoreSubmissionDraft: () => { calls.push('restore') },
+    consumeDraftAttachments: () => {},
+    draftHasAttachments: () => false,
+    pinDraftAttachments: () => () => {},
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    isScopeCurrent: () => true,
+    refuseByTransitionFence: () => { calls.push('fence') },
+    lateAttachmentRefusal: () => undefined,
+    commandSubmitAttachments: () => [],
+    isTuiOwnedCommand: () => false,
+    commandPlaneOwnsLine: () => false,
+    submittedHostClaim: () => undefined,
+    commandSignal: () => new AbortController().signal,
+    invokeCommandPlane: async () => { throw new TransitionInProgressError() },
+    beginCommandSettlement: () => {},
+    abortCommandSettlement: () => {},
+    settleCommandSettlement: () => {},
+    trackSettlementWork: () => {},
+    captureCommandHealthRef: () => 'health-ref',
+    clearCommandHealthError: () => {},
+    recordCommandHealthError: () => { calls.push('health') },
+    readCommandDraftDisposition: () => undefined,
+    shouldConsumeAdvertisedMiss: () => false,
+    isIndeterminateSkillWrite: () => false,
+    startArtifactSave: () => {},
+    submitPrompt: async () => {},
+    commandSessionId: () => 's1',
+    markTurnTransferred: () => {},
+    diag,
+  }
+  executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+    text: '/compact',
+    toggled: '/compact',
+    scope: SCOPE,
+    submitRequestId: 'request-1',
+    submitAckToken: 7,
+    generation: 1,
+    localEchoInstalled: false,
+    wasAdvertisedAtSubmit: true,
+    parsedName: 'compact',
+    submitTurn: { wait: Promise.resolve(), release: () => {} },
+  })
+  await flush()
+  await flush()
+  assert.ok(calls.includes('fence'), 'the draft is restored via the transition refusal')
+  assert.ok(calls.includes('ack:submit refused by transition fence'),
+    'the ack settles as the proven pre-dispatch refusal')
+  assert.ok(!calls.includes('health'),
+    'a frozen transition is never recorded as a command-health error')
+  assert.ok(!calls.some(call => call.startsWith('log:')),
+    'the generic command-failure logger never runs')
+  assert.ok(!calls.includes('notifyFailure'),
+    'the generic submission-failure notice never runs')
+})
+
+/** Flush microtasks/setImmediate rounds until `done` (a bounded drain). */
+async function drainUntil(done: () => boolean): Promise<boolean> {
+  for (let index = 0; index < 50; index += 1) {
+    if (done()) return true
+    await flush()
+  }
+  return done()
+}
+
+test('P1 lock: a session/writer-held steer rejection is settled by the submission owner', async () => {
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const agent = { session: { id: 's1' }, status: 'running' }
+  const deps = {
+    isDisposed: () => false,
+    isViewing: () => false,
+    currentAgent: () => agent,
+    currentGeneration: () => 1,
+    captureOwnerToken: () => 'owner',
+    isOwnerTokenCurrent: () => true,
+    readPendingInput: () => ({ running: true, items: [] }),
+    draftHasAttachments: () => false,
+    draftHasImages: () => false,
+    clearSettledLocalMessages: () => {},
+    mergeDraftIntoEditor: (text: string) => { calls.push(`merge:${text}`); return true },
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    acceptSubmitAck: () => 7,
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    beginLocalSteerEcho: () => {},
+    takeSubmitTurn: () => ({ wait: Promise.resolve(), release: () => {} }),
+    pinDraftAttachments: () => () => {},
+    persistAfterSession: async (resolve: () => Promise<string | undefined>, persist: (id: string | undefined) => void) => {
+      const id = await resolve()
+      if (id !== undefined) persist(id)
+    },
+    ensureSession: async () => {},
+    withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task(),
+    prepareMessage: async () => ({}),
+    markDispatch: () => {},
+    restoreSubmissionDraft: (text: string) => { calls.push(`restore:${text}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    consumeDraftAttachments: () => { calls.push('consume') },
+    writerSection: async (task: () => Promise<unknown>) => task(),
+    pendingInputReader: { snapshot: () => ({ running: true, items: [] }) },
+    writer: {
+      prompt: async () => ({
+        kind: 'rejected' as const,
+        error: { code: 'session/writer-held', message: SESSION_WRITER_HELD_GUIDANCE },
+      }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    },
+    diag,
+  }
+  deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'held draft' })
+  assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
+    'the steer gesture must settle its ack')
+  assert.ok(calls.includes('merge:held draft'),
+    'the submission owner restores the draft')
+  assert.ok(calls.some(call => call.includes(SESSION_WRITER_HELD_GUIDANCE)),
+    'the writer-held guidance is surfaced')
+  assert.ok(calls.some(call => call.startsWith('ack:steer rejected: session/writer-held')),
+    'the owner reads the rejection code')
+  assert.ok(calls.every(call => !call.includes('try again')),
+    'a proven refusal never tells the user to try again')
+  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
+    'the helper never restores behind the owner (no double restore)')
 })
