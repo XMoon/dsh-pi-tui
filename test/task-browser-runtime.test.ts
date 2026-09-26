@@ -465,23 +465,27 @@ const surfaceSource = readFileSync(
 )
 
 test('the runner wires agent/status to the membership-gated RUNTIME-only refresh', () => {
-  assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent, status }) => {"),
+  // A4-7: the routing decision is surface-owned; the runner registers a thin
+  // delegation.
+  assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))"),
     'the runner must register the agent/status listener')
-  assert.ok(indexSource.includes('if (!surface.hasTask(agent.id)) return'),
+  const routing = surfaceSource.slice(
+    surfaceSource.indexOf('const routeAgentStatus = '),
+    surfaceSource.indexOf('const routeProviderRefresh = '),
+  )
+  assert.ok(routing.includes('if (!taskHasChild(agentId)) return'),
     'the listener must be membership-gated (main-agent flips must never repaint)')
   // The handler must route to the runtime-only refresh — a re-listing
   // here would defeat the whole split (and the membership gate).
-  const marker = "ctx.on('agent/status', ({ agent, status }) => {"
-  const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 900)
-  assert.ok(handler.includes('surface.refreshAgentRuntimeOnly()'),
+  assert.ok(routing.includes('refreshAgentRuntimeOnly()'),
     'agent/status must refresh RUNTIME only, never refreshAgents()')
-  assert.ok(!handler.includes('refreshAgents()'),
+  assert.ok(!routing.includes('refreshAgents()'),
     'agent/status must never trigger a catalog re-listing')
   // The MAIN agent's transitions route to the completion-notification
   // controller (the settled boundary) BEFORE the child membership gate —
   // children still never repaint and never notify. The controller is
-  // surface-owned, so the handler routes through the surface entry.
-  assert.ok(handler.includes('surface.onAgentStatus(agent.id, status)'),
+  // surface-owned, so the routing feeds it through the surface entry.
+  assert.ok(routing.includes('feedCompletionStatus(agentId, status)'),
     'the main agent\'s status must feed the completion controller')
   // The surface-side runtime-only refresh must never re-list.
   const runtimeOnly = surfaceSource.slice(

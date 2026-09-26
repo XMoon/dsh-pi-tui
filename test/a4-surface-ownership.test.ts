@@ -136,3 +136,71 @@ test('A4: the opening journal instance is surface-owned', () => {
   const journal = read('src/app/surface/opening-journal.ts')
   assert.match(journal, /export function createOpeningJournal</u, 'the surface module owns the journal implementation')
 })
+
+test('A4-7: the four presentation routing bodies live in app/surface, not the runner', () => {
+  // Plan §16: the runner keeps the Host registrations and the Direct install as
+  // THIN delegations; the routing decisions/fences and the apply/paint calls
+  // are surface-owned. Each routing body is pinned to BOTH sides: the runner
+  // must not re-grow the body, and the surface must actually own it.
+  const surface = read('src/app/surface/runtime.ts')
+
+  // 1. session/event routing.
+  assert.match(indexSource, /ctx\.on\('session\/event', \(session, event\) => surface\.routeSessionEvent\(session, event\)\)/u,
+    'the runner must delegate session/event to the surface routing')
+  assert.doesNotMatch(indexSource, /openingJournal\.isOpening\(/u,
+    'the opening-journal decision must live in the surface routing')
+  assert.doesNotMatch(indexSource, /openingJournal\.record\(/u,
+    'the opening-journal record must live in the surface routing')
+  assert.doesNotMatch(indexSource, /viewing\.folder\.apply\(/u,
+    'the viewed-child transcript application must live in the surface routing')
+  assert.match(surface, /const routeSessionEvent = /u,
+    'the surface must own the session/event routing body')
+  assert.match(surface, /openingJournal\.isOpening\(session\.id\)/u,
+    'the surface must decide the opening-journal target')
+  assert.match(surface, /openingJournal\.record\(session\.id, event\)/u,
+    'the surface must record the opening event')
+  assert.match(surface, /main\.folder\.apply\(\[event\]\)/u,
+    'the surface must issue the main transcript apply call')
+  assert.match(surface, /viewer\.folder\.apply\(\[event\]\)/u,
+    'the surface must issue the viewed-child transcript apply call')
+  assert.match(surface, /source\.paintNow\(\)/u,
+    'the surface must coordinate the forced repaint')
+
+  // 2. assistant stream: the Direct INSTALL stays, the routing bodies move.
+  assert.match(indexSource, /isCurrentAgent: \(agent\) => surface\.isCurrentAssistantAgent\(agent\)/u,
+    'the Direct install must delegate the identity fence to the surface')
+  assert.match(indexSource, /onInput: \(input\) => surface\.applyAssistantInput\(input\)/u,
+    'the Direct install must delegate the neutral input routing to the surface')
+  assert.doesNotMatch(indexSource, /registeredAgentFor\(candidateId\)/u,
+    'the exact-Agent identity fence must live in the surface routing')
+  assert.match(surface, /const isCurrentAssistantAgent = /u,
+    'the surface must own the assistant-stream identity routing')
+  assert.match(surface, /const applyAssistantInput = /u,
+    'the surface must own the assistant-stream input routing')
+
+  // 3. subagent lifecycle + agent/status presentation triggers.
+  assert.match(indexSource, /ctx\.on\('subagent\/start', \(\) => surface\.routeSubagentLifecycle\(\)\)/u,
+    'subagent/start must delegate to the surface routing')
+  assert.match(indexSource, /ctx\.on\('subagent\/end', \(\) => surface\.routeSubagentLifecycle\(\)\)/u,
+    'subagent/end must delegate to the surface routing')
+  assert.match(indexSource, /ctx\.on\('agent\/status', \(\{ agent, status \}\) => surface\.routeAgentStatus\(agent\.id, status\)\)/u,
+    'agent/status must delegate to the surface routing')
+  assert.match(surface, /const routeSubagentLifecycle = /u,
+    'the surface must own the subagent lifecycle routing')
+  assert.match(surface, /const routeAgentStatus = /u,
+    'the surface must own the agent/status routing')
+
+  // 4. provider/settings/credential refresh routing.
+  assert.match(indexSource, /ctx\.on\('llm\/adapters-updated', \(\) => surface\.routeProviderRefresh\(\)\)/u,
+    'llm/adapters-updated must delegate to the surface routing')
+  assert.match(indexSource, /ctx\.on\('settings\/document-updated', \(ns\) => surface\.routeSettingsRefresh\(ns\)\)/u,
+    'settings/document-updated must delegate to the surface routing')
+  assert.match(indexSource, /credentials\.onChanged\(\(\) => surface\.routeProviderRefresh\(\)\)/u,
+    'the credential listener must delegate to the surface routing')
+  assert.match(surface, /const routeProviderRefresh = /u,
+    'the surface must own the provider/credential refresh routing')
+  assert.match(surface, /const routeSettingsRefresh = /u,
+    'the surface must own the settings refresh routing')
+  assert.match(surface, /namespace === 'llm-pi-ai' \|\| namespace === 'llm-deepseek'/u,
+    'the surface must own the settings namespace filter')
+})
