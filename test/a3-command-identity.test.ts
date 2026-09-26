@@ -16,9 +16,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import { compositionSource } from './support/composition-surface.ts'
 
 const commandsSource = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
-const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+const indexSource = compositionSource()
 // A3-5 relocated the semantic, scope-bound command facades (and their ONE
 // stale-throwing admission) out of the runner into the bound command runtime.
 const commandRuntimeSource = readFileSync(new URL('../src/app/command/runtime.ts', import.meta.url), 'utf8')

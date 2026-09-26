@@ -1,22 +1,5 @@
 {
-  "app/direct/composition.ts": [
-    "agentPresets",
-    "import:dsh-agent"
-  ],
-  "app/direct/owner-registry.ts": [
-    "import:dsh-agent"
-  ],
-  "app/direct/owner-retirement.ts": [
-    "import:dsh-agent"
-  ],
-  "app/direct/runtime.ts": [
-    "import:dsh-agent"
-  ],
-  "commands.ts": [
-    "import:dsh-agent",
-    "import:dsh-session"
-  ],
-  "index.ts": [
+  "app/bootstrap.ts": [
     "agentDefaultModel",
     "agentPresets",
     "agents",
@@ -36,6 +19,26 @@
     "shell",
     "subagents",
     "tools"
+  ],
+  "app/direct/composition.ts": [
+    "agentPresets",
+    "import:dsh-agent"
+  ],
+  "app/direct/owner-registry.ts": [
+    "import:dsh-agent"
+  ],
+  "app/direct/owner-retirement.ts": [
+    "import:dsh-agent"
+  ],
+  "app/direct/runtime.ts": [
+    "import:dsh-agent"
+  ],
+  "commands.ts": [
+    "import:dsh-agent",
+    "import:dsh-session"
+  ],
+  "index.ts": [
+    "import:dsh-agent"
   ],
   "rewind.ts": [
     "import:dsh-session"
@@ -57,15 +60,38 @@
     "permissionPresets",
     "settings"
   ],
+  "runtime/direct/host-command-direct.ts": [
+    "commands"
+  ],
   "runtime/direct/interaction-direct.ts": [
     "approval",
     "userQuestions"
+  ],
+  "runtime/direct/job-observation-direct.ts": [
+    "jobController"
+  ],
+  "runtime/direct/model-selection-direct.ts": [
+    "import:dsh-agent"
+  ],
+  "runtime/direct/plugin-manager-direct.ts": [
+    "pluginManager"
+  ],
+  "runtime/direct/session-archive-direct.ts": [
+    "import:dsh-session"
   ],
   "runtime/direct/session-direct.ts": [
     "agentPresets",
     "import:dsh-session",
     "sessionQuery",
     "tokenMeter"
+  ],
+  "runtime/direct/session-lifecycle-direct.ts": [
+    "agentDefaultModel",
+    "agents",
+    "import:dsh-agent",
+    "import:dsh-session",
+    "sessionQuery",
+    "workspaceRegistry"
   ],
   "runtime/direct/session-preset-direct.ts": [
     "agentPresets",
@@ -76,29 +102,6 @@
   "runtime/direct/session-projection-direct.ts": [
     "import:dsh-agent",
     "import:dsh-session"
-  ],
-  "runtime/direct/session-lifecycle-direct.ts": [
-    "agentDefaultModel",
-    "agents",
-    "import:dsh-agent",
-    "import:dsh-session",
-    "sessionQuery",
-    "workspaceRegistry"
-  ],
-  "runtime/direct/model-selection-direct.ts": [
-    "import:dsh-agent"
-  ],
-  "runtime/direct/session-archive-direct.ts": [
-    "import:dsh-session"
-  ],
-  "runtime/direct/host-command-direct.ts": [
-    "commands"
-  ],
-  "runtime/direct/plugin-manager-direct.ts": [
-    "pluginManager"
-  ],
-  "runtime/direct/job-observation-direct.ts": [
-    "jobController"
   ],
   "runtime/direct/session-writer-direct.ts": [
     "sessionTitle"

@@ -42,6 +42,7 @@ import {
 } from '../src/app/submission/runtime.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
+import { compositionSource } from './support/composition-surface.ts'
 
 const SCOPE = { sessionId: 's1' } as unknown as LiveSessionScope
 
@@ -206,7 +207,7 @@ test('app/submission owns the submission domain only: no Direct module, no Host 
 })
 
 test('the queue-recall state and the plain-submit write body live in app/submission', () => {
-  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const index = compositionSource()
   // The concrete state and its settle body moved out; only the WHEN seam
   // (`SessionRuntimeSurface.settlePendingQueueRecalls`) remains in the runner.
   assert.equal(index.includes('const pendingQueueRecalls'), false,
@@ -358,12 +359,12 @@ function srcTsFiles(dir: URL, prefix = ''): string[] {
 }
 
 test('A3-4 static exit: index.ts has ZERO direct writer admission; commands.ts has ZERO withSessionWriter', () => {
-  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const index = compositionSource()
   const commands = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
   assert.equal(index.includes('ownership.barrier.runWriter('), false,
-    'src/index.ts must hold no direct runWriter site')
+    'the composition surface must hold no direct runWriter site')
   assert.equal(index.includes('.barrier.runWriter('), false,
-    'src/index.ts must reach no raw barrier writer admission')
+    'the composition surface must reach no raw barrier writer admission')
   assert.equal(commands.includes('withSessionWriter'), false,
     'TuiCommandRunner.withSessionWriter must be deleted')
 })
@@ -401,9 +402,9 @@ test('P1-1 static: no production fence carries the transition gate into an admit
   // The transition gate may gate a writer that has NOT yet been admitted, but
   // once a writer holds the barrier the gate must WAIT for the whole writer.
   // Re-reading `gate.busy` inside an admitted writer's fence truncates it.
-  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const index = compositionSource()
   const runtime = readFileSync(new URL('../src/app/submission/runtime.ts', import.meta.url), 'utf8')
-  for (const [file, source] of [['../src/index.ts', index], ['../src/app/submission/runtime.ts', runtime]] as const) {
+  for (const [file, source] of [['the composition surface', index], ['../src/app/submission/runtime.ts', runtime]] as const) {
     assert.equal(/fence:\s*\(\)\s*=>[^\n]*gate\.busy/u.test(source), false,
       `${file}: an admitted writer's fence must never read the transition gate`)
   }
@@ -453,7 +454,7 @@ test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a
 
 test('the transition gate has exactly ONE production reader: the intake UX fence', () => {
   const runtime = readFileSync(new URL('../src/app/submission/runtime.ts', import.meta.url), 'utf8')
-  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const index = compositionSource()
   // The gate has exactly ONE production reader in `src`: the attachment-intake
   // UX fence (`sessionTransitionPending`). The HostCommand quick fence was
   // removed; `SessionRuntime.withWriter` is the sole writer-admission authority.

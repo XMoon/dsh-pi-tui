@@ -17,9 +17,10 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { compositionSource } from './support/composition-surface.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const indexSource = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+const indexSource = compositionSource()
 const surfaceSource = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.ts'), 'utf8')
 const commitOrderSource = readFileSync(join(root, 'src', 'app', 'session', 'commit-order.ts'), 'utf8')
 

@@ -9,8 +9,9 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { compositionSource } from './support/composition-surface.ts'
 
-const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+const indexSource = compositionSource()
 const coreSource = readFileSync(new URL('../src/app/session/ownership-core.ts', import.meta.url), 'utf8')
 const runtimeSource = readFileSync(new URL('../src/app/direct/runtime.ts', import.meta.url), 'utf8')
 const retirementSource = readFileSync(new URL('../src/app/direct/owner-retirement.ts', import.meta.url), 'utf8')

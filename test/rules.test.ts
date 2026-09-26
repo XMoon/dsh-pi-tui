@@ -22,6 +22,14 @@ import ts from 'typescript'
 
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
+/** The runner composition source (A5-2 moved the runner body from the
+ * package entry into the composition root): these audits pin the runner
+ * SCOPE, whichever of the two files holds it. */
+const runnerSource = (): string => [
+  readFileSync(join(srcDir, 'index.ts'), 'utf8'),
+  readFileSync(join(srcDir, 'app', 'bootstrap.ts'), 'utf8'),
+].join('\n')
+
 /** Recursively list every `.ts` file under a directory. */
 function listSourceFiles(dir: string): string[] {
   const files: string[] = []
@@ -248,7 +256,7 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
   // handles destructuring (`const { x } = y`, `const [x] = y`), same-line
   // nested blocks and nested closures precisely — no regex/brace-depth
   // approximation.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const source = runnerSource()
   const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
   // Find the startup lifecycle root's async IIFE:
@@ -378,7 +386,7 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
 })
 
 test('the restored fullscreen startup path initializes custom-item persistence before its callback can run', () => {
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const source = runnerSource()
   const helper = source.indexOf('const userFooterCustomItemsForSave =')
   const fullscreenBoot = source.indexOf("if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)")
   assert.ok(helper >= 0, 'the custom-item save projection must exist')
@@ -393,7 +401,7 @@ test('legacy history moves to JSONL files and never re-enters Config', () => {
   // way — history only ever lands in $DSH_HOME/user-history/*.jsonl files.
   // The old whole-document cleanup write (whose footerCustomItems
   // projection this guard used to pin) is gone with the old Settings store.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const source = runnerSource()
   assert.doesNotMatch(source, /settings history cleanup/u,
     'the retired whole-document history cleanup write must stay deleted')
   const migration = readFileSync(join(srcDir, 'legacy-settings-migration.ts'), 'utf8')
@@ -424,7 +432,7 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
   // TuiApp can fire it from its own startup-capable synchronous paths.
   // Non-function property values are eagerly EVALUATED during the call
   // itself, so they must never reference a later-declared binding either.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const source = runnerSource()
   const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
   // The lifecycle root IIFE (same anchor as the cleanup audit above):

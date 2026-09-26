@@ -32,6 +32,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { contextRefreshKind } from '../src/index.ts'
+import { compositionSource } from './support/composition-surface.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -481,7 +482,7 @@ test('D2 structural gate: the runner source keeps measurement out of cheap refre
   // reintroduces a measuring reader (or the direct tokenMeter service)
   // into a generic status refresh fails here instead of waiting for a
   // review round. Comments are stripped so documentation cannot mask code.
-  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const source = compositionSource()
   const stripped = source
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/\/\/[^\n]*/g, ' ')

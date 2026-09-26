@@ -14,6 +14,7 @@ import { createDirectRuntimeBackend } from '../src/runtime/direct/backend-direct
 import { DIRECT_IMPLEMENTED_CAPABILITIES } from '../src/runtime/capability.ts'
 import type { DirectBackendDeps } from '../src/runtime/direct/backend-direct.ts'
 import type { Diag } from '../src/diag.ts'
+import { compositionSource } from './support/composition-surface.ts'
 
 function makeDeps(): DirectBackendDeps {
   const diag: Diag = {
@@ -72,7 +73,7 @@ test('each backend domain is served by its own adapter instance', () => {
 })
 
 test('the runner no longer constructs the Direct Job observation adapter itself', () => {
-  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const source = compositionSource()
   assert.doesNotMatch(source, /DirectJobObservationPort/,
-    'src/index.ts must consume backend.jobObservation instead of constructing the Direct adapter')
+    'the composition surface must consume backend.jobObservation instead of constructing the Direct adapter')
 })

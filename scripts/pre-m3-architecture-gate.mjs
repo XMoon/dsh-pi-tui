@@ -95,7 +95,7 @@ export const ARCHITECTURE_ALLOWLIST = ['legacy-settings-migration.ts:runtime/dir
 
 /**
  * True when `srcRel` may import Direct wiring: the composition root
- * (`src/index.ts`), the future composition owner (`src/app/bootstrap.ts`), the
+ * (`src/index.ts`), the composition owner (`src/app/bootstrap.ts`), the
  * Direct application zone itself (`src/app/direct/**`), and the semantic
  * runtime (`src/runtime/**`).
  *
