@@ -211,6 +211,7 @@ import { bindSessionRuntime } from './app/session/runtime.ts'
 import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import { bindSubmissionRuntime, deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, submitShell, type SteerSubmissionAgent, type SteerSubmissionDeps, type SubmissionRuntime } from './app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
+import { createOpeningJournal } from './app/surface/opening-journal.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
@@ -2164,8 +2165,8 @@ export function apply(ctx: Context, config: Config): void {
           safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement was skipped (${reason}) — the session may not have been closed cleanly\n`)
         },
         isSurfaceDisposed: () => cleanedUp,
-        beginOpening: (sessionId) => beginOpening(sessionId),
-        clearOpening: (token) => clearOpening(token as OpeningToken),
+        beginOpening: (sessionId) => openingJournal.begin(sessionId),
+        clearOpening: (token) => openingJournal.clear(token as object),
         settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
         resetSubmitLatency: () => submitLatencyTracker.reset(),
@@ -2212,8 +2213,8 @@ export function apply(ctx: Context, config: Config): void {
         awaitPendingDefaultWrite: (signal) => awaitPendingDefaultWrite(signal),
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
         sessionCreateCwd: () => process.cwd(),
-        currentOpening: () => currentOpening(),
-        resetOpening: () => resetOpening(),
+        currentOpening: () => openingJournal.current(),
+        resetOpening: () => openingJournal.reset(),
       },
       isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
       diag,
@@ -2574,39 +2575,14 @@ export function apply(ctx: Context, config: Config): void {
     })
     let statsFolder = new StatsFolder()
     /**
-     * The opening-session JOURNAL (A2 seam). Presentation-only: it fences which
-     * pre-commit events belong to the target being opened, and `initLiveSession`
-     * merges its cut into the cold hydration. The journal (including its mutable
-     * event array) is PRIVATE behind this API: callers only ever hold the opaque
-     * identity token, and read events through the readonly `openingCut` view.
+     * The opening-session JOURNAL (A2 seam; the concrete state is A4 surface
+     * ownership — see `app/surface/opening-journal.ts`). Presentation-only: it
+     * fences which pre-commit events belong to the target being opened, and
+     * `initLiveSession` merges its cut into the cold hydration. The mutable
+     * event array stays PRIVATE behind that module's API; callers only ever
+     * hold the opaque identity token, and read events through `cut`.
      */
-    /** Opaque identity token of one opening journal (no readable members). */
-    type OpeningToken = object
-    let openingJournal: { readonly token: OpeningToken; readonly id: string; events: SessionEvent[] } | undefined
-    /** Begin an opening journal and return its opaque identity token. */
-    const beginOpening = (id: string): OpeningToken => {
-      const token: OpeningToken = {}
-      openingJournal = { token, id, events: [] as SessionEvent[] }
-      return token
-    }
-    /** The opaque identity token of the journal currently being opened, if any. */
-    const currentOpening = (): OpeningToken | undefined => openingJournal?.token
-    /** Clear only the EXACT journal identity (a newer transition's journal wins). */
-    const clearOpening = (token: OpeningToken): void => {
-      if (openingJournal?.token === token) openingJournal = undefined
-    }
-    /** Unconditional clear (the ensure-first-session finally path). */
-    const resetOpening = (): void => { openingJournal = undefined }
-    /** Whether the given session id is the one currently being opened. */
-    const isOpening = (sessionId: string): boolean =>
-      openingJournal !== undefined && openingJournal.id === sessionId
-    /** Record one pre-commit event for the opening target (no-op otherwise). */
-    const recordOpeningEvent = (sessionId: string, event: SessionEvent): void => {
-      if (openingJournal !== undefined && openingJournal.id === sessionId) openingJournal.events.push(event)
-    }
-    /** The readonly opening cut for one session id, or undefined. */
-    const openingCut = (sessionId: string): { id: string; events: readonly SessionEvent[] } | undefined =>
-      openingJournal?.id === sessionId ? { id: openingJournal.id, events: openingJournal.events } : undefined
+    const openingJournal = createOpeningJournal<SessionEvent>()
      let goalText: string | undefined
 
     /** Repaint the welcome card from the live agent's current facts. Re-read
@@ -8112,7 +8088,7 @@ export function apply(ctx: Context, config: Config): void {
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
       rememberHistoryCwd(agent.session.header.cwd ?? '')
-      const opening = openingCut(agent.session.id)
+      const opening = openingJournal.cut(agent.session.id)
        const events = opening === undefined
          ? agent.session.snapshotEvents()
          : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
@@ -8834,7 +8810,7 @@ export function apply(ctx: Context, config: Config): void {
       if (attachedSession !== undefined && attachedSession !== session) return
       // Opening journals fence presentation only. Runtime bookkeeping must
       // continue to observe the target for selections, approvals, and cleanup.
-      const openingTarget = isOpening(session.id)
+      const openingTarget = openingJournal.isOpening(session.id)
       // The retiring committed Agent remains authoritative until quiesce
       // completes; the published opening target may also emit before commit.
       const mainEvent = session.id === ownership.currentSessionId() || openingTarget
@@ -8883,7 +8859,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
        if (openingTarget && (viewing === undefined || viewing.id !== session.id)) {
-         recordOpeningEvent(session.id, event)
+         openingJournal.record(session.id, event)
          return
        }
        const opening = openingViewer
@@ -9132,7 +9108,7 @@ export function apply(ctx: Context, config: Config): void {
         // attempt (abandoned end or a committed `assistant/attempt`
         // settlement) clears the step's tool previews — its deltas never
         // materialized into durable calls.
-        if (isOpening(input.sessionId) && (viewing === undefined || viewing.id !== input.sessionId)) return
+        if (openingJournal.isOpening(input.sessionId) && (viewing === undefined || viewing.id !== input.sessionId)) return
          if (viewing !== undefined && input.sessionId === viewing.id) {
           applyAssistantLiveInput(viewing.folder, viewing.stats, viewing.previews, input)
           schedulePaint()
