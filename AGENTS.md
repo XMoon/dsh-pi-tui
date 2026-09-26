@@ -165,6 +165,18 @@ Validation mechanics for this toolchain:
 * Extending a shared interface (e.g. `TuiCommandRunner`, `TuiSettingsDoc`) also
   reaches its test fakes and literal builders: update them with the change and
   let `pnpm typecheck:bundle` enumerate the remainder.
+* Changing WHAT the public entry re-exports (moving or re-exporting a
+  publicly-exported type/function) changes the emitted declaration graph: the
+  bundled `dist/*.d.mts` may only carry the top-level regions allowlisted in
+  `scripts/tarball-smoke.mjs`. Run `pnpm build` and then
+  `node scripts/tarball-smoke.mjs` before pushing — the ordinary product suite
+  does NOT cover this (it is a `postpack`/CI check), and a stale `dist` makes it
+  pass locally.
+* A publicly-exported helper therefore lives in the public entry (`src/index.ts`)
+  or in an allowlisted TOP-LEVEL module that matches its natural ownership
+  (`src/compaction-presentation.ts`, `src/pending-presentation.ts`, ...), never
+  under `src/app/**` or `src/runtime/**`; the internal owner imports it (§27 of
+  the Pre-M3 convergence plan, and §5's `app/* -> presentation modules`).
 
 When entering a development worktree:
 
