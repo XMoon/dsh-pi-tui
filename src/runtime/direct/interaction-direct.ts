@@ -3,8 +3,9 @@
  * in-process implementation of `InteractionPort` over the dsh
  * `userQuestions` / `approval` services and the Cordis `approval/request`
  * event. This is the ONLY module in the interaction path that touches
- * `ctx`; the listeners/providers stay runner-owned (they render through
- * TuiApp), and a Remote adapter will implement the same interface in a
+ * `ctx`; the listeners/providers are registered by the surface owner
+ * (`SurfaceRuntime.attachInteraction`, A4) and render through TuiApp, and a
+ * Remote adapter will implement the same interface in a
  * later milestone. The identity-based `setApprovalPolicy(sessionId)` is
  * resolved to the live Agent HERE (runner-injected resolver); the
  * approval request listener is adapted from the official ApprovalRequest

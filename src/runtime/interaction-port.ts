@@ -4,9 +4,9 @@
  * authority (approval requests, the interactive question provider, the
  * approval policy). Implemented by `src/runtime/direct/` (Direct) today
  * and by a Remote adapter in a later milestone. The port owns the
- * REGISTRATION channels; the listeners/providers stay runner-owned (they
- * render through TuiApp), so the port is the boundary — never a callback
- * serializer.
+ * REGISTRATION channels; the listeners/providers are registered by the
+ * SURFACE owner (`SurfaceRuntime.attachInteraction`, A4) and render through
+ * TuiApp, so the port is the boundary — never a callback serializer.
  *
  * The contract is TRANSPORT-NEUTRAL:
  *

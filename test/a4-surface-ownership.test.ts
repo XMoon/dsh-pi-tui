@@ -91,6 +91,28 @@ test('A4: the mounted TuiApp has exactly one lifetime owner', () => {
   assert.doesNotMatch(indexSource, /app\.dispose\(\)/u, 'the runner must not dispose the mounted app')
 })
 
+test('A4: the runner releases the surface-owned resources in the documented order', () => {
+  // Plan §12.2: the teardown order is behavior. The runner only orchestrates;
+  // every release hook is surface-owned.
+  const cleanupStart = indexSource.indexOf('const disposeSurface = (): void => {')
+  assert.ok(cleanupStart >= 0, 'disposeSurface must exist')
+  const cleanup = indexSource.slice(cleanupStart, indexSource.indexOf('diag.dispose()', cleanupStart) + 20)
+  const order = [
+    'surface.disposePluginManager()',
+    'surface.disposeJobEvents()',
+    'surface.disposeJobObservation()',
+    'surface.disposeTaskBrowser()',
+    'surface.dispose()',
+  ]
+  let cursor = -1
+  for (const hook of order) {
+    const at = cleanup.indexOf(hook)
+    assert.ok(at >= 0, `cleanup must call ${hook}`)
+    assert.ok(at > cursor, `cleanup must call ${hook} after the previous surface release hook`)
+    cursor = at
+  }
+})
+
 test('A4: app/surface reads no Host business service and no Direct wiring', () => {
   const sources = surfaceSources()
   assert.ok(sources.length > 0, 'src/app/surface must exist')
