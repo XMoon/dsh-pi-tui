@@ -237,7 +237,6 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -265,7 +264,6 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -418,7 +416,6 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     },
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -445,7 +442,6 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -585,7 +581,6 @@ test('/footer Esc cancels without writing', async () => {
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -609,7 +604,6 @@ test('/footer Esc cancels without writing', async () => {
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -667,7 +661,6 @@ test('/footer starts from the persisted custom layout when active', async () => 
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -691,7 +684,6 @@ test('/footer starts from the persisted custom layout when active', async () => 
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -750,7 +742,6 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -773,7 +764,6 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -864,7 +854,6 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -888,7 +877,6 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -959,7 +947,6 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -982,7 +969,6 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -1041,7 +1027,6 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -1064,7 +1049,6 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -1152,7 +1136,6 @@ test('/footer save failures notify exactly once (validation and write failures)'
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -1179,7 +1162,6 @@ test('/footer save failures notify exactly once (validation and write failures)'
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -1270,7 +1252,6 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
-      get liveAgent() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
       currentSessionId: undefined,
       ensureSession: async () => {},
@@ -1293,7 +1274,6 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
       signal: new AbortController().signal,
-      get sessionGeneration() { return 0 },
       switchSession: async () => undefined,
       transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
         await steps.prepare?.()
@@ -1396,7 +1376,6 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
-      get liveAgent() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
       currentSessionId: undefined,
       ensureSession: async () => {},
@@ -1419,7 +1398,6 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
       signal: new AbortController().signal,
-      get sessionGeneration() { return 0 },
       switchSession: async () => undefined,
       transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
         await steps.prepare?.()
@@ -1508,7 +1486,6 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
-      get liveAgent() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
       currentSessionId: undefined,
       ensureSession: async () => {},
@@ -1531,7 +1508,6 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
       signal: new AbortController().signal,
-      get sessionGeneration() { return 0 },
       switchSession: async () => undefined,
       transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
         await steps.prepare?.()

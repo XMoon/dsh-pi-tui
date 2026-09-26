@@ -14,7 +14,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../src/index.ts'
-import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
+import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../src/surface-catalog.ts'
 import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
 import { SessionOperationBarrier } from '../src/session-operation-barrier.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -85,8 +85,11 @@ function stubRunner(
     ctx,
     app,
     diag,
-    get liveAgent() { return state.agent },
     ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1),
+    // The scoped collision baseline must read the FAKE registry (which
+    // reflects registrations in its global view), exactly like the real
+    // commands service does through the production provider.
+    listScopedCommands: () => (ctx.get('commands') as unknown as { list(): readonly SurfaceCommandSummary[] }).list(),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -144,7 +147,6 @@ function stubRunner(
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return options.generation?.() ?? 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()

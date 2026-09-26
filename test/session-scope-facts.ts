@@ -1,14 +1,20 @@
 /**
  * Test-only adapter that projects a stub runner's live session state onto the
- * three A3-0 `TuiCommandRunner` CAPTURE members. It wires the REAL production
- * authorities (`createSessionSubjectAuthority` + `createSessionScopeAuthority`)
- * over the same mutable stub state, so a capture is invalidated by an Agent
- * swap and by a generation bump exactly like production — never by a
- * hand-rolled test approximation.
+ * A3-0/A3-2 `TuiCommandRunner` SCOPE + FACADE members. It wires the REAL
+ * production authorities (`createSessionSubjectAuthority` +
+ * `createSessionScopeAuthority`) over the same mutable stub state, so a capture
+ * is invalidated by an Agent swap and by a generation bump exactly like
+ * production — never by a hand-rolled test approximation.
+ *
+ * The generic facade implementations are derived from `currentAgent` and the
+ * REAL scope authority (so a stale scope throws `SupersededReadError`, exactly
+ * like the production providers). A specific suite overrides the members whose
+ * behavior it asserts by declaring them AFTER the spread.
  *
  * `currentSessionId` is deliberately NOT supplied: spreading this helper would
  * evaluate such a getter ONCE and freeze it to the stub-construction value. A
- * stub must expose `currentSessionId` from its OWN live state instead.
+ * stub must expose `currentSessionId` from its OWN live state instead. The
+ * facade members are FUNCTIONS, so spreading them can never freeze live state.
  *
  * This module is intentionally NOT `*.test.ts`: `pnpm test:product` globs
  * `test/*.test.ts` and must not execute it as a suite.
@@ -16,6 +22,7 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import {
   createSessionScopeAuthority,
   type LiveSessionScope,
@@ -26,20 +33,39 @@ import {
   createSessionSubjectAuthority,
   type SessionOwnerRef,
 } from '../src/app/session/subject.ts'
+import { SupersededReadError } from '../src/runtime/read-error.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/skill-catalog-refresh.ts'
+import { computeStats, type SessionStats } from '../src/stats.ts'
+import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
 
 /** The subset of `TuiCommandRunner` the scope helper supplies: the CAPTURE
- * members only. A stub must also expose `currentSessionId` from its OWN live
- * state (a live getter, or `undefined` for a sessionless stub). */
+ * members plus the A3-2 scope-bound facades. A stub must also expose
+ * `currentSessionId` from its OWN live state (a live getter, or `undefined`
+ * for a sessionless stub). */
 export interface SessionScopeFacts {
   captureSessionScope(): SessionScope
+  captureLiveSessionScope(): LiveSessionScope | undefined
   isSessionScopeCurrent(scope: SessionScope): boolean
   requireLiveSessionScope(): Promise<LiveSessionScope>
-  /** The transitional paired resolution (`Agent` + its scope, one sync step). */
-  requireLiveAgentScope(): Promise<{ readonly agent: Agent; readonly scope: LiveSessionScope }>
+  listScopedCommands(): readonly SurfaceCommandSummary[]
+  currentSessionActivity(scope: LiveSessionScope): { readonly running: boolean }
+  currentSessionRouting(scope: LiveSessionScope): { readonly provider: string; readonly model: string; readonly cwd: string }
+  currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
+  currentSessionStats(scope: LiveSessionScope): SessionStats | undefined
+  lastAssistantText(scope: LiveSessionScope): string | undefined
+  refreshSessionCatalog(scope: SessionScope, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
+  refreshStandingCatalog(presetId: string | undefined, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
+  applyPermissionPreset(
+    scope: LiveSessionScope,
+    presetId: string,
+    signal?: AbortSignal,
+  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }>
+  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): void
 }
 
 /**
- * Build the scope CAPTURE members over a stub's live state.
+ * Build the scope CAPTURE members and the scope-bound facades over a stub's
+ * live state.
  *
  * @param currentAgent - re-reads the stub's live agent (its OWNER is the agent
  *   object itself, so swapping the agent invalidates a capture).
@@ -68,20 +94,64 @@ export function sessionScopeFacts(
     isSubjectCurrent: (subject) => subjectAuthority.isCurrent(subject),
   })
 
+  /** The exact agent of a live scope, validated like the production provider. */
+  const agentForLiveScope = (scope: LiveSessionScope): Agent => {
+    if (!scopeAuthority.isCurrent(scope)) {
+      throw new SupersededReadError('the session changed before the read')
+    }
+    const agent = currentAgent()
+    if (agent === undefined || agent.session.id !== scope.sessionId) {
+      throw new Error('a current live scope must resolve its exact Direct owner')
+    }
+    return agent
+  }
+
   return {
     captureSessionScope: () => scopeAuthority.capture(),
+    captureLiveSessionScope: () => scopeAuthority.captureLive(),
     isSessionScopeCurrent: (scope) => scopeAuthority.isCurrent(scope),
     requireLiveSessionScope: async () => {
       const scope = scopeAuthority.captureLive()
       if (scope === undefined) throw new Error('session could not be created')
       return scope
     },
-    requireLiveAgentScope: async () => {
-      // Mirrors the production facade: ONE synchronous step for both identities.
-      const scope = scopeAuthority.captureLive()
-      const agent = currentAgent()
-      if (scope === undefined || agent === undefined) throw new Error('session could not be created')
-      return { agent, scope }
+    // The generic scoped view is empty; a suite that asserts scoped-command
+    // collisions overrides this from its own commands registry.
+    listScopedCommands: () => [],
+    currentSessionActivity: (scope) => ({ running: agentForLiveScope(scope).status === 'running' }),
+    currentSessionRouting: (scope) => {
+      const agent = agentForLiveScope(scope)
+      const provider = agent.options.provider
+      const model = agent.options.model
+      if (provider === undefined || model === undefined) {
+        throw new Error('a live session has no provider/model routing')
+      }
+      return { provider, model, cwd: agent.session.header.cwd ?? '' }
     },
+    currentApprovalOverride: (scope) => {
+      agentForLiveScope(scope)
+      return undefined
+    },
+    currentSessionStats: (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
+    lastAssistantText: (scope) => {
+      const session = agentForLiveScope(scope).session
+      for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
+        const event = session.eventAt(SessionSeq(seq))
+        if (event?.type !== 'assistant/message') continue
+        return event.data.message.content
+          .filter(block => block.type === 'text')
+          .map(block => block.text)
+          .join('')
+      }
+      return undefined
+    },
+    // Catalog refreshes are suite-specific; the default reports "not wired".
+    refreshSessionCatalog: async (scope) => {
+      if (!scopeAuthority.isCurrent(scope)) throw new SupersededReadError('the session changed before the read')
+      return { kind: 'failed', error: 'catalog refresh not wired in tests' }
+    },
+    refreshStandingCatalog: async () => ({ kind: 'failed', error: 'catalog refresh not wired in tests' }),
+    applyPermissionPreset: async () => ({ kind: 'applied' }),
+    setSessionApprovalPolicy: () => {},
   }
 }

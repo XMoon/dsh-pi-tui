@@ -83,7 +83,6 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -126,7 +125,6 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     insertIntoEditor: (text) => app.insertIntoEditor(text),
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: options.signal ?? new AbortController().signal,
-    get sessionGeneration() { return 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()

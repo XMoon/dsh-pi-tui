@@ -21,11 +21,10 @@
 import { randomUUID } from 'node:crypto'
 import { scheduler } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
-import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
@@ -80,7 +79,7 @@ import { ModelPicker, type ModelApplyOutcome } from './model-picker.ts'
 import type { OperationResult } from './runtime/write-outcome.ts'
 import { LifecycleError } from './runtime/session-lifecycle-port.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
-import { computeStats, formatStats } from './stats.ts'
+import { formatStats, type SessionStats } from './stats.ts'
 import { textOf } from './transcript.ts'
 import {
   CONTENT_SEARCH_DEBOUNCE_MS,
@@ -122,7 +121,7 @@ import {
   type AuthorizationTarget,
   type LoginTarget,
 } from './authorization.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshRequest } from './skill-catalog-refresh.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshRequest, CatalogRefreshSource } from './skill-catalog-refresh.ts'
 import {
   commandSummaryOf,
   listGlobalCommands,
@@ -426,11 +425,6 @@ export interface TuiCommandRunner {
   app: TuiApp
   /** The runner's diagnostics channel (stderr + $DSH_HOME/logs). */
   diag: Diag
-  /** The live agent handle; re-read on every access (swaps on switch).
-   * `undefined` until the first user message creates the session (deferred
-   * start) — sessionless commands must degrade, session commands call
-   * {@link ensureSession} first. */
-  readonly liveAgent: Agent | undefined
   /** The current session id. SYNC display/diagnostics ONLY — never an operation
    *  admission and never a fence (use a captured {@link SessionScope} there). */
   readonly currentSessionId: string | undefined
@@ -438,17 +432,15 @@ export interface TuiCommandRunner {
    *  sessionless-ALLOWED paths (a sessionless capture is meaningful: it fails
    *  once any Session appears, including mid-commit). */
   captureSessionScope(): SessionScope
+  /** The same atomic capture for a session-backed path, or `undefined` while
+   *  sessionless. Never creates a Session. */
+  captureLiveSessionScope(): LiveSessionScope | undefined
   /** True only for the same exact owner AND generation — or, for a sessionless
    *  capture, the same sessionless generation. */
   isSessionScopeCurrent(scope: SessionScope): boolean
   /** Ensure the lazy first session exists, then capture an atomic LIVE scope.
    *  Throws when the surface is still sessionless (creation failed). */
   requireLiveSessionScope(): Promise<LiveSessionScope>
-  /** TRANSITIONAL (A3-2 drops the agent half): ensure the lazy first session,
-   *  then read the exact live Direct Agent AND its scope in ONE synchronous
-   *  step. A session switch must never interleave between the two identities —
-   *  two separate reads would pair one session's Agent with another's scope. */
-  requireLiveAgentScope(): Promise<{ readonly agent: Agent; readonly scope: LiveSessionScope }>
   /** Create the first session lazily when none exists (deferred start). */
   ensureSession(): Promise<void>
   /**
@@ -607,9 +599,6 @@ export interface TuiCommandRunner {
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
-  /** The runner's monotonic session generation; bumped on every session
-   * swap. Late async work must re-check it before committing state. */
-  readonly sessionGeneration: number
   switchSession(sessionId: string): Promise<string | undefined>
   /** Host-owned /fork navigation. The runner dispatches the semantic fork
    * outside the destructive transition FIFO and only commits the visible child
@@ -651,6 +640,46 @@ export interface TuiCommandRunner {
    * see docs/surface-catalog.md). Never rejects: outcomes are `applied`,
    * `failed` or `superseded`. */
   refreshCatalog(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
+  /**
+   * The scoped command view of the CURRENT surface: the live Session's
+   * effective view (global + its scoped shadows) when one exists, else the
+   * global layer. A synchronous current read (display/collision baseline),
+   * never a fence.
+   */
+  listScopedCommands(): readonly SurfaceCommandSummary[]
+  /** Whether the live Session's owner is running. A stale scope throws
+   *  {@link SupersededReadError}. */
+  currentSessionActivity(scope: LiveSessionScope): { readonly running: boolean }
+  /** The routing facts of the exact owner the scope pins (provider, model,
+   *  workspace cwd). A stale scope throws {@link SupersededReadError}. */
+  currentSessionRouting(scope: LiveSessionScope): { readonly provider: string; readonly model: string; readonly cwd: string }
+  /** The pinned Session's approval-policy override, or `undefined` when it
+   *  has none. A stale scope throws {@link SupersededReadError}. */
+  currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
+  /** The pinned Session's folded stats, or `undefined` when the owner exposes
+   *  none. A stale scope throws {@link SupersededReadError}. */
+  currentSessionStats(scope: LiveSessionScope): SessionStats | undefined
+  /** The pinned Session's last assistant-message text ('' when the message
+   *  carries no text block), or `undefined` when there is none. A stale scope
+   *  throws {@link SupersededReadError}. */
+  lastAssistantText(scope: LiveSessionScope): string | undefined
+  /** Refresh the LIVE Session's scoped catalog through the coordinator. The
+   *  scope is validated at the SYNC admission (the exact owner is captured
+   *  there) and again after the read settles; a stale scope throws
+   *  {@link SupersededReadError}. Accepts a sessionless-capable capture so
+   *  /preset's live branch can pass the scope it fences with. */
+  refreshSessionCatalog(scope: SessionScope, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
+  /** Refresh the sessionless STANDING catalog of `presetId` (undefined = the
+   *  deployment default) through the coordinator. */
+  refreshStandingCatalog(presetId: string | undefined, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
+  /** Apply one permission preset to the Session the scope pins. */
+  applyPermissionPreset(
+    scope: LiveSessionScope,
+    presetId: string,
+    signal?: AbortSignal,
+  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }>
+  /** Set the approval-policy override of the owner the scope pins. */
+  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): void
   refreshStatus(): void
   /** PR D2: the /status explicit context force — measures NOW through the
    * runner's context coordinator (mark dirty + semantic SessionReader),
@@ -746,9 +775,11 @@ export interface TuiCommandRunner {
    * window shared with `/model` selection (rc.2 `serializeImageAdmission`)
    * when `line` references an image draft; a text-only prompt runs directly.
    * This keeps an image capability check + attachment admission + delivery
-   * commit atomic against a concurrent model switch.
+   * commit atomic against a concurrent model switch. The provider reads the
+   * CURRENT Direct attachment at call time — the caller must already hold the
+   * writer section for the scope's session.
    */
-  withPromptAdmission<T>(agent: unknown, line: string, task: () => Promise<T> | T): Promise<T>
+  withPromptAdmission<T>(scope: LiveSessionScope, line: string, task: () => Promise<T> | T): Promise<T>
   /**
    * Enter the subagent viewer for one child session: the target carries
    * the catalog MODE (continuable = interactive editor, one-shot =
@@ -1467,7 +1498,7 @@ export function registerTuiCommands(
     runDetached(label, task, {
       diag: runner.diag,
       // Diagnostics name the live session at settle time, never the payload.
-      sessionId: () => runner.liveAgent?.session.id,
+      sessionId: () => runner.currentSessionId,
       notify: options.notify === true ? (message) => app.notify(message, 'error') : undefined,
       recoverable: options.notify === true ? () => true : undefined,
     })
@@ -1501,7 +1532,7 @@ export function registerTuiCommands(
         runMutation: (mutation, onResult, onError) => {
           runOwned('keybinding editor mutation', () => controller.mutate(mutation), {
             diag: runner.diag,
-            sessionId: () => runner.liveAgent?.session.id,
+            sessionId: () => runner.currentSessionId,
             onResult,
             onError,
           })
@@ -1532,18 +1563,6 @@ export function registerTuiCommands(
         app.notify(`session switch failed: ${message}`, 'error')
       },
     })
-  }
-
-  /**
-   * Resolve the live agent for a session-backed command, creating the first
-   * session lazily when the deferred start has not run yet. Throws when the
-   * creation failed — the executor surfaces the error to the user.
-   */
-  const requireAgent = async (): Promise<Agent> => {
-    await runner.ensureSession()
-    const agent = runner.liveAgent
-    if (agent === undefined) throw new Error('session could not be created')
-    return agent
   }
 
   // ── completion surface + advertised command claims ─────────────────────
@@ -1741,12 +1760,15 @@ export function registerTuiCommands(
             return { items: [...result.items], prefix: result.prefix }
           },
       // The completion scope is resolved at SUGGESTION time from the LIVE
-      // agent (session identity when one exists — even mid-transition —
+      // session id (session identity when one exists — even mid-transition —
       // the workspace cwd otherwise): a session switch or first create is
       // picked up immediately, never requiring a reinstall.
-      () => runner.liveAgent === undefined
-        ? { kind: 'workspace', cwd: runner.sessionCwd() }
-        : { kind: 'session', sessionId: runner.liveAgent.session.id },
+      () => {
+        const sessionId = runner.currentSessionId
+        return sessionId === undefined
+          ? { kind: 'workspace', cwd: runner.sessionCwd() }
+          : { kind: 'session', sessionId }
+      },
       // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
       // adapter can keep this independent from the Host session scope.
       () => runner.cwd,
@@ -1828,10 +1850,11 @@ export function registerTuiCommands(
     }
   }
   const refreshCompletions = (): void => {
-    const liveAgent = runner.liveAgent
-    installCompletionsContained(liveAgent === undefined
+    // The sessionless view keeps the saved scoped overrides (the standing
+    // snapshot's scoped commands); a live session reads its own scoped view.
+    installCompletionsContained(runner.currentSessionId === undefined
       ? mergeGlobalAndSavedScoped()
-      : commands.list(liveAgent).map(commandSummaryOf))
+      : runner.listScopedCommands())
   }
   // ── registry-change coalescing ─────────────────────────────────────────
   // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
@@ -1919,7 +1942,10 @@ export function registerTuiCommands(
     name: 'settings',
     description: 'Open the TUI settings panel',
     handler: () => {
-      const liveAgent = runner.liveAgent
+      // The session-scoped rows and their writes belong to the exact owner
+      // that was live when the panel opened; the captured scope never
+      // retargets to a replacement session. Never creates a Session.
+      const liveScope = runner.captureLiveSessionScope()
       const tuiSettings = runner.tuiSettings
       let settingsDoc: TuiSettingsDoc | undefined
       if (tuiSettings !== undefined) {
@@ -1997,11 +2023,11 @@ export function registerTuiCommands(
       let settingsOpen = true
       const closeSettings = app.openSettings(
         [
-          ...liveAgent === undefined ? [] : [{
+          ...liveScope === undefined ? [] : [{
             id: 'approval',
             label: 'Approval policy (this session)',
             description: 'How tool approvals are handled in this session',
-            currentValue: permissions.approvalOverrideOf(liveAgent.session) ?? 'ask',
+            currentValue: runner.currentApprovalOverride(liveScope) ?? 'ask',
             values: ['ask', 'never'],
           }],
           ...permissionNames.length > 0 ? [{
@@ -2046,7 +2072,7 @@ export function registerTuiCommands(
                   runOwned: (label, task, options) => {
                     runOwned(label, task, {
                       diag: runner.diag,
-                      sessionId: () => runner.liveAgent?.session.id,
+                      sessionId: () => runner.currentSessionId,
                       ...options,
                     })
                   },
@@ -2202,26 +2228,31 @@ export function registerTuiCommands(
             label: color.border('─'.repeat(34)),
             currentValue: '',
           },
-          ...liveAgent === undefined ? [] : [
-            {
-              id: 'session',
-              label: color.textDim('Session'),
-              description: color.textDim(liveAgent.session.id),
-              currentValue: color.textDim(displaySessionId(liveAgent.session.id)),
-            },
-            {
-              id: 'model',
-              label: color.textDim('Model'),
-              description: color.textDim('Provider and model routing this session'),
-              currentValue: color.textDim(`${liveAgent.options.provider}/${liveAgent.options.model}`),
-            },
-            {
-              id: 'preset',
-              label: color.textDim('Agent preset'),
-              description: color.textDim('Composition this session runs on (see /preset)'),
-              currentValue: color.textDim(runner.currentPreset() ?? 'none'),
-            },
-          ],
+          ...liveScope === undefined ? [] : (() => {
+            // The routing facts come from the exact owner the scope pins
+            // (the facade refuses a stale scope).
+            const routing = runner.currentSessionRouting(liveScope)
+            return [
+              {
+                id: 'session',
+                label: color.textDim('Session'),
+                description: color.textDim(liveScope.sessionId),
+                currentValue: color.textDim(displaySessionId(liveScope.sessionId)),
+              },
+              {
+                id: 'model',
+                label: color.textDim('Model'),
+                description: color.textDim('Provider and model routing this session'),
+                currentValue: color.textDim(`${routing.provider}/${routing.model}`),
+              },
+              {
+                id: 'preset',
+                label: color.textDim('Agent preset'),
+                description: color.textDim('Composition this session runs on (see /preset)'),
+                currentValue: color.textDim(runner.currentPreset() ?? 'none'),
+              },
+            ]
+          })(),
           {
             id: 'cwd',
             label: color.textDim('Working directory'),
@@ -2253,8 +2284,8 @@ export function registerTuiCommands(
         ],
         (id, value, revert, navigate) => {
           if (id === 'approval') {
-            if ((value === 'ask' || value === 'never') && liveAgent !== undefined) {
-              runner.interaction.setApprovalPolicy(liveAgent.session.id, value)
+            if ((value === 'ask' || value === 'never') && liveScope !== undefined) {
+              runner.setSessionApprovalPolicy(liveScope, value)
               // The footer's permission badge derives from the knob folds;
               // reflect the change immediately.
               runner.refreshStatus()
@@ -2881,7 +2912,7 @@ export function registerTuiCommands(
     // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
-    const currentId = runner.liveAgent?.session.id
+    const currentId = runner.currentSessionId
     // A NEW picker open supersedes the previous one outright: bump the
     // generation, cancel its scan AND its content search, and take over
     // as the active load.
@@ -2924,7 +2955,7 @@ export function registerTuiCommands(
         ...row,
         title: titlesById.get(row.id),
         preset: presetsById.get(row.id) ?? row.preset,
-      }, runner.liveAgent?.session.id ?? '', indent, contentHitsById.get(row.id))
+      }, runner.currentSessionId ?? '', indent, contentHitsById.get(row.id))
     // Category tabs (Tab cycles while the picker is open): the session
     // picker is a HUMAN surface, so subagent children never appear in
     // either scope — /tasks and the subagent viewer own that surface now
@@ -2958,7 +2989,7 @@ export function registerTuiCommands(
           ...row,
           title: titlesById.get(row.id),
           preset: presetsById.get(row.id) ?? row.preset,
-        }, runner.liveAgent?.session.id ?? '', indent, contentHitsById.get(row.id)),
+        }, runner.currentSessionId ?? '', indent, contentHitsById.get(row.id)),
         queryOf: () => pendingContentQuery,
         contentHitsById,
         metadataOf: id => ({ title: titlesById.get(id), preset: presetsById.get(id) }),
@@ -3312,9 +3343,6 @@ export function registerTuiCommands(
     },
   })
 
-  /** The workspace the live session runs in; fallback to the TUI's cwd. */
-  const sessionCwd = (agent: Agent): string => agent.session.header.cwd ?? cwd
-
   /**
    * Split a skill invocation's trailing input into the skill name and its
    * arguments: the first whitespace-bounded token is the name (the public
@@ -3362,14 +3390,13 @@ export function registerTuiCommands(
    * authorization. A model-only skill is refused with an explicit error and
    * never injected.
    * @param scope - the captured owner identity at the caller's resolution
-   *   boundary (the exact agent was current there); every await below re-fences
-   *   against it. Capturing it here instead would lose the check that the
-   *   PASSED agent is still the current owner on the async picker path.
+   *   boundary; every await below re-fences against it. Capturing it here
+   *   instead would lose the check that the PASSED owner is still the current
+   *   one on the async picker path.
    * @param delivery - the delivery mode the caller's boundary resolved for
    *   this gesture, or undefined when no TUI submission launched it.
    */
   const loadSkill = async (
-    agent: Agent,
     scope: LiveSessionScope,
     name: string,
     args = '',
@@ -3456,7 +3483,7 @@ export function registerTuiCommands(
       // (rc.2 `serializeImageAdmission`): a concurrent model switch can never
       // change the model between the image capability check and the commit.
       const admission = await runner.withSessionWriter(scope.sessionId, () =>
-        runner.withPromptAdmission(agent, line, async (): Promise<
+        runner.withPromptAdmission(scope, line, async (): Promise<
           | { readonly kind: 'stale' }
           | { readonly kind: 'written'; readonly outcome: Awaited<ReturnType<typeof runner.sessionWriter.prompt>> | undefined }
         > => {
@@ -3558,7 +3585,7 @@ export function registerTuiCommands(
     // about to be replaced, not external collisions.
     const owned = new Set(skillDisposers.keys())
     const taken = new Set<string>()
-    const view = commands.list(runner.liveAgent as unknown as Agent)
+    const view = runner.listScopedCommands()
     for (const command of view) if (!owned.has(command.name)) taken.add(command.name)
     for (const name of scopedNames) taken.add(name)
     for (const dispose of skillDisposers.values()) dispose()
@@ -3583,11 +3610,8 @@ export function registerTuiCommands(
             // invocation's delivery mode for exactly this call stack (see
             // withDelivery). Everything below may await.
             const delivery = takeDelivery()
-            // The agent and its scope come from ONE atomic resolution step, so a
-            // switch during the ensure can never pair this agent with another
-            // session's scope.
-            const { agent, scope } = await runner.requireLiveAgentScope()
-            return loadSkill(agent, scope, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
+            const scope = await runner.requireLiveSessionScope()
+            return loadSkill(scope, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
           },
         })
         skillDisposers.set(skill.name, dispose)
@@ -3648,8 +3672,8 @@ export function registerTuiCommands(
             handler: async (invocation) => {
               // Captured before any await, exactly like the direct wrapper.
               const delivery = takeDelivery()
-              const { agent, scope } = await runner.requireLiveAgentScope()
-              return loadSkill(agent, scope, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
+              const scope = await runner.requireLiveSessionScope()
+              return loadSkill(scope, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
             },
           })
           skillDisposers.set(name, dispose)
@@ -3691,17 +3715,17 @@ export function registerTuiCommands(
     handler: async (invocation) => {
       // Captured before any await: the submit boundary's resolved mode.
       const delivery = takeDelivery()
-      // ONE atomic resolution step for the agent + its scope (held across the
-      // whole picker lifecycle: a switch while this picker or its catalog read
-      // is in flight must refuse the selection).
-      const { agent, scope } = await runner.requireLiveAgentScope()
+      // ONE atomic resolution step for the live scope (held across the whole
+      // picker lifecycle: a switch while this picker or its catalog read is in
+      // flight must refuse the selection).
+      const scope = await runner.requireLiveSessionScope()
       // `/skill <name> [args...]`: the first whitespace token is the skill
       // name, the remainder its arguments (forwarded verbatim on the
       // original line, web parity — never carved out or dropped). The
       // invocation line is normalized to `/name args` so the host's pre-step
       // gesture (dsh-tool-skill) also recognizes it when visible.
       const [name, ...args] = splitSkillLine(invocation.rawInput)
-      if (name !== '') return loadSkill(agent, scope, name, args.join(' '), invocation.signal ?? runner.signal, delivery, invocation.commandId)
+      if (name !== '') return loadSkill(scope, name, args.join(' '), invocation.signal ?? runner.signal, delivery, invocation.commandId)
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (the catalog port's
       // live read), so hostile or model-only entries never reach the
@@ -3727,11 +3751,11 @@ export function registerTuiCommands(
           // resolved mode is handed to the delivery, which never re-derives
           // it.
           const delivery = resolveComposerDelivery(
-            agent.status === 'running',
+            runner.currentSessionActivity(scope).running,
             'enter',
             runner.tuiSettings?.get().busyEnter,
           )
-          detach('skill load', () => loadSkill(agent, scope, id, '', runner.signal, delivery).then(result => {
+          detach('skill load', () => loadSkill(scope, id, '', runner.signal, delivery).then(result => {
             if (result.kind === 'error') app.notify(result.text)
           }), { notify: true })
         },
@@ -3756,13 +3780,18 @@ export function registerTuiCommands(
       // degradation notice, partial issues, supersession); provider or
       // composition failures never prevent the settings portion below.
       let catalogText = ''
-      const liveAgent = runner.liveAgent
-      if (liveAgent !== undefined) {
-        const outcome = await runner.refreshCatalog({
-          source: 'reload',
-          target: { kind: 'agent', key: runner.sessionGeneration },
-          agent: liveAgent,
-        })
+      const scope = runner.captureLiveSessionScope()
+      if (scope !== undefined) {
+        let outcome: CatalogRefreshOutcome
+        try {
+          outcome = await runner.refreshSessionCatalog(scope, 'reload')
+        } catch (error) {
+          // The captured owner was replaced during the read: a stale refresh
+          // owns nothing, so it reports exactly like the coordinator's own
+          // supersession outcome.
+          if (!(error instanceof SupersededReadError)) throw error
+          outcome = { kind: 'superseded' }
+        }
         if (outcome.kind === 'applied') {
           catalogText = `${outcome.snapshot.commands.length} commands \u00b7 ${outcome.snapshot.skills.length} skills`
           if (outcome.snapshot.issues.length > 0) {
@@ -3774,10 +3803,7 @@ export function registerTuiCommands(
           catalogText = 'catalog refresh superseded'
         }
       } else {
-        const outcome = await runner.refreshCatalog({
-          source: 'reload',
-          target: { kind: 'preset', presetId: runner.effectivePresetId },
-        })
+        const outcome = await runner.refreshStandingCatalog(runner.effectivePresetId, 'reload')
         if (outcome.kind === 'applied') {
           catalogText = `${outcome.snapshot.skills.length} human skills`
           if (outcome.notice !== undefined) catalogText += ` \u00b7 ${outcome.notice}`
@@ -4178,7 +4204,7 @@ export function registerTuiCommands(
       // row-level confirmed Stop on capable rows — the full surface behind
       // `/tasks` (runner.openTasksBrowser). Completed jobs and finished
       // one-shot children are reachable exactly through this path.
-      await requireAgent()
+      await runner.requireLiveSessionScope()
       runner.openTasksBrowser()
       return { kind: 'success' }
     },
@@ -4207,13 +4233,13 @@ export function registerTuiCommands(
     name: 'yolo',
     description: 'Switch to danger-full-access (alias of /permission danger-full-access)',
     handler: async () => {
-      const liveAgent = await requireAgent()
+      const scope = await runner.requireLiveSessionScope()
       // The permission switch is a CONFIG semantic operation (migration
       // M1.9): the Direct adapter still executes the OFFICIAL command line
       // (sandbox + live approval writer + the injected policy-change model
       // message + the preset log) — the raw commands service never crosses
       // into the command surface.
-      const outcome = await runner.config.permissions.applyPermissionPreset(liveAgent.session.id, 'danger-full-access', signal)
+      const outcome = await runner.applyPermissionPreset(scope, 'danger-full-access', signal)
       if (outcome.kind === 'unavailable') {
         return { kind: 'error', text: outcome.cause === 'commands'
           ? 'commands service unavailable'
@@ -4231,8 +4257,8 @@ export function registerTuiCommands(
   // ensureSession() for anything outside SESSIONLESS_COMMANDS), and the
   // roster's rows were inert — SettingsList only fires onChange for rows
   // with values or a submenu, and /preset rows had neither, so the switch
-  // the picker promised was impossible. The handler reads
-  // runner.liveAgent optionally and never creates a session itself.
+  // the picker promised was impossible. The handler captures a
+  // sessionless-capable scope and never creates a session itself.
   // Operation ownership for `/preset` is SHARED across handler invocations: a
   // newer pick supersedes an older one's notification/repaint even on the SAME
   // Session generation.
@@ -4249,8 +4275,8 @@ export function registerTuiCommands(
       }
       // The live composition is the runner's own read (Direct ownership);
       // the roster catalog the command surface needs is the port's. Every
-      // session-dependent decision RE-READS `runner.liveAgent` at its own
-      // operation boundary so an await cannot apply a stale Session.
+      // session-dependent decision re-fences against the captured scope at
+      // its own operation boundary so an await cannot apply a stale Session.
       const displayedDefault = async (): Promise<string | undefined> =>
         runner.config.presetDefault.get() ?? presets.defaultId()
       const presetErrorText = (error: unknown): string => safeErrorMessage(error)
@@ -4282,10 +4308,7 @@ export function registerTuiCommands(
           return { kind: 'error', text: presetErrorText(error) }
         }
         if (runner.effectivePresetId === undefined) {
-          const outcome = await runner.refreshCatalog({
-            source: 'preset',
-            target: { kind: 'preset', presetId: rest },
-          })
+          const outcome = await runner.refreshStandingCatalog(rest, 'preset')
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
         }
         return { kind: 'success', text: `default preset set: ${rest}` }
@@ -4301,7 +4324,7 @@ export function registerTuiCommands(
       // Operation ownership for `/preset` (shared across invocations, declared
       // beside the registration): a newer pick supersedes an older one's
       // notification/repaint even on the SAME Session generation.
-      const applyPresetSelection = async (id: string, pickerOwner?: { readonly scope: SessionScope; readonly generation: number }):
+      const applyPresetSelection = async (id: string, pickerOwner?: SessionScope):
         Promise<
           | { kind: 'pending'; preset: string }
           | { kind: 'switched'; preset: string }
@@ -4314,14 +4337,12 @@ export function registerTuiCommands(
         // The semantic subject is captured ONCE, when the operation starts: a
         // picker passes the scope it was opened on; the typed verb path captures
         // the CURRENT subject here. Every await below re-fences it, so the
-        // subject can never drift onto a Session that appeared later. The
-        // generation is kept ONLY as this operation's live catalog-refresh
-        // target key (A3-2 takes it over with a scope-bound facade).
-        const owner = pickerOwner ?? { scope: runner.captureSessionScope(), generation: runner.sessionGeneration }
-        const ownerCurrent = (): boolean => runner.isSessionScopeCurrent(owner.scope)
+        // subject can never drift onto a Session that appeared later.
+        const owner = pickerOwner ?? runner.captureSessionScope()
+        const ownerCurrent = (): boolean => runner.isSessionScopeCurrent(owner)
         try {
-        const agent = runner.liveAgent
-        if (agent === undefined) {
+        const sessionId = owner.sessionId
+        if (sessionId === undefined) {
           const resolved = await presets.resolve(id, runner.signal)
           // A roster that vanished between the availability check and the
           // resolve is a hard failure (the old compose path threw too) —
@@ -4338,16 +4359,12 @@ export function registerTuiCommands(
           // probes are disabled in this deployment, see
           // docs/surface-catalog.md). A failed read degrades inside the
           // coordinator: the choice itself still applies.
-          const outcome = await runner.refreshCatalog({
-            source: 'preset',
-            target: { kind: 'preset', presetId: resolved.id },
-          })
+          const outcome = await runner.refreshStandingCatalog(resolved.id, 'preset')
           if (token !== presetOperationToken) return { kind: 'superseded' }
           if (!ownerCurrent()) return { kind: 'superseded' }
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
           return { kind: 'pending', preset: resolved.id }
         }
-        const sessionId = agent.session.id
         // The live-session preset swap runs INSIDE the session-transition
         // gate: the official recompose + `agent-preset/selected` append must
         // never interleave with a concurrent /new, /fork, rewind or switch.
@@ -4389,11 +4406,7 @@ export function registerTuiCommands(
         // catalog for the SAME owner (no transition — the old scoped
         // previews are being replaced by the new composition's). A late
         // commit from a replaced surface must not repaint it.
-        const refreshed = await runner.refreshCatalog({
-          source: 'preset',
-          target: { kind: 'agent', key: owner.generation },
-          agent: runner.liveAgent,
-        })
+        const refreshed = await runner.refreshSessionCatalog(owner, 'preset')
         // Fence after the refresh await: a newer operation or a moved subject
         // owns the surface, and a superseded refresh must not repaint.
         if (token !== presetOperationToken) return { kind: 'superseded' }
@@ -4413,7 +4426,7 @@ export function registerTuiCommands(
       }
       const lockedPresetMessage = (sessionId: string): string =>
         `session "${sessionId}" has already started; its agent preset is fixed — preset switching is only available in a new session`
-      const pickPreset = async (id: string, owner?: { readonly scope: SessionScope; readonly generation: number }): Promise<void> => {
+      const pickPreset = async (id: string, owner?: SessionScope): Promise<void> => {
         let outcome: Awaited<ReturnType<typeof applyPresetSelection>>
         try {
           outcome = await applyPresetSelection(id, owner)
@@ -4467,13 +4480,10 @@ export function registerTuiCommands(
         }
       }
       // The picker belongs to the EXACT Session that opened it (the captured
-      // scope pins the owner, the generation and the session id — a
-      // sessionless capture included): a switch during the roster read must not
-      // paint the old current preset (or the old blankness) onto the new
-      // Session's picker. The generation is kept only as the live
-      // catalog-refresh target key.
+      // scope pins the owner and the session id — a sessionless capture
+      // included): a switch during the roster read must not paint the old
+      // current preset (or the old blankness) onto the new Session's picker.
       const pickerScope = runner.captureSessionScope()
-      const pickerGeneration = runner.sessionGeneration
       const pickerOwnerCurrent = (): boolean => runner.isSessionScopeCurrent(pickerScope)
       let roster
       try {
@@ -4502,7 +4512,7 @@ export function registerTuiCommands(
       // authority. Fence BEFORE the notify/openSettings UI mutation.
       if (!pickerOwnerCurrent()) return { kind: 'success' }
       if (runner.sessionBlank() === false) {
-        const message = `preset switching is only available in a new session — session "${runner.liveAgent?.session.id}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
+        const message = `preset switching is only available in a new session — session "${pickerScope.sessionId}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
         app.notify(message, 'error')
         return { kind: 'error', text: message }
       }
@@ -4532,9 +4542,9 @@ export function registerTuiCommands(
           // The picker's selection is an async result-consuming flow: the
           // outcome drives the notices — runOwned (AGENTS.md), never a bare
           // void; cancellation (a torn-down TUI) is debug-only.
-          runOwned('preset pick', () => pickPreset(id, { scope: pickerScope, generation: pickerGeneration }), {
+          runOwned('preset pick', () => pickPreset(id, pickerScope), {
             diag: runner.diag,
-            sessionId: () => runner.liveAgent?.session.id,
+            sessionId: () => runner.currentSessionId,
             onError: (error) => app.notify(`preset selection failed: ${safeErrorMessage(error)}`, 'error'),
           })
         },
@@ -4631,23 +4641,11 @@ export function registerTuiCommands(
     name: 'copy',
     description: 'Copy the last assistant message to the system clipboard (tmux-aware)',
     handler: async () => {
-      const liveAgent = await requireAgent()
-      // Single-event lookup: walk BACKWARDS from the log offset with
-      // eventAt (alpha.4) — never materialize the whole log for one
-      // message (the plan's count/eventAt/snapshot split).
-      let last: SessionEvent<'assistant/message'> | undefined
-      for (let seq = Number(liveAgent.session.seq) - 1; seq >= 0; seq -= 1) {
-        const event = liveAgent.session.eventAt(SessionSeq(seq))
-        if (event?.type === 'assistant/message') {
-          last = event
-          break
-        }
-      }
-      if (last === undefined) return { kind: 'error', text: 'no assistant message yet' }
-      const text = last.data.message.content
-        .filter(block => block.type === 'text')
-        .map(block => block.text)
-        .join('')
+      const scope = await runner.requireLiveSessionScope()
+      // The last assistant-message text comes from the exact owner the scope
+      // pins (the facade throws on a stale scope, never a stale read).
+      const text = runner.lastAssistantText(scope)
+      if (text === undefined) return { kind: 'error', text: 'no assistant message yet' }
       if (text === '') return { kind: 'error', text: 'last assistant message has no text' }
       // Issue #7: the SAME client-local shared user-clipboard policy as the
       // fullscreen drag selection (src/clipboard.ts): an independent
@@ -4683,7 +4681,7 @@ export function registerTuiCommands(
     const detach = (task: () => unknown): void => {
       runDetached('attachment intake', task, {
         diag: runner.diag,
-        sessionId: () => runner.liveAgent?.session.id,
+        sessionId: () => runner.currentSessionId,
         notify: (message) => app.notify(message, 'error'),
         recoverable: () => true,
       })
@@ -4751,7 +4749,7 @@ export function registerTuiCommands(
         app.notify(`attached ${draft.placeholder} — Enter to send`)
       }, {
         diag: runner.diag,
-        sessionId: () => runner.liveAgent?.session.id,
+        sessionId: () => runner.currentSessionId,
         isCancellation: () => intakeSignal.aborted,
         onError: (error) => {
           app.notify(safeErrorMessage(error), 'error')
@@ -4808,15 +4806,18 @@ export function registerTuiCommands(
     name: 'fork',
     description: 'Fork this session at the Host-selected latest completed prefix',
     handler: async () => {
-      const source = runner.liveAgent
-      if (source === undefined) return { kind: 'error', text: 'no conversation to fork from' }
+      // A sessionless-capable capture that never creates a Session: /fork
+      // without a conversation refuses instead of starting one.
+      const scope = runner.captureSessionScope()
+      const sourceSessionId = scope.sessionId
+      if (sourceSessionId === undefined) return { kind: 'error', text: 'no conversation to fork from' }
       if (runner.forkSession === undefined) {
         return { kind: 'error', text: 'session fork is unavailable in this backend' }
       }
       // The command captures only the source identity. Host fork owns the
       // boundary, child identity, lineage, workspace and model/preset policy;
       // runner.forkSession owns the independently supersedable navigation.
-      return runner.forkSession(source.session.id)
+      return runner.forkSession(sourceSessionId)
     },
   })
 
@@ -4836,8 +4837,8 @@ export function registerTuiCommands(
     name: 'status',
     description: 'Show session stats and identity',
     handler: async () => {
-      const liveAgent = await requireAgent()
-      const stats = computeStats(liveAgent.session.snapshotEvents())
+      const scope = await runner.requireLiveSessionScope()
+      const stats = runner.currentSessionStats(scope)
       // Explicit status: measure NOW through the runner's context
       // coordinator — the panel and the cached footer value share ONE
       // measurement (no duplicate reads, no stale footer). Stubs without
@@ -4853,17 +4854,17 @@ export function registerTuiCommands(
       // must not trigger a second, uncached measurement (round-9 finding).
       const forceContext = runner.forceContextMeasurement
       const contextTokens = forceContext === undefined
-        ? runner.sessionReader.measureContext(liveAgent.session.id)
+        ? runner.sessionReader.measureContext(scope.sessionId)
         : forceContext()
       app.openSettings(
         [
           {
             id: 'session-id',
             label: color.textDim('Session'),
-            description: color.textDim(liveAgent.session.id),
-            currentValue: color.textDim(displaySessionId(liveAgent.session.id)),
+            description: color.textDim(scope.sessionId),
+            currentValue: color.textDim(displaySessionId(scope.sessionId)),
           },
-          { id: 'session-stats', label: 'Stats', description: formatStats(stats), currentValue: '' },
+          { id: 'session-stats', label: 'Stats', description: stats === undefined ? 'unmeasured' : formatStats(stats), currentValue: '' },
           {
             id: 'session-context',
             label: 'Context',
@@ -5090,7 +5091,7 @@ export function registerTuiCommands(
         { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
         { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs locally without recording', currentValue: '' },
         { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
-        ...commands.list(runner.liveAgent as unknown as Agent)
+        ...runner.listScopedCommands()
           .map(command => ({
             id: `cmd-${command.name}`,
             label: `/${command.name}`,

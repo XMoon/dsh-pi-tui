@@ -33,7 +33,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolCallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 // P7d: the subagent registry merge for ctx.subagents (listChildren/interrupt).
 import type {} from '@deepseek-ai/dsh-subagent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 // P6: the agent-preset registry — ctx.agentPresets and the
 // `agent-preset/selected` session projection owned by DSH.
@@ -111,7 +111,7 @@ import { CompletionNotificationController } from './notification/controller.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOCUS_OUT_SEQUENCE, TerminalFocusTracker } from './notification/terminal-focus.ts'
 import { guardedStreamWriter, TerminalNotifier } from './notification/terminal-notifier.ts'
-import { formatStats, StatsFolder } from './stats.ts'
+import { computeStats, formatStats, StatsFolder } from './stats.ts'
 import { isAssistantTokenDelta } from './token-usage.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { plainSectionEqual } from './status/equal.ts'
@@ -153,7 +153,7 @@ import {
 import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { ComposerSubmitGesture, ComposerSubmitRequest, TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
-import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
+import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
 import { DefaultIntentTracker } from './default-intent.ts'
 import { DefaultWriteBarrier } from './default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
@@ -207,7 +207,7 @@ import {
 import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
-import { createSessionScopeAuthority } from './app/session/scope.ts'
+import { createSessionScopeAuthority, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -216,6 +216,7 @@ import { PluginManagerHostRegistry, type PluginManagerHostClaim } from './plugin
 import { PluginManagerPanel } from './plugin-manager/panel.ts'
 import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
+import { SupersededReadError } from './runtime/read-error.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 import {
   LifecycleError,
@@ -233,6 +234,7 @@ import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, 
 import { parseShellWords } from './shell-words.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from './skill-catalog-refresh.ts'
 import {
+  commandSummaryOf,
   readSurfaceCatalog,
   type SurfaceCatalogContext,
   type SurfaceCatalogSnapshot,
@@ -9263,30 +9265,38 @@ export function apply(ctx: Context, config: Config): void {
         },
       )
     }
+    /**
+     * The exact Direct attachment of a scope, validated in ONE synchronous
+     * admission step: a stale scope throws `SupersededReadError` (never
+     * retargets to the current owner), a sessionless scope has no live read,
+     * and a current live scope that cannot resolve its matching Direct
+     * attachment breaks an internal invariant loudly.
+     */
+    const agentForLiveScope = (scope: SessionScope): Agent => {
+      if (!sessionScope.isCurrent(scope)) {
+        throw new SupersededReadError('the session changed before the read')
+      }
+      const sessionId = scope.sessionId
+      if (sessionId === undefined) throw new Error('a live read requires a Session scope')
+      const agent = agentNow()
+      if (agent === undefined || agent.session.id !== sessionId) {
+        throw new Error('a current live scope must resolve its exact Direct owner')
+      }
+      return agent
+    }
     const runner: TuiCommandRunner = {
       ctx,
       app,
       diag,
-      get liveAgent() { return agentNow() },
       get currentSessionId() { return ownership.currentSessionId() },
       captureSessionScope: () => sessionScope.capture(),
+      captureLiveSessionScope: () => sessionScope.captureLive(),
       isSessionScopeCurrent: (scope) => sessionScope.isCurrent(scope),
       requireLiveSessionScope: async () => {
         await sessionRuntime.ensureSession()
         const scope = sessionScope.captureLive()
         if (scope === undefined) throw new Error('session could not be created')
         return scope
-      },
-      requireLiveAgentScope: async () => {
-        await sessionRuntime.ensureSession()
-        // ONE synchronous step: the Direct agent and its scope must describe the
-        // SAME owner, so no session switch can interleave between the two reads
-        // (a separate `await requireLiveSessionScope()` + `liveAgent` read would
-        // resume in a later microtask and could pair A's agent with B's scope).
-        const scope = sessionScope.captureLive()
-        const agent = agentNow()
-        if (scope === undefined || agent === undefined) throw new Error('session could not be created')
-        return { agent, scope }
       },
       // Completion-notification preference setters (the /settings panel
       // writes): the controller applies the parsed value immediately and
@@ -9386,7 +9396,6 @@ export function apply(ctx: Context, config: Config): void {
        * whole surface. */
       sessionCwd,
       signal,
-      get sessionGeneration() { return ownership.generation() },
       progressUpdatesState,
       responseStyleState,
       /** Canonical display surface: /display and /focus compatibility both
@@ -9408,6 +9417,74 @@ export function apply(ctx: Context, config: Config): void {
         return refresh === undefined
           ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
           : refresh(request)
+      },
+      // The scoped command view of the CURRENT surface: the live owner's
+      // effective view, or the global layer while sessionless. A synchronous
+      // current read (display/collision baseline), never a fence.
+      listScopedCommands: () => {
+        const commands = ctx.get('commands') as CommandRegistryLike | undefined
+        if (commands === undefined) throw new Error('commands service unavailable')
+        return commands.list(agentNow()).map(commandSummaryOf)
+      },
+      currentSessionActivity: (scope) => ({ running: agentForLiveScope(scope).status === 'running' }),
+      currentSessionRouting: (scope) => {
+        const agent = agentForLiveScope(scope)
+        const provider = agent.options.provider
+        const model = agent.options.model
+        // A composed live Agent always carries its provider/model routing;
+        // its absence is an invariant break, not "no routing".
+        if (provider === undefined || model === undefined) {
+          throw new Error('a live session has no provider/model routing')
+        }
+        return { provider, model, cwd: agent.session.header.cwd ?? cwd }
+      },
+      currentApprovalOverride: (scope) => {
+        // The scope's owner is proven current before the read; the port
+        // resolves the session id to its exact live Agent internally.
+        agentForLiveScope(scope)
+        return backend.config.permissions.approvalOverrideOf(scope.sessionId)
+      },
+      currentSessionStats: (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
+      lastAssistantText: (scope) => {
+        const session = agentForLiveScope(scope).session
+        // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
+        // materialize the whole log for one message.
+        for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
+          const event = session.eventAt(SessionSeq(seq))
+          if (event?.type !== 'assistant/message') continue
+          return event.data.message.content
+            .filter(block => block.type === 'text')
+            .map(block => block.text)
+            .join('')
+        }
+        return undefined
+      },
+      refreshSessionCatalog: async (scope, source) => {
+        // SYNC admission: the scope must still be the current owner, and the
+        // exact Direct Agent is captured HERE, before the read awaits (§10.2).
+        const agent = agentForLiveScope(scope)
+        const refresh = catalogRefreshRequest
+        if (refresh === undefined) return { kind: 'failed', error: 'catalog refresh unavailable' }
+        const outcome = await refresh({ source, target: { kind: 'agent', key: ownership.generation() }, agent })
+        // Judge staleness with the ORIGINAL scope after settle; a read that
+        // did not own the surface must not present its result.
+        if (!sessionScope.isCurrent(scope)) {
+          throw new SupersededReadError('the session changed during the catalog refresh')
+        }
+        return outcome
+      },
+      refreshStandingCatalog: (presetId, source) => {
+        const refresh = catalogRefreshRequest
+        return refresh === undefined
+          ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
+          : refresh({ source, target: { kind: 'preset', presetId } })
+      },
+      applyPermissionPreset: (scope, presetId, presetSignal) =>
+        backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal),
+      setSessionApprovalPolicy: (scope, value) => {
+        // The write addresses the exact owner the scope pins (never the
+        // current replacement owner).
+        backend.interaction.setApprovalPolicy(scope.sessionId, value)
       },
       switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
       forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
@@ -9450,8 +9527,13 @@ export function apply(ctx: Context, config: Config): void {
         })),
       withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
         ownership.barrier.runWriter(sessionId, async () => task()),
-      withPromptAdmission: <T>(agent: unknown, line: string, task: () => Promise<T> | T) =>
-        directRuntime.withPromptAdmission(agent as Agent, draftHasImages(line, draftImages), async () => task()),
+      withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T> | T) => {
+        // The caller already holds this scope's writer section, so this
+        // synchronous read of the CURRENT Direct attachment IS the scope's
+        // exact Agent (§10.1); a transition cannot swap it here.
+        const agent = agentForLiveScope(scope)
+        return directRuntime.withPromptAdmission(agent, draftHasImages(line, draftImages), async () => task())
+      },
       enterView,
       requestExit,
       exit,

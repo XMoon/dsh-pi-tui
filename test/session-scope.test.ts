@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   createSessionScopeAuthority,
   type SessionScope,
@@ -19,6 +20,8 @@ import {
   createSessionSubjectAuthority,
   type SessionOwnerRef,
 } from '../src/app/session/subject.ts'
+import { SupersededReadError } from '../src/runtime/read-error.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 
 type FakeAgent = { session: { id: string } }
 
@@ -54,6 +57,7 @@ function slot(initial: { agent: FakeAgent | undefined; generation: number }) {
   })
   return {
     authority,
+    agent: () => state.agent,
     generation: () => state.generation,
     reads: () => reads,
     setAgent: (next: FakeAgent | undefined) => { state = { ...state, agent: next } },
@@ -190,4 +194,45 @@ test('captureLive() returns a subject + string sessionId while live, undefined w
   assert.equal(live.authority.isCurrent(scope!), true)
   live.setAgent(undefined)
   assert.equal(live.authority.captureLive(), undefined)
+})
+
+test('a scope-bound read facade throws SupersededReadError on a stale scope; a valid absent value returns undefined', () => {
+  // The A3-2 frozen contract (§3.2): `undefined` means "the domain value is
+  // absent", NEVER "stale". The helpers mirror the production providers (the
+  // REAL scope authority + the same sync admission check).
+  const live = slot({ agent: fakeAgent('s1'), generation: 3 })
+  const facts = sessionScopeFacts(
+    () => live.agent() as unknown as Agent,
+    () => live.generation(),
+  )
+  const scope = facts.captureLiveSessionScope()
+  assert.notEqual(scope, undefined)
+  // A valid scope with an absent domain value returns undefined.
+  assert.equal(facts.currentApprovalOverride(scope!), undefined, 'no override is an absent value')
+  assert.equal(facts.lastAssistantText(scope!), undefined, 'no assistant message is an absent value')
+  assert.deepEqual(facts.currentSessionActivity(scope!), { running: false })
+  // The SAME session id on a NEW owner object is a different owner: every
+  // scope-bound read must refuse instead of retargeting to the new owner.
+  live.setAgent(fakeAgent('s1'))
+  for (const read of [
+    () => facts.currentApprovalOverride(scope!),
+    () => facts.currentSessionActivity(scope!),
+    () => facts.currentSessionRouting(scope!),
+    () => facts.currentSessionStats(scope!),
+    () => facts.lastAssistantText(scope!),
+  ]) {
+    assert.throws(read, (error: unknown) => error instanceof SupersededReadError,
+      'a stale scope must throw SupersededReadError, never return undefined')
+  }
+  // A generation bump on the same owner is stale too.
+  const stable = slot({ agent: fakeAgent('s2'), generation: 1 })
+  const stableFacts = sessionScopeFacts(
+    () => stable.agent() as unknown as Agent,
+    () => stable.generation(),
+  )
+  const stableScope = stableFacts.captureLiveSessionScope()
+  assert.notEqual(stableScope, undefined)
+  stable.setGeneration(2)
+  assert.throws(() => stableFacts.currentApprovalOverride(stableScope!),
+    (error: unknown) => error instanceof SupersededReadError)
 })

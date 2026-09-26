@@ -179,7 +179,6 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
     ctx,
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
-    get liveAgent() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -206,7 +205,6 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()

@@ -30,6 +30,7 @@ import type { SessionStats } from '../src/stats.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 import { contextRefreshKind } from '../src/index.ts'
 
 
@@ -411,7 +412,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
         captureExtensionHealthRef: () => {},
         ensureSession: async () => {},
         sessionCwd: () => '/ws',
-        get liveAgent() { return agent },
+        ...sessionScopeFacts(() => agent, () => 0),
         extensions: undefined,
         forceContextMeasurement: () => { forceCalls += 1; return forceValue },
         sessionReader: {

@@ -51,7 +51,11 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
     recordExtensionError: () => {},
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
-    liveAgent: undefined,
+    // A sessionless surface: the completion install and the /settings
+    // session rows must see no live scope.
+    currentSessionId: undefined,
+    captureLiveSessionScope: () => undefined,
+    listScopedCommands: () => [],
     tuiSettings: undefined,
     extensions: undefined,
     openPluginManager: () => { counts.opened += 1 },
