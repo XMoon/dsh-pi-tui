@@ -4,9 +4,11 @@
  *
  * These are the PURE presentation folds the `session/event` routing applies:
  * compaction lifecycle pairing, the matched-settle surface effects, the
- * turn-boundary busy rule and the context re-measure classification. They read
- * no Host identity and no persistence, so they are a top-level presentation
- * module (the boundary direction is `app/* -> presentation modules`).
+ * turn-boundary busy rule, the context re-measure classification, and the
+ * resumed-session-log bootstrap folds (`workingFromLog`, `compactingFromLog`).
+ * They read no Host identity and no persistence, so they are a top-level
+ * presentation module (the boundary direction is `app/* -> presentation
+ * modules`).
  *
  * `src/index.ts` re-exports them unchanged to keep the public entry point
  * byte-compatible (the published package and the regression suites import them
@@ -140,4 +142,44 @@ export function contextRefreshKind(eventType: string): 'measure' | 'cheap' {
     default:
       return 'cheap'
   }
+}
+
+/**
+ * Whether the agent is busy from a session log: the newest turn-boundary
+ * event decides. A resumed session can be persisted mid-turn, so the scan
+ * cannot assume the log ends idle.
+ * @param events - the session log.
+ * @returns whether the newest turn is still open.
+ */
+export function workingFromLog(events: readonly { readonly type: string }[]): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type === 'turn/start') return true
+    if (event.type === 'turn/end') return false
+  }
+  return false
+}
+
+/**
+ * The in-flight compaction state a resumed session log implies: the newest
+ * compaction bracket decides. A `session/end-seed` boundary makes any
+ * EARLIER unmatched `compaction/start` STALE — the upstream invariant
+ * (inheritedOrphanStartSeqs) treats seed compactions that never settled
+ * inside the seed as abandoned, so they must not re-arm the compacting
+ * surface on resume.
+ */
+export function compactingFromLog(
+  events: readonly { type: unknown; data?: unknown }[],
+): { active: boolean; id: string | undefined } {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined) break
+    const kind = typeof event.type === 'string' ? event.type : ''
+    if (kind === 'compaction/start') {
+      const data = (event as { data?: { compactionId?: unknown } }).data
+      return { active: true, id: typeof data?.compactionId === 'string' ? data.compactionId : undefined }
+    }
+    if (kind === 'compaction/end' || kind === 'session/end-seed') break
+  }
+  return { active: false, id: undefined }
 }

@@ -185,6 +185,7 @@ import {
   type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from './subagent-viewer-submit.ts'
+import { composeDirectAgent, recordedDirectPreset } from './app/direct/composition.ts'
 import { bindCommandRuntime } from './app/command/runtime.ts'
 import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
@@ -371,6 +372,45 @@ export const Config: z<Config> = z.object({
   legacySettingsMigrationVersion: z.number().default(0).volatile(),
 }) as unknown as z<Config>
 
+// ── Relocated root helpers (A5-1, plan §27) ────────────────────────────────
+// Every pure helper implementation now lives in its natural top-level module;
+// the package-root exports are preserved here unchanged. The local imports
+// feed the runner body, which still lives in this file until A5-2 moves it to
+// `src/app/bootstrap.ts` (then they collapse into plain re-exports).
+import {
+  SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG,
+  isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery,
+  normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand,
+} from './command-policy.ts'
+export {
+  SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG,
+  isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery,
+  normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand,
+}
+import { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './interrupt.ts'
+export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike }
+import {
+  createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall,
+  type PendingSubagentCall, type ViewerOpenToken,
+} from './subagent-viewer.ts'
+export {
+  createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall,
+  type PendingSubagentCall, type ViewerOpenToken,
+}
+import { resolveInitialCatalog, type InitialCatalogResolution, type ResolveInitialCatalogOptions } from './surface-catalog.ts'
+export { resolveInitialCatalog, type InitialCatalogResolution, type ResolveInitialCatalogOptions }
+import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './task-presentation.ts'
+export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint }
+import { foldQueueRows, queueInboxMessageOf, queueTextOf, type QueueFoldResult, type QueueInboxMessage } from './pending-presentation.ts'
+export { foldQueueRows, type QueueFoldResult, type QueueInboxMessage }
+import { bundleVersion, packageVersion, versionDisplay } from './dsh-version.ts'
+import { setTerminalTitle } from './terminal-title.ts'
+import { gitBranch } from './git-branch.ts'
+import { foldGoal } from './status/derive-goal.ts'
+import { compactingFromLog, workingFromLog } from './compaction-presentation.ts'
+export { compactingFromLog }
+import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput } from './streaming-tool-preparing.ts'
+
 /** The launcher's bounded exit request; the TUI invokes it after keyboard
  * confirmation. */
 interface AppExit {
@@ -386,769 +426,14 @@ const TRANSCRIPT_WINDOW_STEP = 10
  * often, so a high-throughput log cannot rebuild the view per chunk. */
 const LOCAL_SHELL_TAIL_FLUSH_MS = 200
 
-/**
- * Slash commands that need no session: before the first user message
- * (deferred start) they run locally without creating one. Everything else
- * dispatches through `commands.execute`, which creates the session lazily
- * (the command line IS the first user input). Commands in this set must
- * tolerate `liveAgent === undefined` in their handlers.
- *
- * Exported for the headless suite: the gate is exactly where a sessionless
- * command silently starts creating sessions again.
- */
-export const SESSIONLESS_COMMANDS = new Set([
-  'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
-  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
-  // `/statusline` is the approved alias of `/footer` (same configurator,
-  // other-agent muscle memory) — it rides the same ownership sets, so it
-  // executes locally, never steers, and works before any session exists.
-  'statusline',
-])
 
-/**
- * The LOCAL-execute command set: TUI-owned UI/control commands AND core
- * control commands the TUI does not itself register (e.g. /kill) that
- * must ALWAYS run locally through the commands service, never steered,
- * regardless of the busyEnter preference. Everything NOT in this set —
- * plain prompts AND non-local commands (the per-skill slash commands like
- * /grilling or /matrix-cli) — flows through the busy-Enter submission
- * policy while the agent is running: web parity, where a skill invocation
- * is a plain `session.prompt` whose leading `/name` line the host's
- * pre-step listener (dsh-tool-skill) resolves into the injected skill
- * body — there is no command-execution wire for skills.
- */
-export const LOCAL_COMMANDS = new Set([
-  'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
-  'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
-  'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
-  'title', 'transcript', 'yolo',
-  // `/statusline` — the approved alias of `/footer` (see its registration
-  // comment: the near-synonym rule stays, this pairing is an explicit
-  // alias, and `/status` keeps priority matching).
-  'statusline',
-])
 
-/**
- * Command semantics matrix (plan §19.3/M12): a LOCAL command line carrying a
- * staged image placeholder is REJECTED — local commands are pure UI
- * controls, never LLM prompts. AGENT-FACING input (plain prompts AND
- * per-skill slash invocations like `/grilling`) SUPPORTS images: the skill
- * wrapper builds its message through the same prepared-input path, so an
- * image-bearing skill line is a real multimodal prompt (review finding 4).
- * There is never a silent drop.
- * @param parsed - the parsed slash command, undefined for a plain prompt.
- * @param text - the submission text.
- * @param store - the live draft store.
- * @param isLocal - whether THIS LINE is a LOCAL (TUI-owned/UI) command; skill
- *   names answer false. Never derived from the name alone: a host command's
- *   input KIND decides which line it claims (see
- *   {@link commandIsLocalForAttachments}).
- */
-export function commandRejectsImages(
-  parsed: { name: string; rawInput?: string } | undefined,
-  text: string,
-  store: import('./image/types.ts').DraftImageStoreLike,
-  isLocal: boolean,
-): boolean {
-  return parsed !== undefined && isLocal && draftHasImages(text, store)
-}
 
-/**
- * The STATIC host-owned command catalog (P1-04): the ownership sets
- * (LOCAL_COMMANDS and SESSIONLESS_COMMANDS — the TUI's own local/UI command
- * names, including the ones `registerTuiCommands` registers, plus core
- * commands such as /kill that the TUI does not register but dispatches
- * locally) and `/plan`. A plugin command contribution is validated against
- * this fixed catalog at register time: an exact or near-synonym collision is
- * rejected loudly, so a plugin can never shadow a built-in command. Names
- * that only the CURRENT host catalog owns (session-scoped or dynamically
- * registered commands) are not in this set — those collisions surface at
- * candidate synthesis time instead.
- */
-export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
-  ...LOCAL_COMMANDS,
-  ...SESSIONLESS_COMMANDS,
-  // `/plan` is handled specially by the runner (bare form toggles plan mode)
-  // and must remain host-owned even though it is not registered by the TUI
-  // command list.
-  'plan',
-])
 
-/**
- * The TUI-local classification the attachment gate uses: a TUI/core local
- * command or a live client command contribution is LOCAL (its line is a UI
- * control — attachments are refused), while a LIVE skill wrapper is
- * AGENT-FACING input (multimodal) even when a client contribution shares its
- * name: the wrapper route outranks the contribution everywhere.
- * @param name - the slash name.
- * @param isSkillWrapper - the live skill-wrapper test (absent = none).
- * @param isDynamicLocal - the live client-contribution test (absent = none).
- * @param hostView - the host catalog's view of THIS LINE (`undefined` = the
- *   catalog does not resolve the name at all; see {@link HostCommandClaim}).
- *   A name the catalog RESOLVES is never a client-local line: when the
- *   catalog claims the line the host's own `input.attachments` declaration
- *   decides, and when it does not (an argued line of an execute-kind
- *   command) the line is an ordinary submission — never a same-named client
- *   contribution's.
- */
-export function isLocalCommandLine(
-  name: string,
-  isSkillWrapper: ((name: string) => boolean) | undefined,
-  isDynamicLocal: ((name: string) => boolean) | undefined,
-  hostView?: HostCommandClaim | undefined,
-): boolean {
-  // A TUI-owned name is local no matter what the host catalog holds: the
-  // dispatch excludes LOCAL_COMMANDS from the host route, so the
-  // classification must not claim a host authority the route never grants.
-  if (LOCAL_COMMANDS.has(name)) return true
-  if (isSkillWrapper?.(name) === true) return false
-  if (hostView !== undefined) return false
-  return isDynamicLocal?.(name) ?? false
-}
 
-/**
- * Whether one parsed line is the BARE slash token (DSH `matchEnter`'s `bare`:
- * no input follows the name — trailing whitespace is not input). It is the
- * whole difference between a command invocation and an ordinary submission
- * for the NAME-keyed client routes: a client command contribution claims the
- * bare token only, exactly like an execute-kind host command.
- * @param parsed - the parsed slash command.
- * @returns whether the line carries no input after the command name.
- */
-export function isBareCommandLine(parsed: { name: string; rawInput?: string }): boolean {
-  return (parsed.rawInput?.trim() ?? '') === ''
-}
 
-/**
- * The attachment gate's local-command classification for ONE parsed line —
- * the SINGLE classification the dispatch and its regression tests share, and
- * the DSH client namespace order applied to a LINE:
- * - a TUI/core local command is local;
- * - `/skill <name> ...` and a LIVE skill wrapper are agent-facing
- *   (multimodal) even when a client contribution shares the name;
- * - a name the HOST catalog RESOLVES is never local: when the catalog claims
- *   the line, the claiming descriptor's `input.attachments` declaration
- *   decides (`/goal <objective>` is claimed), and when it does not (an argued
- *   line of an execute-kind command, `/compact extra`) the line is an
- *   ordinary submission — never a command and never a same-named client
- *   contribution's;
- * - everything else follows the live client contribution of that name — for
- *   the BARE token only: a contribution claims `/name`, so an argued line
- *   (`/deploy explain`) is an ordinary multimodal submission that keeps its
- *   attachments.
- * @param parsed - the parsed slash command (undefined = plain prompt).
- * @param isSkillWrapper - the live skill-wrapper test (absent = none).
- * @param isDynamicLocal - the live client-contribution test (absent = none).
- * @param hostClaim - the live HOST-catalog view of THIS LINE (absent = none).
- * @returns whether the line is a local command line.
- */
-export function commandIsLocalForAttachments(
-  parsed: { name: string; rawInput?: string } | undefined,
-  isSkillWrapper: ((name: string) => boolean) | undefined,
-  isDynamicLocal: ((name: string) => boolean) | undefined,
-  hostClaim?: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined,
-): boolean {
-  if (parsed === undefined) return false
-  // `/skill <name> ...` is agent-facing (loadSkill owns it) even though the
-  // bare `/skill` picker is a TUI-local command.
-  if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return false
-  // The host catalog's view of THIS LINE outranks a same-named client
-  // contribution, exactly like the dispatch's namespace order; the
-  // contribution term itself is asked for a BARE line alone (DSH `matchEnter`).
-  return isLocalCommandLine(
-    parsed.name,
-    isSkillWrapper,
-    isBareCommandLine(parsed) ? isDynamicLocal : undefined,
-    hostClaim?.(parsed),
-  )
-}
 
-/**
- * The TUI dispatch boundary's delivery resolution: the WEB composer policy
- * ({@link resolveComposerDelivery}) applied to agent-facing input, with the
- * TUI's own ownership terms on top. Pure so the dispatch gate (inside the
- * runner closure) is testable headless.
- * @param parsed - the parsed slash command, undefined for a plain prompt.
- * @param running - whether the live agent reports running.
- * @param gesture - the composer gesture that raised the submission.
- * @param busyEnter - the persisted preference value (''/undefined = queue).
- */
-export function resolveSubmitDelivery(
-  parsed: { name: string; rawInput?: string } | undefined,
-  running: boolean,
-  gesture: ComposerSubmitGesture,
-  busyEnter: string | undefined,
-): SubmitDelivery {
-  if (parsed !== undefined) {
-    // `/skill <name> [args...]` is an AGENT-facing invocation (loadSkill),
-    // NOT the local picker: it follows the busy policy like any other
-    // prompt. Only the bare `/skill` picker counts as local (review finding
-    // — same classification as the image-rejection gate).
-    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return resolveComposerDelivery(running, gesture, busyEnter)
-    // A TUI-owned local command executes through its own surface and never
-    // steers; its delivery value is only ever a placeholder for the (never
-    // taken) skill-delivery binding. Client contributions never reach this
-    // resolver at all (the namespace dispatch routes them first).
-    if (LOCAL_COMMANDS.has(parsed.name)) return 'queue'
-  }
-  return resolveComposerDelivery(running, gesture, busyEnter)
-}
 
-/**
- * Normalize an explicit `/skill <name> <args>` invocation to the skill's
- * own slash line `/<name> <args>` (review finding 2). The harness's
- * explicit skill gesture scans for `/<skill-name>` — it would extract
- * `skill` from a raw `/skill grilling ...` line and never inject the
- * grilling body. The command handler already performs this conversion
- * (`loadSkill` builds `'/' + skill.name + ' ' + args`); the busy-Enter
- * steer path must use the SAME normalized line so the body injects and
- * any image placeholders ride along.
- * @param text - the submitted line.
- * @returns the normalized `/<name> <args>` line, or undefined when the
- *   line is not an explicit skill invocation (plain prompt, other
- *   commands, or the bare `/skill` picker).
- */
-export function normalizeSkillInvocation(text: string): string | undefined {
-  const parsed = parseCommand(text)
-  if (parsed?.name !== 'skill') return undefined
-  // Only the SEPARATOR whitespace is trimmed (the rawInput starts after
-  // the command name): the argument text — INCLUDING its trailing
-  // whitespace — travels verbatim (the skill-invocation contract).
-  const raw = parsed.rawInput.trimStart()
-  if (raw === '') return undefined
-  const match = /^([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+([\s\S]*))?$/.exec(raw)
-  if (match === null) return undefined
-  const name = match[1]!
-  const args = match[2]
-  return args === undefined || args.trim() === '' ? `/${name}` : `/${name} ${args.trimStart()}`
-}
-
-/**
- * The advertised-claim miss decision (pure, exported for the headless
- * suite): a slash input whose name was advertised by the completion list at
- * submit time but that the REAL session's catalog lacks is CONSUMED with an
- * explicit error — never sent to the model as a plain user message. An
- * unadvertised miss keeps the existing plain-input fallback (the user may
- * deliberately send slash text to the model).
- * @param execution - the settled `commands.execute` outcome.
- * @param wasAdvertised - whether the submission was an advertised command
- *   INVOCATION: the submit-time name claim AND the command plane's final
- *   ownership of the line (an argued line of an execute-kind command never
- *   reached the plane, so it is an ordinary submission).
- * @returns whether the miss must be consumed as an advertised miss.
- */
-export function shouldConsumeAdvertisedMiss(
-  execution: { readonly result: unknown } | undefined,
-  wasAdvertised: boolean,
-): boolean {
-  return execution === undefined && wasAdvertised
-}
-
-/** Public settlement shape for the interrupt helper. Kept local so the
- * entry-point declaration does not expose the internal runtime port module. */
-export type InterruptWriteOutcome =
-  | { readonly kind: 'committed'; readonly value: undefined }
-  | { readonly kind: 'rejected'; readonly error: {
-      readonly code: string
-      readonly message: string
-      readonly details?: Readonly<Record<string, unknown>>
-    } }
-  | { readonly kind: 'cancelled' }
-  | { readonly kind: 'indeterminate'; readonly error: {
-      readonly code: string
-      readonly message: string
-      readonly details?: Readonly<Record<string, unknown>>
-    } }
-  | { readonly kind: 'unsupported'; readonly reason: string }
-
-/** The live-agent surface {@link interruptAgent} needs (structural — the
- * TUI never imports the agent runtime for this call). */
-export interface InterruptAgentLike {
-  readonly session: { readonly id: string }
-  readonly status: string
-  cancel(cause: { kind: 'user' }, options?: { keepInbox?: boolean }): void
-}
-
-/** The writer surface {@link interruptAgent} needs (structural — a LOCAL
- * type so the public declaration never inlines internal runtime modules;
- * the runner's SessionWriter satisfies it). */
-export interface InterruptWriterLike {
-  cancel(sessionId: string): Promise<InterruptWriteOutcome>
-}
-
-/**
- * Interrupt the live agent (web Stop parity): abort the current
- * turn/tool run while PRESERVING the pending queue. dsh's DEFAULT
- * `cancel()` clears queued AND steering input, so a bare cancel would
- * destroy everything the user queued with Ctrl+S / queue-mode Enter —
- * the Esc-interrupt semantic is "stop the current thinking", never
- * "drop the queue". `keepInbox: true` parks the preserved work; dsh's
- * cancel is a documented no-op when nothing is active, so an idle
- * interrupt (double-Esc while idle) is harmless and still aborts a
- * local shell / maintenance task through the caller.
- *
- * NOTE (upstream dependency): dsh currently PARKS the preserved queue
- * after an abort — the "Esc with a queue continues immediately" UX
- * needs an upstream `wakePending`/`continueInbox` capability (not yet
- * in dsh). A TUI-side emulation (remove + re-send a queue message)
- * would fabricate durable discarded/inserted events in the session
- * log, which the design explicitly rejects — the parked queue is the
- * agreed web-parity behavior until upstream lands the capability.
- */
-export function interruptAgent(agent: InterruptAgentLike | undefined, writer: InterruptWriterLike): Promise<InterruptWriteOutcome> {
-  if (agent === undefined) return Promise.resolve({ kind: 'committed', value: undefined })
-  return writer.cancel(agent.session.id)
-}
-
-/** One unsettled subagent delegation, in tool/call order. */
-export interface PendingSubagentCall {
-  readonly callId: string
-  readonly description: string
-}
-
-/**
- * The async viewer-OPEN invalidation token (pure, exported for the headless
- * suite — the runner closure itself is not drivable in the headless tests,
- * so the lifecycle rule is tested through these token semantics). An open
- * request captures a token; EVERY viewer session change — opening another
- * child, leaving the viewer (Esc), or a session swap (which routes through
- * exitView) — invalidates the token, so a slow transcript inspection can
- * never commit an obsolete child over the current surface. Invalidation is
- * unconditional: an exit that finds NO mounted viewer still invalidates,
- * because the open is exactly then still in flight (round-5 finding).
- */
-export interface ViewerOpenToken {
-  /** The current token value (bumped by every open and every invalidate). */
-  readonly current: number
-  /** Start one async open; returns the request's token. */
-  open(): number
-  /** Invalidate every in-flight open (a viewer session change). */
-  invalidate(): void
-  /** Whether a request may still commit. */
-  isCurrent(request: number): boolean
-}
-
-export function createViewerOpenToken(): ViewerOpenToken {
-  let value = 0
-  return {
-    get current(): number {
-      return value
-    },
-    open: () => ++value,
-    invalidate: () => {
-      value += 1
-    },
-    isCurrent: (request) => request === value,
-  }
-}
-
-/**
- * Session-swap viewer teardown (pure, exported for the headless suite —
- * the runner closure is not headless-drivable, so the rule is pinned
- * through this seam). A session swap must do BOTH: invalidate any
- * in-flight viewer OPEN — UNCONDITIONALLY, because the open may still be
- * loading when nothing is mounted yet, and the swap must still cancel it
- * (round-6 finding) — and close a MOUNTED viewer when there is one.
- * @param token - the shared viewer-open token.
- * @param mounted - whether a viewer is currently mounted.
- * @param closeMounted - closes the mounted viewer (a no-op when unmounted).
- * @returns whether a mounted viewer was closed.
- */
-export function teardownViewerForSessionSwap(
-  token: ViewerOpenToken,
-  mounted: boolean,
-  closeMounted: () => void,
-): boolean {
-  token.invalidate()
-  if (!mounted) return false
-  closeMounted()
-  return true
-}
-
-/**
- * The viewer capability gate for SEMANTIC plugin actions (pure, exported
- * for the headless suite — the runner closure is not drivable there).
- * While a subagent viewer is open, only actions that stay CHILD- or
- * SURFACE-local are allowed; every action with PARENT-session side
- * effects (steer, cancel/interrupt, permission cycling, the main
- * transcript search) is blocked, so a plugin keybinding can never
- * interrupt/steer/reconfigure the parent from inside the viewer. The
- * raw-key viewer guard already consumes the parent chords — this gate
- * closes the plugin-keybinding path, the only other way a semantic
- * action reaches the runner.
- * @param action - the semantic action the plugin requested.
- * @param viewer - the open viewer (mode), or undefined when no viewer.
- * @returns whether the runner may execute the action.
- */
-export function viewerActionCapability(
-  action: import('./extension/public-types.ts').TuiAction,
-  viewer: { mode: 'one-shot' | 'continuable' } | undefined,
-): boolean {
-  if (viewer === undefined) return true
-  switch (action) {
-    case 'submit-draft':
-    case 'queue-draft':
-    case 'toggle-fullscreen':
-      // Child- or surface-local: submitDraft routes to the child (and
-      // hard-rejects in a one-shot viewer); fullscreen is chrome-local.
-      return true
-    default:
-      // steer-draft / cancel-activity / cycle-permission / open-search
-      // all target the parent session — never while viewing.
-      return false
-  }
-}
-
-/**
- * Match the child a user is about to view against the unsettled subagent
- * calls (pure, exported for the headless suite). The child's durable label
- * is the delegation's `description`; duplicate descriptions take the MOST
- * RECENT call (the one the user is most likely watching), an empty/absent
- * label falls back to a LONE pending call, and no match disables the
- * auto-pop (the user exits the viewer with Esc as before — never a wrong
- * pop). Mutates `pending` by removing the matched call.
- * @param pending - the unsettled calls, in order (oldest first).
- * @param label - the child's durable label; '' or undefined = no description.
- * @returns the matched call, or undefined when nothing matches.
- */
-export function matchPendingSubagentCall(
-  pending: PendingSubagentCall[],
-  label: string | undefined,
-): PendingSubagentCall | undefined {
-  if (label !== undefined && label !== '') {
-    for (let index = pending.length - 1; index >= 0; index -= 1) {
-      if (pending[index]!.description === label) {
-        return pending.splice(index, 1)[0]
-      }
-    }
-    // No description match: a lone pending call is the only remaining
-    // candidate (the user can only be viewing the one unsettled child).
-    if (pending.length === 1) return pending.splice(0, 1)[0]
-    return undefined
-  }
-  // No usable label: only a lone pending call can be tied unambiguously.
-  if (pending.length === 1) return pending.splice(0, 1)[0]
-  return undefined
-}
-
-/**
- * The pre-mount surface catalog resolution:
- * - an explicit `--session` start PREFETCHES the resumed agent's effective
- *   catalog (a live read emits no session events);
- * - the deferred start (no `--session`) reads the cold HUMAN SKILL catalog
- *   through the preset's STANDING SCOPE — no Agent, no session, no turn —
- *   so the first input sees human-invocable skills without any durable
- *   side effect (the mechanism that avoids the probe dead end: host
- *   `session/created` observers write durable knob events into every fresh
- *   session).
- *
- * The snapshot (resume) or the skill catalog (cold) installs synchronously
- * after mount (the ready barrier).
- *
- * Failure taxonomy (plan appendix B):
- * - lifecycle cancellation: nothing installed, no notice;
- * - a prefetch/standing read failure degrades to a one-shot notice (the
- *   TUI mounts with the global view and built-in commands);
- * - a missing/unknown preset or a broken standing mount degrades the cold
- *   target to the global layer with a one-shot notice — never a probe
- *   Agent, never a startup failure;
- * - an ordinary provider read failure never rejects here: it becomes an
- *   empty field + detached issue inside the catalog.
- * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
- * @returns the snapshot / skill catalog to install and an optional notice.
- */
-export interface InitialCatalogResolution {
-  /** The resume prefetch snapshot to install at mount. */
-  readonly snapshot?: SurfaceCatalogSnapshot
-  /** The cold standing-scope human skill catalog (deferred start). */
-  readonly skills?: HumanSkillCatalog
-  /** A user-facing notice when the prefetch/standing read degraded. */
-  readonly notice?: string
-}
-
-/** Options for {@link resolveInitialCatalog}. */
-export interface ResolveInitialCatalogOptions {
-  /** The resumed live agent, if any (prefetch path). */
-  readonly liveAgent?: Agent
-  /** The effective preset id for the cold standing read (undefined = the
-   * deployment default; only consulted for the deferred start). */
-  readonly presetId?: string
-  readonly signal: AbortSignal
-  /** The context surface the collectors read services from. */
-  readonly ctx: SurfaceCatalogContext
-  readonly diag: Diag
-  /** Suspend the pre-mount startup status before an ordinary log write
-   * (the status owns the current terminal line; a TTY shares one cursor
-   * between stdout and stderr). Called right before every diag.warn this
-   * function may emit. */
-  readonly onLog?: () => void
-}
-
-export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
-  const { liveAgent, presetId, signal, ctx, diag, onLog } = options
-  if (liveAgent !== undefined) {
-    try {
-      const snapshot = await readSurfaceCatalog(liveAgent, signal, ctx)
-      diag.info('surface catalog prefetched', {
-        commands: snapshot.commands.length,
-        scopedCommands: snapshot.scopedCommands.length,
-        skills: snapshot.skills.length,
-      })
-      return { snapshot }
-    } catch (error) {
-      if (isCancellation(error)) return {}
-      const message = safeErrorMessage(error)
-      onLog?.()
-      diag.warn('surface catalog unavailable', { phase: 'resume', error: message })
-      return { notice: `surface catalog unavailable: ${message}` }
-    }
-  }
-  // Deferred start: the cold standing-scope skill read. No Agent, no
-  // session, no turn — and no probe fallback on any failure. The standing
-  // scope rides the official revision lease; it is released once the read
-  // settles on ANY path (the lease must never outlive its read).
-  const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
-  if (target.target === undefined) return {}
-  try {
-    const catalog = await readHumanSkillCatalog(target.target.registry, {
-      cwd: target.target.cwd,
-      scope: target.target.scope,
-      signal,
-    })
-    diag.info('skill catalog standing ready', {
-      preset: presetId ?? 'default',
-      skills: catalog.skills.length,
-      complete: catalog.complete,
-    })
-    return { skills: catalog, ...target.degraded === undefined ? {} : { notice: target.degraded } }
-  } catch (error) {
-    if (isCancellation(error)) return {}
-    const message = safeErrorMessage(error)
-    onLog?.()
-    diag.warn('skill catalog unavailable', { phase: 'cold', error: message })
-    return { notice: `skill catalog unavailable: ${message}` }
-  } finally {
-    await target.release?.()
-  }
-}
-
-export function subagentJobTranscriptId(snapshot: unknown): string | undefined {
-  if (typeof snapshot !== 'object' || snapshot === null) return undefined
-  const childSessionId = (snapshot as { readonly childSessionId?: unknown }).childSessionId
-  return typeof childSessionId === 'string' && childSessionId.trim() !== '' ? childSessionId : undefined
-}
-
-/**
- * The Task Center row-selection disposition (plan §4.3/§4.4). A subagent
- * transcript opens a session/viewer surface that REPLACES the browser; a
- * Job row's detail keeps it mounted (the caller passes {@link openJobView}'s
- * disposition). An UNKNOWN row — a stale panel selection after a live
- * re-projection — also keeps the parent usable instead of dismissing it.
- */
-export function taskRowSelectionDisposition(
-  row: { readonly kind: 'job' | 'subagent' } | undefined,
-  jobDetail: 'close' | 'keep-open',
-): 'close' | 'keep-open' {
-  if (row === undefined) return 'keep-open'
-  if (row.kind === 'subagent') return 'close'
-  return jobDetail
-}
-
-/** Viewer body for a subagent job with no uniquely matched child. */
-export function subagentJobViewHint(status: string, detail: string | undefined): string {
-  const tail = status === 'running' || status === 'stopping'
-    ? ' — running in the background; its transcript updates live in /tasks'
-    : ` — this subagent finished${detail === undefined ? '' : ` (${detail})`}`
-  return [
-    `status: ${status}${tail}`,
-    '',
-    'The job record does not carry the child session id, so this job cannot',
-    'be matched to its child from the task browser (a same-label foreground',
-    'run would be indistinguishable). Open /tasks and pick the child by',
-    'its label to read the transcript.',
-  ].join('\n')
-}
-
-/**
- * Whether a plain submitted draft is the quit word: exactly `exit` (trimmed,
- * lowercase). The runner intercepts this BEFORE any session creation or
- * submission (shell muscle memory); anything else — `exit!`, `Exit`, or a
- * draft with a recalled entry still in it — is an ordinary message.
- * @param text - the submitted draft.
- */
-export function isPlainExitPrompt(text: string): boolean {
-  return text.trim() === 'exit'
-}
-
-/** One semantic pending-input item as the queue mirror sees it. */
-export interface QueueInboxMessage {
-  readonly id: string
-  readonly content: readonly ContentBlock[]
-}
-
-/** Adapt one semantic pending-input item to the queue pane's presentation
- * projection without reintroducing backend-specific fields. */
-function queueInboxMessageOf(item: PendingInputItem): QueueInboxMessage {
-  return {
-    id: item.id,
-    content: item.content as readonly ContentBlock[],
-  }
-}
-
-/** The queue-pane rows for one semantic pending-input batch. */
-export interface QueueFoldResult {
-  readonly rows: QueueItem[]
-}
-
-/**
- * The queue-pane display text of one message's content (review finding 5):
- * text blocks verbatim, image blocks as a compact `🖼️ name` summary (the
- * marker carries U+FE0F so fonts with an emoji face render it 2 cells wide
- * — the width math's expectation — and never overlap the name) — an
- * image-only queued message shows `🖼️ shot.png` instead of an empty row,
- * and a mixed message advertises its image. The queue row stays one line.
- */
-function queueTextOf(content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[]): string {
-  const parts: string[] = []
-  for (const block of content) {
-    if (block.type === 'text') parts.push(block.text)
-    else if (block.type === 'image') parts.push(`🖼️ ${block.attachment.name ?? 'image'}`)
-    else if (block.type === 'file') parts.push(fileAttachmentSummary(block.attachment))
-  }
-  return parts.join(' ')
-}
-
-/** Build queue-pane rows from semantic pending-input occurrences, preserving
- * their order and content without inspecting backend-specific metadata. */
-export function foldQueueRows(
-  messages: readonly QueueInboxMessage[],
-  mode: 'followup' | 'steer',
-): QueueFoldResult {
-  return {
-    rows: messages.map(message => ({
-      id: message.id,
-      text: queueTextOf(message.content),
-      mode,
-    })),
-  }
-}
-
-/**
- * The bundle's own version, read from package.json at runtime so the welcome
- * card never drifts from the shipped version. The DISPLAYED version prefers
- * the installed dsh version (`dshVersion` — shared with the header badge
- * via src/dsh-version.ts), falling back to this one.
- * @returns the version string, or a fallback when the file is unreadable.
- */
-function packageVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
-    return dshVersion() ?? pkg.version ?? '0.0.0'
-  } catch {
-    return dshVersion() ?? '0.0.0'
-  }
-}
-
-/**
- * The welcome card's version line: the installed dsh version plus the
- * bundle's own version (header-badge parity — `dsh-0.1.7-rc.2 ·
- * tui-v0.4.9`). Without a resolvable dsh launcher it degrades to
- * the bundle version alone.
- * @returns the combined version string.
- */
-function versionDisplay(): string {
-  const dsh = dshVersion()
-  return dsh === undefined ? `tui-v${bundleVersion()}` : `dsh-${dsh} · tui-v${bundleVersion()}`
-}
-
-/**
- * The BUNDLE's OWN version (`@xmoon76/dsh-pi-tui`'s package.json),
- * INDEPENDENT of the installed dsh version. The status snapshot's
- * host.tuiVersion and the footer's `version(format=tui)` item must report
- * the TUI's own patch level — the welcome-card helper above deliberately
- * prefers the dsh version for display, so reusing it made `tui` show the
- * harness version (and `both` show the dsh version twice) inside a real
- * dsh installation (the review's P2).
- * @returns the bundle version string, or a fallback when the file is unreadable.
- */
-function bundleVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
-    return pkg.version ?? '0.0.0'
-  } catch {
-    return '0.0.0'
-  }
-}
-
-/** Translate official DSH events into the local preview operations. The
- * STREAMED tool-call deltas arrive through the live assistant stream seam
- * (`applyStreamingToolPreviewInput`); this durable-event path only CLEARS
- * previews (settled calls, retries, step/turn boundaries). */
-function applyStreamingToolPreviewEvent(
-  previews: Map<string, StreamingToolPreview>,
-  event: SessionEvent,
-): void {
-  if (event.type === 'tool/call') {
-    removeStreamingToolPreview(previews, event.data.callId, event.data.turn, event.data.step)
-    return
-  }
-  // `assistant/attempt` (Session v2, typed STRUCTURALLY): the attempt's
-  // tool-call deltas never materialized — its step's previews must not
-  // survive as ghost rows.
-  if ((event.type as string) === 'assistant/attempt') {
-    const data = event.data as { turn: number; step: number }
-    clearStreamingToolPreviewsForStep(previews, data.turn, data.step)
-    return
-  }
-  if (event.type === 'llm/retry' || event.type === 'llm/retry-started') {
-    clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
-    return
-  }
-  if (event.type === 'step/end') {
-    clearStreamingToolPreviewsForStep(previews, event.data.turn, event.data.step)
-    return
-  }
-  if (event.type === 'turn/end') {
-    clearStreamingToolPreviewsForTurn(previews, event.data.turn)
-  }
-}
-
-/** Translate one live assistant stream input (Session v2 transient plane)
- * into the streaming tool preview operations. The CLEAR paths stay on the
- * durable session-event plane (`tool/call`, `llm/retry`, `step/end`,
- * `turn/end`); only the streamed tool-call deltas and block-ends arrive
- * here. */
-function applyStreamingToolPreviewInput(
-  previews: Map<string, StreamingToolPreview>,
-  input: AssistantLiveInput,
-): void {
-  if (input.kind !== 'chunk') return
-  const chunk = input.chunk
-  if (chunk.type === 'tool-call-delta') {
-    upsertStreamingToolPreview(previews, {
-      callId: chunk.id,
-      turn: input.turn,
-      step: input.step,
-      index: chunk.index,
-      name: chunk.name,
-      argumentsDelta: chunk.argumentsDelta,
-      time: input.time,
-    })
-    return
-  }
-  if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
-    const callId = typeof chunk.block.id === 'string' ? chunk.block.id : ''
-    const name = typeof chunk.block.name === 'string' ? chunk.block.name : undefined
-    upsertStreamingToolPreview(previews, {
-      callId,
-      turn: input.turn,
-      step: input.step,
-      index: chunk.index,
-      name,
-      time: input.time,
-    })
-  }
-}
 
 /** Apply one transient input to a presentation owner and its independent stats. */
 function applyAssistantLiveInput(
@@ -1175,52 +460,7 @@ function mergeSessionEventCut(
   return [...snapshot, ...opening.filter(event => Number(event.seq) > cut)]
 }
 
-/** Current git branch from the nearest .git/HEAD, or empty outside a checkout. */
-function gitBranch(cwd: string): string {
-  let dir = cwd
-  for (let depth = 0; depth < 10; depth += 1) {
-    try {
-      const head = readFileSync(join(dir, '.git', 'HEAD'), 'utf8').trim()
-      if (!head.startsWith('ref: refs/heads/')) return ''
-      return head.slice('ref: refs/heads/'.length)
-    } catch {
-      const parent = join(dir, '..')
-      if (parent === dir) return ''
-      dir = parent
-    }
-  }
-  return ''
-}
 
-/** Shell commands the approval dialog flags as dangerous (kimi-inspired). */
-const DANGER_PATTERNS: readonly RegExp[] = [
-  /\bmkfs(\.\w+)?\b/,
-  /\bdd\s+if=.*of=\/dev\//,
-  /^:\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:/,
-  /\bchmod\s+-R\s+777\s+\//,
-  /\bgit\s+push\b[^\n|;]*(--force\b|\s-f\b)/,
-  /\b(shutdown|reboot|poweroff|init\s+0)\b/,
-  />+\s*\/dev\/sd/,
-  /\bcurl\b[^\n|]*\|\s*(ba)?sh\b/,
-]
-
-/**
- * Whether a shell command matches a destructive pattern. `rm` is treated
- * specially: any spelling of recursive + force flags (`rm -rf`, `rm -r -f`,
- * `rm -rf /`) is dangerous; the remaining patterns are verbatim matches.
- */
-export function dangerCommand(command: string): boolean {
-  // Slice the flags from the WORD-BOUNDED rm match itself: slicing from the
-  // first "rm" substring (e.g. inside "alarm") would read flags from the
-  // wrong offset and both miss and misfire depending on what follows.
-  const rm = /\brm\b/i.exec(command)
-  if (rm !== null) {
-    const flags = command.slice(rm.index + rm[0].length)
-    const combined = flags.match(/-\w+/g)?.join('') ?? ''
-    if (combined.includes('r') && combined.includes('f')) return true
-  }
-  return DANGER_PATTERNS.some(pattern => pattern.test(command))
-}
 
 /**
  * The dsh profile named by the `--profile` flag in `argv`, in both spellings.
@@ -1289,41 +529,7 @@ export function resumeCommand(profile: string, sessionId: string): string | unde
   return `dsh --profile ${profile} --session ${id}`
 }
 
-/**
- * The active goal badge text from the session log, or undefined. The latest
- * `goal/change` wins; a clear or completed goal hides the badge.
- * @param events - the session log.
- * @returns e.g. `goal ● fix the build`, or undefined.
- */
-/**
- * Whether the agent is busy from a session log: the newest turn-boundary
- * event decides. A resumed session can be persisted mid-turn, so the scan
- * cannot assume the log ends idle.
- * @param events - the session log.
- * @returns whether the newest turn is still open.
- */
-function workingFromLog(events: readonly SessionEvent[]): boolean {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event.type === 'turn/start') return true
-    if (event.type === 'turn/end') return false
-  }
-  return false
-}
 
-function foldGoal(events: readonly SessionEvent[]): string | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event === undefined || event.type !== 'goal/change') continue
-    if (event.data.operation === 'clear') return undefined
-    const goal = event.data.goal
-    if (goal.phase === 'complete') return undefined
-    const mark = goal.phase === 'active' ? '●' : goal.phase === 'paused' ? '‖' : '◌'
-    const objective = goal.objective.length > 24 ? `${goal.objective.slice(0, 24)}…` : goal.objective
-    return `goal ${mark} ${objective}`
-  }
-  return undefined
-}
 
 /** Time one cold-bootstrap fold without changing its authoritative semantics. */
 function timedBootstrapScan<T>(diag: Diag, name: string, eventCount: number, scan: () => T): T {
@@ -1349,29 +555,6 @@ export {
 } from './compaction-presentation.ts'
 export type { CompactionFold, CompactionSettleSurface } from './compaction-presentation.ts'
 
-/**
- * The in-flight compaction state a resumed session log implies: the newest
- * compaction bracket decides. A `session/end-seed` boundary makes any
- * EARLIER unmatched `compaction/start` STALE — the upstream invariant
- * (inheritedOrphanStartSeqs) treats seed compactions that never settled
- * inside the seed as abandoned, so they must not re-arm the compacting
- * surface on resume.
- */
-export function compactingFromLog(
-  events: readonly { type: unknown; data?: unknown }[],
-): { active: boolean; id: string | undefined } {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event === undefined) break
-    const kind = typeof event.type === 'string' ? event.type : ''
-    if (kind === 'compaction/start') {
-      const data = (event as { data?: { compactionId?: unknown } }).data
-      return { active: true, id: typeof data?.compactionId === 'string' ? data.compactionId : undefined }
-    }
-    if (kind === 'compaction/end' || kind === 'session/end-seed') break
-  }
-  return { active: false, id: undefined }
-}
 
 /** One agent's preset composition: the id to record and the setup that installs it. */
 export interface AgentComposition {
@@ -1452,68 +635,9 @@ export async function composeAgent(
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
 ): Promise<LegacyAgentComposition | AgentComposition> {
-  const installTuiPrompts = (agentCtx: Context): void => {
-    if (progressUpdatesState !== undefined || responseStyleState !== undefined) {
-      const systemPrompt = agentCtx.get('systemPrompt') as SystemPromptLike | undefined
-      if (systemPrompt !== undefined) {
-        // The progress section's effective text reads the live display state
-        // (Focus suppresses it), so it needs both live states.
-        if (progressUpdatesState !== undefined && displayState !== undefined) {
-          installProgressUpdatesPrompt(systemPrompt, displayState, progressUpdatesState)
-        } else if (progressUpdatesState !== undefined) {
-          diag?.warn('progress updates prompt unavailable', { reason: 'display state missing' })
-        }
-        if (responseStyleState !== undefined) installResponseStylePrompt(systemPrompt, responseStyleState)
-      } else {
-        diag?.warn('communication policy prompt unavailable', { reason: 'systemPrompt service missing' })
-      }
-    }
-    if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
-  }
-  const presets = ctx.get('agentPresets')
-  if (presets === undefined) {
-    if (typeof installSelection === 'function') {
-      return {
-        setup: (agentCtx: Context, agent: Agent): void => {
-          installSelection(agentCtx, agent)
-          installTuiPrompts(agentCtx)
-        },
-      }
-    }
-    return {
-      setup: (agentCtx: Context): void => {
-        installModelSelection(agentCtx, installSelection)
-        installTuiPrompts(agentCtx)
-      },
-    }
-  }
-  // The official registry owns identity resolution (unknown/broken ids are
-  // refused by `resolve`); the TUI only maps the concrete id onto the new
-  // Agent's composition. There is deliberately NO legacy alias here: a
-  // requested id — `code` included — is an ordinary preset id.
-  const resolved = await presets.resolve(presetId)
-  const finishSetup = async (agentCtx: Context): Promise<void> => {
-    await presets.mount(agentCtx, resolved.id)
-    // Install after the preset mounts its services. Preset-only recomposition
-    // preserves these outer-scoped sections; a new agent installs them anew.
-    installTuiPrompts(agentCtx)
-  }
-  if (typeof installSelection === 'function') {
-    return {
-      agentPreset: resolved.id,
-      setup: async (agentCtx: Context, agent: Agent): Promise<void> => {
-        installSelection(agentCtx, agent)
-        await finishSetup(agentCtx)
-      },
-    }
-  }
-  return {
-    agentPreset: resolved.id,
-    setup: async (agentCtx: Context): Promise<void> => {
-      installModelSelection(agentCtx, installSelection)
-      await finishSetup(agentCtx)
-    },
-  }
+  // The Direct-only body lives in app/direct (plan §27); the entry keeps the
+  // public overloads above and delegates the composition here.
+  return composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState)
 }
 
 /**
@@ -1524,7 +648,7 @@ export async function composeAgent(
  * @returns the recorded preset id, or undefined to compose the default.
  */
 export async function recordedPreset(ctx: Context, sessionId: string): Promise<string | undefined> {
-  return recordedSessionPreset(ctx, sessionId)
+  return recordedDirectPreset(ctx, sessionId)
 }
 
 /** Read the official `RemoteError` code off a refused preset switch. */
@@ -1534,10 +658,6 @@ function presetErrorCode(error: unknown): string | undefined {
   return typeof code === 'string' && code !== '' ? code : undefined
 }
 
-/** Set the terminal window title (OSC 0); a no-op without a TTY. */
-function setTerminalTitle(title: string): void {
-  if (process.stdout.isTTY === true) process.stdout.write(`\x1b]0;${title}\x07`)
-}
 
 
 /**
