@@ -391,3 +391,30 @@ test('A3-4 static exit: SessionRuntime is the SOLE operation-barrier writer admi
   assert.deepEqual(offenders, [],
     'only SessionRuntime.withWriter may call the operation barrier')
 })
+
+test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a transition', () => {
+  // The pull-back captures its live scope well before the writer entry, so the
+  // admission can refuse with `SessionScopeSupersededError` after the queue
+  // reconciliation started. That refusal must drop the staged refs and report the
+  // STALE notice — never the transition one, which would leave staged attachments
+  // behind and mislabel the refusal.
+  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const pullBack = source.slice(
+    source.indexOf("runOwned('queue pull-back'"),
+    source.indexOf("onError: (_error) => {", source.indexOf("runOwned('queue pull-back'")),
+  )
+  const outerCatch = pullBack.slice(pullBack.lastIndexOf('.catch(error => {'))
+  assert.ok(outerCatch.includes('if (error instanceof TransitionInProgressError) {'),
+    'the transition refusal keeps its branch')
+  assert.ok(outerCatch.includes('} else if (error instanceof SessionScopeSupersededError) {'),
+    'a stale pre-entry refusal has its OWN branch')
+  const staleBranch = outerCatch.slice(outerCatch.indexOf('SessionScopeSupersededError'))
+  assert.ok(staleBranch.includes('discardStaged()'),
+    'a stale refusal discards the staged attachments')
+  assert.ok(staleBranch.includes("failureKind = 'stale'"),
+    'a stale refusal reports the stale kind')
+  assert.ok(source.includes("if (failureKind === 'stale')"),
+    'the stale kind has its own user notice')
+  assert.ok(source.includes('the session changed while pulling messages back'),
+    'the stale notice text is the session change, not a transition')
+})

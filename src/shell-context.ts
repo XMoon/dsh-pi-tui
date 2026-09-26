@@ -82,11 +82,16 @@ export async function submitShellResult(deps: ShellSubmitDeps, text: string): Pr
     try {
       return await writerSection(async () => submitShellResultCore(deps, text, agent, generation))
     } catch (error) {
-      // A frozen transition and a superseded capture are DIFFERENT refusals,
-      // but both wrote NOTHING: report the fence/stale notice and keep the
-      // card's output visible for a retry. Never report one as the other.
-      if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) {
+      // A frozen transition and a superseded capture are DIFFERENT refusals
+      // (both wrote NOTHING): report the refusal that actually happened and keep
+      // the card's output visible for a retry — never the transition notice for a
+      // stale capture.
+      if (error instanceof TransitionInProgressError) {
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      if (error instanceof SessionScopeSupersededError) {
+        deps.notify(deps.staleNotice(), 'info')
         return 'stale'
       }
       throw error

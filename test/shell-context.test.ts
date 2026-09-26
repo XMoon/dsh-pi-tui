@@ -213,6 +213,9 @@ test('submitShellResult: a stale capture refuses stale, never as a frozen transi
   const agent = fakeAgent()
   const { deps, notices, cleared } = makeDeps({ agent: () => agent })
   deps.writerSection = async () => { throw new SessionScopeSupersededError() }
+  // The PRODUCTION wiring configures a transition-specific fence notice: a stale
+  // capture must still take the STALE notice, never the transition one.
+  deps.fenceNotice = () => 'a session transition is in progress'
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'stale')
   assert.equal(agent.followed.length, 0, 'no followup for a superseded capture')

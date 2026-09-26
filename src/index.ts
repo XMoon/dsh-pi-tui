@@ -7227,11 +7227,17 @@ export function apply(ctx: Context, config: Config): void {
             if (!deferredToTransition) releaseRecalled()
           }
         }).catch(error => {
-          // A pre-entry fence refusal never enters the callback above, so its
-          // staged representation is reconciled by this outer catch only.
+          // A pre-entry refusal never enters the callback above, so its staged
+          // representation is reconciled by this outer catch only. A frozen
+          // transition and a superseded capture are DIFFERENT refusals: the stale
+          // one must drop the staged attachments and report the stale notice,
+          // never the transition one.
           if (error instanceof TransitionInProgressError) {
             discardStaged()
             failureKind = 'transition'
+          } else if (error instanceof SessionScopeSupersededError) {
+            discardStaged()
+            failureKind = 'stale'
           }
           throw error
         }).finally(() => {
