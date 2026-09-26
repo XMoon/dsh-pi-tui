@@ -16,7 +16,12 @@
 import type { Diag } from '../../diag.ts'
 import { observeSettled, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
+import {
+  LifecycleError,
+  requireOpened,
+  type SessionHandle,
+  type SessionLifecycle,
+} from '../../runtime/session-lifecycle-port.ts'
 import { isRewindIdentityCurrent, type RewindLiveIdentity } from '../../session-fork.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
@@ -54,6 +59,10 @@ export interface SessionRuntimeSurface {
   /** Report a committed switch (the runner logs it and adds its own Direct
    *  session detail). */
   reportSwitch(from: string | undefined, to: SessionOwnerRef): void
+  /** Drop the unpinned per-session drafts after a committed switch/fork. */
+  clearUnpinnedDrafts(): void
+  /** Report a failed switch (the runner owns the logger + diagnostics). */
+  reportSwitchFailure(sessionId: string, message: string): void
 }
 
 export interface SessionRuntimeDeps {
@@ -61,6 +70,8 @@ export interface SessionRuntimeDeps {
   readonly owners: SessionOwnerAccess
   /** The owner retirement port (backend-side implementation). */
   readonly retirement: SessionOwnerRetirement
+  /** The session lifecycle port (open/create/fork). */
+  readonly lifecycle: SessionLifecycle
   /** The runner lifecycle abort signal (the quiesces observe it). */
   readonly lifecycleSignal: AbortSignal
   readonly surface: SessionRuntimeSurface
@@ -73,6 +84,8 @@ export interface SessionRuntimeDeps {
 export interface SessionRuntime {
   /** Run one ordinary session transition/switch (plan §4A). */
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
+  /** Hand the TUI over to another persisted session (never throws). */
+  switchSession(sessionId: string): Promise<string | undefined>
   /** Adopt one forked child inside the gate (plan §4B). */
   adoptFork(
     handle: SessionHandle,
@@ -238,6 +251,82 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       if (!transitionCommitted) deps.surface.settlePendingQueueRecalls(false)
       deps.surface.clearOpening(opening)
     })
+  }
+
+  /**
+   * Hand the TUI over to another persisted session. Never throws: every failure
+   * (unknown session, broken log, preset mount) returns an error string so the
+   * caller's `.then(error => ...)` needs no rejection path. The whole switch
+   * (open → commit) runs inside the session-transition gate, so it can never
+   * interleave with another ordinary transition.
+   */
+  const switchSession = (sessionId: string): Promise<string | undefined> => {
+    core.bumpNavigationEpoch()
+    return core.gate.run(() => core.barrier.runTransition(async () => {
+      try {
+        return await switchSessionLocked(sessionId)
+      } finally {
+        // Preflight can fail before `transitionTo` is reached; settle any
+        // recall that was waiting on this transition in that case.
+        deps.surface.settlePendingQueueRecalls(false)
+      }
+    }))
+  }
+
+  const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
+    // A switch INTO the session we are already on is a no-op.
+    if (core.currentSessionId() === sessionId) {
+      return 'already on this session'
+    }
+    // Draft cleanup happens ONLY after the switch committed (the transaction
+    // returned ok): a refused/failed switch keeps the CURRENT session and its
+    // staged drafts intact — clearing up front would orphan the editor's
+    // placeholders on every failed switch.
+    try {
+      // The unified transaction: the OLD session is flushed FIRST, then the
+      // resume publishes the child. A failure anywhere before the create leaves
+      // the current session live — there is nothing to re-acquire (the DSH
+      // SessionWriteLease is the only writer authority). The recorded preset
+      // drives the Direct adapter's internal resume composition; the
+      // cross-backend open request carries only the Session identity.
+      if (deps.lifecycleSignal.aborted) return undefined
+      const result = await transitionTo({
+        target: { id: sessionId },
+        // A rejected open leaves the target untouched: no pin, no retry — the
+        // CURRENT session stays live and the user can retry the switch.
+        create: async () => requireOpened(await deps.lifecycle.open({
+          sessionId,
+          signal: deps.lifecycleSignal,
+        })),
+      })
+      if (!result.ok) {
+        if (result.error instanceof LifecycleError) {
+          // Preserve the machine-readable cause even on the silent path.
+          deps.diag.warn('session switch did not own the surface', {
+            settlement: result.error.settlement,
+            ownership: result.error.ownership,
+            publishedSessionId: result.error.publishedSessionId,
+            requestedSessionId: result.error.requestedSessionId,
+          })
+          // A locally SUPERSEDED open/switch emits no error notice: the surface
+          // moved, so the message belongs to a stale operation.
+          if (result.error.ownership === 'superseded') return undefined
+        }
+        // The resume failed: the CURRENT session is still live.
+        return result.message
+      }
+      // The switch COMMITTED: staged drafts are per-session UI state — drop the
+      // unpinned ones now (never durable attachments). In-flight submissions
+      // keep their pinned drafts so a stale submission can still restore its
+      // text with a live backing draft.
+      deps.surface.clearUnpinnedDrafts()
+      return undefined
+    } catch (error) {
+      const message = safeErrorMessage(error)
+      deps.surface.reportSwitchFailure(sessionId, message)
+      // The CURRENT session is still live.
+      return `switch failed: ${message}`
+    }
   }
 
   // The fork + source-retirement ledgers (A2-3b-3): they moved out of the
@@ -600,6 +689,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
 
   return {
     transitionTo,
+    switchSession,
     adoptFork,
     parkForkOwner,
     isNavigationCurrent,
