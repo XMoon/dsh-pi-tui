@@ -67,6 +67,21 @@ test('A4: the runner owns no surface construction or mount', () => {
     'the runner must not construct the terminal notifier')
   assert.doesNotMatch(indexSource, /new TerminalFocusTracker\(/u,
     'the runner must not construct the terminal focus tracker')
+  // A4-6 Task Browser / Job viewer + approval/question ownership (plan §15/§16).
+  assert.doesNotMatch(indexSource, /new TaskBrowserRuntime\(/u,
+    'the runner must not construct the Task Browser coordinator')
+  assert.match(indexSource, /surface\.attachTasks\(\{/u,
+    'the runner must attach the Task Center through the surface owner')
+  assert.match(read('src/app/surface/runtime.ts'), /jobsEventsDispose = jobs\.subscribe\(/u,
+    'the surface owner must own the jobs-event subscription')
+  assert.doesNotMatch(indexSource, /backend\.interaction\.onApprovalRequest\(/u,
+    'the runner must not register the approval provider directly')
+  assert.doesNotMatch(indexSource, /backend\.interaction\.registerQuestionProvider\(/u,
+    'the runner must not register the question provider directly')
+  assert.match(indexSource, /surface\.attachInteraction\(backend\.interaction,/u,
+    'the runner must attach the interaction providers through the surface owner')
+  assert.match(read('src/app/surface/runtime.ts'), /new TaskBrowserRuntime\(/u,
+    'the surface owner must construct the Task Browser coordinator')
 })
 
 test('A4: the mounted TuiApp has exactly one lifetime owner', () => {
