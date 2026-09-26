@@ -13,6 +13,8 @@ import { TuiApp } from '../src/tui-app.ts'
 import { LOCAL_COMMANDS } from '../src/index.ts'
 import { CatalogRefreshCoordinator } from '../src/skill-catalog-refresh.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import { TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 import { readSurfaceCatalog, type SurfaceCatalogContext } from '../src/surface-catalog.ts'
 import { createDiag } from '../src/diag.ts'
 import { currentPalette, darkColors, lightColors } from '../src/theme.ts'
@@ -1079,6 +1081,101 @@ test('/title with an argument pins the title; an invalid title surfaces as an er
   assert.equal(bad.kind, 'error')
   assert.ok((bad.text ?? '').includes('must contain visible characters'),
     `the invalid-title failure must surface as an error result, got: ${bad.text}`)
+  app.stop()
+})
+
+test('/title foo reports a frozen transition as the transition notice, never the stale capture', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  // Drive the REAL /title writer entry with a writer section that throws the
+  // transition refusal: the transition froze the barrier FIRST, the capture is
+  // NOT stale.
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new TransitionInProgressError() } })
+  registerTuiCommands(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
+  assert.equal(writerEntered, true, 'the /title writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.notEqual(result.text, 'the session changed while updating the title — try again',
+    '/title foo must not report a frozen transition as the session-change text')
+  assert.equal(result.text, 'a session transition is in progress — try again in a moment')
+  app.stop()
+})
+
+test('/title foo reports a superseded capture as the stale notice', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new SessionScopeSupersededError() } })
+  registerTuiCommands(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
+  assert.equal(writerEntered, true, 'the /title writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.equal(result.text, 'the session changed while updating the title — try again')
+  app.stop()
+})
+
+test('/title (regenerate) reports a frozen transition as the transition notice, never the stale capture', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new TransitionInProgressError() } })
+  registerTuiCommands(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(writerEntered, true, 'the /title regenerate writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.notEqual(result.text, 'the session changed while updating the title — try again',
+    '/title must not report a frozen transition as the session-change text')
+  assert.equal(result.text, 'a session transition is in progress — try again in a moment')
+  app.stop()
+})
+
+test('/title (regenerate) reports a superseded capture as the stale notice', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new SessionScopeSupersededError() } })
+  registerTuiCommands(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(writerEntered, true, 'the /title regenerate writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.equal(result.text, 'the session changed while updating the title — try again')
   app.stop()
 })
 

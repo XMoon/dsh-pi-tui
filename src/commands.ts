@@ -4684,7 +4684,14 @@ export function registerTuiCommands(
   const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const scope = await runner.requireLiveSessionScope()
     const current = (): boolean => !runner.signal.aborted && runner.isSessionScopeCurrent(scope)
-    const stale = (): CommandResult => ({ kind: 'error', text: 'the session changed while updating the title — try again' })
+    const stale = (): CommandResult => ({
+      kind: 'error',
+      text: 'the session changed while updating the title — try again',
+    })
+    const transitioning = (): CommandResult => ({
+      kind: 'error',
+      text: 'a session transition is in progress — try again in a moment',
+    })
     const name = invocation.rawInput.trim()
     let acceptedTitle = name
     if (name !== '') {
@@ -4711,7 +4718,8 @@ export function registerTuiCommands(
           return { kind: 'error', text: message }
         }
       } catch (error) {
-        if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) return stale()
+        if (error instanceof TransitionInProgressError) return transitioning()
+        if (error instanceof SessionScopeSupersededError) return stale()
         if (isCancellation(error)) throw error
         return { kind: 'error', text: safeErrorMessage(error) }
       }
@@ -4733,7 +4741,8 @@ export function registerTuiCommands(
       app.notify(`title regenerated: ${outcome.title}`, 'info')
       return { kind: 'success' }
     } catch (error) {
-      if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) return stale()
+      if (error instanceof TransitionInProgressError) return transitioning()
+      if (error instanceof SessionScopeSupersededError) return stale()
       if (isCancellation(error)) throw error
       return { kind: 'error', text: safeErrorMessage(error) }
     }
