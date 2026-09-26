@@ -7231,7 +7231,8 @@ export function apply(ctx: Context, config: Config): void {
           // representation is reconciled by this outer catch only. A frozen
           // transition and a superseded capture are DIFFERENT refusals: the stale
           // one must drop the staged attachments and report the stale notice,
-          // never the transition one.
+          // never the transition one. (Defensive: this span is currently
+          // synchronous, so only the transition lands here today.)
           if (error instanceof TransitionInProgressError) {
             discardStaged()
             failureKind = 'transition'
