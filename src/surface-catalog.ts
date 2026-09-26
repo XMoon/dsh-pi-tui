@@ -9,19 +9,29 @@
  * Only discovery metadata crosses the boundary: command HANDLERS and skill
  * BODIES never enter a snapshot, and nothing here holds an Agent, a service,
  * or a provider. Execution always re-binds to the live agent later.
+ *
+ * The module also owns the pre-mount catalog RESOLUTION
+ * (`resolveInitialCatalog`): the resume prefetch or the cold standing-scope
+ * skill read, with their one-shot degradation notices.
  * @module @xmoon76/dsh-pi-tui/surface-catalog
  */
 
 import { safeErrorMessage } from './error-boundary.ts'
 import {
   readHumanSkillCatalog,
+  resolveColdSkillTarget,
   resolveLiveSkillTarget,
+  type HumanSkillCatalog,
   type HumanSkillSummary,
   type SkillCatalogContext,
 } from './skill-catalog.ts'
+import { isCancellation } from './detached.ts'
+import type { Diag } from './diag.ts'
 
-/** Minimal live-agent face consumed by the effective catalog readers. */
-interface SurfaceCatalogAgent {
+/** Minimal live-agent face consumed by the effective catalog readers — and by
+ * {@link ResolveInitialCatalogOptions}, so the published option type stays
+ * structural instead of inlining the Host Agent. */
+export interface SurfaceCatalogAgent {
   readonly ctx: object
   readonly session: {
     readonly header: {
@@ -223,4 +233,105 @@ export async function readSurfaceCatalog(
 /** Name-stable sort for command summaries (copies, never mutates input). */
 function sortCommands(commands: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] {
   return Object.freeze([...commands].sort((left, right) => left.name < right.name ? -1 : 1))
+}
+
+export interface InitialCatalogResolution {
+  /** The resume prefetch snapshot to install at mount. */
+  readonly snapshot?: SurfaceCatalogSnapshot
+  /** The cold standing-scope human skill catalog (deferred start). */
+  readonly skills?: HumanSkillCatalog
+  /** A user-facing notice when the prefetch/standing read degraded. */
+  readonly notice?: string
+}
+
+/** Options for {@link resolveInitialCatalog}. */
+export interface ResolveInitialCatalogOptions {
+  /** The resumed live agent, if any (prefetch path). */
+  readonly liveAgent?: SurfaceCatalogAgent
+  /** The effective preset id for the cold standing read (undefined = the
+   * deployment default; only consulted for the deferred start). */
+  readonly presetId?: string
+  readonly signal: AbortSignal
+  /** The context surface the collectors read services from. */
+  readonly ctx: SurfaceCatalogContext
+  readonly diag: Diag
+  /** Suspend the pre-mount startup status before an ordinary log write
+   * (the status owns the current terminal line; a TTY shares one cursor
+   * between stdout and stderr). Called right before every diag.warn this
+   * function may emit. */
+  readonly onLog?: () => void
+}
+
+/**
+ * The pre-mount surface catalog resolution:
+ * - an explicit `--session` start PREFETCHES the resumed agent's effective
+ *   catalog (a live read emits no session events);
+ * - the deferred start (no `--session`) reads the cold HUMAN SKILL catalog
+ *   through the preset's STANDING SCOPE — no Agent, no session, no turn —
+ *   so the first input sees human-invocable skills without any durable
+ *   side effect (the mechanism that avoids the probe dead end: host
+ *   `session/created` observers write durable knob events into every fresh
+ *   session).
+ *
+ * The snapshot (resume) or the skill catalog (cold) installs synchronously
+ * after mount (the ready barrier).
+ *
+ * Failure taxonomy (plan appendix B):
+ * - lifecycle cancellation: nothing installed, no notice;
+ * - a prefetch/standing read failure degrades to a one-shot notice (the
+ *   TUI mounts with the global view and built-in commands);
+ * - a missing/unknown preset or a broken standing mount degrades the cold
+ *   target to the global layer with a one-shot notice — never a probe
+ *   Agent, never a startup failure;
+ * - an ordinary provider read failure never rejects here: it becomes an
+ *   empty field + detached issue inside the catalog.
+ * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
+ * @returns the snapshot / skill catalog to install and an optional notice.
+ */
+export async function resolveInitialCatalog(options: ResolveInitialCatalogOptions): Promise<InitialCatalogResolution> {
+  const { liveAgent, presetId, signal, ctx, diag, onLog } = options
+  if (liveAgent !== undefined) {
+    try {
+      const snapshot = await readSurfaceCatalog(liveAgent, signal, ctx)
+      diag.info('surface catalog prefetched', {
+        commands: snapshot.commands.length,
+        scopedCommands: snapshot.scopedCommands.length,
+        skills: snapshot.skills.length,
+      })
+      return { snapshot }
+    } catch (error) {
+      if (isCancellation(error)) return {}
+      const message = safeErrorMessage(error)
+      onLog?.()
+      diag.warn('surface catalog unavailable', { phase: 'resume', error: message })
+      return { notice: `surface catalog unavailable: ${message}` }
+    }
+  }
+  // Deferred start: the cold standing-scope skill read. No Agent, no
+  // session, no turn — and no probe fallback on any failure. The standing
+  // scope rides the official revision lease; it is released once the read
+  // settles on ANY path (the lease must never outlive its read).
+  const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
+  if (target.target === undefined) return {}
+  try {
+    const catalog = await readHumanSkillCatalog(target.target.registry, {
+      cwd: target.target.cwd,
+      scope: target.target.scope,
+      signal,
+    })
+    diag.info('skill catalog standing ready', {
+      preset: presetId ?? 'default',
+      skills: catalog.skills.length,
+      complete: catalog.complete,
+    })
+    return { skills: catalog, ...target.degraded === undefined ? {} : { notice: target.degraded } }
+  } catch (error) {
+    if (isCancellation(error)) return {}
+    const message = safeErrorMessage(error)
+    onLog?.()
+    diag.warn('skill catalog unavailable', { phase: 'cold', error: message })
+    return { notice: `skill catalog unavailable: ${message}` }
+  } finally {
+    await target.release?.()
+  }
 }

@@ -1,4 +1,8 @@
 {
+  "app/direct/composition.ts": [
+    "agentPresets",
+    "import:dsh-agent"
+  ],
   "app/direct/owner-registry.ts": [
     "import:dsh-agent"
   ],

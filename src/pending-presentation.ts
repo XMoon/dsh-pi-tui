@@ -13,13 +13,18 @@
  * Host-free and transport-free while the single join rule remains shared by the
  * Direct production path and the experimental Remote path.
  *
+ * It also owns the queue-PANE row fold (`foldQueueRows` plus the semantic
+ * pending-item projection) the mounted surface renders.
+ *
  * @module @xmoon76/dsh-pi-tui/pending-presentation
  */
 
 import { pendingSubmissionsNotReplaced } from './pending-submission.ts'
 import type { SubmissionPresentationItem } from './submission-presentation.ts'
-import type { PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
+import type { PendingInputItem, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
 import type { PendingUserRow, QueueItem } from './tui-app.ts'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { fileAttachmentSummary } from './content-block-presentation.ts'
 
 /** The joined pending-input rows for one subject. */
 export interface PendingPresentationRows {
@@ -128,4 +133,57 @@ function echoText(echo: SubmissionPresentationItem): string {
   const markers = echo.attachments.map(attachment =>
     attachment.kind === 'image' ? `[Image: ${attachment.label}]` : `[File: ${attachment.label}]`)
   return [echo.text, ...markers].filter(part => part !== '').join(' ')
+}
+
+/** One semantic pending-input item as the queue mirror sees it. */
+export interface QueueInboxMessage {
+  readonly id: string
+  readonly content: readonly ContentBlock[]
+}
+
+/** Adapt one semantic pending-input item to the queue pane's presentation
+ * projection without reintroducing backend-specific fields. */
+export function queueInboxMessageOf(item: PendingInputItem): QueueInboxMessage {
+  return {
+    id: item.id,
+    content: item.content as readonly ContentBlock[],
+  }
+}
+
+/** The queue-pane rows for one semantic pending-input batch. */
+export interface QueueFoldResult {
+  readonly rows: QueueItem[]
+}
+
+/**
+ * The queue-pane display text of one message's content (review finding 5):
+ * text blocks verbatim, image blocks as a compact `🖼️ name` summary (the
+ * marker carries U+FE0F so fonts with an emoji face render it 2 cells wide
+ * — the width math's expectation — and never overlap the name) — an
+ * image-only queued message shows `🖼️ shot.png` instead of an empty row,
+ * and a mixed message advertises its image. The queue row stays one line.
+ */
+export function queueTextOf(content: readonly ContentBlock[]): string {
+  const parts: string[] = []
+  for (const block of content) {
+    if (block.type === 'text') parts.push(block.text)
+    else if (block.type === 'image') parts.push(`🖼️ ${block.attachment.name ?? 'image'}`)
+    else if (block.type === 'file') parts.push(fileAttachmentSummary(block.attachment))
+  }
+  return parts.join(' ')
+}
+
+/** Build queue-pane rows from semantic pending-input occurrences, preserving
+ * their order and content without inspecting backend-specific metadata. */
+export function foldQueueRows(
+  messages: readonly QueueInboxMessage[],
+  mode: 'followup' | 'steer',
+): QueueFoldResult {
+  return {
+    rows: messages.map(message => ({
+      id: message.id,
+      text: queueTextOf(message.content),
+      mode,
+    })),
+  }
 }

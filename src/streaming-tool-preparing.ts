@@ -1,7 +1,13 @@
-/** Pure local operations for the live tool-call preparing projection. */
+/**
+ * Pure local operations for the live tool-call preparing projection: the
+ * preview map operations plus the two appliers that fold a durable session
+ * event or one transient assistant-stream input onto them.
+ */
 
 import type { StreamingToolPreview } from './tui-app.ts'
 import { toolSummaryKeys } from './present.ts'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 
 /** Hard cap for the partial argument prefix retained for summary extraction. */
 export const PREPARING_SCAN_MAX_CHARS = 4096
@@ -186,4 +192,78 @@ export function streamingToolPreviewSnapshot(
   previews: ReadonlyMap<string, StreamingToolPreview>,
 ): StreamingToolPreview[] {
   return [...previews.values()].sort((left, right) => left.index - right.index)
+}
+
+/** Translate official DSH events into the local preview operations. The
+ * STREAMED tool-call deltas arrive through the live assistant stream seam
+ * (`applyStreamingToolPreviewInput`); this durable-event path only CLEARS
+ * previews (settled calls, retries, step/turn boundaries). */
+export function applyStreamingToolPreviewEvent(
+  previews: Map<string, StreamingToolPreview>,
+  event: { readonly type: string; readonly data: unknown },
+): void {
+  if (event.type === 'tool/call') {
+    const data = event.data as { readonly callId: ToolCallId; readonly turn: number; readonly step: number }
+    removeStreamingToolPreview(previews, data.callId, data.turn, data.step)
+    return
+  }
+  // `assistant/attempt` (Session v2, typed STRUCTURALLY): the attempt's
+  // tool-call deltas never materialized — its step's previews must not
+  // survive as ghost rows.
+  if ((event.type as string) === 'assistant/attempt') {
+    const data = event.data as { turn: number; step: number }
+    clearStreamingToolPreviewsForStep(previews, data.turn, data.step)
+    return
+  }
+  if (event.type === 'llm/retry' || event.type === 'llm/retry-started') {
+    const data = event.data as { readonly turn: number; readonly step: number }
+    clearStreamingToolPreviewsForStep(previews, data.turn, data.step)
+    return
+  }
+  if (event.type === 'step/end') {
+    const data = event.data as { readonly turn: number; readonly step: number }
+    clearStreamingToolPreviewsForStep(previews, data.turn, data.step)
+    return
+  }
+  if (event.type === 'turn/end') {
+    const data = event.data as { readonly turn: number }
+    clearStreamingToolPreviewsForTurn(previews, data.turn)
+  }
+}
+
+/** Translate one live assistant stream input (Session v2 transient plane)
+ * into the streaming tool preview operations. The CLEAR paths stay on the
+ * durable session-event plane (`tool/call`, `llm/retry`, `step/end`,
+ * `turn/end`); only the streamed tool-call deltas and block-ends arrive
+ * here. */
+export function applyStreamingToolPreviewInput(
+  previews: Map<string, StreamingToolPreview>,
+  input: AssistantLiveInput,
+): void {
+  if (input.kind !== 'chunk') return
+  const chunk = input.chunk
+  if (chunk.type === 'tool-call-delta') {
+    upsertStreamingToolPreview(previews, {
+      callId: chunk.id,
+      turn: input.turn,
+      step: input.step,
+      index: chunk.index,
+      name: chunk.name,
+      argumentsDelta: chunk.argumentsDelta,
+      time: input.time,
+    })
+    return
+  }
+  if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+    const callId = typeof chunk.block.id === 'string' ? chunk.block.id : ''
+    const name = typeof chunk.block.name === 'string' ? chunk.block.name : undefined
+    upsertStreamingToolPreview(previews, {
+      callId,
+      turn: input.turn,
+      step: input.step,
+      index: chunk.index,
+      name,
+      time: input.time,
+    })
+  }
 }

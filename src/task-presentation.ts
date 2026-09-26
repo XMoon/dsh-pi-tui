@@ -6,6 +6,10 @@
  * retention, disclosure, and tree connectors. It never mutates a runtime row
  * or reorders the catalog.
  *
+ * It also owns the Task Center's row-SELECTION disposition and the Job
+ * viewer's fallback body (`taskRowSelectionDisposition`,
+ * `subagentJobViewHint`, `subagentJobTranscriptId`).
+ *
  * @module @xmoon76/dsh-pi-tui/task-presentation
  */
 
@@ -329,4 +333,41 @@ export function projectedTaskIds(
   options: TaskPresentationProjectionOptions,
 ): string[] {
   return projectTaskItems(input, options).rows.map(item => item.value)
+}
+
+export function subagentJobTranscriptId(snapshot: unknown): string | undefined {
+  if (typeof snapshot !== 'object' || snapshot === null) return undefined
+  const childSessionId = (snapshot as { readonly childSessionId?: unknown }).childSessionId
+  return typeof childSessionId === 'string' && childSessionId.trim() !== '' ? childSessionId : undefined
+}
+
+/**
+ * The Task Center row-selection disposition (plan §4.3/§4.4). A subagent
+ * transcript opens a session/viewer surface that REPLACES the browser; a
+ * Job row's detail keeps it mounted (the caller passes {@link openJobView}'s
+ * disposition). An UNKNOWN row — a stale panel selection after a live
+ * re-projection — also keeps the parent usable instead of dismissing it.
+ */
+export function taskRowSelectionDisposition(
+  row: { readonly kind: 'job' | 'subagent' } | undefined,
+  jobDetail: 'close' | 'keep-open',
+): 'close' | 'keep-open' {
+  if (row === undefined) return 'keep-open'
+  if (row.kind === 'subagent') return 'close'
+  return jobDetail
+}
+
+/** Viewer body for a subagent job with no uniquely matched child. */
+export function subagentJobViewHint(status: string, detail: string | undefined): string {
+  const tail = status === 'running' || status === 'stopping'
+    ? ' — running in the background; its transcript updates live in /tasks'
+    : ` — this subagent finished${detail === undefined ? '' : ` (${detail})`}`
+  return [
+    `status: ${status}${tail}`,
+    '',
+    'The job record does not carry the child session id, so this job cannot',
+    'be matched to its child from the task browser (a same-label foreground',
+    'run would be indistinguishable). Open /tasks and pick the child by',
+    'its label to read the transcript.',
+  ].join('\n')
 }

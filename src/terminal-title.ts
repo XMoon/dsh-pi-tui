@@ -96,3 +96,8 @@ export function terminalTitleOf(context: TerminalTitleContext): string {
 export function terminalTitleFits(title: string): boolean {
   return visibleWidth(title) <= MAX_TERMINAL_TITLE_WIDTH
 }
+
+/** Set the terminal window title (OSC 0); a no-op without a TTY. */
+export function setTerminalTitle(title: string): void {
+  if (process.stdout.isTTY === true) process.stdout.write(`\x1b]0;${title}\x07`)
+}
