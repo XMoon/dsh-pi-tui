@@ -148,9 +148,9 @@ On top of the gate, ordinary session transitions share ONE transaction shape
 `/fork` and `/rewind` are deliberately not ordinary transition transactions.
 They capture the source identity and navigation epoch, dispatch the semantic
 Host fork immediately without `whenIdle()` or the destructive transition gate,
-and keep the operation in the runner's pending-fork set through adoption or
-parking. The Host boundary fixes the completed-turn cut at admission, so a
-busy source is not waited to a later boundary.
+and keep the operation in the session runtime's pending-fork ledger through
+adoption or parking. The Host boundary fixes the completed-turn cut at
+admission, so a busy source is not waited to a later boundary.
 
 When a known child settles, the runner rechecks the captured identity. A newer
 navigation leaves the visible surface unchanged and parks the successful Direct
