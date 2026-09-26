@@ -9505,14 +9505,15 @@ export function apply(ctx: Context, config: Config): void {
           : refresh({ source, target: { kind: 'preset', presetId } })
       },
       applyPermissionPreset: async (scope, presetId, presetSignal) => {
-        // The stale-before-dispatch contract: a scope that no longer owns the
-        // surface is REFUSED, never dispatched to the replacement owner.
-        if (!sessionScope.isCurrent(scope)) return { kind: 'superseded' as const }
+        // A stale scope BEFORE the dispatch proves nothing ran: report `refused`.
+        if (!sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }
         agentForLiveScope(scope)
         const outcome = await backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
-        // Re-check the ORIGINAL scope before presenting any settlement.
-        if (!sessionScope.isCurrent(scope)) return { kind: 'superseded' as const }
-        return outcome
+        // The operation WAS dispatched. Losing the surface after the fact must NOT
+        // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and
+        // settlement are independent axes) — the caller may not claim "not applied".
+        if (!sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
+        return { ownership: 'current' as const, outcome }
       },
       setSessionApprovalPolicy: (scope, value) => {
         // Same contract for the synchronous write: validate, then dispatch in

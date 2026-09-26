@@ -76,7 +76,7 @@ import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.t
 import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { ModelPicker, type ModelApplyOutcome } from './model-picker.ts'
-import type { OperationResult } from './runtime/write-outcome.ts'
+import type { OperationOwnership, OperationResult } from './runtime/write-outcome.ts'
 import { LifecycleError } from './runtime/session-lifecycle-port.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
 import { formatStats, type SessionStats } from './stats.ts'
@@ -420,6 +420,21 @@ export function isIndeterminateSkillWrite(error: unknown): boolean {
  * correlated by the DSH command execution id outside the normalized result. */
 type CommandDraftDisposition = 'restored' | 'suppressed'
 
+/** The permission-preset port's own settlement vocabulary. */
+export type PermissionPresetOutcome =
+  | { readonly kind: 'applied' }
+  | { readonly kind: 'unavailable'; readonly cause: 'commands' | 'permission' }
+
+/**
+ * One permission-preset attempt. The LOCAL ownership axis stays INDEPENDENT from
+ * the port settlement (`src/runtime/write-outcome.ts`): `refused` proves nothing
+ * ran, while a `superseded` result still carries what the port settled — a
+ * dispatched operation may already have applied to the previous owner.
+ */
+export type PermissionPresetResult =
+  | { readonly ownership: 'refused' }
+  | { readonly ownership: OperationOwnership; readonly outcome: PermissionPresetOutcome }
+
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
   ctx: Context
@@ -690,15 +705,23 @@ export interface TuiCommandRunner {
   /** Refresh the sessionless STANDING catalog of `presetId` (undefined = the
    *  deployment default) through the coordinator. */
   refreshStandingCatalog(presetId: string | undefined, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
-  /** Apply one permission preset to the Session the scope pins. A stale scope is
-   *  REFUSED (`superseded`) before any dispatch — never retargeted. */
+  /** Apply one permission preset to the Session the scope pins.
+   *
+   *  Two INDEPENDENT axes (D2.3 v2 §0.2.1): `ownership` says whether the result
+   *  still owns the current surface, and `outcome` carries what the port actually
+   *  settled. `refused` means the dispatch never happened (a stale scope), so the
+   *  caller may say "not applied". `superseded` means the operation WAS dispatched
+   *  and its settlement is PRESERVED — the caller must never report it as
+   *  "not applied" and never invite a blind retry (it would target the replacement
+   *  owner). */
   applyPermissionPreset(
     scope: LiveSessionScope,
     presetId: string,
     signal?: AbortSignal,
-  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' } | { kind: 'superseded' }>
+  ): Promise<PermissionPresetResult>
   /** Set the approval-policy override of the owner the scope pins. A stale scope
-   *  is REFUSED (`superseded`) before any dispatch — never retargeted. */
+   *  is REFUSED (`superseded`) before any dispatch — never retargeted. This write
+   *  is SYNCHRONOUS, so `superseded` always means "nothing ran". */
   setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
   refreshStatus(): void
   /** PR D2: the /status explicit context force — measures NOW through the
@@ -4313,11 +4336,21 @@ export function registerTuiCommands(
       // message + the preset log) — the raw commands service never crosses
       // into the command surface.
       const outcome = await runner.applyPermissionPreset(scope, 'danger-full-access', signal)
-      if (outcome.kind === 'superseded') {
+      if (outcome.ownership === 'refused') {
         return { kind: 'error', text: 'the session changed before the permission preset could be applied — try again' }
       }
-      if (outcome.kind === 'unavailable') {
-        return { kind: 'error', text: outcome.cause === 'commands'
+      if (outcome.ownership === 'superseded') {
+        // The operation WAS dispatched (and may already have applied to the
+        // previous owner): never claim it did not run and never invite a blind
+        // retry — this preset disables approvals, and the retry would target the
+        // replacement owner.
+        return {
+          kind: 'error',
+          text: 'the session changed after the permission operation was dispatched — do not retry blindly',
+        }
+      }
+      if (outcome.outcome.kind === 'unavailable') {
+        return { kind: 'error', text: outcome.outcome.cause === 'commands'
           ? 'commands service unavailable'
           : '/permission unavailable (permission presets not composed)' }
       }

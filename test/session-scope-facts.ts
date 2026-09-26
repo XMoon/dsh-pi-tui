@@ -35,6 +35,7 @@ import {
 } from '../src/app/session/subject.ts'
 import { SupersededReadError } from '../src/runtime/read-error.ts'
 import type { SkillDefinitionResult } from '../src/runtime/catalog-port.ts'
+import type { PermissionPresetOutcome, PermissionPresetResult } from '../src/commands.ts'
 import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/skill-catalog-refresh.ts'
 import { computeStats, type SessionStats } from '../src/stats.ts'
@@ -68,8 +69,13 @@ export interface SessionScopeFacts {
     scope: LiveSessionScope,
     presetId: string,
     signal?: AbortSignal,
-  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' } | { kind: 'superseded' }>
+  ): Promise<PermissionPresetResult>
   setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
+}
+
+/** The permission-preset port the scope-bound write delegates to. */
+export interface ScopedPermissionSource {
+  applyPermissionPreset(scope: LiveSessionScope): Promise<PermissionPresetOutcome>
 }
 
 /** The skill catalog capability the scope-bound skill facades read through. */
@@ -93,6 +99,7 @@ export function sessionScopeFacts(
   currentAgent: () => Agent | undefined,
   currentGeneration: () => number,
   skills?: ScopedSkillSource,
+  permissions?: ScopedPermissionSource,
 ): SessionScopeFacts {
   const subjectAuthority = createSessionSubjectAuthority(() => {
     const agent = currentAgent()
@@ -195,10 +202,16 @@ export function sessionScopeFacts(
     refreshStandingCatalog: async () => ({ kind: 'failed', error: 'catalog refresh not wired in tests' }),
     // The writes mirror the production stale-before-dispatch refusal.
     applyPermissionPreset: async (scope) => {
-      if (!scopeAuthority.isCurrent(scope)) return { kind: 'superseded' as const }
+      // Two INDEPENDENT axes, exactly like the production provider: a stale scope
+      // BEFORE the dispatch is `refused`; a dispatched operation keeps its
+      // settlement even when the surface moved on (`superseded`).
+      if (!scopeAuthority.isCurrent(scope)) return { ownership: 'refused' as const }
       agentForLiveScope(scope)
-      if (!scopeAuthority.isCurrent(scope)) return { kind: 'superseded' as const }
-      return { kind: 'applied' as const }
+      const outcome = permissions === undefined
+        ? { kind: 'applied' as const }
+        : await permissions.applyPermissionPreset(scope)
+      if (!scopeAuthority.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
+      return { ownership: 'current' as const, outcome }
     },
     setSessionApprovalPolicy: (scope) => {
       if (!scopeAuthority.isCurrent(scope)) return 'superseded' as const
