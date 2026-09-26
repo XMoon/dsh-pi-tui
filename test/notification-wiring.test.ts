@@ -64,7 +64,9 @@ test('focus reporting is enabled at mount and disabled on EVERY exit path', () =
   const cleanupStart = indexSource.indexOf('const disposeSurface = (): void => {')
   const cleanup = indexSource.slice(cleanupStart, indexSource.indexOf('diag.dispose()', cleanupStart) + 20)
   const disableIndex = cleanup.indexOf('notificationWriter.write(DISABLE_FOCUS_REPORTING)')
-  const disposeIndex = cleanup.indexOf('app?.dispose()')
+  // A4: the mounted app is released by the surface owner, so the cleanup's app
+  // release is `surface.dispose()` (it disposes the mounted TuiApp).
+  const disposeIndex = cleanup.indexOf('surface.dispose()')
   assert.ok(disableIndex >= 0 && disposeIndex > disableIndex,
     'cleanup must disable focus reporting before disposing the app')
   // The startup-failure catch disables too (the body may have thrown
