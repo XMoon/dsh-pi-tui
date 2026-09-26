@@ -1,21 +1,21 @@
 /**
- * Surface-owned compaction/context presentation folds (A4-7, plan §16).
+ * The compaction/context presentation module (A4-7, plan §16/§27): the pure
+ * compaction/context presentation folds consumed by the surface routing.
  *
  * These are the PURE presentation folds the `session/event` routing applies:
  * compaction lifecycle pairing, the matched-settle surface effects, the
  * turn-boundary busy rule and the context re-measure classification. They read
- * no Host identity and no persistence, so they belong to the surface routing
- * owner (the boundary test: they only decide WHICH presentation view updates
- * and WHEN it repaints).
+ * no Host identity and no persistence, so they are a top-level presentation
+ * module (the boundary direction is `app/* -> presentation modules`).
  *
  * `src/index.ts` re-exports them unchanged to keep the public entry point
  * byte-compatible (the published package and the regression suites import them
  * from the package root).
  *
- * @module app/surface/presentation-folds
+ * @module @xmoon76/dsh-pi-tui/compaction-presentation
  */
 
-import type { CompactionPhase } from '../../tui-app.ts'
+import type { CompactionPhase } from './tui-app.ts'
 
 /** One fold of a compaction lifecycle event over the in-flight compaction
  * state. Pure (the routing applies the returned surface effects):
