@@ -50,6 +50,10 @@ import type { ImageAttachmentRefLike } from '../../image/admission.ts'
 import type { KeybindingRegistry } from '../../keybinding-registry.ts'
 import { StatusStore } from '../../status/store.ts'
 import { initialStatusSnapshot } from '../../status/snapshot.ts'
+import { CompletionNotificationController } from '../../notification/controller.ts'
+import { parseNotificationMethod, parseNotificationMode } from '../../notification/settings.ts'
+import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOCUS_OUT_SEQUENCE, TerminalFocusTracker } from '../../notification/terminal-focus.ts'
+import { TerminalNotifier, type TerminalNotifierWriter } from '../../notification/terminal-notifier.ts'
 import { normalizedKeyToKeyId } from '../../keybindings/manager.ts'
 import { SurfaceHost } from '../../extension/internal/surface-host.ts'
 import { PluginManagerController } from '../../plugin-manager/controller.ts'
@@ -126,8 +130,6 @@ export interface SurfaceMountDeps {
   readonly readImage: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>
   /** Tool-card presentation bridge (the runner resolves the live tool registry). */
   readonly present: OptionCapability<'present'>
-  /** Live known-cwd resolver for the all-scope history search. */
-  readonly knownHistoryCwds: () => Map<string, string>
   /** The live session cwd the history search's `current` scope resolves against. */
   readonly sessionCwd: () => string
   /** The live session identity the history panel captures at open time. */
@@ -159,6 +161,21 @@ export interface SurfaceSeamDeps {
   readonly refreshCommandCompletions: () => void
 }
 
+/** The creation options: the early surface state + the Client-local sinks. */
+export interface SurfaceRuntimeOptions {
+  /** The TUI package version rendered in the initial status snapshot. */
+  readonly tuiVersion: string
+  /** The guarded terminal sink shared with the runner's fatal-path focus
+   *  disable (the sink is stateless; both writers emit the same sequences). */
+  readonly notificationWriter: TerminalNotifierWriter
+  /** The persisted notification settings at startup (parsed by the owner). */
+  readonly notificationMode: string | undefined
+  readonly notificationMethod: string | undefined
+}
+
+/** One completion status fact (the controller's parameter type). */
+type AgentLifecycleStatus = Parameters<CompletionNotificationController['onAgentStatus']>[1]
+
 /** The surface owner the runner/bootstrap consumes. */
 export interface SurfaceRuntime<Event> {
   /** The mounted TuiApp. Throws if read before {@link SurfaceRuntime.start}. */
@@ -167,6 +184,26 @@ export interface SurfaceRuntime<Event> {
   readonly status: StatusStore
   /** The opening-session journal (surface-owned instance). */
   readonly openingJournal: OpeningJournal<Event>
+  /**
+   * The completion-owner fence (A2 seam): the notification controller fences by
+   * the EXACT Direct `Agent.id` — a late `agent/status` from a retired agent
+   * must never notify. `undefined` on the teardown path.
+   */
+  setCompletionOwner(identity: string | undefined): void
+  /** The ONLY completion-controller status feed (the `agent/status` handler). */
+  onAgentStatus(agentId: string, status: AgentLifecycleStatus): void
+  /** The notification settings write path (`/notify`, `agent/status` policy). */
+  setNotificationMode(mode: string): void
+  setNotificationMethod(method: string): void
+  /** A terminal focus report (CSI ? 1004): the tracker only records state. */
+  handleTerminalFocus(focused: boolean): void
+  /** Any REAL input proves the user is operating the terminal (restores
+   *  'focused' so a missed FOCUS_IN never falsely notifies). */
+  noteUserInput(): void
+  /** Enable focus reporting at mount (CSI ? 1004). */
+  enableFocusReporting(): void
+  /** Disable focus reporting on every exit path (idempotent). */
+  disableFocusReporting(): void
   /**
    * Acquire the extension surface host + theme-unload hook (M3 wiring). The
    * runner resolves the service (never this module) and calls this at the
@@ -195,9 +232,26 @@ export interface SurfaceRuntime<Event> {
 }
 
 /** Create the surface owner; the status store and journal exist immediately. */
-export function createSurfaceRuntime<Event>(options: { readonly tuiVersion: string }): SurfaceRuntime<Event> {
+export function createSurfaceRuntime<Event>(options: SurfaceRuntimeOptions): SurfaceRuntime<Event> {
   const status = new StatusStore(initialStatusSnapshot(options.tuiVersion))
   const openingJournal = createOpeningJournal<Event>()
+  // Completion notifications (A4-4): settled detection, focus detection,
+  // terminal output and settings parsing stay separate modules, never a blob.
+  // The controller consumes the AUTHORITATIVE `agent/status` runtime fact (same
+  // live main agent, observed running -> idle) — never `turn/end`, timers or
+  // debounces. The sink wrapper contains synchronous throws so a notification
+  // failure can never crash the TUI.
+  const terminalNotifier = new TerminalNotifier(options.notificationWriter)
+  const completionController = new CompletionNotificationController((method, title, body) => {
+    try {
+      terminalNotifier.notify(method, title, body)
+    } catch {
+      // A notification failure is Client-local UX: never crash the TUI.
+    }
+  })
+  const terminalFocusTracker = new TerminalFocusTracker()
+  completionController.setMode(parseNotificationMode(options.notificationMode))
+  completionController.setMethod(parseNotificationMethod(options.notificationMethod))
   let app: TuiApp | undefined
   let disposed = false
   // The extension surface resources (A4-5); each has exactly one acquire point
@@ -296,6 +350,45 @@ export function createSurfaceRuntime<Event>(options: { readonly tuiVersion: stri
     },
     status,
     openingJournal,
+    setCompletionOwner(identity) {
+      completionController.setLiveAgent(identity)
+    },
+    onAgentStatus(agentId, status) {
+      completionController.onAgentStatus(agentId, status)
+    },
+    setNotificationMode(mode) {
+      completionController.setMode(parseNotificationMode(mode))
+    },
+    setNotificationMethod(method) {
+      completionController.setMethod(parseNotificationMethod(method))
+    },
+    handleTerminalFocus(focused) {
+      terminalFocusTracker.handleFocusReport(focused ? FOCUS_IN_SEQUENCE : FOCUS_OUT_SEQUENCE)
+      completionController.setFocus(terminalFocusTracker.state)
+    },
+    noteUserInput() {
+      terminalFocusTracker.markFocused()
+      completionController.setFocus(terminalFocusTracker.state)
+    },
+    enableFocusReporting() {
+      // The guarded writer swallows a broken-stream error; a synchronous throw
+      // is contained so a dead stdout can never fail the TUI mount.
+      try {
+        options.notificationWriter.write(ENABLE_FOCUS_REPORTING)
+      } catch {
+        // A broken stdout degrades the notification capability silently.
+      }
+    },
+    disableFocusReporting() {
+      // Disable terminal focus reporting on every exit path so the mode can
+      // never leak into the shell; idempotent (a startup failure that never
+      // enabled it writes a harmless no-op).
+      try {
+        options.notificationWriter.write(DISABLE_FOCUS_REPORTING)
+      } catch {
+        // The stream may already be gone during teardown; best effort.
+      }
+    },
     attachExtensionHost(service) {
       extensionService = service
       // The TUI surface attaches a SurfaceHost over the service ledger —

@@ -107,10 +107,8 @@ import {
   type DisplayPresetApplyResult,
   type DisplayState,
 } from './display-preset.ts'
-import { CompletionNotificationController } from './notification/controller.ts'
-import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
-import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOCUS_OUT_SEQUENCE, TerminalFocusTracker } from './notification/terminal-focus.ts'
-import { guardedStreamWriter, TerminalNotifier } from './notification/terminal-notifier.ts'
+import { DISABLE_FOCUS_REPORTING } from './notification/terminal-focus.ts'
+import { guardedStreamWriter } from './notification/terminal-notifier.ts'
 import { computeStats, formatStats, StatsFolder } from './stats.ts'
 import { isAssistantTokenDelta } from './token-usage.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
@@ -2016,37 +2014,28 @@ export function apply(ctx: Context, config: Config): void {
     const responseStyleState: ResponseStyleState = { style: parseResponseStyle(persistedTuiSettings?.responseStyle) }
 
     // Completion notifications (plan: Client/TUI presentation capability —
-    // settled detection, focus detection, terminal output and settings
-    // parsing stay separate modules, never a blob in the runner). The
-    // controller consumes the AUTHORITATIVE `agent/status` runtime fact
-    // (same live main agent, observed running → idle) — never `turn/end`,
-    // timers or debounces. The notifier writes through the HOISTED
-    // guarded writer (declared with the runner scope so the fatal catch
-    // can disable focus reporting too); the sink wrapper contains
-    // synchronous throws so a notification failure can never crash the
-    // TUI. The SAME guarded writer carries the focus-reporting mode
-    // writes (enable at mount, disable at cleanup AND on the
-    // startup-failure path).
-    const terminalNotifier = new TerminalNotifier(notificationWriter)
-    const completionController = new CompletionNotificationController((method, title, body) => {
-      try {
-        terminalNotifier.notify(method, title, body)
-      } catch {
-        // A notification failure is Client-local UX: never crash the TUI.
-      }
+    // settled detection, focus detection, terminal output and settings parsing
+    // stay separate modules, never a blob in the runner). A4-4: the notification
+    // controller, the focus tracker and the terminal notifier are surface-owned;
+    // the runner feeds the exact owner identity, the authoritative
+    // `agent/status` runtime fact and the focus/user-input reports through the
+    // surface, and reads/writes the notification settings through it. The
+    // guarded writer stays hoisted with the runner scope so the terminal-total
+    // fatal catch (outside the startup IIFE) can disable focus reporting too.
+
+    // A4: the mounted surface's ONE application owner. It owns the concrete
+    // surface state (the opening journal + the unified status projection store,
+    // the footer's single input) and the notification/focus presentation from
+    // here on; `start()` below performs the mount once the startup composition
+    // has resolved the surface capabilities. The mounted TuiApp is created and
+    // released by this owner alone. Declared BEFORE the resume commit: the A2
+    // commit seams reset the completion owner during startup, before the mount.
+    const surface = createSurfaceRuntime<SessionEvent>({
+      tuiVersion: bundleVersion(),
+      notificationWriter,
+      notificationMode: tuiSettings?.get().notificationMode,
+      notificationMethod: tuiSettings?.get().notificationMethod,
     })
-    /**
-     * The completion-owner fence (A2 seam). The notification controller fences
-     * by the EXACT Direct `Agent.id` — a late `agent/status` from a retired
-     * agent must never notify. The value is the owner's completion identity
-     * (never a session id), and `undefined` on the teardown path.
-     */
-    const setCompletionOwner = (identity: string | undefined): void => {
-      completionController.setLiveAgent(identity)
-    }
-    const terminalFocusTracker = new TerminalFocusTracker()
-    completionController.setMode(parseNotificationMode(tuiSettings?.get().notificationMode))
-    completionController.setMethod(parseNotificationMethod(tuiSettings?.get().notificationMethod))
 
     // The live Agent is declared before the TUI-facing facade so every read
     // after a transition follows the current Session rather than a startup
@@ -2159,7 +2148,7 @@ export function apply(ctx: Context, config: Config): void {
         settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
         resetSubmitLatency: () => submitLatencyTracker.reset(),
-        setCompletionOwner: (identity) => setCompletionOwner(identity),
+        setCompletionOwner: (identity) => surface.setCompletionOwner(identity),
         initLiveSession: (owner) => {
           const agent = directAgentOfOwner(owner)
           if (agent === undefined) throw new Error('initLiveSession requires a Direct owner attachment')
@@ -2944,17 +2933,6 @@ export function apply(ctx: Context, config: Config): void {
     // rebuild. Assigned once the search state below exists; undefined before
     // that (and while no search is active it returns undefined).
     let searchBindingForRepaint: (() => TranscriptSearchPresentation | undefined) | undefined
-    // The unified status projection store (M0) is surface-owned concrete state
-    // (the footer's single input): the runner derives the DSH-owned sections
-    // (composition/access/workspace/usage/host/plan) and commits them through
-    // `surface.status`; the app projects its own surface state
-    // (interaction/activity/surface/view) through its setters.
-    // A4: the mounted surface's ONE application owner. It owns the concrete
-    // surface state (the opening journal + the status projection store) from
-    // here on; `start()` below performs the mount once the startup composition
-    // has resolved the surface capabilities. The mounted TuiApp is created and
-    // released by this owner alone.
-    const surface = createSurfaceRuntime<SessionEvent>({ tuiVersion: bundleVersion() })
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -3142,22 +3120,16 @@ export function apply(ctx: Context, config: Config): void {
     const disposeSurface = (): void => {
       if (cleanedUp) return
       cleanedUp = true
-      // Fence the completion-notification controller: after teardown a
-      // late `agent/status` idle from the old live agent must never emit
-      // a notification into a dead surface (the identity fence drops
+      // Fence the completion-notification controller (surface-owned, A4-4):
+      // after teardown a late `agent/status` idle from the old live agent must
+      // never emit a notification into a dead surface (the identity fence drops
       // every event once the live id is undefined).
-      setCompletionOwner(undefined)
+      surface.setCompletionOwner(undefined)
       // Disable terminal focus reporting FIRST — before any throwable
       // teardown step — so the mode can never leak into the shell even
       // when a later teardown operation throws (idempotent: a startup
-      // failure that never enabled it writes a harmless no-op). The
-      // guarded writer swallows a broken-stream error; a synchronous
-      // throw is contained here so teardown can never crash.
-      try {
-        notificationWriter.write(DISABLE_FOCUS_REPORTING)
-      } catch {
-        // The stream may already be gone during teardown; best effort.
-      }
+      // failure that never enabled it writes a harmless no-op).
+      surface.disableFocusReporting()
       // The DSH SessionWriteLease (kernel flock) is the only cross-process
       // writer authority: a clean TUI exit needs no TUI-side lock
       // bookkeeping — the lease is released by the DSH session teardown
@@ -6056,16 +6028,14 @@ export function apply(ctx: Context, config: Config): void {
       // listener owns FOCUS_OUT's selection cleanup), so the tracker
       // only records state.
       onTerminalFocus: (focused) => {
-        terminalFocusTracker.handleFocusReport(focused ? FOCUS_IN_SEQUENCE : FOCUS_OUT_SEQUENCE)
-        completionController.setFocus(terminalFocusTracker.state)
+        surface.handleTerminalFocus(focused)
       },
       // Any REAL input (not a focus report) proves the user is operating
       // the terminal: restore the tracker to 'focused' (a missed FOCUS_IN
       // must never leave an 'unfocused' tracker that would falsely notify
       // while the user watches).
       onUserInput: () => {
-        terminalFocusTracker.markFocused()
-        completionController.setFocus(terminalFocusTracker.state)
+        surface.noteUserInput()
       },
       // Phase 4: the advanced host-state setTheme for a NON-built-in name
       // (a registered plugin theme). The runner resolves the palette
@@ -6584,7 +6554,6 @@ export function apply(ctx: Context, config: Config): void {
         return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
       },
       present,
-      knownHistoryCwds: () => knownHistoryCwds(),
       sessionCwd: () => sessionCwd(),
       // The session scope's identity — a GETTER like the cwd: a session switch
       // must make the next Ctrl+R search the NEW session (the panel captures it
@@ -7133,14 +7102,11 @@ export function apply(ctx: Context, config: Config): void {
     // Terminal focus reporting (CSI ? 1004) for the completion
     // notification policy: enabled at TUI mount, disabled in cleanup so
     // the mode never leaks into the shell after exit. The app already
-    // passes the ESC[I/ESC[O reports through to the runner's tracker.
-    // The guarded writer swallows a broken-stream error; a synchronous
-    // throw is contained so a dead stdout can never fail the TUI mount.
-    try {
-      notificationWriter.write(ENABLE_FOCUS_REPORTING)
-    } catch {
-      // A broken stdout degrades the notification capability silently.
-    }
+    // passes the ESC[I/ESC[O reports through to the surface's tracker
+    // (A4-4). The guarded writer swallows a broken-stream error; a
+    // synchronous throw is contained so a dead stdout can never fail the
+    // TUI mount.
+    surface.enableFocusReporting()
     // Issue #9: the Home/End navigation preset is applied BEFORE the first
     // fullscreen frame so the first frame and later behavior agree (plan
     // §4.8); an invalid persisted value falls back to `viewport`.
@@ -8287,8 +8253,8 @@ export function apply(ctx: Context, config: Config): void {
       // Completion-notification preference setters (the /settings panel
       // writes): the controller applies the parsed value immediately and
       // the panel persists the raw string through the config port.
-      setNotificationMode: (mode) => completionController.setMode(parseNotificationMode(mode)),
-      setNotificationMethod: (method) => completionController.setMethod(parseNotificationMethod(method)),
+      setNotificationMode: (mode) => surface.setNotificationMode(mode),
+      setNotificationMethod: (method) => surface.setNotificationMethod(method),
       ensureSession: () => sessionRuntime.ensureSession(),
       get selected() { return selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
@@ -8946,7 +8912,7 @@ export function apply(ctx: Context, config: Config): void {
       const owner = ownership.owner()
       const currentAgentId = owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)
       if (currentAgentId !== undefined && agent.id === currentAgentId) {
-        completionController.onAgentStatus(agent.id, status)
+        surface.onAgentStatus(agent.id, status)
         queueMicrotask(refreshPendingInput)
         return
       }
