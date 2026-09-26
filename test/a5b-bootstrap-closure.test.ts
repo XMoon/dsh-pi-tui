@@ -156,6 +156,14 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     ],
   ],
   [
+    'src/app/command/model-selection.ts',
+    [
+      'defaultIntent', 'setDefaultIntent', 'settleIntent', 'reconcileDefaultIntent', 'selected',
+      'defaultWriteBarrier', 'trackDefaultWrite', 'awaitPendingDefaultWrite',
+      'pendingModelSelection', 'setModelSelectionPending', 'currentModelSelectionMarker',
+    ],
+  ],
+  [
     'src/app/surface/settings-runtime.ts',
     [
       'userFooterCustomItemsForSave', 'footerCommandRunner', 'footerCommandUnsubscribe',
@@ -208,6 +216,7 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/status-runtime.ts', 'createStatusRuntime', 'createStatusRuntime('],
   ['src/app/surface/input-history.ts', 'createInputHistory', 'createInputHistory('],
   ['src/app/surface/settings-runtime.ts', 'createSettingsRuntime', 'createSettingsRuntime('],
+  ['src/app/command/model-selection.ts', 'createModelSelectionOwner', 'createModelSelectionOwner<'],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
 ]

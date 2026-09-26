@@ -31,6 +31,13 @@ const statusSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'status-runtime.ts'),
   'utf8',
 )
+// A5b-1: the session-generation reset (which resets the search presentation
+// through the surface) moved into the presentation owner — the previous match
+// here was only a COMMENT, so the lock now follows the real call.
+const presentationSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'session-presentation.ts'),
+  'utf8',
+)
 
 /** Every TypeScript source under `src/app/surface`. */
 function surfaceSources(): Array<{ rel: string; source: string }> {
@@ -345,8 +352,10 @@ test('A4-8: the active-target, repaint and search/transcript wiring are surface-
   assert.doesNotMatch(indexSource, /searchBindingForRepaint/u, 'the runner must not hold the search binding')
   assert.doesNotMatch(indexSource, /const jumpToSearchMatch\b/u, 'the runner must not hold the search commit')
   assert.doesNotMatch(indexSource, /const resetSearchState\b/u, 'the runner must not hold the search reset')
-  assert.match(indexSource, /surface\.resetSearchPresentation\(\)/u,
-    'the runner must reset the search presentation through the surface')
+  assert.match(presentationSource, /deps\.surface\.resetSearchPresentation\(\)/u,
+    'the presentation owner must reset the search presentation through the surface')
+  assert.doesNotMatch(indexSource, /(?<!deps\.)surface\.resetSearchPresentation\(\)/u,
+    'the composition root must not reset the search presentation itself')
 
   // The Host registrations, the Direct install and the credential
   // subscription/disposal stay in the runner.

@@ -35,7 +35,7 @@ import type {} from '@deepseek-ai/dsh-tool-todo'
 import { selectBlankSessionPreset, sessionPresetOf } from '../runtime/direct/session-preset-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui-settings-direct.ts'
 import type { DefaultModelServiceLike } from '../runtime/direct/model-selection-direct.ts'
-import { rawSelectionFromRequestHeader, sameModelSelection, type ModelSelectionValue } from '../model-selection.ts'
+import { rawSelectionFromRequestHeader } from '../model-selection.ts'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -62,6 +62,7 @@ import { createSessionPresentation } from './surface/session-presentation.ts'
 import { createStatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
+import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
@@ -86,8 +87,6 @@ import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extens
 import { type ViewerAccess } from '../tasks-browser.ts'
 import type { ComposerSubmitRequest } from '../tui-app.ts'
 import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../commands.ts'
-import { DefaultIntentTracker } from '../default-intent.ts'
-import { DefaultWriteBarrier } from '../default-write-barrier.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from '../detached.ts'
 import { historyFilePath } from '../history.ts'
@@ -503,6 +502,17 @@ export function applyRunner(ctx: Context, config: Config): void {
      * user-facing reporting and the in-flight-work view (the ledgers move into
      * the runtime with the fork / command-settlement flows in 3b-3 / 3b-5).
      */
+    // A5b-3: the model-selection owner (sessionless default intent + write
+    // barrier + the in-flight "selecting" marker + the TUI-only selection
+    // facade). Constructed before the session runtime, whose deps read the
+    // write barrier.
+    const model = createModelSelectionOwner<ModelSelection>({
+      liveAgent: () => agentNow(),
+      generation: () => ownership.generation(),
+      currentDefault: () => defaultModel.currentSelection() as ModelSelection | undefined,
+      currentOf: (agent) => directRuntime.modelSelections.current(agent as Agent),
+      setCurrentOf: (agent, next) => directRuntime.modelSelections.setCurrent(agent as Agent, next),
+    })
     const sessionRuntime = bindSessionRuntime(ownership, {
       owners: directRuntime.owners,
       retirement: directRuntime.retirement,
@@ -569,7 +579,7 @@ export function applyRunner(ctx: Context, config: Config): void {
             resumeFailure = undefined
           }
         },
-        awaitPendingDefaultWrite: (signal) => awaitPendingDefaultWrite(signal),
+        awaitPendingDefaultWrite: (signal) => model.awaitPendingDefaultWrite(signal),
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
         sessionCreateCwd: () => process.cwd(),
         currentOpening: () => surface.openingJournal.current(),
@@ -606,57 +616,6 @@ export function applyRunner(ctx: Context, config: Config): void {
     })
     /** Resolve one preset composition through the runtime's model-selection install. */
     const compose = (presetId?: string): Promise<DirectAgentComposition> => directRuntime.compose(presetId)
-    // The latest SESSIONLESS /model global-default intent (a live Session write
-    // is NOT recorded here: the official `session.selectModel` best-effort
-    // default save is a Host side effect, so the tracker is sessionless-only).
-    // It is TRANSIENT: a committed save clears it (the next /new reads the
-    // persisted default dynamically), an ambiguous save stays UNRESOLVED until
-    // an authoritative Host read reconciles it, and a failed save walks the
-    // operation ancestry back to the nearest still-pending ancestor.
-    //
-    // The intent is a small OPERATION CHAIN state machine (the pure
-    // `DefaultIntentTracker`): each operation carries its own save status and
-    // links the operation that owned the intent before it. A settle reports
-    // ONLY the operation id and outcome; the machine decides whether the intent
-    // clears (committed), restores the nearest pending ancestor, retains the
-    // nearest unresolved ancestor, or clears as failed when none remains.
-    // An optimistic intent is NOT a committed save — the semantic settlement
-    // still awaits the Host write.
-    const defaultIntent = new DefaultIntentTracker<ModelSelection>()
-    const setDefaultIntent = (next: ModelSelection | undefined): void => { defaultIntent.set(next) }
-    const settleIntent = (id: number, outcome: 'committed' | 'failed' | 'unresolved'): void => { defaultIntent.settle(id, outcome) }
-    /** Reconcile an UNRESOLVED sessionless default intent against an
-     *  authoritative Host read (v2 §0.3.2): the persisted default either
-     *  carries the choice (committed) or proves it did not land (clear). */
-    const reconcileDefaultIntent = (persisted: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined): void => {
-      // Only an AUTHORITATIVE snapshot reconciles; an unavailable read is not
-      // proof. The tracker itself walks the whole unresolved ancestry with the
-      // SAME snapshot (a matching ancestor commits; non-matching ones fail). The
-      // sessionless footer marker is DERIVED from the tracker, so a restored
-      // pending ancestor is shown again with no separate marker bookkeeping.
-      if (persisted === undefined) return
-      defaultIntent.reconcile(selection => sameModelSelection(persisted as ModelSelection, selection))
-    }
-    /** TUI-only facade; this ref is NEVER installed into an Agent context. */
-    const selected: ModelSelectionRef = {
-      get current(): ModelSelection | undefined {
-        return agentNow() === undefined
-          ? defaultIntent.intent ?? (defaultModel.currentSelection() as ModelSelection | undefined)
-          : directRuntime.modelSelections.current(agentNow())
-      },
-      set current(next: ModelSelection | undefined) {
-        // The facade write path: a live Session routes to its own selection
-        // (in-memory; the durable commit belongs to the catalog port), a
-        // sessionless surface records the default intent. /model uses the
-        // runner's explicit setDefaultIntent for the durable path.
-        if (agentNow() === undefined) {
-          setDefaultIntent(next)
-          return
-        }
-        directRuntime.modelSelections.setCurrent(agentNow(), next)
-      },
-      assembled: undefined,
-    }
 
     // Migrate legacy/invalid display settings without delaying composition or
     // changing the initial frame. The canonical field always wins at boot;
@@ -1006,10 +965,10 @@ export function applyRunner(ctx: Context, config: Config): void {
       currentSessionId: () => ownership.currentSessionId(),
       measureContext: (sessionId) => backend.sessionReader.measureContext(sessionId),
       model: {
-        selection: () => selected.current,
-        currentOf: (agent) => directRuntime.modelSelections.current(agent as Agent),
-        defaultSelection: () => defaultModel.currentSelection() as ModelSelectionValue | undefined,
-        marker: () => currentModelSelectionMarker(),
+        selection: () => model.selected.current,
+        currentOf: (agent) => model.currentOf(agent),
+        defaultSelection: () => model.currentDefault(),
+        marker: () => model.currentMarker(),
         preset: () => currentPreset(),
       },
       host: () => ({
@@ -1699,62 +1658,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       restoreMainTranscriptAnchor: () => presentation.restoreMainTranscriptAnchor(),
     })
     viewerRef = viewer
-    // Transcript search presentation state and the repaint binding are
-    // surface-owned (A4-8, plan §17); the runner keeps only the folder
-    // instances (behind the routing source) and calls
-    // `surface.resetSearchPresentation()` at a session-generation bump.
-    // Monotonic session generation: bumped on EVERY session swap (switch,
-    // resume, deferred creation). Late async work (the skill command
-    // catalog refresh, title folds) captures the
-    // generation it was issued for and refuses to commit state once a newer
-    // session owns the surface. Bumping also tears down old-session-only
-    // state: tool-call preview args, search results, and per-message
-    // expansion overrides. Pending question/approval dialogs settle through
-    // their own abort signals — the disposed agent aborts them — so they
-    // need no explicit teardown here.
-    /** EVERY in-flight sessionless `/model` global-default write (the pure
-     *  `DefaultWriteBarrier`): the Direct adapter intentionally allows
-     *  overlapping writes, so an older write can still be settling — and
-     *  re-asserting the newest committed value — after a newer one resolved. A
-     *  fresh create waits for ALL of them before reading the persisted Host
-     *  default. */
-    const defaultWriteBarrier = new DefaultWriteBarrier()
-    const trackDefaultWrite = (write: Promise<unknown>): void => { defaultWriteBarrier.track(write) }
-    const awaitPendingDefaultWrite = (signal?: AbortSignal): Promise<void> => defaultWriteBarrier.wait(signal)
-    /** The in-flight Session model selection the footer reports as
-     *  `selecting`; the display itself always follows the authoritative
-     *  Session selection, never this request. */
-    let pendingModelSelection: { readonly generation: number; readonly selection: ModelSelection; readonly token: number; readonly status: 'pending' | 'unresolved' } | undefined
-    const setModelSelectionPending = (selection: ModelSelection | undefined, token?: number, status: 'pending' | 'unresolved' = 'pending'): void => {
-      if (selection === undefined) {
-        // Only the operation that OWNS the marker may clear it: an older
-        // completion must never wipe a newer operation's `(selecting…)`.
-        if (token !== undefined && pendingModelSelection !== undefined && pendingModelSelection.token !== token) return
-        pendingModelSelection = undefined
-        return
-      }
-      pendingModelSelection = { generation: ownership.generation(), selection, token: token ?? 0, status }
-    }
-    /** The owned in-flight marker for the CURRENT generation (status included),
-     *  so the footer can distinguish `selecting…` from an explicit `unconfirmed`
-     *  unresolved state (v2 §0.3.2).
-     *
-     *  LIVE Session writes use the explicit `pendingModelSelection` marker. A
-     *  SESSIONLESS write has no live Session, so its marker is DERIVED from the
-     *  single `DefaultIntentTracker` source — pending `(selecting…)` while the
-     *  default write is in flight, `(unconfirmed)` while unresolved. There is
-     *  no second marker to diverge from the tracker. */
-    const currentModelSelectionMarker = ():
-      { readonly selection: ModelSelection; readonly status: 'pending' | 'unresolved' } | undefined => {
-      if (agentNow() !== undefined) {
-        return pendingModelSelection !== undefined && pendingModelSelection.generation === ownership.generation()
-          ? { selection: pendingModelSelection.selection, status: pendingModelSelection.status }
-          : undefined
-      }
-      const selection = defaultIntent.intent
-      if (selection === undefined) return undefined
-      return { selection, status: defaultIntent.outcome === 'unresolved' ? 'unresolved' : 'pending' }
-    }
     /** Error sink for a failed session creation: restore the draft and
      * surface the reason instead of silently dropping the submission. The
      * classification diagnostics are owned by runOwned (label + session +
@@ -2023,14 +1926,15 @@ export function applyRunner(ctx: Context, config: Config): void {
         // selection's `current` (/model writes it; prompt assembly reads
         // it) — never `agentNow().options`, which holds the agent's launch
         // configuration and does not move on /model (review finding 1).
-        const current = selected.current
+        const current = model.selected.current
         if (current !== undefined) return { provider: current.provider, model: current.model }
         // No selection assembled yet (pre-/model or a sessionless start):
         // fall back to the agent's launch options as the best known pair.
         const agent = agentNow()
         if (agent === undefined) return undefined
-        const { provider, model } = agent.options
-        return provider === undefined || model === undefined ? undefined : { provider, model }
+        // (Renamed local: `model` is the model-selection owner in this scope.)
+        const { provider, model: launchModel } = agent.options
+        return provider === undefined || launchModel === undefined ? undefined : { provider, model: launchModel }
       },
     }
     // ── Pre-Stage-D export convergence: the post-command-success artifact
@@ -4380,22 +4284,21 @@ export function applyRunner(ctx: Context, config: Config): void {
       setNotificationMode: (mode) => surface.setNotificationMode(mode),
       setNotificationMethod: (method) => surface.setNotificationMethod(method),
       ensureSession: () => sessionRuntime.ensureSession(),
-      get selected() { return selected },
+      get selected() { return model.selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
       // or unresolved) falling back to the persisted global default. A fresh
       // create never seeds from it — the Direct adapter captures the persisted
       // Host default at admission.
-      defaultSelection: (): ModelSelection | undefined =>
-        defaultIntent.intent ?? (defaultModel.currentSelection() as ModelSelection | undefined),
-      get defaultIntent() { return defaultIntent.intent },
-      get defaultIntentRecord() { return defaultIntent.record },
-      get defaultIntentOutcome() { return defaultIntent.outcome },
-      awaitPendingDefaultWrite,
-      trackDefaultWrite,
-      setModelSelectionPending,
-      reconcileDefaultIntent,
-      setDefaultIntent,
-      settleIntent,
+      defaultSelection: () => model.defaultIntent.intent ?? model.currentDefault(),
+      get defaultIntent() { return model.defaultIntent.intent },
+      get defaultIntentRecord() { return model.defaultIntent.record },
+      get defaultIntentOutcome() { return model.defaultIntent.outcome },
+      awaitPendingDefaultWrite: (signal) => model.awaitPendingDefaultWrite(signal),
+      trackDefaultWrite: (write) => model.trackDefaultWrite(write),
+      setModelSelectionPending: (selection, token, status) => model.setPending(selection, token, status),
+      reconcileDefaultIntent: (persisted) => model.reconcileDefaultIntent(persisted),
+      setDefaultIntent: (next) => model.setDefaultIntent(next),
+      settleIntent: (id, outcome) => model.settleIntent(id, outcome),
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
       // /new and /fork create through the session lifecycle port (semantic
       // requests — the Direct adapter resolves the preset composition).
