@@ -164,24 +164,33 @@ A rejected `create`/`open` is handled WITHOUT any publication-phase
 inference: the old session simply stays current and the user may retry.
 
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
-woken again by a prompt in `queue` or `steer` mode while the transition still awaits
-(flush, prepare, create). A write in that window would target a session
-the transition is about to retire. The transition gate therefore doubles
-as a WRITE FENCE: while a transition is in flight
-(`SessionTransitionGate.busy`), every agent-write entry point — plain
-submit, busy-Enter prompt, Ctrl+S per-occurrence queue steering, the command fallback prompt,
-Host command execution through `HostCommandPort` (a command that landed
-across a transition could write an Agent a concurrent transition is
-about to retire), the `!` shell submit, and the
-per-skill slash invocations — refuses the write, restores/keeps the draft
-or the invocation line (or keeps the shell card) and notifies "a session
-transition is in progress". The live `/preset` swap (the official
+woken again by a prompt in `queue` or `steer` mode while the transition still
+awaits (flush, prepare, create). A write in that window would target a session
+the transition is about to retire. Two mechanisms cover it, on DIFFERENT sides
+of admission:
+
+- A writer that starts BEFORE the transition has `whenIdle()` observe the
+  active turn, but the transition cannot wait for it via `whenIdle()`. The
+  `SessionOperationBarrier` is what makes the transition WAIT: every TUI-owned
+  session write runs inside `runWriter` and every transition inside
+  `runTransition`, so once a writer is ADMITTED the transition drains it before
+  quiescing the old agent. An admitted writer therefore never re-reads the
+  transition gate — doing so would truncate it mid-sweep (the writer-first
+  contract).
+- A writer that STARTS while a transition already holds the barrier is refused
+  by the barrier itself (`TransitionInProgressError`), restores/keeps the
+  draft, the invocation line or the shell card, and notifies "a session
+  transition is in progress". This is the only gate-based refusal for a
+  semantic write; there is no automatic retry.
+- The submission re-validation (agent object + session generation) covers the
+  window AFTER the transition commits.
+
+The legacy `SessionTransitionGate.busy` pre-read survives ONLY as the
+attachment-intake UX fence (`sessionTransitionPending()`); no semantic writer
+re-reads it. The live `/preset` swap (the official
 `agentPresets.select` blank check + recompose transaction + durable
 `agent-preset/selected` commit) likewise runs INSIDE the transition gate,
 so the captured Session can never be quiesced mid-swap (review round 27).
-The submission re-validation (agent object + session generation) covers
-the window AFTER the transition commits; the fence covers the window
-DURING it.
 
 ### SessionOperationBarrier — writers vs. transitions
 
@@ -198,9 +207,12 @@ refused (`TransitionInProgressError`).
 Every TUI-owned session writer enters the barrier through the BOUND session
 runtime (`src/app/session/runtime.ts`, `SessionRuntime.withWriter(scope, task)`).
 This is the ONE writer-admission owner: `src/index.ts` holds no direct
-`barrier.runWriter` call, and the command layer never re-checks the transition
-gate for a semantic write (only the attachment-intake UX fence still reads
-`transitionGate.busy`).
+`barrier.runWriter` call. No semantic writer re-checks the transition gate:
+the submission-facing entrypoints (plain prompt, busy delivery, steer, queue
+pull-back, `HostCommandPort` submission, shell submit) admit through the bound
+runtime and, once admitted, carry only the surface-lifetime fence. Only the
+attachment-intake UX fence still reads `transitionGate.busy`
+(`sessionTransitionPending()`).
 
 - The admission is SCOPE-BOUND and a NO-YIELD section: the scope-currentness
   read (`SessionScopeAuthority.isCurrent`) and the barrier occupancy run in the
@@ -216,9 +228,12 @@ gate for a semantic write (only the attachment-intake UX fence still reads
   retry — the caller restores its draft). Collapsing them would misreport a
   stale owner as a frozen transition.
 - The M3 `session/writer-held` caller/UI insertion point is
-  `src/app/submission/runtime.ts`: its `withWriter` is the submission domain's
-  single seam delegating to `SessionRuntime.withWriter`, so the future Remote
-  writer-held recovery hangs off ONE caller-side insertion point rather than
+  `src/app/submission/runtime.ts`: it owns the submission-facing APPLICATION
+  entrypoints (`submitPrompt`, `deliverBusy`, `steer`, `pullBackQueue`,
+  `executeHostCommandSubmission`, `submitShell`) and, for each, the
+  `WriteOutcome` classification plus the draft/queue/card settlement. Every
+  write they perform enters through `SessionRuntime.withWriter`, so the future
+  Remote writer-held recovery hangs off this ONE caller-side module rather than
   every writer site.
 
 ### D2.1 write settlement

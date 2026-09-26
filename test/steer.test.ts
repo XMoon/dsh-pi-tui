@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SessionTransitionGate } from '../src/transition-gate.ts'
 import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
@@ -494,6 +495,76 @@ test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier t
     'queued:b:end',
     'transition',
   ])
+})
+
+test('a transition that starts during an admitted steer must NOT truncate the FIFO sweep (writer-first)', async () => {
+  // REAL production-shaped race: two queued occurrences, the first write
+  // blocks, a REAL SessionTransitionGate transition starts (its task waits on
+  // the operation barrier), then the first write releases. The admitted steer
+  // writer must finish the WHOLE sweep before the transition runs.
+  //
+  // `useGateInFence` models the two wirings: `true` is the pre-fix production
+  // (`fence: () => gate.busy`), `false` is the fixed production (the main
+  // steer's fence carries only the surface lifetime). The gate/barrier are
+  // real, so the test fails if the gate creeps back into the writer's fence.
+  const runRace = async (useGateInFence: boolean): Promise<{
+    outcome: Awaited<ReturnType<typeof steerAll>>
+    steered: string[]
+    events: string[]
+    transitionRan: boolean
+  }> => {
+    const agent = fakeAgent(['a', 'b'])
+    const barrier = new SessionOperationBarrier()
+    const gate = new SessionTransitionGate()
+    const events: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+    const deps = makeDeps({
+      agent: () => agent,
+      writerSection: (task) => barrier.runWriter('session-steer', task),
+    })
+    deps.fence = useGateInFence ? () => gate.busy : () => false
+    deps.writer = {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async (_sessionId, messageId) => {
+        events.push(`${messageId}:start`)
+        if (messageId === 'a') await firstGate
+        agent.inbox.remove(messageId)
+        agent.steered.push({ id: messageId, text: '' })
+        events.push(`${messageId}:end`)
+        return { kind: 'committed' as const, value: undefined }
+      },
+    }
+    const steering = steerAll(deps, '', { draftHasPayload: false })
+    assert.equal(barrier.activeWriters, 1, 'the admitted steer owns the barrier before it yields')
+    let transitionRan = false
+    const transition = gate.run(() => barrier.runTransition(async () => {
+      transitionRan = true
+      events.push('transition')
+    }))
+    // Let the queued transition start so `gate.busy` is true while the writer
+    // is still admitted (and blocked on the first occurrence).
+    await Promise.resolve()
+    assert.equal(gate.busy, true, 'the real transition is executing while the writer is admitted')
+    releaseFirst()
+    const outcome = await steering
+    await transition
+    return { outcome, steered: agent.steered.map(message => message.id), events, transitionRan }
+  }
+
+  // Pre-fix production: the gate in the fence axis truncates the admitted
+  // sweep after the FIRST occurrence — the regression this lock guards.
+  const before = await runRace(true)
+  assert.equal(before.outcome, 'stale')
+  assert.deepEqual(before.steered, ['a'], 'the gate fence truncates the admitted FIFO sweep')
+  assert.equal(before.transitionRan, true)
+
+  // Fixed production: the WHOLE sweep is written, then the transition runs.
+  const after = await runRace(false)
+  assert.equal(after.outcome, 'ok')
+  assert.deepEqual(after.steered, ['a', 'b'], 'the admitted writer completes the whole sweep')
+  assert.deepEqual(after.events, ['a:start', 'a:end', 'b:start', 'b:end', 'transition'],
+    'the transition waits for the WHOLE writer')
 })
 
 test('a child queue sweep stops before the next occurrence after a same-id Agent rollover', async () => {

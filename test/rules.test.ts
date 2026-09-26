@@ -678,32 +678,32 @@ test('steerNow calls the empty-Ctrl+S gate BEFORE any runOwned/ensureSession wor
   // This audit pins the ORDER: someone moving the gate below the owned
   // workflow (or in front of the payload computation) breaks the deferred
   // no-creation contract even if every behavior test still passes.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
-  const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  // The steer body now lives in the submission runtime; the runner's
+  // `steerNow` is a thin hook-supplying delegation.
+  const source = readFileSync(join(srcDir, 'app', 'submission', 'runtime.ts'), 'utf8')
+  const sourceFile = ts.createSourceFile('runtime.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
-  // Locate the steerNow arrow function BY DECLARATION NAME: the runner
-  // scope declares `const steerNow = (text, onlyDraft, persistHistory)
-  // => { ... }` — the only arrow named steerNow.
-  let steerNow: ts.ArrowFunction | undefined
-  const findSteerNow = (node: ts.Node): void => {
-    if (steerNow !== undefined) return
-    if (ts.isVariableDeclaration(node)
-      && node.name.getText(sourceFile) === 'steerNow'
-      && node.initializer !== undefined
-      && ts.isArrowFunction(node.initializer)) {
-      steerNow = node.initializer
+  // Locate the steer body BY DECLARATION NAME.
+  let steerBody: ts.Block | undefined
+  const findSteerBody = (node: ts.Node): void => {
+    if (steerBody !== undefined) return
+    if (ts.isFunctionDeclaration(node)
+      && node.name !== undefined
+      && node.name.getText(sourceFile) === 'steerSubmission'
+      && node.body !== undefined) {
+      steerBody = node.body
       return
     }
-    ts.forEachChild(node, findSteerNow)
+    ts.forEachChild(node, findSteerBody)
   }
-  findSteerNow(sourceFile)
-  assert.ok(steerNow !== undefined, 'the steerNow arrow must exist in the runner')
-  const body = steerNow.body as ts.Block
+  findSteerBody(sourceFile)
+  assert.ok(steerBody !== undefined, 'the steerSubmission body must exist in the submission runtime')
+  const body = steerBody
 
   const gateLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes('steerHasPayload'))
   const ownedLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes("runOwned('steer'"))
   const ensureLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes('ensureSession'))
-  assert.ok(gateLine !== -1, 'the steerHasPayload gate must be a direct statement in steerNow')
+  assert.ok(gateLine !== -1, 'the steerHasPayload gate must be a direct statement in the steer body')
   // The gate must run before the owned workflow starts (a reorder that
   // puts runOwned/ensureSession first would allow session creation).
   assert.ok(gateLine !== -1 && (ownedLine === -1 || gateLine < ownedLine),
