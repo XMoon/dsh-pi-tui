@@ -206,3 +206,38 @@ test('a superseded skill/permission interaction is refused gracefully, never thr
   assert.ok(commandsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
     'the permission preset refusal is user-visible')
 })
+
+test('a dispatched permission write keeps its settlement; the refusal text never invites a blind retry', () => {
+  const provider = span(
+    indexSource,
+    'applyPermissionPreset: async (scope, presetId, presetSignal) => {',
+    '\n      setSessionApprovalPolicy: ',
+  )
+  // Pre-dispatch staleness proves nothing ran; a dispatched write keeps what the
+  // port settled (the two axes of `src/runtime/write-outcome.ts` stay independent).
+  assert.ok(provider.includes("if (!sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }"),
+    'a stale scope before the dispatch is REFUSED (nothing ran)')
+  assert.ok(provider.includes("return { ownership: 'superseded' as const, outcome }"),
+    'a dispatched write PRESERVES its settlement when the surface moves on')
+  // `/yolo`: the pre-dispatch refusal may invite a retry, the post-dispatch one
+  // must NOT (this preset disables approvals; a retry would target the new owner).
+  const yolo = span(
+    commandsSource,
+    'const outcome = await runner.applyPermissionPreset(',
+    "return { kind: 'success', text: 'danger-full-access",
+  )
+  const supersededBranch = span(
+    yolo,
+    "if (outcome.ownership === 'superseded') {",
+    "if (outcome.outcome.kind === 'unavailable')",
+  )
+  assert.equal(supersededBranch.includes('try again'), false,
+    'a dispatched write must never invite a blind retry')
+  assert.equal(supersededBranch.includes('could be applied'), false,
+    'a dispatched write must never claim the preset was not applied')
+  assert.ok(supersededBranch.includes('do not retry blindly'),
+    'the post-dispatch refusal states what actually happened')
+  const refusedBranch = span(yolo, "if (outcome.ownership === 'refused') {", "if (outcome.ownership === 'superseded')")
+  assert.ok(refusedBranch.includes('could not be applied') || refusedBranch.includes('could be applied'),
+    'only the pre-dispatch refusal claims the preset was not applied')
+})

@@ -248,13 +248,50 @@ test('a scope-bound WRITE refuses a stale scope before dispatching (never retarg
   )
   const scope = facts.captureLiveSessionScope()
   assert.notEqual(scope, undefined)
-  // A current scope applies.
+  // A current scope applies, and the ownership axis says the result is current.
   assert.equal(facts.setSessionApprovalPolicy(scope!, 'never'), 'applied')
-  assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'), { kind: 'applied' })
+  assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'),
+    { ownership: 'current', outcome: { kind: 'applied' } })
   // The SAME session id on a NEW owner object: both writes refuse.
   live.setAgent(fakeAgent('s1'))
   assert.equal(facts.setSessionApprovalPolicy(scope!, 'never'), 'superseded',
     'a stale sync write must refuse, not dispatch to the replacement owner')
-  assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'), { kind: 'superseded' },
-    'a stale async write must refuse and never present a settlement')
+  assert.deepEqual(await facts.applyPermissionPreset(scope!, 'danger-full-access'), { ownership: 'refused' },
+    'a stale async write must refuse BEFORE dispatching (nothing ran)')
+})
+
+test('a dispatched permission write keeps its settlement when the owner changes before it returns', async () => {
+  // The two axes are independent (`src/runtime/write-outcome.ts`): once the
+  // operation was DISPATCHED, losing the surface afterwards must never erase
+  // what the port settled — `/yolo` would otherwise tell the user "could not be
+  // applied, try again" for a preset that may already be active (and a blind
+  // retry would target the replacement owner).
+  const live = slot({ agent: fakeAgent('s1'), generation: 3 })
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let dispatched!: () => void
+  const started = new Promise<void>(resolve => { dispatched = resolve })
+  const facts = sessionScopeFacts(
+    () => live.agent() as unknown as Agent,
+    () => live.generation(),
+    undefined,
+    {
+      applyPermissionPreset: async () => {
+        dispatched()
+        await gate
+        return { kind: 'applied' }
+      },
+    },
+  )
+  const scope = facts.captureLiveSessionScope()
+  assert.notEqual(scope, undefined)
+  const pending = facts.applyPermissionPreset(scope!, 'danger-full-access')
+  // The port IS dispatched (blocked inside), then the owner changes.
+  await started
+  live.setAgent(fakeAgent('s1'))
+  release()
+  const result = await pending
+  assert.equal(result.ownership, 'superseded', 'the surface moved on after the dispatch')
+  assert.deepEqual(result.outcome, { kind: 'applied' },
+    'the applied settlement must be PRESERVED, never reported as "not applied"')
 })
