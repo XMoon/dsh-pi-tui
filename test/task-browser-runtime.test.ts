@@ -750,8 +750,11 @@ test('PR2 scope: reset() (session switch) clears the scope with the catalog', as
 // ---------------------------------------------------------------------------
 
 test('PR2 review: the runner wires onWorkflowAction through the single authority resolver', () => {
-  assert.ok(indexSource.includes('onWorkflowAction: (action) => handleWorkflowAction(action)'),
-    'the app options must wire the workflow action sink')
+  // A4: the mount call moved behind the surface owner, so the runner wires its
+  // ONE resolver into the surface mount deps; `SurfaceRuntime` forwards it as
+  // the app's `onWorkflowAction` sink (the surface builds the option wiring).
+  assert.ok(indexSource.includes('handleWorkflowAction: (action) => handleWorkflowAction(action)'),
+    'the surface mount deps must wire the workflow action sink to the single authority resolver')
   const marker = 'const handleWorkflowAction = (action: WorkflowAction): void => {'
   const start = indexSource.indexOf(marker)
   assert.ok(start >= 0, 'the runner must define handleWorkflowAction')

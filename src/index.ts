@@ -116,8 +116,6 @@ import { isAssistantTokenDelta } from './token-usage.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { plainSectionEqual } from './status/equal.ts'
 import { deriveRunnerPermission } from './status/derive-permission.ts'
-import { StatusStore } from './status/store.ts'
-import { initialStatusSnapshot } from './status/snapshot.ts'
 import { deriveAccessStatus } from './status/derive-access.ts'
 import { derivePlanStatus, projectedPlanActive, type PlanProjectionLike } from './status/derive-plan.ts'
 import { usageFromStats } from './status/derive-usage.ts'
@@ -131,7 +129,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TranscriptSearchCloseReason, type TuiApp } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TranscriptSearchCloseReason, type TuiApp, type TuiAppEvents } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
@@ -178,7 +176,6 @@ import { createStartupStatus } from './startup-status.ts'
 import { iconStyleOf } from './icons.ts'
 import { checkImageLimits } from './image/intake.ts'
 import { ImageLoadError } from './image/errors.ts'
-import { ImageLoader } from './image/loader.ts'
 import {
   consumeDraftAttachments,
   draftHasAttachments,
@@ -211,7 +208,7 @@ import { bindSessionRuntime } from './app/session/runtime.ts'
 import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import { bindSubmissionRuntime, deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, submitShell, type SteerSubmissionAgent, type SteerSubmissionDeps, type SubmissionRuntime } from './app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
-import { createOpeningJournal } from './app/surface/opening-journal.ts'
+import { createSurfaceRuntime } from './app/surface/runtime.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
@@ -2165,8 +2162,8 @@ export function apply(ctx: Context, config: Config): void {
           safeTerminalWarning(`\n${color.textDim('Warning:')} session retirement was skipped (${reason}) — the session may not have been closed cleanly\n`)
         },
         isSurfaceDisposed: () => cleanedUp,
-        beginOpening: (sessionId) => openingJournal.begin(sessionId),
-        clearOpening: (token) => openingJournal.clear(token as object),
+        beginOpening: (sessionId) => surface.openingJournal.begin(sessionId),
+        clearOpening: (token) => surface.openingJournal.clear(token as object),
         settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
         resetSubmitLatency: () => submitLatencyTracker.reset(),
@@ -2213,8 +2210,8 @@ export function apply(ctx: Context, config: Config): void {
         awaitPendingDefaultWrite: (signal) => awaitPendingDefaultWrite(signal),
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
         sessionCreateCwd: () => process.cwd(),
-        currentOpening: () => openingJournal.current(),
-        resetOpening: () => openingJournal.reset(),
+        currentOpening: () => surface.openingJournal.current(),
+        resetOpening: () => surface.openingJournal.reset(),
       },
       isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
       diag,
@@ -2576,13 +2573,12 @@ export function apply(ctx: Context, config: Config): void {
     let statsFolder = new StatsFolder()
     /**
      * The opening-session JOURNAL (A2 seam; the concrete state is A4 surface
-     * ownership — see `app/surface/opening-journal.ts`). Presentation-only: it
-     * fences which pre-commit events belong to the target being opened, and
-     * `initLiveSession` merges its cut into the cold hydration. The mutable
-     * event array stays PRIVATE behind that module's API; callers only ever
-     * hold the opaque identity token, and read events through `cut`.
+     * ownership — `surface.openingJournal`). Presentation-only: it fences which
+     * pre-commit events belong to the target being opened, and `initLiveSession`
+     * merges its cut into the cold hydration. The mutable event array stays
+     * PRIVATE behind the surface module's API; callers only ever hold the opaque
+     * identity token, and read events through `cut`.
      */
-    const openingJournal = createOpeningJournal<SessionEvent>()
      let goalText: string | undefined
 
     /** Repaint the welcome card from the live agent's current facts. Re-read
@@ -2821,7 +2817,7 @@ export function apply(ctx: Context, config: Config): void {
       // CONTENT actually changed are committed — an identical refresh must
       // not churn the store's revision (the store compares by identity) nor
       // wake the command runner's refresh on every streaming event.
-      const current = statusStore.snapshot()
+      const current = surface.status.snapshot()
       const composition = viewing === undefined ? deriveCompositionStatus() : {}
       const access = viewing === undefined
         ? deriveAccessStatus(
@@ -2853,7 +2849,7 @@ export function apply(ctx: Context, config: Config): void {
       if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
       if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
       if (!plainSectionEqual(current.host, host)) patch.host = host
-      statusStore.update(patch)
+      surface.status.update(patch)
       app.setStatus({
         model: modelLabel(),
         // The FULL cwd lands in the structured workspace section (the
@@ -2957,11 +2953,17 @@ export function apply(ctx: Context, config: Config): void {
     // rebuild. Assigned once the search state below exists; undefined before
     // that (and while no search is active it returns undefined).
     let searchBindingForRepaint: (() => TranscriptSearchPresentation | undefined) | undefined
-    // M0: the unified status projection store — the footer's future single
-    // input. The runner derives the DSH-owned sections (composition/access/
-    // workspace/usage/host/plan); the app projects its own surface state
+    // The unified status projection store (M0) is surface-owned concrete state
+    // (the footer's single input): the runner derives the DSH-owned sections
+    // (composition/access/workspace/usage/host/plan) and commits them through
+    // `surface.status`; the app projects its own surface state
     // (interaction/activity/surface/view) through its setters.
-    const statusStore = new StatusStore(initialStatusSnapshot(bundleVersion()))
+    // A4: the mounted surface's ONE application owner. It owns the concrete
+    // surface state (the opening journal + the status projection store) from
+    // here on; `start()` below performs the mount once the startup composition
+    // has resolved the surface capabilities. The mounted TuiApp is created and
+    // released by this owner alone.
+    const surface = createSurfaceRuntime<SessionEvent>({ tuiVersion: bundleVersion() })
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -3133,7 +3135,7 @@ export function apply(ctx: Context, config: Config): void {
     let jobsEventsDispose: (() => void) | undefined
     // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
     // guards: cleanup releases them, and — unlike the two slots above —
-    // `onTerminalResize` (captured by startProcessTui below) READS
+    // `onTerminalResize` (handed to the surface mount below) READS
     // footerCommandRunner during startup itself: the first surface-geometry
     // sync fires it (lastCommandWidth starts at 0), and a keybinding
     // rebuild's invalidate → requestRender is reachable before the footer
@@ -3225,7 +3227,9 @@ export function apply(ctx: Context, config: Config): void {
       activeJobViewerClose = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
-      app?.dispose()
+      // The mounted TuiApp is released by its surface owner (A4): the runner
+      // steps above/below release only what the runner still owns.
+      surface.dispose()
       // M2: unsubscribe the plugin keybinding sync (the registry outlives
       // the surface — a stale listener must not resync into a dead app).
       stopPluginKeybindingSync?.()
@@ -5860,17 +5864,6 @@ export function apply(ctx: Context, config: Config): void {
         }
       })
     }
-    // The durable-image loader (plan M8/M10): history images resolve through
-    // `ctx.attachments.readImage` only — never the draft store. The read
-    // callback is a late-bound service access (AGENTS.md: never a bare
-    // property read of a non-injected service).
-    const imageLoader = new ImageLoader((ref) => {
-      const attachments = ctx.get('attachments')
-      if (attachments === undefined) {
-        throw new ImageLoadError('Image attachments are unavailable in this deployment.')
-      }
-      return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
-    })
     /** The clipboard bridge (plan M3): a bounded execFile runner with a
      * generous buffer (clipboard payloads can be multi-MB); `input` is
      * piped to the child's stdin (issue #7 — the copy helpers read their
@@ -5954,7 +5947,11 @@ export function apply(ctx: Context, config: Config): void {
       pluginManagerController.open('settings-submenu')
       return panel
     }
-    app = startProcessTui({
+    // A4: the application input contract owned by the session/submission/
+    // command layers. The surface owner (`surface.start` below) owns the mount
+    // and the surface-local option wiring; the runner hands this table in
+    // unchanged.
+    const surfaceEvents: TuiAppEvents = {
       // ONE submission entry: the request (the Enter gesture, the
       // accelerated chord, or the explicit queue action) rides along — the
       // boundary resolves its delivery mode.
@@ -6639,7 +6636,20 @@ export function apply(ctx: Context, config: Config): void {
           ),
         })
       },
-    }, {
+    }
+    // A4: mount through the surface owner. The surface builds the surface-local
+    // option wiring (image loader, history-search binding, clipboard/link
+    // capabilities, extension registries + input routes, resize/workflow hooks)
+    // from these narrow injected capabilities and owns the mounted TuiApp from
+    // here on.
+    surface.start({
+      events: surfaceEvents,
+      workspaceRoot: cwd,
+      // The structural icon palette: read ONCE at startup from the persisted
+      // document; runtime switches go through app.setIconStyle (the /settings
+      // write path) — never a deep settings read per render.
+      iconStyle: iconStyleOf(tuiSettings?.get().iconStyle),
+      displayState,
       // Ctrl+R input-history search: the runner owns the IO (the file-backed
       // source + the known-cwd identity map), the surface owns the panel
       // lifecycle (plan §27 — TuiApp never touches the filesystem).
@@ -6649,85 +6659,50 @@ export function apply(ctx: Context, config: Config): void {
         // newest known cwds (sessions created/switched after startup).
         knownCwds: () => knownHistoryCwds(),
       }),
-      historySearchCwd: () => sessionCwd(),
-      // The session scope's identity — a GETTER like the cwd: a session
-      // switch must make the next Ctrl+R search the NEW session (the
-      // panel captures it once at open time).
-      historySearchSessionId: () => agentNow()?.session.id,
-      // The transcript image surface (plan M8/M9): the durable loader plus
-      // the dim fallback coloring.
-      imageLoader,
-      imageTheme: { fallbackColor: color.textDim },
+      // The durable-image read (plan M8/M10): history images resolve through
+      // `ctx.attachments.readImage` only — never the draft store. The read
+      // callback is a late-bound service access (AGENTS.md: never a bare
+      // property read of a non-injected service).
+      readImage: (ref) => {
+        const attachments = ctx.get('attachments')
+        if (attachments === undefined) {
+          throw new ImageLoadError('Image attachments are unavailable in this deployment.')
+        }
+        return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
+      },
       present,
-      workspaceRoot: cwd,
-      // The structural icon palette: read ONCE at startup from the
-      // persisted document; runtime switches go through app.setIconStyle
-      // (the /settings write path) — never a deep settings read per render.
-      iconStyle: iconStyleOf(tuiSettings?.get().iconStyle),
-      extensionHost,
-      // M0: the unified status projection store (the app projects its own
-      // surface state into it; the runner derives the DSH-owned sections).
-      statusStore,
-      displayState,
-      // M5: a material width change refreshes the command surface (the
-      // runner coalesces to its interval).
+      knownHistoryCwds: () => knownHistoryCwds(),
+      sessionCwd: () => sessionCwd(),
+      // The session scope's identity — a GETTER like the cwd: a session switch
+      // must make the next Ctrl+R search the NEW session (the panel captures it
+      // once at open time).
+      sessionId: () => agentNow()?.session.id,
+      // M5: a material width change refreshes the command surface (the runner
+      // coalesces to its interval).
       onTerminalResize: () => footerCommandRunner?.requestRefresh(),
-      // Issue #7: the fullscreen drag selection and `/copy` are the SAME
-      // user copy intent and share ONE clipboard policy. That policy
-      // delivers through two independent legs (terminal-client OSC 52 +
-      // native/helper compatibility) and never lets a host helper success
-      // suppress the OSC 52 leg — otherwise a remote host helper would
-      // strand the copy in the remote clipboard.
+      // PR2: the semantic Workflow card actions (member open / scoped agent
+      // browse). The handler is declared below (it needs the task browser +
+      // viewer openers); the closure only runs on a user click.
+      handleWorkflowAction: (action) => handleWorkflowAction(action),
+      extensionService,
+      extensionHost,
+      // Issue #7: the fullscreen drag selection and `/copy` are the SAME user
+      // copy intent and share ONE clipboard policy. That policy delivers
+      // through two independent legs (terminal-client OSC 52 + native/helper
+      // compatibility) and never lets a host helper success suppress the OSC 52
+      // leg — otherwise a remote host helper would strand the copy in the
+      // remote clipboard.
       copySelection: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
-      // Fullscreen OSC 8 link clicks + the Windows right-click paste: the
-      // alt screen's mouse capture swallows both native behaviors, so the
-      // host opens http/https links itself and reads the clipboard through
-      // the same platform-aware policy as the image paste probe.
+      // Fullscreen OSC 8 link clicks + the Windows right-click paste: the alt
+      // screen's mouse capture swallows both native behaviors, so the host
+      // opens http/https links itself and reads the clipboard through the same
+      // platform-aware policy as the image paste probe.
       openExternalUrl: (url) => openExternalUrl(url),
       readClipboardText: () => readClipboardText(runClipboardCommand, clipboardEnv),
-      // M7: the transcript/tool renderer registry. Renderer failures are
-      // isolated per contribution (the registry catches throws and the
-      // host falls back); the health sink records them for /status.
-      renderers: extensionService?.renderers,
-      // M9 (round-1 finding 1): the editor registry MUST reach TuiApp —
-      // without it the SDK is inert (reconcileEditorWinner never fires).
-      editorRegistry: extensionService?.editors,
-      // M6: non-capturing plugin keybindings. The resolver reads the
-      // extensionService LAZILY (it is fetched below the app construction)
-      // and normalizes through the InputRouter — a plugin binding resolves
-      // against normalized keys only, never raw terminal data. Reserved
-      // host lifecycle keys are rejected by the registry at register time
-      // and handled by the host ladder before this stage.
-      pluginActionFor: (normalized) => {
-        // The InputRouter has already normalized the raw input and applied
-        // the reserved-key + printable guards; this resolver only maps the
-        // NORMALIZED key to a plugin semantic action.
-        const keybindings = extensionService?.keybindings
-        if (keybindings === undefined) return undefined
-        return keybindings.actionFor(normalized)
-      },
-      pluginActionIdFor: (normalized) => extensionService?.keybindings.idFor(normalized),
-      // Phase 2: the ADVANCED normalized input capture route. The host
-      // input path consults it AFTER its own capturing flows (questions,
-      // approvals, overlays) and reserved lifecycle keys, and BEFORE the
-      // editor and the Stable keybindings — an advanced plugin can preempt
-      // ordinary editor/panel input, never a Host question/approval/overlay
-      // or a fatal-recovery shortcut (session safety stays Host-owned).
-      advancedInputRoute: (data) => extensionService?._advancedInputRoute(data) ?? 'passed',
-      // Phase 3: the UNSTABLE raw input route — consulted BEFORE terminal
-      // protocol decoding (a raw capture can see, consume or rewrite ANY
-      // chunk). The emergency fail-safe is armed only while captures are
-      // live and releases them all (Host recovery, not rewritable by the
-      // Unstable API).
-      unstableInputRoute: (data, surfaceId) => extensionService?._unstableInputRoute(data, surfaceId) ?? { action: 'pass' },
-      unstableInputsLive: () => extensionService?._unstableInputsLive() ?? false,
-      unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
-      unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
-      // PR2: the semantic Workflow card actions (member open / scoped
-      // agent browse). The handler is declared below (it needs the task
-      // browser + viewer openers); the closure only runs on a user click.
-      onWorkflowAction: (action) => handleWorkflowAction(action),
     })
+    // The mounted surface is now live; the runner borrows the reference (the
+    // surface owner keeps the lifetime).
+    app = surface.app
     // M3: the user-orchestrable keybinding manager (the app built it with
     // the builtin defaults). Apply safe mode, the persisted user
     // overrides, and the plugin contributions — all fail-soft (a bad entry
@@ -7488,7 +7463,7 @@ export function apply(ctx: Context, config: Config): void {
           .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
         if (footerDynamicItemRuntime === undefined) {
           footerDynamicItemRuntime = new FooterDynamicItemRuntime({
-            snapshot: () => statusStore.snapshot(),
+            snapshot: () => surface.status.snapshot(),
             width: () => app.getTerminalWidth(),
             height: () => app.getTerminalHeight(),
             signal,
@@ -7575,7 +7550,7 @@ export function apply(ctx: Context, config: Config): void {
         if (footerCommandRunner === undefined) {
           footerCommandRunner = new FooterCommandRunner({
             config,
-            snapshot: () => statusStore.snapshot(),
+            snapshot: () => surface.status.snapshot(),
             width: () => app.getTerminalWidth(),
             height: () => app.getTerminalHeight(),
             onOutput: (rows) => app.setFooterCommandRows(rows),
@@ -7583,7 +7558,7 @@ export function apply(ctx: Context, config: Config): void {
             signal,
           })
           // Status changes refresh the command (coalesced to its interval).
-          footerCommandUnsubscribe = statusStore.subscribe(() => footerCommandRunner?.requestRefresh())
+          footerCommandUnsubscribe = surface.status.subscribe(() => footerCommandRunner?.requestRefresh())
         } else {
           footerCommandRunner.setConfig(config)
         }
@@ -8088,7 +8063,7 @@ export function apply(ctx: Context, config: Config): void {
       // the all-directory search): a legacy-only history file in this cwd
       // becomes recoverable immediately, even if it predates this process.
       rememberHistoryCwd(agent.session.header.cwd ?? '')
-      const opening = openingJournal.cut(agent.session.id)
+      const opening = surface.openingJournal.cut(agent.session.id)
        const events = opening === undefined
          ? agent.session.snapshotEvents()
          : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
@@ -8810,7 +8785,7 @@ export function apply(ctx: Context, config: Config): void {
       if (attachedSession !== undefined && attachedSession !== session) return
       // Opening journals fence presentation only. Runtime bookkeeping must
       // continue to observe the target for selections, approvals, and cleanup.
-      const openingTarget = openingJournal.isOpening(session.id)
+      const openingTarget = surface.openingJournal.isOpening(session.id)
       // The retiring committed Agent remains authoritative until quiesce
       // completes; the published opening target may also emit before commit.
       const mainEvent = session.id === ownership.currentSessionId() || openingTarget
@@ -8859,7 +8834,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
        if (openingTarget && (viewing === undefined || viewing.id !== session.id)) {
-         openingJournal.record(session.id, event)
+         surface.openingJournal.record(session.id, event)
          return
        }
        const opening = openingViewer
@@ -9108,7 +9083,7 @@ export function apply(ctx: Context, config: Config): void {
         // attempt (abandoned end or a committed `assistant/attempt`
         // settlement) clears the step's tool previews — its deltas never
         // materialized into durable calls.
-        if (openingJournal.isOpening(input.sessionId) && (viewing === undefined || viewing.id !== input.sessionId)) return
+        if (surface.openingJournal.isOpening(input.sessionId) && (viewing === undefined || viewing.id !== input.sessionId)) return
          if (viewing !== undefined && input.sessionId === viewing.id) {
           applyAssistantLiveInput(viewing.folder, viewing.stats, viewing.previews, input)
           schedulePaint()

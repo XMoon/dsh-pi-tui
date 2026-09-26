@@ -489,23 +489,33 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
     }
   }
 
-  // The single startProcessTui call inside the lifecycle root and its
-  // object-literal arguments (the options object). Scoped to the runner
-  // block: the audit speaks about RUNNER-scope bindings only.
+  // The single mount call inside the lifecycle root and its object-literal
+  // arguments (the mount deps object). A4: the call moved behind the surface
+  // owner, so the runner's anchor is `surface.start({...})`; its deps object is
+  // still evaluated in the runner's startup window, so the eager-read audit is
+  // unchanged in meaning. Scoped to the runner block: the audit speaks about
+  // RUNNER-scope bindings only.
   let appCall: ts.CallExpression | undefined
   const findCall = (node: ts.Node): void => {
     if (appCall !== undefined) return
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'startProcessTui') {
+    const isMountCall = ts.isCallExpression(node) && (
+      (ts.isIdentifier(node.expression) && node.expression.text === 'startProcessTui')
+      || (ts.isPropertyAccessExpression(node.expression)
+        && ts.isIdentifier(node.expression.expression)
+        && node.expression.expression.text === 'surface'
+        && node.expression.name.text === 'start')
+    )
+    if (isMountCall) {
       appCall = node
       return
     }
     ts.forEachChild(node, findCall)
   }
   findCall(runnerBlock)
-  assert.ok(appCall !== undefined, 'the startProcessTui call must exist in the runner scope')
+  assert.ok(appCall !== undefined, 'the mount call (startProcessTui / surface.start) must exist in the runner scope')
   const callLine = sourceFile.getLineAndCharacterOfPosition(appCall.getStart()).line + 1
   const objectArgs = appCall.arguments.filter(argument => ts.isObjectLiteralExpression(argument))
-  assert.ok(objectArgs.length > 0, 'startProcessTui must receive its options as object-literal arguments')
+  assert.ok(objectArgs.length > 0, 'the mount call must receive its deps as object-literal arguments')
 
   /** Callbacks TuiApp can invoke SYNCHRONOUSLY from its own
    * startup-capable paths: the requestRender → syncSurfaceGeometry chain
