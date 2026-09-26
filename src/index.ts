@@ -207,7 +207,7 @@ import {
 import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
-import { createSessionScopeAuthority, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
+import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from './app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
@@ -1950,6 +1950,27 @@ export function apply(ctx: Context, config: Config): void {
     // through this closure, which only runs once a transition starts (after
     // binding).
     let submissionRuntime!: SubmissionRuntime
+    /** The synchronous live-scope capture for a site whose owner is already
+     *  known (its `agentNow()` guard ran) — a missing owner is an invariant
+     *  break, never a silent no-op. */
+    const requireLiveScope = (): LiveSessionScope => {
+      const scope = sessionScope.captureLive()
+      if (scope === undefined) throw new Error('a live owner must carry a live session scope')
+      return scope
+    }
+    /**
+     * The busy/steer and shell-submit writer admission (A3-4): the helper
+     * modules receive a writer SECTION, not the raw barrier. It captures the
+     * live scope at the SAME synchronous admission point and enters through
+     * `SubmissionRuntime.withWriter`, so the operation barrier has exactly ONE
+     * admission owner and a stale capture refuses with
+     * `SessionScopeSupersededError`.
+     */
+    const submissionWriterSection = <T>(task: () => Promise<T>): Promise<T> => {
+      const scope = sessionScope.captureLive()
+      if (scope === undefined) return Promise.reject(new SessionScopeSupersededError())
+      return submissionRuntime.withWriter(scope, task)
+    }
     // The abort-aware quiesce mechanism lives in the Direct owner retirement;
     // the runner only decides WHEN to quiesce.
 
@@ -3076,8 +3097,11 @@ export function apply(ctx: Context, config: Config): void {
       const agent = agentNow()
       if (agent === undefined) return
       const generation = ownership.generation()
-      runOwned('agent interrupt', () => ownership.barrier.runWriter(
-        agent.session.id,
+      // The scope-bound writer admission (A3-4): interrupt is NOT a submission
+      // write, so its business ownership stays here — only the admission moves
+      // through SessionRuntime.withWriter.
+      runOwned('agent interrupt', () => sessionRuntime.withWriter(
+        requireLiveScope(),
         () => interruptAgent(agent, backend.sessionWriter),
       ), {
         diag,
@@ -3395,7 +3419,7 @@ export function apply(ctx: Context, config: Config): void {
           // transition is in flight the followup would target a session
           // that is about to be retired.
           fence: () => ownership.gate.busy || cleanedUp,
-          barrier: ownership.barrier,
+          writerSection: submissionWriterSection,
           fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
           writer: backend.sessionWriter,
           createMessage: (text) => createUserMessage({
@@ -5255,7 +5279,10 @@ export function apply(ctx: Context, config: Config): void {
                       : { kind: 'committed', matched: true, execution } as const
                    })
                 }
-                return ownership.barrier.runWriter(agent.session.id, () => backend.hostCommand.execute({
+                // The HostCommandPort submission is a submission-domain write:
+                // it enters the barrier through the submission runtime (the M3
+                // insertion point), which delegates to SessionRuntime.withWriter.
+                return submissionRuntime.withWriter(scope, () => backend.hostCommand.execute({
                   sessionId: agent.session.id,
                   line: toggled,
                   attachments: submittedAttachments,
@@ -5881,7 +5908,7 @@ export function apply(ctx: Context, config: Config): void {
           // a steer in that window would target a session that is about
           // to be retired (the two-writers race, review round 4).
           fence: () => ownership.gate.busy || cleanedUp,
-          barrier: ownership.barrier,
+          writerSection: submissionWriterSection,
           fenceNotice: () => 'a session transition is in progress — try again in a moment',
           createDraft: () => prepared,
           staleNotice: () => 'the queue or session changed while sending — try again',
@@ -6973,6 +7000,9 @@ export function apply(ctx: Context, config: Config): void {
         const queuedAgent = agentNow()
         if (cleanedUp || viewing !== undefined || queuedAgent === undefined) return
         const queuedSubject = ownership.captureSubject()
+        // The scope-bound writer admission for the pull-back removals: ONE
+        // atomic capture with the subject fence above.
+        const queuedScope = requireLiveScope()
         const pending = backend.pendingInputReader.snapshot(queuedAgent.session.id)
         if (pending === undefined) return
         const queued = pending.items
@@ -7078,8 +7108,8 @@ export function apply(ctx: Context, config: Config): void {
         }
         // Remove each pulled-back occurrence through the official single-item queue mutation,
         // FIFO admission keeps pending input behind it; confirmed removals are reflected only
-        // after each settlement.
-        runOwned('queue pull-back', () => ownership.barrier.runWriter(queuedAgent.session.id, async () => {
+        // after each settlement. The write enters through the submission runtime.
+        runOwned('queue pull-back', () => submissionRuntime.withWriter(queuedScope, async () => {
           try {
             if (cleanedUp) {
               for (const entry of staged) {
@@ -7335,7 +7365,7 @@ export function apply(ctx: Context, config: Config): void {
             fenceNotice: () => 'the child viewer changed while steering — try again',
             pendingInputReader: backend.pendingInputReader,
             writer: backend.sessionWriter,
-            barrier: ownership.barrier,
+            writerSection: submissionWriterSection,
           }, submit.text, { draftHasPayload: false }), {
             diag,
             sessionId: () => directRuntime.queueAgentFor(submit.childSessionId)?.session.id,
@@ -7765,14 +7795,16 @@ export function apply(ctx: Context, config: Config): void {
           // The interrupt authority names the child's DURABLE DIRECT parent;
           // deep descendants must not be addressed through the main root.
           const interruptParent = subagentInterruptParent(row, browserSession.session.id) as SessionId
-          runOwned('subagent interrupt', () => ownership.barrier.runWriter(
-            browserSession.session.id,
-            () => backend.subagent.interrupt({
+          // The scope-bound writer admission (A3-4): the Task-Center subagent
+          // interrupt is NOT a submission write, so its business ownership stays
+          // here — only the admission moves through SessionRuntime.withWriter.
+          runOwned('subagent interrupt', function () {
+            return sessionRuntime.withWriter(requireLiveScope(), () => backend.subagent.interrupt({
               parentSessionId: interruptParent,
               childSessionId: row.childId as SessionId,
               mode: 'continuable',
-            }),
-          ), {
+            }))
+          }, {
             diag,
             sessionId: () => browserSession.session.id,
             onResult: (outcome) => {
@@ -9431,8 +9463,6 @@ export function apply(ctx: Context, config: Config): void {
         })),
       withWriter: <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> =>
         sessionRuntime.withWriter(scope, task),
-      withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
-        ownership.barrier.runWriter(sessionId, async () => task()),
       withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T> | T) => {
         // The caller already holds this scope's writer section, so this
         // synchronous read of the CURRENT Direct attachment IS the scope's

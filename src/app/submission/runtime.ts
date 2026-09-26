@@ -2,7 +2,7 @@
  * The BOUND submission runtime (A3 plan §4.1/§4.3/§10.3): the submission
  * domain's own application owner.
  *
- * It owns two things:
+ * It owns three things:
  *
  * 1. the PLAIN-PROMPT write orchestration — the fixed order
  *    `writer admission → capability admission → prepare message → semantic
@@ -10,7 +10,12 @@
  *    entered through `SessionRuntime.withWriter` so the writer-first /
  *    transition-first contract and the per-Agent image admission window are
  *    unchanged;
- * 2. the deferred QUEUE-RECALL state (`deferQueueRecall` /
+ * 2. the SUBMISSION-domain writer sections — busy delivery / steer, the queue
+ *    pull-back removals and the HostCommandPort submission enter the operation
+ *    barrier through {@link SubmissionRuntime.withWriter} (the M3
+ *    `session/writer-held` insertion point), which delegates to
+ *    `SessionRuntime.withWriter`;
+ * 3. the deferred QUEUE-RECALL state (`deferQueueRecall` /
  *    `settleQueueRecalls`), which the session runtime only decides WHEN to
  *    settle through `SessionRuntimeSurface.settlePendingQueueRecalls`.
  *
@@ -97,6 +102,16 @@ export interface SubmissionRuntime {
   /** Settle every parked recall: commit keeps the removal, abort restores it. */
   settleQueueRecalls(committed: boolean): void
   /**
+   * One scope-bound submission writer section (the M3 `session/writer-held`
+   * insertion point): busy delivery / steer, the queue pull-back removals and
+   * the HostCommandPort submission enter the operation barrier HERE, not
+   * through the raw barrier. It delegates to `SessionRuntime.withWriter`, so a
+   * stale scope is refused with `SessionScopeSupersededError` and a frozen
+   * transition with `TransitionInProgressError` — the writer-first contract is
+   * unchanged, and no caller reads `transitionGate.busy` to decide admission.
+   */
+  withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
+  /**
    * Run one plain-prompt write through the writer barrier. The caller owns the
    * reserved-submit pin/release/restore wrapper; this method owns the ordered
    * write and its terminal ack/echo settlement.
@@ -123,6 +138,15 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       else recall.abort()
     }
   }
+
+  /**
+   * The submission-domain writer admission. It is a deliberate delegation to
+   * the session runtime's `withWriter`: the barrier stays owned there, while
+   * this module is the single caller-side insertion point a future Remote
+   * `session/writer-held` recovery hangs off.
+   */
+  const withWriter = <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> =>
+    surface.withWriter(scope, task)
 
   /** Restore the submission and settle its gesture as stale (the ORIGINAL branch). */
   const settleStaleSubmission = (submission: PromptSubmission): void => {
@@ -200,6 +224,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
   return {
     deferQueueRecall: (recall) => { pendingQueueRecalls.push(recall) },
     settleQueueRecalls,
+    withWriter,
     submitPrompt,
   }
 }

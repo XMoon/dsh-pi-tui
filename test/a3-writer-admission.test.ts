@@ -14,12 +14,17 @@
  *    a stale capture takes the stale path, and neither runs the prompt write.
  * 3. The queue-recall state commits on a committed transition and aborts on a
  *    failed one.
+ * 4. A3-4: the SUBMISSION-domain writer sections (busy/steer, queue pull-back,
+ *    HostCommandPort submission) enter through the submission runtime's
+ *    `withWriter`, which delegates to `SessionRuntime.withWriter`; the runner
+ *    holds no direct `barrier.runWriter` site and the command layer no
+ *    `withSessionWriter`.
  * @module @xmoon76/dsh-pi-tui/a3-writer-admission.test
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync, readdirSync } from 'node:fs'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
 import {
   bindSessionRuntime,
   type SessionRuntimeDeps,
@@ -208,4 +213,181 @@ test('the queue-recall state and the plain-submit write body live in app/submiss
   // runtime through `submitPrompt`.
   assert.equal((index.match(/submissionRuntime\.submitPrompt\(/g) ?? []).length, 2,
     'the command-fallback and direct prompt sites must delegate to the submission runtime')
+})
+
+// ── A3-4: the submission-domain writer sections (moved sites) ──────────────
+
+/**
+ * Bind the REAL submission runtime over the REAL session runtime + barrier, so
+ * the moved-domain locks exercise the actual admission rather than a stub.
+ */
+function bindSubmissionOverSession(isScopeCurrent: (scope: LiveSessionScope) => boolean): {
+  runtime: ReturnType<typeof bindSubmissionRuntime>
+  barrier: SessionOperationBarrier
+} {
+  const { runtime: sessionRuntime, barrier } = bind(isScopeCurrent)
+  const { surface } = recordingSurface({
+    withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
+  })
+  return { runtime: bindSubmissionRuntime({ surface }), barrier }
+}
+
+/** Assert the writer-first contract for one moved submission domain: the
+ * domain occupies the barrier BEFORE it yields, and a transition started
+ * immediately after must wait for it to drain. */
+test('moved domain (HostCommand submission): the submission runtime occupies the barrier before the execute yields', async () => {
+  const { runtime, barrier } = bindSubmissionOverSession(() => true)
+  let ran = false
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const pending = runtime.withWriter(SCOPE, async () => {
+    ran = true
+    await gate
+  })
+  assert.equal(barrier.activeWriters, 1, 'HostCommand submission: admission is synchronous')
+  let transitionDone = false
+  const transition = barrier.runTransition(async () => { transitionDone = true })
+  await flush()
+  assert.equal(ran, true)
+  assert.equal(transitionDone, false, 'the transition waits for the HostCommand writer')
+  release()
+  await pending
+  await transition
+  assert.equal(transitionDone, true)
+})
+
+test('moved domain (queue pull-back): the submission runtime occupies the barrier before the removals yield', async () => {
+  const { runtime, barrier } = bindSubmissionOverSession(() => true)
+  let ran = false
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const pending = runtime.withWriter(SCOPE, async () => {
+    ran = true
+    await gate
+  })
+  assert.equal(barrier.activeWriters, 1, 'queue pull-back: admission is synchronous')
+  let transitionDone = false
+  const transition = barrier.runTransition(async () => { transitionDone = true })
+  await flush()
+  assert.equal(ran, true)
+  assert.equal(transitionDone, false, 'the transition waits for the pull-back writer')
+  release()
+  await pending
+  await transition
+  assert.equal(transitionDone, true)
+})
+
+test('moved domain (busy delivery/steer): the submission runtime occupies the barrier before the steer yields', async () => {
+  const { runtime, barrier } = bindSubmissionOverSession(() => true)
+  let ran = false
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const pending = runtime.withWriter(SCOPE, async () => {
+    ran = true
+    await gate
+  })
+  assert.equal(barrier.activeWriters, 1, 'busy/steer: admission is synchronous')
+  let transitionDone = false
+  const transition = barrier.runTransition(async () => { transitionDone = true })
+  await flush()
+  assert.equal(ran, true)
+  assert.equal(transitionDone, false, 'the transition waits for the steer writer')
+  release()
+  await pending
+  await transition
+  assert.equal(transitionDone, true)
+})
+
+test('the moved domains refuse a FROZEN transition before the task body', async () => {
+  const { runtime, barrier } = bindSubmissionOverSession(() => true)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const transition = barrier.runTransition(async () => { await gate })
+  for (const domain of ['HostCommand', 'pull-back', 'steer']) {
+    let ran = false
+    await assert.rejects(
+      runtime.withWriter(SCOPE, () => { ran = true }),
+      (error: unknown) => error instanceof TransitionInProgressError,
+      `${domain}: a frozen transition must throw TransitionInProgressError`,
+    )
+    assert.equal(ran, false, `${domain}: a frozen transition runs NO task body`)
+  }
+  release()
+  await transition
+})
+
+test('the moved domains refuse a STALE capture with SessionScopeSupersededError, never the transition error', async () => {
+  const { runtime, barrier } = bindSubmissionOverSession(() => false)
+  for (const domain of ['HostCommand', 'pull-back', 'steer']) {
+    let ran = false
+    await assert.rejects(
+      runtime.withWriter(SCOPE, () => { ran = true }),
+      (error: unknown) => error instanceof SessionScopeSupersededError
+        && !(error instanceof TransitionInProgressError),
+      `${domain}: a stale capture must reject with its own signal`,
+    )
+    assert.equal(ran, false, `${domain}: a stale capture runs NO task body`)
+  }
+  assert.equal(barrier.activeWriters, 0, 'a stale admission never occupies the writer')
+})
+
+// ── A3-4: the four static exit criteria ────────────────────────────────────
+
+function span(source: string, start: string, end: string): string {
+  const from = source.indexOf(start)
+  assert.ok(from >= 0, `span start not found: ${start}`)
+  const to = source.indexOf(end, from + start.length)
+  assert.ok(to > from, `span end not found: ${end}`)
+  return source.slice(from, to)
+}
+
+/** Every `.ts` file under src/, as a path relative to src/. */
+function srcTsFiles(dir: URL, prefix = ''): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+    if (entry.isDirectory()) out.push(...srcTsFiles(new URL(`${entry.name}/`, dir), rel))
+    else if (entry.name.endsWith('.ts')) out.push(rel)
+  }
+  return out
+}
+
+test('A3-4 static exit: index.ts has ZERO direct writer admission; commands.ts has ZERO withSessionWriter', () => {
+  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const commands = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
+  assert.equal(index.includes('ownership.barrier.runWriter('), false,
+    'src/index.ts must hold no direct runWriter site')
+  assert.equal(index.includes('.barrier.runWriter('), false,
+    'src/index.ts must reach no raw barrier writer admission')
+  assert.equal(commands.includes('withSessionWriter'), false,
+    'TuiCommandRunner.withSessionWriter must be deleted')
+})
+
+test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachment-intake UX fence', () => {
+  const commands = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
+  // The /skill semantic write enters through withWriter: no gate.busy re-check.
+  const skill = span(commands, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
+  assert.equal(skill.includes('sessionTransitionPending()'), false,
+    'the /skill writer section must not pre-check the transition gate')
+  // The only remaining uses are the attachment-intake UX fence (a draft-stage
+  // gate, NOT a semantic session write).
+  const intake = span(
+    commands,
+    'const stageAttachmentCommand = (',
+    "\n  registerTuiCommand({\n    name: 'attach'",
+  )
+  const all = commands.match(/sessionTransitionPending\(\)/g) ?? []
+  const fenced = intake.match(/sessionTransitionPending\(\)/g) ?? []
+  assert.equal(fenced.length, 3, 'the attachment intake keeps its three UX checks')
+  assert.equal(all.length, fenced.length + 1,
+    'the only sessionTransitionPending() outside the intake fence is the interface declaration')
+})
+
+test('A3-4 static exit: SessionRuntime is the SOLE operation-barrier writer admission owner', () => {
+  const root = new URL('../src/', import.meta.url)
+  const offenders = srcTsFiles(root)
+    .filter(rel => rel !== 'app/session/runtime.ts')
+    .filter(rel => readFileSync(new URL(rel, root), 'utf8').includes('.barrier.runWriter('))
+  assert.deepEqual(offenders, [],
+    'only SessionRuntime.withWriter may call the operation barrier')
 })

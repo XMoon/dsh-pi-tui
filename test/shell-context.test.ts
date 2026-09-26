@@ -17,7 +17,8 @@ import {
   type ShellSubmitAgentLike,
   type ShellSubmitDeps,
 } from '../src/shell-context.ts'
-import { TransitionInProgressError, type SessionOperationBarrier } from '../src/session-operation-barrier.ts'
+import { TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 
 interface FakeAgent extends ShellSubmitAgentLike {
   followup(message: unknown): void
@@ -68,15 +69,15 @@ function makeDeps(options: {
   return { deps, notices, cleared }
 }
 
-/** A fake barrier whose runWriter waits on a manual resolve: the write is
+/** A fake writer section whose task waits on a manual resolve: the write is
  * IN FLIGHT (draining) until the test releases it. */
-function stallingBarrier(): { barrier: SessionOperationBarrier; release: () => void } {
+function stallingWriterSection(): {
+  writerSection: <T>(task: () => Promise<T>) => Promise<T>
+  release: () => void
+} {
   let resolve!: () => void
   const promise = new Promise<void>(res => { resolve = res })
-  const barrier = {
-    runWriter: (_sessionId: string, task: () => unknown) => promise.then(task),
-  } as unknown as SessionOperationBarrier
-  return { barrier, release: () => resolve() }
+  return { writerSection: <T>(task: () => Promise<T>) => promise.then(task), release: () => resolve() }
 }
 
 // --- classification ---
@@ -195,12 +196,10 @@ test('the transition fence refuses the shell followup (output stays on the card)
 
 // ── convergence phase 3: the write itself runs inside the barrier ──────────
 
-test('submitShellResult: TransitionInProgressError from the barrier refuses with the fence notice', async () => {
+test('submitShellResult: TransitionInProgressError from the writer section refuses with the fence notice', async () => {
   const agent = fakeAgent()
   const { deps, notices, cleared } = makeDeps({ agent: () => agent })
-  deps.barrier = {
-    runWriter: async () => { throw new TransitionInProgressError() },
-  } as unknown as SessionOperationBarrier
+  deps.writerSection = async () => { throw new TransitionInProgressError() }
   deps.fenceNotice = () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles'
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'stale')
@@ -210,11 +209,23 @@ test('submitShellResult: TransitionInProgressError from the barrier refuses with
   assert.ok(notices.at(-1)!.message.includes('transition is in progress'))
 })
 
-test('submitShellResult delivers normally after the barrier drains', async () => {
+test('submitShellResult: a stale capture refuses stale, never as a frozen transition', async () => {
+  const agent = fakeAgent()
+  const { deps, notices, cleared } = makeDeps({ agent: () => agent })
+  deps.writerSection = async () => { throw new SessionScopeSupersededError() }
+  const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
+  assert.equal(outcome, 'stale')
+  assert.equal(agent.followed.length, 0, 'no followup for a superseded capture')
+  assert.equal(cleared.count, 0, 'the card stays (the output is not lost)')
+  assert.deepEqual(notices, [{ message: 'stale', kind: 'info' }],
+    'a stale capture takes the stale refusal — the output stays on the card')
+})
+
+test('submitShellResult delivers normally after the writer section drains', async () => {
   const agent = fakeAgent()
   const { deps, cleared } = makeDeps({ agent: () => agent })
-  const { barrier, release } = stallingBarrier()
-  deps.barrier = barrier
+  const { writerSection, release } = stallingWriterSection()
+  deps.writerSection = writerSection
   const pending = submitShellResult(deps, '$ ls\n[exit 0]')
   release()
   const outcome = await pending

@@ -17,7 +17,8 @@
  * @module @xmoon76/dsh-pi-tui/steer
  */
 
-import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
+import { TransitionInProgressError } from './session-operation-barrier.ts'
+import { SessionScopeSupersededError } from './app/session/scope.ts'
 import { cancellationError } from './detached.ts'
 import type { SessionWriter, WriteOutcome } from './runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
@@ -68,12 +69,15 @@ export interface SteerDeps {
    * queue mutations always go through the semantic SessionWriter. */
   writer: Pick<SessionWriter, 'prompt' | 'updateQueue'>
   /**
-   * The session operation barrier (convergence plan phase 3): the whole
-   * steer write runs inside `runWriter`, so a transition started while
+   * The submission writer admission (convergence plan phase 3): the whole
+   * steer write runs inside this section, so a transition started while
    * this steer awaits drains it first — the `fence` quick-refusal alone
-   * cannot stop a writer that started BEFORE the transition.
+   * cannot stop a writer that started BEFORE the transition. The runner binds
+   * it to the captured live scope through `SubmissionRuntime.withWriter`, so
+   * the operation barrier has exactly ONE admission owner. Optional; absent
+   * keeps the direct/unit-call behavior.
    */
-  barrier?: SessionOperationBarrier
+  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
 }
 
 /** The notice for a submission refused by the session-transition fence. */
@@ -226,16 +230,19 @@ export function steerHasPayload(
  * queue write commits.
  */
 export async function steerAll(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
-  // The whole steer write runs inside the operation barrier: a transition
+  // The whole steer write runs inside the writer section: a transition
   // that starts while this steer awaits drains it first. The fence quick
   // refusal below only covers writers that START during a transition.
-  const barrier = deps.barrier
+  const writerSection = deps.writerSection
   const sessionId = deps.currentAgent()?.session.id
-  if (barrier !== undefined && sessionId !== undefined) {
+  if (writerSection !== undefined && sessionId !== undefined) {
     try {
-      return await barrier.runWriter(sessionId, () => steerAllCore(deps, text, options))
+      return await writerSection(() => steerAllCore(deps, text, options))
     } catch (error) {
-      if (error instanceof TransitionInProgressError) {
+      // A frozen transition and a superseded capture are DIFFERENT refusals,
+      // but both mean "this gesture did not send": restore the draft and let
+      // the user retry. Never report one as the other.
+      if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) {
         deps.restoreDraft(text)
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
         return 'stale'

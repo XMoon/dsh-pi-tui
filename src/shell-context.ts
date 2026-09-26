@@ -18,7 +18,8 @@
 import { cancellationError } from './detached.ts'
 import { sessionUnchanged } from './steer.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
-import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
+import { TransitionInProgressError } from './session-operation-barrier.ts'
+import { SessionScopeSupersededError } from './app/session/scope.ts'
 
 /** The minimal agent surface the shell submit needs (the runner's live agent). */
 export interface ShellSubmitAgentLike {
@@ -47,11 +48,14 @@ export interface ShellSubmitDeps {
   /** The fence refusal notice (defaults to {@link staleNotice}). */
   fenceNotice?: () => string
   /**
-   * The session operation barrier (convergence plan phase 3): the shell
-   * write runs inside `runWriter`, so a transition started while the
-   * shell result awaits drains it first.
+   * The submission writer admission (convergence plan phase 3): the shell
+   * write runs inside this section, so a transition started while the
+   * shell result awaits drains it first. The runner binds it to the captured
+   * live scope through `SubmissionRuntime.withWriter`, so the operation
+   * barrier has exactly ONE admission owner. Optional; absent keeps the
+   * direct/unit-call behavior.
    */
-  barrier?: SessionOperationBarrier
+  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
   /** Deliver the shell result through the semantic session writer. */
   writer: Pick<SessionWriter, 'prompt'>
   /** Build the user message (runner-side creation, keeps this module dsh-free). */
@@ -73,12 +77,15 @@ export async function submitShellResult(deps: ShellSubmitDeps, text: string): Pr
   const agent = deps.currentAgent()
   if (agent === undefined) return 'ok'
   const generation = deps.currentGeneration()
-  const barrier = deps.barrier
-  if (barrier !== undefined) {
+  const writerSection = deps.writerSection
+  if (writerSection !== undefined) {
     try {
-      return await barrier.runWriter(agent.session.id, async () => submitShellResultCore(deps, text, agent, generation))
+      return await writerSection(async () => submitShellResultCore(deps, text, agent, generation))
     } catch (error) {
-      if (error instanceof TransitionInProgressError) {
+      // A frozen transition and a superseded capture are DIFFERENT refusals,
+      // but both wrote NOTHING: report the fence/stale notice and keep the
+      // card's output visible for a retry. Never report one as the other.
+      if (error instanceof TransitionInProgressError || error instanceof SessionScopeSupersededError) {
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
         return 'stale'
       }
