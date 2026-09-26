@@ -251,6 +251,21 @@ test('A5b: the moved presentation constructors live in their owners, not in the 
   }
 })
 
+test('A5b-2: the settings owner consumes narrow surface/config capabilities', () => {
+  // A5b-2 review P2: taking the whole `SurfaceRuntime` and `Backend` would hand
+  // the owner a large set of unrelated capabilities. It declares exactly the app
+  // + status-store surface and the config slice it uses.
+  const owner = ownerFile('src/app/surface/settings-runtime.ts')
+  assert.ok(owner.includes('export interface SettingsSurface'),
+    'the settings owner must declare its narrow surface capability')
+  assert.ok(owner.includes('export interface SettingsConfigPort'),
+    'the settings owner must declare its narrow config capability')
+  assert.ok(!/readonly\s+surface:\s*SurfaceRuntime</u.test(owner),
+    'the settings owner must not depend on the whole surface owner')
+  assert.ok(!/readonly\s+backend:\s*Backend\b/u.test(owner),
+    'the settings owner must not depend on the whole backend port')
+})
+
 test('A5b: the Direct-facing viewed-queue slot stays a composition connector', () => {
   // `viewedQueueAgent` is deliberately NOT extracted: the Direct runtime reads
   // it through `getViewedQueueAgent`, so the composition root keeps the single
