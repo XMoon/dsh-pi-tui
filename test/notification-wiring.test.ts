@@ -23,6 +23,36 @@ const indexSource = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
 const surfaceSource = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.ts'), 'utf8')
 const commitOrderSource = readFileSync(join(root, 'src', 'app', 'session', 'commit-order.ts'), 'utf8')
 
+/**
+ * The text of one member method of the surface runtime object literal: from
+ * `    <name>(` to the NEXT `\n    },` member boundary. Per-method slicing is
+ * what makes the focus locks exact — a whole-file `includes` check keeps
+ * passing after one path's sync is deleted.
+ */
+function methodBody(source: string, name: string): string {
+  const marker = `    ${name}(`
+  const start = source.indexOf(marker)
+  assert.ok(start >= 0, `the surface runtime must define ${name}(`)
+  const end = source.indexOf('\n    },', start)
+  assert.ok(end > start, `${name} must end with the runtime's member layout`)
+  return source.slice(start, end)
+}
+const surfaceMethodBody = (name: string): string => methodBody(surfaceSource, name)
+
+test('the per-method body slicer is exact (mutation guard for the focus locks)', () => {
+  // Prove the slicer isolates ONE member: emptying the OTHER focus path must
+  // not affect the target's body, while emptying the target must be visible.
+  const emptiedOther = surfaceSource.replace(
+    /    handleTerminalFocus\(focused\) \{[\s\S]*?\n    \},/u,
+    '    handleTerminalFocus(focused) {\n    },',
+  )
+  assert.notEqual(emptiedOther, surfaceSource, 'the fixture must actually rewrite handleTerminalFocus')
+  assert.ok(methodBody(emptiedOther, 'noteUserInput').includes('terminalFocusTracker.markFocused()'),
+    'emptying handleTerminalFocus must not leak into the noteUserInput slice')
+  assert.ok(!methodBody(emptiedOther, 'handleTerminalFocus').includes('terminalFocusTracker.handleFocusReport('),
+    'a removed sync inside handleTerminalFocus must be visible to the slice')
+})
+
 test('the ONLY completion-controller feed is agent/status (turn/end can never notify)', () => {
   // The controller's status input is reached through exactly ONE surface entry
   // (`SurfaceRuntime.onAgentStatus`), fed by exactly ONE runner call inside the
@@ -37,9 +67,9 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
   const handler = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf(marker) + 900)
   assert.ok(handler.includes('surface.onAgentStatus(agent.id, status)'),
     'the agent/status handler must route the main agent to the controller')
-  assert.ok(handler.includes('if (taskRuntime?.has(agent.id) !== true) return'),
+  assert.ok(handler.includes('if (!surface.hasTask(agent.id)) return'),
     'the child membership gate must stay (children never notify and never repaint)')
-  assert.ok(handler.includes('refreshAgentRuntimeOnly()'),
+  assert.ok(handler.includes('surface.refreshAgentRuntimeOnly()'),
     'the child runtime refresh must stay')
 })
 
@@ -89,21 +119,29 @@ test('focus reporting is enabled at mount and disabled on EVERY exit path', () =
 test('user activity restores the tracker to focused (the onUserInput wiring)', () => {
   // The runner's onUserInput seam must restore the tracker (a missed
   // FOCUS_IN must never leave an 'unfocused' tracker that would falsely
-  // notify while the user watches) and re-sync the controller.
+  // notify while the user watches) and re-sync the controller. The lock is
+  // PER METHOD: each surface entry must itself do both halves — a future edit
+  // that drops one half of one path must fail here (a whole-file `includes`
+  // check would keep passing).
   const wiringStart = indexSource.indexOf('onUserInput: () => {')
   assert.ok(wiringStart >= 0, 'the app events must wire onUserInput')
   const wiring = indexSource.slice(wiringStart, wiringStart + 300)
   assert.ok(wiring.includes('surface.noteUserInput()'),
     'onUserInput must route to the surface tracker restore')
-  assert.ok(surfaceSource.includes('terminalFocusTracker.markFocused()'),
-    'the surface must restore the tracker to focused')
+  const restoreBody = surfaceMethodBody('noteUserInput')
+  assert.ok(restoreBody.includes('terminalFocusTracker.markFocused()'),
+    'noteUserInput must restore the tracker to focused')
+  assert.ok(restoreBody.includes('completionController.setFocus(terminalFocusTracker.state)'),
+    'noteUserInput must re-sync the controller focus')
   // The onTerminalFocus wiring keeps feeding the tracker + controller.
   const focusStart = indexSource.indexOf('onTerminalFocus: (focused) => {')
+  assert.ok(focusStart >= 0, 'the app events must wire onTerminalFocus')
   const focusWiring = indexSource.slice(focusStart, focusStart + 300)
   assert.ok(focusWiring.includes('surface.handleTerminalFocus(focused)'),
     'onTerminalFocus must route to the surface tracker')
-  assert.ok(surfaceSource.includes('terminalFocusTracker.handleFocusReport('),
-    'the surface must feed the tracker')
-  assert.ok(surfaceSource.includes('completionController.setFocus(terminalFocusTracker.state)'),
-    'the surface must re-sync the controller focus')
+  const focusBody = surfaceMethodBody('handleTerminalFocus')
+  assert.ok(focusBody.includes('terminalFocusTracker.handleFocusReport('),
+    'handleTerminalFocus must feed the tracker')
+  assert.ok(focusBody.includes('completionController.setFocus(terminalFocusTracker.state)'),
+    'handleTerminalFocus must re-sync the controller focus')
 })
