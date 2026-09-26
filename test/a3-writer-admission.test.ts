@@ -392,6 +392,30 @@ test('A3-4 static exit: SessionRuntime is the SOLE operation-barrier writer admi
     'only SessionRuntime.withWriter may call the operation barrier')
 })
 
+test('P1-1 static: no production fence carries the transition gate into an admitted writer', () => {
+  // The transition gate may gate a writer that has NOT yet been admitted, but
+  // once a writer holds the barrier the gate must WAIT for the whole writer.
+  // Re-reading `gate.busy` inside an admitted writer's fence truncates it.
+  const index = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const runtime = readFileSync(new URL('../src/app/submission/runtime.ts', import.meta.url), 'utf8')
+  for (const [file, source] of [['../src/index.ts', index], ['../src/app/submission/runtime.ts', runtime]] as const) {
+    assert.equal(/fence:\s*\(\)\s*=>[^\n]*gate\.busy/u.test(source), false,
+      `${file}: an admitted writer's fence must never read the transition gate`)
+  }
+  // The main steer and the shell submit share the SURFACE-lifetime-only fence
+  // (after A3-4 they live in the submission runtime's deps hooks).
+  assert.equal((runtime.match(/fence: \(\) => deps\.isDisposed\(\)/gu) ?? []).length, 2,
+    'the main steer and the shell submit keep the surface-lifetime fence')
+  // The child-viewer steer is a DIFFERENT ownership axis: the viewer
+  // generation, never the session transition gate.
+  assert.ok(index.includes('fence: () => cleanedUp || app.getViewerGeneration() !== childViewerGeneration,'),
+    'the child-viewer steer keeps its own viewer-generation axis')
+  // The pull-back's delayed-representation reconciliation still reads the
+  // queued transition + the frozen barrier together.
+  assert.ok(index.includes('isTransitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,'),
+    'the pull-back transition reconciliation is untouched')
+})
+
 test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a transition', () => {
   // DEFENSIVE branch: this path is currently synchronous from the scope capture
   // to the writer entry, so only a frozen transition can land in the outer catch
@@ -399,7 +423,9 @@ test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a
   // (plan §1.3): if a future refactor introduces an await in that window, a stale
   // capture must drop the staged refs and report the STALE notice — never leave
   // them behind while claiming a transition is in progress.
-  const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  // The pull-back orchestration now lives in `app/submission/runtime.ts`; the
+  // runner keeps only the narrow hooks.
+  const source = readFileSync(new URL('../src/app/submission/runtime.ts', import.meta.url), 'utf8')
   const pullBack = source.slice(
     source.indexOf("runOwned('queue pull-back'"),
     source.indexOf("onError: (_error) => {", source.indexOf("runOwned('queue pull-back'")),

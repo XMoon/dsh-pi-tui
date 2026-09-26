@@ -195,7 +195,7 @@ import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController } from './exit.ts'
 import { type SessionRetirementReport } from './app/session/owner-access.ts'
-import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, steerAll, steerHasPayload, sessionUnchanged, type SteerAgentLike } from './steer.ts'
+import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import {
   resolveSubagentSettleTarget,
   subagentPromptDisposition,
@@ -209,7 +209,7 @@ import { createDirectApplicationRuntime } from './app/direct/runtime.ts'
 import { createSessionOwnershipCore } from './app/session/ownership-core.ts'
 import { bindSessionRuntime } from './app/session/runtime.ts'
 import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
-import { bindSubmissionRuntime, type SubmissionRuntime } from './app/submission/runtime.ts'
+import { bindSubmissionRuntime, deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, submitShell, type SteerSubmissionAgent, type SteerSubmissionDeps, type SubmissionRuntime } from './app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from './app/session/subject.ts'
 import { type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
@@ -231,7 +231,7 @@ import {
 } from './runtime/session-lifecycle-port.ts'
 import type { HostCommandOutcome } from './runtime/host-command-port.ts'
 import type { PendingInputItem } from './runtime/pending-input-reader-port.ts'
-import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
+import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from './skill-catalog-refresh.ts'
@@ -3386,81 +3386,33 @@ export function apply(ctx: Context, config: Config): void {
       /**
        * Submit the completed run to the session (context mode only):
        * re-validate → followup. Accepted clears the settled card — the
-       * transcript's user row becomes the record. An owned workflow: the
-       * outcome drives the notify and the card — runOwned (AGENTS.md),
-       * never a bare void.
+       * transcript's user row becomes the record. The submission runtime owns
+       * the ordered write, its outcome settlement and the card dismissal; the
+       * runner supplies the narrow TUI hooks.
        */
       const submitResult = (result: string): void => {
-        if (cleanedUp) return
-        // A session switch while the command ran: the output must not be
-        // posted into a session the user has left (the switch already
-        // cleared the card; the notify explains what happened). A session
-        // switch between the check and the followup is caught by
-        // submitShellResult's own re-validation. The ack row (armed at the
-        // gesture) is TERMINAL here: nothing will be written for the old
-        // session.
-        if (ownership.generation() !== generationAtRun) {
-          shellTerminalAck('shell submit skipped after a session switch')
-          app.notify('the session changed while the command ran — the output was not submitted', 'error')
-          return
-        }
-        const submitted = formatShellSubmitText(command, result)
-        // T1 BEFORE the dispatch: same ordering rule as the Enter path —
-        // the ack row keeps waiting for the authoritative event (plan D).
-        submitLatencyTracker.mark(agentNow()?.session.id, 'dispatch')
-        runOwned('shell submit', () => submitShellResult({
-          currentAgent: () => agentNow() as unknown as ShellSubmitAgentLike | undefined,
+        submitShell({
+          command,
+          result,
+          generationAtRun,
+          isDisposed: () => cleanedUp,
           currentGeneration: () => ownership.generation(),
+          currentSessionId: () => agentNow()?.session.id,
+          currentAgent: () => agentNow() as unknown as ShellSubmitAgentLike | undefined,
+          terminalAck: shellTerminalAck,
+          clearSettledLocalMessages: () => app.clearSettledLocalMessages(),
           notify: (message, kind) => {
             if (cleanedUp) return
             app.notify(message, kind)
           },
-          staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
-          // The session-transition write fence (review round 4): while a
-          // transition is in flight the followup would target a session
-          // that is about to be retired.
-          fence: () => ownership.gate.busy || cleanedUp,
+          markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
           writerSection: submissionWriterSection,
-          fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
           writer: backend.sessionWriter,
           createMessage: (text) => createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
           }),
-          onSubmitted: () => {
-            if (cleanedUp) return
-            app.clearSettledLocalMessages()
-            // The write was accepted. The ACK ROW STAYS until the first
-            // authoritative event (the inbox insert) settles it — never
-            // cleared at delivery time (plan D lifecycle: an event or a
-            // failure ends the wait, not the send).
-          },
-        }, submitted), {
           diag,
-          sessionId: () => agentNow()?.session.id,
-          // A stalled shell submit (stale identity / transition fence /
-          // no agent) wrote nothing: terminal — the pending row must not
-          // outlive the submission (plan D exit enumeration).
-          onResult: (outcome) => {
-            if (cleanedUp) return
-            if (outcome !== 'ok') shellTerminalAck(`shell submit ${outcome}`)
-            else if (agentNow() === undefined) shellTerminalAck('shell submit without an agent')
-          },
-          // runOwned routes cancellations EXCLUSIVELY here: a
-          // cancellation-shaped rejection from the write bypasses
-          // onResult/onError, so the ack row armed at the gesture must
-          // end terminally (the caller's card keeps the output).
-          onCancel: () => {
-            if (cleanedUp) return
-            shellTerminalAck('shell submit cancelled')
-          },
-          onError: (error) => {
-            if (cleanedUp) return
-            // The submission failed before the write ran: keep the card
-            // (the output is not lost) and surface the reason.
-            shellTerminalAck('shell submit failure')
-            app.notify(`shell submit failed: ${safeErrorMessage(error)}`, 'error')
-          },
         })
       }
       // A settled latch: `error` and `close` can both fire (a spawn failure
@@ -5145,382 +5097,131 @@ export function apply(ctx: Context, config: Config): void {
             && projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, agent.session) === true
             ? '/plan off'
             : text
-          // The command execution is itself an owned workflow: its outcome
-          // decides between the fallback follow-up and a draft restore.
-          // HANDSHAKE PIN (review finding): the outer task's pin releases
-          // when this task returns (right after launching the command), but
-          // the nested fallback pin is only established inside onResult —
-          // without a synchronous handoff the referenced drafts would be
-          // prunable for the whole command run. Acquire it HERE, transfer
-          // it to the nested fallback, and release it on every other exit.
-          const fallbackPin = pinDraftAttachments(text, draftImages, draftFiles)
-          const commandDraftDispositionReader = takeCommandDraftDisposition
-
-          // Command handlers are agent-facing only when they carry staged
-          // attachments. If the command fails before delivery, restore the
-          // cleared editor text while the handoff pin still protects drafts.
-          const restoreCommandAttachmentDraft = (): void => {
-            if (draftHasAttachments(text, draftImages, draftFiles)) restoreSubmissionDraft(text)
-          }
-          // DEFERRED AUTHORITY: the session may have committed a host command
-          // the standing view could not see when the composer classified this
-          // line (an unknown slash line becomes a session-scoped command).
-          // Re-apply the attachment policy against the FINAL catalog BEFORE
-          // the command plane runs: an undeclared command must never receive
-          // a placeholder line with no payload (and must never consume the
-          // attachment), while a declaring command keeps its payload and a
-          // skill invocation keeps its agent-facing delivery.
-          const lateRefusal = parsed === undefined ? undefined : attachmentRefusal(
-            parsed,
-            text,
-            commandIsLocalForAttachments(
-              parsed,
-              isSkillWrapperName,
-              // The dynamic (client contribution) term is STICKY to the
-              // submit-time route: a contribution that appeared during the
-              // deferred window does not reclassify an ordinary line as a UI
-              // control under the final authority.
-              n => clientLocalAtSubmit && (extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false),
-              // STICKY SUBMIT-TIME AUTHORITY: once the host catalog RESOLVED
-              // this name when the line was submitted, the name is host
-              // territory for the lifetime of the submission — the line never
-              // falls back to a same-named client contribution (which only
-              // ever owns names the host catalog does not resolve at all),
-              // even when the name disappears from the final catalog. The
-              // final catalog still decides the CLAIM itself.
-              line => hostClaimOf?.(line) ?? submitView,
+          // The HostCommandPort submission + the agent-facing fallback live in
+          // the submission runtime; the runner supplies the command-plane and
+          // TUI hooks.
+          executeHostCommandSubmission({
+            isDisposed: () => cleanedUp,
+            notify: (message, kind) => {
+              if (cleanedUp) return
+              app.notify(message, kind)
+            },
+            loggerError: (message) => {
+              try {
+                ctx.logger.error(message)
+              } catch {
+                // The cordis logger must not block the user notice.
+              }
+            },
+            readDraft: () => app.getDraft(),
+            mergeDraftIntoEditor: (value) => {
+              const merged = mergeDraft(app.getDraft(), value)
+              app.setEditorText(merged)
+              return merged === value
+            },
+            restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
+            consumeDraftAttachments: (value) => consumeDraftAttachments(value, draftImages, draftFiles),
+            draftHasAttachments: (value) => draftHasAttachments(value, draftImages, draftFiles),
+            pinDraftAttachments: (value) => pinDraftAttachments(value, draftImages, draftFiles),
+            settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
+            settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
+            notifySubmissionFailure: (error) => notifySubmissionFailure(error),
+            isScopeCurrent: (value) => sessionScope.isCurrent(value),
+            isTransitionBusy: () => ownership.gate.busy,
+            refuseByTransitionFence: (value) => refuseByTransitionFence(
+              value,
+              () => app.getDraft(),
+              (t) => app.setEditorText(t),
+              (m, k) => app.notify(m, k),
             ),
-            isSkillInvocation(parsed, text),
-          )
-          if (lateRefusal !== undefined) {
-            fallbackPin()
-            restoreCommandAttachmentDraft()
-            app.notify(lateRefusal, 'error')
-            settleLocalSubmission(submitRequestId)
-            settleLocalSubmitAck('attachments refused by the command declaration', { token: submitAckToken, terminal: true })
-            return
-          }
-          // The session-transition write fence: the identity check above
-          // can yield across a concurrent /new, /fork, rewind or
-          // switch — once a transition is in flight, executing the command
-          // would write an agent that is about to be retired (review
-          // round 27). Refuse and restore the draft instead.
-          if (ownership.gate.busy) {
-            fallbackPin()
-            refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
-            settleLocalSubmission(submitRequestId)
-            settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
-            return
-          }
-          submitTurnTransferred = true
-          runOwned('command execution', () => {
-            // RE-CAPTURE at invocation time: the runOwned factory runs
-            // SYNCHRONOUSLY right before execute(), so there is no race
-            // window — the ref always names the owner whose command is
-            // actually about to run (a submit-time capture could name a
-            // long-gone owner after an HMR reload, silently dropping the
-            // new owner's real failures; the review's P2).
-            const liveCommandId = parsedAtSubmit === undefined || extensionService === undefined
-              ? undefined
-              : extensionService.commands.idFor(parsedAtSubmit.name)
-            commandHealthRef = liveCommandId === undefined
-              ? undefined
-              : extensionService?._recordRegistryHealthRef('command', liveCommandId)
-            // The resolution's delivery mode is bound for THIS synchronous
-            // window: `commands.execute` invokes a resolved handler in the
-            // same call stack, so a TUI-owned skill handler captures its
-            // submission's mode before any await (see withDelivery).
-            // The command plane receives the submitted attachments (DSH
-            // `CommandSubmitAttachment`) ONLY for a HOST command that
-            // DECLARES `input.attachments` — the web composer's
-            // `leadingClaim.submit(args, attachments)` path; the host admits
-            // them through its own store before the handler runs. The claim
-            // is asked for THIS LINE: an argued line of an execute-kind
-            // command is not an invocation at all (see the routing gate). A
-            // TUI-owned command must never carry them on this wire: its
-            // descriptor does not declare attachments (`/skill <name>` is
-            // itself a registered TUI command, and a live skill wrapper is
-            // TUI-owned too), so the host executor would reject the
-            // invocation BEFORE the handler — their placeholder line is
-            // delivered as-is and the images are admitted by the delivery
-            // path (loadSkill → prepareUserMessage).
-            const submittedClaim = parsedAtSubmit === undefined ? undefined : hostClaimOf?.(parsedAtSubmit)
-            const submittedAttachments = submittedClaim?.claimed === true && submittedClaim.attachments
-              ? commandSubmitAttachments(text)
-              : []
-            // The plane is asked only for a line it owns, resolved against the
-            // FINAL catalog here (see commandPlaneOwnsLine): the host registry
-            // resolves by NAME, so handing it an argued line of an execute-kind
-            // command would run the command the DSH decision table never made
-            // an invocation. An unowned line resolves undefined and keeps the
-            // ordinary delivery below; the advertised-miss gate follows the
-            // SAME resolution.
-            const commandPlaneLine = commandPlaneOwnsLine()
-            planeAdvertised = commandPlaneLine && wasAdvertisedAtSubmit
-            const tuiOwnedCommand = parsedAtSubmit !== undefined
-              && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || isSkillWrapperName?.(parsedAtSubmit.name) === true)
-            // The post-command-settlement window opens HERE: a handler that
-            // commits a fork queues its source retirement instead of detaching
-            // the Session the executor is still appending `command/done` to.
-            sessionRuntime.beginCommandSettlement()
-            let settled: Promise<HostCommandOutcome>
-            try {
-              settled = Promise.resolve(withCommandDelivery(delivery, () => {
+            // DEFERRED AUTHORITY: re-apply the attachment policy against the
+            // FINAL catalog BEFORE the command plane runs.
+            lateAttachmentRefusal: () => {
+              if (parsed === undefined) return undefined
+              return attachmentRefusal(
+                parsed,
+                text,
+                commandIsLocalForAttachments(
+                  parsed,
+                  isSkillWrapperName,
+                  // The dynamic (client contribution) term is STICKY to the
+                  // submit-time route.
+                  n => clientLocalAtSubmit && (extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false),
+                  // STICKY SUBMIT-TIME AUTHORITY: once the host catalog RESOLVED
+                  // this name, the name is host territory for the lifetime of the
+                  // submission.
+                  line => hostClaimOf?.(line) ?? submitView,
+                ),
+                isSkillInvocation(parsed, text),
+              )
+            },
+            commandSubmitAttachments: (value) => commandSubmitAttachments(value),
+            isTuiOwnedCommand: () => parsedAtSubmit !== undefined
+              && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || isSkillWrapperName?.(parsedAtSubmit.name) === true),
+            commandPlaneOwnsLine,
+            submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : hostClaimOf?.(parsedAtSubmit),
+            commandSignal: () => signal,
+            invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
+              withCommandDelivery(delivery, () => {
                 if (!commandPlaneLine || parsedAtSubmit === undefined) {
                   return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
                 }
                 if (tuiOwnedCommand) {
                   // TUI-local commands and skill wrappers retain their existing
-                  // in-process command service path; HostCommandPort is only for
-                  // a line already selected as Host-owned.
-                  return commands.execute(agent as Agent, toggled, submittedAttachments, signal).then(execution => {
-
-                     return execution === undefined
+                  // in-process command service path; HostCommandPort is only
+                  // for a line already selected as Host-owned.
+                  return commands.execute(agent as Agent, commandLine, submittedAttachments as Parameters<typeof commands.execute>[2], commandSignal).then(execution => {
+                    return execution === undefined
                       ? { kind: 'committed', matched: false } as const
                       : { kind: 'committed', matched: true, execution } as const
-                   })
+                  })
                 }
-                // The HostCommandPort submission is a submission-domain write:
-                // it enters the barrier through the submission runtime (the M3
-                // insertion point), which delegates to SessionRuntime.withWriter.
+                // The HostCommandPort submission enters the barrier through
+                // the submission runtime (the M3 insertion point).
                 return submissionRuntime.withWriter(scope, () => backend.hostCommand.execute({
                   sessionId: agent.session.id,
-                  line: toggled,
+                  line: commandLine,
                   attachments: submittedAttachments,
-                  signal,
+                  signal: commandSignal,
                 }))
-              }))
-            } catch (error) {
-              // A SYNCHRONOUS throw (the delivery wrapper, or a branch throwing
-              // before it returns its promise) means the handler never ran, so
-              // nothing was queued: close the window synchronously (no
-              // retirement to await) and rethrow.
-              sessionRuntime.abortCommandSettlement()
-              throw error
-            }
-            // The official executor's post-handler `command/done` append is
-            // inside this settlement: teardown awaits it before retiring the
-            // current owner, and the window closes only after the append.
-            settled = settled.finally(sessionRuntime.settleCommandSettlement)
-            // `then(onSettled, onSettled)`: tracking must not add an unhandled
-            // rejection branch next to `runOwned`'s own failure handling.
-            sessionRuntime.trackSettlementWork(settled)
-            return settled
-          }, {
+              }),
+            beginCommandSettlement: () => sessionRuntime.beginCommandSettlement(),
+            abortCommandSettlement: () => sessionRuntime.abortCommandSettlement(),
+            settleCommandSettlement: () => sessionRuntime.settleCommandSettlement(),
+            trackSettlementWork: (work) => sessionRuntime.trackSettlementWork(work),
+            captureCommandHealthRef: () => {
+              // RE-CAPTURE at invocation time: the runOwned factory runs
+              // SYNCHRONOUSLY right before execute().
+              const liveCommandId = parsedAtSubmit === undefined || extensionService === undefined
+                ? undefined
+                : extensionService.commands.idFor(parsedAtSubmit.name)
+              return liveCommandId === undefined
+                ? undefined
+                : extensionService?._recordRegistryHealthRef('command', liveCommandId)
+            },
+            clearCommandHealthError: (ref) =>
+              extensionService?._clearRegistryError(ref as { slot: string; id: string; owner: string }),
+            recordCommandHealthError: (ref, error) =>
+              extensionService?._recordRegistryError(ref as { slot: string; id: string; owner: string }, error),
+            readCommandDraftDisposition: (commandId) => takeCommandDraftDisposition?.(commandId),
+            shouldConsumeAdvertisedMiss,
+            isIndeterminateSkillWrite: (error) => isIndeterminateSkillWrite(error),
+            startArtifactSave: (name) => startArtifactSave(name, agent),
+            submitPrompt: (submission) => submissionRuntime.submitPrompt(submission),
+            commandSessionId: () => agent.session.id,
+            markTurnTransferred: () => { submitTurnTransferred = true },
             diag,
-            sessionId: () => agent.session.id,
-            onResult: (outcome) => {
-              if (cleanedUp) {
-                fallbackPin()
-                submitTurn.release()
-                return
-              }
-              if (outcome.kind !== 'committed') {
-                // A known refusal did not settle a command, so restore the
-                // complete submitted line while the handoff pin is held. An
-                // indeterminate result is different: the command may have
-                // committed, so never restore or automatically retry it. A
-                // cancellation is a normal aborted gesture, not a confirmed
-                // command failure.
-                if (outcome.kind !== 'indeterminate') restoreSubmissionDraft(text)
-                fallbackPin()
-                submitTurn.release()
-                if (outcome.kind === 'cancelled') {
-                  settleLocalSubmission(submitRequestId)
-                  settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
-                  return
-                }
-                settleLocalSubmission(submitRequestId)
-                settleLocalSubmitAck(
-                  outcome.kind === 'indeterminate' ? 'command result indeterminate' : 'command execution refused',
-                  { token: submitAckToken, terminal: true },
-                )
-                if (outcome.kind === 'indeterminate') {
-                  app.notify('command result is indeterminate — do not retry automatically', 'error')
-                  return
-                }
-                app.notify(outcome.error.message, 'error')
-                return
-              }
-              const execution = outcome.matched
-                ? outcome.execution as { readonly commandId: string; readonly result: CommandResult }
-                : undefined
-              const draftDisposition = execution === undefined
-                 ? undefined
-                 : commandDraftDispositionReader?.(execution.commandId)
-               if (commandHealthRef !== undefined && execution !== undefined) {
-                extensionService?._clearRegistryError(commandHealthRef)
-              }
-              // A command that RAN owns its own feedback (cards, working
-              // surface): the submit-ack row stands down here — never
-              // before execute() resolved, so the fallback followup (a
-              // plain prompt: execute → undefined) keeps its pending row.
-              if (execution !== undefined) {
-                settleLocalSubmission(submitRequestId)
-                settleLocalSubmitAck('submit consumed by a command', { token: submitAckToken, terminal: true })
-              }
-              // A command the surface advertised (e.g. from the startup
-              // probe) but the real session's catalog lacks: consume the
-              // slash input with an explicit error — never a plain model
-              // message. Attachment-bearing drafts are restored below; plain slash lines
-               // remain consumed (the refreshed completions already revoked the
-               // claim, and a mechanical retry could ride the unadvertised fallback).
-               if (shouldConsumeAdvertisedMiss(execution, planeAdvertised)) {
-                restoreCommandAttachmentDraft()
-                app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
-                settleLocalSubmission(submitRequestId)
-                settleLocalSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
-                fallbackPin()
-                submitTurn.release()
-                return
-              }
-              // The fallback follow-up still targets the CAPTURED agent; if
-              // the session moved on while the command ran, restore the
-              // draft instead of posting into a session the user has left.
-              if (execution === undefined) {
-                if (sessionScope.isCurrent(scope)) {
-                  // The fallback is a REAL submission: prepare (admit
-                  // images when present) and follow up — an owned workflow
-                  // so a failed image admission restores the draft instead
-                  // of silently dropping the images. This nested workflow
-                  // outlives the outer task (fire-and-forget), so it
-                  // consumes the handoff pin across the async admission
-                  // and releases it in its own finally (review finding 1
-                  // follow-up).
-                  runOwned('image submit', () => {
-                    const task = runReservedSubmit({
-                    // TRANSFER the handoff reservation, never a second
-                    // pin: fallbackPin was acquired synchronously before
-                    // commands.execute() launched (covering the outer
-                    // release window); the nested flow releases it in its
-                    // finally (review finding — double pinning leaked the
-                    // handoff pin forever).
-                    reserve: () => fallbackPin,
-                    // The submission runtime owns the ordered write
-                    // (writer admission → capability → prepare → write →
-                    // settlement → consume) and its terminal ack/echo.
-                    run: () => submissionRuntime.submitPrompt({
-                      text,
-                      scope,
-                      requestId: submitRequestId,
-                      ackToken: submitAckToken,
-                      generation,
-                      echoInstalled: localEchoInstalled,
-                    }),
-                    restore: (t) => restoreSubmissionDraft(t),
-                    }, text)
-                    // This nested submission starts one callback later than the
-                    // command execution, so teardown must reach it explicitly.
-                    sessionRuntime.trackSettlementWork(task)
-                    return task
-                  }, {
-                    diag,
-                    sessionId: () => agent.session.id,
-                    onResult: () => {
-                      submitTurn.release()
-                    },
-                    // The flow restored the editor; this sink settles the
-                    // gesture's ack (token-scoped) and only notifies.
-                    onError: (error) => {
-                      submitTurn.release()
-                      settleLocalSubmission(submitRequestId)
-                      settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
-                      notifySubmissionFailure(error)
-                    },
-                    // Cancellations route EXCLUSIVELY here (never
-                    // onError): a cancelled fallback write must end the
-                    // ack row the gesture armed (plan D exit enumeration;
-                    // the flow already restored the draft).
-                    onCancel: () => {
-                      submitTurn.release()
-                      settleLocalSubmission(submitRequestId)
-                      settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
-                    },
-                  })
-                } else {
-                  fallbackPin()
-                  submitTurn.release()
-                  const merged = mergeDraft(app.getDraft(), text)
-                  app.setEditorText(merged)
-                  settleLocalSubmission(submitRequestId)
-                  settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-                  app.notify(merged === text
-                    ? 'the session changed while sending — try again'
-                    : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-                }
-              } else {
-                // A command submission CONSUMES its attachments only after
-                // handler success (web parity: an error outcome keeps the
-                // draft and its attachments for correction, so a failed
-                // command never silently drops the user's attachment). An
-                // error result committed no agent-facing message: restore the
-                // staged draft before the handoff pin is released.
-                if (execution.result.kind === 'error'
-                  && draftDisposition !== 'restored'
-                  && draftDisposition !== 'suppressed') {
-                  restoreSubmissionDraft(text)
-                } else if (execution.result.kind !== 'error') consumeDraftAttachments(text, draftImages, draftFiles)
-                // The command COMMITTED (no image fallback): release the
-                // handoff pin.
-                fallbackPin()
-                submitTurn.release()
-                // Pre-Stage-D export convergence: a SUCCESSFUL /export or
-                // /transcript starts the Client-local save workflow ONLY
-                // after the command lifecycle settled (command/done
-                // durable) — never inside the handler. The originating
-                // Agent/Session identity is the CAPTURED `agent` from the
-                // same dispatch that executed the command, so a later
-                // session switch can never redirect the artifact.
-                if (execution.result.kind === 'success') {
-                  const commandName = parsedAtSubmit?.name
-                  if (commandName === 'export' || commandName === 'transcript') {
-                    startArtifactSave(commandName, agent)
-                  }
-                }
-              }
-            },
-            onError: (error) => {
-              fallbackPin()
-              submitTurn.release()
-              if (cleanedUp) return
-              const indeterminateSkill = isIndeterminateSkillWrite(error)
-              const draftDisposition = commandDraftDispositionReader?.()
-              if (!indeterminateSkill && draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
-                restoreSubmissionDraft(text)
-              }
-              settleLocalSubmission(submitRequestId)
-              settleLocalSubmitAck(
-                indeterminateSkill ? 'skill write result indeterminate' : 'command execution failed',
-                { token: submitAckToken, terminal: true },
-              )
-              if (indeterminateSkill) {
-                app.notify('skill write result is indeterminate — do not retry automatically', 'error')
-                return
-              }
-              if (commandHealthRef !== undefined) extensionService?._recordRegistryError(commandHealthRef, error)
-              const message = safeErrorMessage(error)
-              try {
-                ctx.logger.error(`tui-runner: command execution failed: ${message}`)
-              } catch {
-                // The cordis logger must not block the user notice.
-              }
-              app.notify(message, 'error')
-            },
-            // A cancelled command runs NO other sink (runOwned routes
-            // cancellations to onCancel only): without this the ack row
-            // armed at the gesture would pend forever and the handoff pin
-            // would leak (plan D exit enumeration).
-            onCancel: () => {
-              fallbackPin()
-              submitTurn.release()
-              if (cleanedUp) return
-              const draftDisposition = commandDraftDispositionReader?.()
-              if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
-                restoreSubmissionDraft(text)
-              }
-              settleLocalSubmission(submitRequestId)
-              settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
-            },
+          }, {
+            text,
+            toggled,
+            scope,
+            submitRequestId,
+            submitAckToken,
+            generation,
+            localEchoInstalled,
+            wasAdvertisedAtSubmit,
+            parsedName: parsedAtSubmit?.name,
+            submitTurn,
           })
           return
         }
@@ -5670,311 +5371,60 @@ export function apply(ctx: Context, config: Config): void {
     // admission must take the shared FIFO turn rather than letting a later
     // gesture deliver first.
     const steerNow = (text: string, onlyDraft = false, persistHistory?: (sessionId: string | undefined) => void): void => {
-      // The subagent viewer is read-only: steering would send to the
-      // PARENT session. Refuse with a notice and restore the draft.
-      if (viewing !== undefined) {
-        if (text.trim() !== '') app.setEditorText(mergeDraft(app.getDraft(), text))
-        app.notify('viewing a subagent — Esc returns before steering', 'info')
-        return
-      }
-      // Same dismissal rule as submissions: settled local cards are a live
-      // view, not a record (completed `!`/`!!` runs).
-      app.clearSettledLocalMessages()
-      // Ctrl+S gives a payload-bearing draft priority over the queue. With an
-      // empty draft it steers the initial pending next-turn snapshot in FIFO
-      // order. Each queue occurrence is addressed by id through the semantic
-      // writer; a row that disappears or becomes unavailable converges without
-      // replay, and a row added after the snapshot is left for a later gesture.
-      // Nothing to send at all is a no-op BEFORE any session is created
-      // (deferred start).
-      // The payload verdict is computed ONCE here on the SERIALIZED wire
-      // form and passed to steerAll (steer.ts never guesses shell/image
-      // semantics): `!` / `!!` shell modes make a bare prefix a payload,
-      // attachment placeholders make an empty-text draft a payload, whitespace
-      // alone is not.
-      const draftHasPayload = text.trim() !== '' || draftHasAttachments(text, draftImages, draftFiles)
-      // The empty-Ctrl+S gate: nothing to steer is a clean no-op BEFORE
-      // any runOwned / ensureSession work — the deferred-start contract
-      // (an empty Ctrl+S must never create the session). The decision is
-      // the steerHasPayload pure function (headless-pinned).
-      const pendingAgent = agentNow()
-      const pendingForGate = pendingAgent === undefined
-        ? undefined
-        : backend.pendingInputReader.snapshot(pendingAgent.session.id)
-      // An unavailable projection is not an empty queue. Let steerAll report
-      // that stale read unless this is the draft-only policy, which never
-      // depends on queue state.
-      if (pendingForGate !== undefined || agentNow() === undefined || onlyDraft) {
-        if (!steerHasPayload(draftHasPayload, {
-          onlyDraft,
-          queuedCount: pendingForGate === undefined
-            ? 0
-            : pendingForGate.items.filter(item => item.placement === 'queued').length,
-          liveAgent: agentNow() !== undefined,
-        })) {
-          // A parked next-step steering occurrence is not a lost message — the
-          // official contract leaves it in the inbox until the next wake — but
-          // an empty Ctrl+S must not be a SILENT no-op: explain the official
-          // recovery (the next ordinary prompt). This is a pre-flight
-          // explanation only: no runOwned, no submit ack row, and no
-          // prompt/updateQueue/agent.steer. Gate A judges the QUEUE only, so
-          // the parked case is reported here rather than by steerAll. A
-          // non-empty non-payload draft (whitespace) is restored: the editor was
-          // already cleared by the gesture, and nothing was sent.
-          if (pendingForGate !== undefined && hasParkedSteering(pendingForGate)) {
-            if (text !== '') app.setEditorText(mergeDraft(app.getDraft(), text))
-            app.notify(PARKED_STEERING_NOTICE, 'info')
-          }
-          return
-        }
-      }
-      // Local submit acknowledgement (plan D): the row appears NOW, before
-      // the awaited prepare/admission work, so an accepted Ctrl+S is never
-      // a silent editor clear. The TOKEN arms every terminal exit of THIS
-      // workflow.
-      const steerAckToken = acceptLocalSubmitAck()
-      // steerAll owns restoration for queue-level cancellation; keep the
-      // enclosing submit flow from restoring that same draft a second time.
-      let steerRestored = false
-      // Capture the session identity before the first awaited preparation or
-      // deferred-start operation. A later session must never receive this
-      // gesture's prepared input or history row.
-      const submittedAgent = agentNow()
-      const submittedGeneration = ownership.generation()
-      const submittedSubject = ownership.captureSubject()
-      // The steered draft's correlation identity, minted before the first
-      // asynchronous preparation await. An EXISTING session installs its local
-      // steering echo right now (the editor just cleared); a deferred start
-      // installs it once the session materializes below.
-      const steerRequestId = randomUUID()
-      // The delivery mode RESOLVED AT THE GESTURE for the draft prompt: it
-      // drives BOTH the local echo placement and the written mode, so a status
-      // flip while this gesture waits on the submit FIFO can never make the
-      // pending surface disagree with the actual delivery. A deferred start
-      // resolves it once the session materializes, below.
-      let steerDelivery: 'queue' | 'steer' | undefined
-      if ((draftHasPayload || onlyDraft) && submittedAgent !== undefined) {
-        const running = submittedAgent.status === 'running'
-        steerDelivery = running ? 'steer' : 'queue'
-        if (draftHasPayload) {
+      // The submission runtime owns the gesture's pre-flight gate, FIFO turn,
+      // deferred-start persist, admission window and terminal ack/echo/consume
+      // settlement; the runner supplies the narrow TUI hooks.
+      const deps: SteerSubmissionDeps = {
+        isDisposed: () => cleanedUp,
+        isViewing: () => viewing !== undefined,
+        currentAgent: () => agentNow() as unknown as SteerSubmissionAgent | undefined,
+        currentGeneration: () => ownership.generation(),
+        captureOwnerToken: () => ownership.captureSubject(),
+        isOwnerTokenCurrent: (token) => captureMatches(token as SessionSubject | undefined),
+        readPendingInput: (sessionId) => backend.pendingInputReader.snapshot(sessionId),
+        draftHasAttachments: (value) => draftHasAttachments(value, draftImages, draftFiles),
+        draftHasImages: (value) => draftHasImages(value, draftImages),
+        clearSettledLocalMessages: () => app.clearSettledLocalMessages(),
+        mergeDraftIntoEditor: (value) => {
+          const merged = mergeDraft(app.getDraft(), value)
+          app.setEditorText(merged)
+          return merged === value
+        },
+        notify: (message, kind) => {
+          if (cleanedUp) return
+          app.notify(message, kind)
+        },
+        acceptSubmitAck: () => acceptLocalSubmitAck(),
+        settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
+        settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
+        beginLocalSteerEcho: ({ requestId, text: echoText, running, sessionId, generation, ackToken }) => {
           beginLocalSubmission(
-            steerRequestId,
-            text,
-            submissionPlacement(steerDelivery, running),
-            submittedAgent.session.id,
-            submittedGeneration,
-            steerAckToken,
+            requestId,
+            echoText,
+            submissionPlacement(running ? 'steer' : 'queue', running),
+            sessionId,
+            generation,
+            ackToken,
           )
-        }
-      }
-      const submitTurn = takeSubmitTurn()
-      // An owned workflow: the send's outcome drives the draft restore and
-      // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
-      // referenced drafts SYNCHRONOUSLY (same call stack that left the
-      // editor — review finding): sessionRuntime.ensureSession() is async on a deferred
-      // start, and no await may precede the reservation.
-      // The submit-flow core owns the ordering contract (shared with the
-      // integration tests).
-      runOwned('steer', () => runReservedSubmit({
-        reserve: (t) => {
-          try {
-            const releasePin = pinDraftAttachments(t, draftImages, draftFiles)
-            return () => {
-              try {
-                releasePin()
-              } finally {
-                submitTurn.release()
-              }
-            }
-          } catch (error) {
-            submitTurn.release()
-            throw error
-          }
         },
-        run: async () => {
-          await submitTurn.wait
-          if (cleanedUp) return
-        // The deferred-start gate (history-persist.ts): the steered
-        // draft's history row is written AFTER the session exists, with
-        // the FINAL session id — Ctrl+S on a deferred start creates the
-        // session here, and a row written before creation would carry no
-        // sessionId and vanish from the Ctrl+R `Current session` scope.
-        // A rejected creation persists nothing (the steer never reached
-        // a session).
-        await persistAfterSession(
-          async () => {
-            await sessionRuntime.ensureSession()
-            if (cleanedUp) return undefined
-            if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return undefined
-            return agentNow()?.session.id
-          },
-          (sessionId) => {
-            if (cleanedUp) return
-            if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return
-            persistHistory?.(sessionId)
-          },
-        )
-        if (cleanedUp) return
-        if (submittedAgent !== undefined && !captureMatches(submittedSubject)) {
-          const merged = mergeDraft(app.getDraft(), text)
-          app.setEditorText(merged)
-          settleLocalSubmission(steerRequestId)
-          settleLocalSubmitAck('steer stale', { token: steerAckToken, terminal: true })
-          app.notify(merged === text
-            ? 'the session changed while sending — try again'
-            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-          return
-        }
-        const steerAgent = agentNow()
-        if (steerAgent === undefined) {
-          // Nothing can be sent (degraded resolve after a successful
-          // creation): the ack row must not outlive the submission.
-          settleLocalSubmission(steerRequestId)
-          settleLocalSubmitAck('steer resolved without an agent', { token: steerAckToken, terminal: true })
-          return
-        }
-        // For an existing session this is the identity captured before the
-        // first await; for deferred start it is captured immediately after
-        // creation and before message admission.
-        const agentForSteer = submittedAgent ?? steerAgent
-        const generationForSteer = submittedAgent === undefined ? ownership.generation() : submittedGeneration
-        const steerSubject = submittedAgent === undefined ? ownership.captureSubject() : submittedSubject
-        // A deferred start now has its session identity: resolve the gesture's
-        // delivery mode and install the local echo before the async admission
-        // await.
-        if (submittedAgent === undefined && (draftHasPayload || onlyDraft)) {
-          const running = agentForSteer.status === 'running'
-          steerDelivery = running ? 'steer' : 'queue'
-          if (draftHasPayload) {
-            beginLocalSubmission(
-              steerRequestId,
-              text,
-              submissionPlacement(steerDelivery, running),
-              agentForSteer.session.id,
-              generationForSteer,
-              steerAckToken,
-            )
-          }
-        }
-        // The draft message is prepared BEFORE the send: admission is
-        // async I/O, and the prepared message is exactly what the send
-        // delivers (§13).
-        const admission = await directRuntime.withPromptAdmission(
-          agentForSteer,
-          draftHasImages(text, draftImages),
-          async (): Promise<
-            | { readonly kind: 'stale' }
-            | { readonly kind: 'delivered'; readonly outcome: Awaited<ReturnType<typeof steerAll>> }
-          > => {
-        const prepared = await prepareUserMessage(text, draftImages, submitDeps, { requestId: steerRequestId })
-        if (cleanedUp) return { kind: 'stale' }
-        // Re-check the identity after async admission, before entering the
-        // writer barrier. A session switch during preparation must restore
-        // the original draft instead of retargeting the new session.
-        if (!captureMatches(steerSubject)) {
-          const merged = mergeDraft(app.getDraft(), text)
-          app.setEditorText(merged)
-          settleLocalSubmission(steerRequestId)
-          settleLocalSubmitAck('steer stale', { token: steerAckToken, terminal: true })
-          app.notify(merged === text
-            ? 'the session changed while sending — try again'
-            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-          return { kind: 'stale' }
-        }
-        // T1 BEFORE the dispatch: the steer is being invoked, and any
-        // synchronously-emitted event from the delivery must never log
-        // ahead of it. The ACK ROW keeps waiting for the authoritative
-        // event (plan D).
-        submitLatencyTracker.mark(agentForSteer.session.id, 'dispatch')
-        // The whole send (snapshot → re-validate → confirm-and-send) lives
-        // in steer.ts so the races are testable: a queue splice or session
-        // switch while the delivery is in flight aborts with a retry notice
-        // instead of losing messages.
-        const outcome = await steerAll({
-          currentAgent: () => cleanedUp ? undefined : agentForSteer as unknown as SteerAgentLike,
-          currentGeneration: () => generationForSteer,
-          notify: (message, kind) => {
-            if (cleanedUp) return
-            app.notify(message, kind)
-          },
-          restoreDraft: (draft) => {
-            if (cleanedUp) return false
-            const merged = mergeDraft(app.getDraft(), draft)
-            app.setEditorText(merged)
-            steerRestored = true
-            return merged === draft
-          },
-          // The session-transition write fence: while a transition is in
-          // flight (quiesce → commit) the old agent may be woken again —
-          // a steer in that window would target a session that is about
-          // to be retired (the two-writers race, review round 4).
-          fence: () => ownership.gate.busy || cleanedUp,
-          writerSection: submissionWriterSection,
-          fenceNotice: () => 'a session transition is in progress — try again in a moment',
-          createDraft: () => prepared,
-          staleNotice: () => 'the queue or session changed while sending — try again',
-          mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
-          pendingInputReader: backend.pendingInputReader,
-          // The FINAL delivery goes through the session WRITE port: the
-          // Direct fence/barrier orchestration above stays in the runner,
-          // the port delivers prompts and official queue mutations.
-          writer: backend.sessionWriter,
-        },
-        text,
-        onlyDraft ? { onlyDraft: true, draftHasPayload, draftDelivery: steerDelivery } : { draftHasPayload, draftDelivery: steerDelivery },
-      )
-        return { kind: 'delivered', outcome }
-        })
-        if (admission.kind === 'stale') return
-        const outcome = admission.outcome
-        if (cleanedUp) return
-        // Only a successful send consumes the drafts: on block/stale the
-        // draft was restored and the images are still referenced — removing
-        // would orphan the placeholders (§14). The consumption is
-        // per-reference, so a concurrent intake's newer draft survives
-        // (round-5 finding 1).
-        if (outcome === 'ok') {
-          consumeDraftAttachments(text, draftImages, draftFiles)
-          // The write landed; T1 was stamped BEFORE the dispatch call. The
-          // ACK ROW keeps waiting for the authoritative event (plan D).
-        }
-        // Only a NON-delivered steer settles the ack row here: 'ok' waits
-        // for the authoritative inbox event (plan D — an event, a failure
-        // or a session switch ends the wait, never the delivery itself);
-        // 'stale' wrote nothing and restored the draft, so the row must
-        // not linger (a retry re-accepts). The local echo follows the same
-        // rule: a failed delivery removes it, a committed one waits for its
-        // authoritative rpc-correlated replacement.
-        if (outcome !== 'ok') {
-          settleLocalSubmission(steerRequestId)
-          settleLocalSubmitAck(`steer ${outcome}`, { token: steerAckToken, terminal: true })
-        }
-        },
-        restore: (t) => {
-          if (!steerRestored) restoreSubmissionDraft(t)
-        },
-      }, text), {
+        takeSubmitTurn,
+        pinDraftAttachments: (value) => pinDraftAttachments(value, draftImages, draftFiles),
+        persistAfterSession,
+        ensureSession: () => sessionRuntime.ensureSession(),
+        withPromptAdmission: (agent, hasImages, task) =>
+          directRuntime.withPromptAdmission(agent as unknown as Agent, hasImages, task),
+        prepareMessage: (value, requestId) => prepareUserMessage(value, draftImages, submitDeps, { requestId }),
+        markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
+        restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
+        notifySubmissionFailure: (error) => notifySubmissionFailure(error),
+        consumeDraftAttachments: (value) => consumeDraftAttachments(value, draftImages, draftFiles),
+        writerSection: submissionWriterSection,
+        pendingInputReader: backend.pendingInputReader,
+        writer: backend.sessionWriter,
         diag,
-        sessionId: () => agentNow()?.session.id,
-        // The flow restored the editor; this sink settles the gesture's
-        // ack (token-scoped) and only notifies.
-        onError: (error) => {
-          if (cleanedUp) return
-          settleLocalSubmission(steerRequestId)
-          settleLocalSubmitAck('failure', { token: steerAckToken, terminal: true })
-          notifySubmissionFailure(error)
-        },
-        // runOwned routes cancellations EXCLUSIVELY to onCancel: a
-        // cancelled deferred create / image admission / barrier write
-        // bypasses onError, so the ack row armed at the gesture must be
-        // terminated HERE (the flow already restored the draft — plan D
-        // exit enumeration).
-        onCancel: () => {
-          if (cleanedUp) return
-          settleLocalSubmission(steerRequestId)
-          settleLocalSubmitAck('steer cancelled', { token: steerAckToken, terminal: true })
-        },
-      })
+      }
+      if (onlyDraft) deliverBusy(deps, { text, persistHistory })
+      else steer(deps, { text, persistHistory })
     }
     /**
      * The newest input-history entry this process persisted (kimi's
@@ -6998,275 +6448,62 @@ export function apply(ctx: Context, config: Config): void {
       // into the editor draft. The gesture is disabled in every viewer so it
       // cannot mutate a hidden main or child queue.
       onDequeue: () => {
-        const queuedAgent = agentNow()
-        if (cleanedUp || viewing !== undefined || queuedAgent === undefined) return
-        const queuedSubject = ownership.captureSubject()
-        // The scope-bound writer admission for the pull-back removals: ONE
-        // atomic capture with the subject fence above.
-        const queuedScope = requireLiveScope()
-        const pending = backend.pendingInputReader.snapshot(queuedAgent.session.id)
-        if (pending === undefined) return
-        const queued = pending.items
-          .filter(item => item.placement === 'queued')
-          .map(queueInboxMessageOf)
-        if (queued.length === 0) return
-        // Multimodal queued messages (durable ImageBlocks) ARE pullable:
-        // each image block becomes a RECALLED draft — a placeholder that
-        // reuses the already-durable ImageAttachmentRef, so re-submitting
-        // never re-uploads the bytes. The queue is spliced ONLY after the
-        // drafts are staged (a failure keeps the queue intact).
-        let recalledText = ''
-        const staged: { kind: 'image' | 'file'; id: number }[] = []
-        const recalledEntries: { text: string; staged: { kind: 'image' | 'file'; id: number }[] }[] = []
-        try {
-          const lines: string[] = []
-          for (const message of queued) {
-            const messageStaged: { kind: 'image' | 'file'; id: number }[] = []
-            const parts: string[] = []
-            for (const block of message.content) {
-              if (block.type === 'text') {
-                parts.push(block.text)
-              } else if (block.type === 'image') {
-                const attachment = block.attachment as import('./image/admission.ts').ImageAttachmentRefLike
-                const draft = draftImages.add({
-                  mediaType: attachment.mediaType,
-                  width: attachment.width,
-                  height: attachment.height,
-                  ...(attachment.name !== undefined ? { name: attachment.name } : {}),
-                  source: { type: 'recalled' },
-                  recalledRef: attachment,
-                })
-                staged.push({ kind: 'image', id: draft.id })
-                messageStaged.push({ kind: 'image', id: draft.id })
-                parts.push(draft.placeholder)
-              } else if (block.type === 'file') {
-                const attachment = block.attachment as import('./attachment/file-admission.ts').FileAttachmentRefLike
-                const draft = draftFiles.add({
-                  name: attachment.name,
-                  byteLength: attachment.bytes,
-                  source: { type: 'recalled', ref: attachment },
-                })
-                staged.push({ kind: 'file', id: draft.id })
-                messageStaged.push({ kind: 'file', id: draft.id })
-                parts.push(draft.placeholder)
-              }
-            }
-            const messageText = parts.join('')
-            lines.push(messageText)
-            recalledEntries.push({ text: messageText, staged: messageStaged })
-          }
-          recalledText = lines.join('\n\n')
-        } catch (error) {
-          // The recalled drafts could not be staged (capacity): roll back
-          // the drafts staged so far and keep the queue fully intact —
-          // nothing removed, no capacity leaked (follow-up finding).
-          for (const entry of staged) {
-            if (entry.kind === 'image') draftImages.remove(entry.id)
-            else draftFiles.remove(entry.id)
-          }
-          app.notify(safeErrorMessage(error), 'error')
-          return
-        }
-        // Pin recalled refs before the first async boundary. The editor still
-        // lacks these placeholders until the semantic queue removal commits,
-        // so an attach-time prune must not delete them in the meantime.
-        const releaseRecalled = pinDraftAttachments(recalledText, draftImages, draftFiles)
-        let draftApplied = false
-        let settledRemovals = 0
-        let failureKind: 'transition' | 'stale' | 'indeterminate' | 'cancelled' | undefined
-        const discardStaged = (from = 0): void => {
-          for (const entry of recalledEntries.slice(from)) {
-            for (const attachment of entry.staged) {
-              if (attachment.kind === 'image') draftImages.remove(attachment.id)
-              else draftFiles.remove(attachment.id)
-            }
-          }
-        }
-        let deferredToTransition = false
-        const deferRecalledToTransition = (count: number): void => {
-          discardStaged(count)
-          const restoreText = recalledEntries.slice(0, count).map(entry => entry.text).join('\n\n')
-          submissionRuntime.deferQueueRecall({
-            commit: () => {
-              discardStaged()
-              releaseRecalled()
-            },
-            abort: () => {
-              if (cleanedUp || !captureMatches(queuedSubject)) {
-                discardStaged()
-                releaseRecalled()
-                return
-              }
-              if (restoreText !== '') {
-                const current = app.getDraft()
-                app.setDraft(current === '' ? restoreText : `${restoreText}\n\n${current}`)
-              }
-              refreshPendingInput()
-              releaseRecalled()
-            },
-          })
-          deferredToTransition = true
-        }
-        // Remove each pulled-back occurrence through the official single-item queue mutation,
-        // FIFO admission keeps pending input behind it; confirmed removals are reflected only
-        // after each settlement. The write enters through the submission runtime.
-        runOwned('queue pull-back', () => submissionRuntime.withWriter(queuedScope, async () => {
-          try {
-            if (cleanedUp) {
-              for (const entry of staged) {
-                if (entry.kind === 'image') draftImages.remove(entry.id)
-                else draftFiles.remove(entry.id)
-              }
-              return
-            }
-            if (!captureMatches(queuedSubject)) {
-              discardStaged()
-              app.notify('the session changed while pulling messages back — try again', 'info')
-              return
-            }
-            const outcomes: InterruptWriteOutcome[] = []
-            for (const message of queued) {
-              const next = await backend.sessionWriter.updateQueue(
-                queuedAgent.session.id,
-                message.id,
-                { kind: 'remove' },
-              )
-              outcomes.push(next)
-              if (next.kind !== 'committed') break
-              settledRemovals += 1
-            }
-            const outcome = outcomes[outcomes.length - 1]!
-            const confirmed = recalledEntries.slice(0, settledRemovals)
-            // Final disposal may happen while the semantic removal is in
-            // flight. Leave recalled refs owned by this dead workflow rather
-            // than touching the disposed app; in particular, an indeterminate
-            // removal must never discard the only local representation.
-            if (cleanedUp) return
-            if (ownership.gate.pending || ownership.barrier.inTransition) {
-              const preserveCount = outcome.kind === 'committed' || outcome.kind === 'indeterminate'
-                ? recalledEntries.length
-                : settledRemovals
-              deferRecalledToTransition(preserveCount)
-              return
-            }
-            if (outcome.kind === 'committed') {
-              const current = app.getDraft()
-              app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
-              draftApplied = true
-              refreshPendingInput()
-              return
-            }
-            if (outcome.kind === 'indeterminate') {
-              // Keep the staged recalled refs visible for manual review. The
-              // queue state is unknown, so this must not silently discard the
-              // only local representation or trigger an automatic retry.
-              const current = app.getDraft()
-              app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
-              draftApplied = true
-              app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
-              return
-            }
-            // A known refusal means only the confirmed prefix was removed. Preserve
-            // that prefix in the draft and release staged refs for rows that
-            // remain in the queue; never pretend this was atomic.
-            discardStaged(confirmed.length)
-            const confirmedText = confirmed.map(entry => entry.text).join('\n\n')
-            if (confirmedText !== '') {
-              const current = app.getDraft()
-              app.setDraft(current === '' ? confirmedText : `${confirmedText}\n\n${current}`)
-            }
-            draftApplied = true
-            if (outcome.kind === 'cancelled') throw cancellationError('queue pull-back cancelled')
-            const failure = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
-            app.notify(`queue pull-back stopped after ${confirmed.length} message${confirmed.length === 1 ? '' : 's'}: ${failure}`, 'error')
-            refreshPendingInput()
-          } catch (error) {
-            // Preserve or discard local representations before releasing the
-            // writer barrier. A waiting transition must not overtake this
-            // reconciliation and prune/cross-session the recalled draft.
-            if (cleanedUp) {
-              discardStaged()
-              throw error
-            }
-            if (ownership.gate.pending || ownership.barrier.inTransition) {
-              if (!draftApplied) {
-                deferRecalledToTransition(isCancellation(error) ? settledRemovals : recalledEntries.length)
-              }
-              failureKind = 'transition'
-              throw error
-            }
-            if (draftApplied) throw error
-            if (error instanceof TransitionInProgressError) {
-              discardStaged()
-              failureKind = 'transition'
-              throw error
-            }
-            if (!captureMatches(queuedSubject)) {
-              discardStaged()
-              failureKind = 'stale'
-              throw error
-            }
-            if (isCancellation(error)) {
-              discardStaged(settledRemovals)
-              const confirmedText = recalledEntries.slice(0, settledRemovals).map(entry => entry.text).join('\n\n')
-              if (confirmedText !== '') {
-                const current = app.getDraft()
-                app.setDraft(current === '' ? confirmedText : `${confirmedText}\n\n${current}`)
-              }
-              draftApplied = true
-              failureKind = 'cancelled'
-              throw error
-            }
-            const current = app.getDraft()
-            app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
-            draftApplied = true
-            failureKind = 'indeterminate'
-            throw error
-          } finally {
-            // Release the pin while the writer still owns the barrier. The
-            // outer finally is idempotent and only covers pre-entry refusal.
-            if (!deferredToTransition) releaseRecalled()
-          }
-        }).catch(error => {
-          // A pre-entry refusal never enters the callback above, so its staged
-          // representation is reconciled by this outer catch only. A frozen
-          // transition and a superseded capture are DIFFERENT refusals: the stale
-          // one must drop the staged attachments and report the stale notice,
-          // never the transition one. (Defensive: this span is currently
-          // synchronous, so only the transition lands here today.)
-          if (error instanceof TransitionInProgressError) {
-            discardStaged()
-            failureKind = 'transition'
-          } else if (error instanceof SessionScopeSupersededError) {
-            discardStaged()
-            failureKind = 'stale'
-          }
-          throw error
-        }).finally(() => {
-          if (!deferredToTransition) releaseRecalled()
-        }), {
+        // Alt+↑: on the main surface, run the TUI-only recall-all extension:
+        // remove every semantic `queued` occurrence and pull its content back
+        // into the editor draft. The gesture is disabled in every viewer so it
+        // cannot mutate a hidden main or child queue. The submission runtime
+        // owns the ordered removal + recalled-draft settlement; the runner
+        // supplies the narrow queue/TUI hooks.
+        pullBackQueue({
+          isDisposed: () => cleanedUp,
+          isViewing: () => viewing !== undefined,
+          currentAgent: () => agentNow(),
+          captureOwnerToken: () => ownership.captureSubject(),
+          isOwnerTokenCurrent: (token) => captureMatches(token as SessionSubject | undefined),
+          requireLiveScope,
+          readPullableQueue: (sessionId) => {
+            const pending = backend.pendingInputReader.snapshot(sessionId)
+            if (pending === undefined) return undefined
+            return pending.items
+              .filter(item => item.placement === 'queued')
+              .map(queueInboxMessageOf)
+          },
+          isTransitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
+          withWriter: (scope, task) => submissionRuntime.withWriter(scope, task),
+          updateQueue: (sessionId, messageId, operation) =>
+            backend.sessionWriter.updateQueue(sessionId, messageId, operation),
+          deferQueueRecall: (recall) => submissionRuntime.deferQueueRecall(recall),
+          stageRecalledImage: (attachment) => {
+            const ref = attachment as import('./image/admission.ts').ImageAttachmentRefLike
+            const draft = draftImages.add({
+              mediaType: ref.mediaType,
+              width: ref.width,
+              height: ref.height,
+              ...(ref.name !== undefined ? { name: ref.name } : {}),
+              source: { type: 'recalled' },
+              recalledRef: ref,
+            })
+            return { id: draft.id, placeholder: draft.placeholder }
+          },
+          stageRecalledFile: (attachment) => {
+            const ref = attachment as import('./attachment/file-admission.ts').FileAttachmentRefLike
+            const draft = draftFiles.add({
+              name: ref.name,
+              byteLength: ref.bytes,
+              source: { type: 'recalled', ref },
+            })
+            return { id: draft.id, placeholder: draft.placeholder }
+          },
+          discardStagedDraft: (kind, id) => {
+            if (kind === 'image') draftImages.remove(id)
+            else draftFiles.remove(id)
+          },
+          pinRecalledDrafts: (text) => pinDraftAttachments(text, draftImages, draftFiles),
+          readDraft: () => app.getDraft(),
+          writeDraft: (text) => app.setDraft(text),
+          notify: (message, kind) => app.notify(message, kind),
+          refreshPendingInput,
           diag,
-          sessionId: () => agentNow()?.session.id,
-          onError: (_error) => {
-            if (cleanedUp) return
-            if (failureKind === 'transition') {
-              app.notify('a session transition is in progress — try again in a moment', 'info')
-              return
-            }
-            if (failureKind === 'stale') {
-              app.notify('the session changed while pulling messages back — try again', 'info')
-              return
-            }
-            if (failureKind === 'indeterminate') {
-              app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
-              return
-            }
-            if (draftApplied || failureKind === 'cancelled') return
-            app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
-          },
-          onCancel: () => {
-            if (cleanedUp || draftApplied || failureKind !== undefined) return
-          },
         })
       },
       // ↓ with an empty editor: the Quick Tasks browser. Task Center
