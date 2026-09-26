@@ -131,6 +131,11 @@ extension-facing contract.
 - **Context presentation does not rewrite model input.** Keep model-facing bytes
   untouched; render parsed skill/system envelopes, never raw XML. See
   `test/rendering.test.ts`.
+- **Prove lifecycle invariants with a probe, not with intuition.** For
+  generation/lease, proxy-receiver, attachment and teardown-idempotence changes,
+  confirm the real numbers and identities (a targeted probe or test) instead of
+  reasoning from the code alone — this repository has had a double
+  `markAttachment()` inflate a generation. See `docs/concurrency.md`.
 
 ## Development
 
@@ -144,6 +149,22 @@ pnpm test
 
 Use the smallest relevant validation for the current change. Prefer targeted
 tests first; do not run expensive compatibility suites mechanically.
+
+Validation mechanics for this toolchain:
+
+* `packages/pi-tui/dist` is a build INPUT to the root bundle and to the tests:
+  run `pnpm build` before testing anything that depends on the fork, and never
+  run a build and an artifact-dependent test or gate at the same time.
+* Some bundle paths run under Node's strip-only TypeScript loader: new `src/**`
+  files must not use TypeScript parameter properties
+  (`constructor(private readonly x: T) {}`) — assign explicit fields instead.
+* `scripts/client-boundary-gate.mjs` counts a Host package import even when it is
+  TYPE-ONLY (`@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session`). Prefer a
+  local structural type or the owning port's type; see
+  `docs/client-server-coupling.md`.
+* Extending a shared interface (e.g. `TuiCommandRunner`, `TuiSettingsDoc`) also
+  reaches its test fakes and literal builders: update them with the change and
+  let `pnpm typecheck:bundle` enumerate the remainder.
 
 When entering a development worktree:
 
