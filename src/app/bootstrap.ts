@@ -63,6 +63,7 @@ import { createStatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
+import { createCommandSurface } from './command/surface.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
@@ -86,7 +87,7 @@ import { isEmptyAcceleratedViewerSubmit, type TuiApp, type TuiAppEvents } from '
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
 import { type ViewerAccess } from '../tasks-browser.ts'
 import type { ComposerSubmitRequest } from '../tui-app.ts'
-import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../commands.ts'
+import { isIndeterminateSkillWrite, resolveComposerDelivery, type CommandRegistryLike, type SubmitDelivery, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from '../detached.ts'
 import { historyFilePath } from '../history.ts'
@@ -123,15 +124,13 @@ import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
-import { SupersededReadError } from '../runtime/read-error.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
 import type { HostCommandOutcome } from '../runtime/host-command-port.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, type ShellSubmitAgentLike } from '../shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_DISK_CAP_BYTES } from '../bounded-output.ts'
 import { parseShellWords } from '../shell-words.ts'
-import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from '../skill-catalog-refresh.ts'
-import { commandSummaryOf, readSurfaceCatalog, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
+import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import { collectRewindCandidates, rewindPickerItem } from '../rewind.ts'
 import { type RewindLiveIdentity } from '../session-fork.ts'
@@ -140,7 +139,7 @@ import { PendingSubmissions, type PendingSubmissionPlacement } from '../pending-
 import { DirectSubmissionPresentation, type SubmissionPresentationSource } from '../submission-presentation.ts'
 import { SubmitLatencyTracker } from '../submit-latency.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
-import { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from '../command-policy.ts'
+import { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from '../command-policy.ts'
 import { interruptAgent } from '../interrupt.ts'
 import { viewerActionCapability } from '../subagent-viewer.ts'
 import { resolveInitialCatalog } from '../surface-catalog.ts'
@@ -548,7 +547,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         refreshLiveCatalog: (owner) => {
           const agent = directAgentOfOwner(owner)
           if (agent === undefined) throw new Error('refreshLiveCatalog requires a Direct owner attachment')
-          return refreshLiveCatalog(agent)
+          return command.refreshLiveCatalog(agent)
         },
         reportSwitch: (from, to) => {
           const agent = directAgentOfOwner(to)
@@ -913,7 +912,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         records: (cwd) => history.records(cwd),
         setLastContent: (content) => history.setLastContent(content),
       },
-      commands: { register: () => registerCommands({ snapshot: initialSnapshot, skills: initialSkills }) },
+      commands: { register: () => command.register({ snapshot: initialSnapshot, skills: initialSkills }) },
       submission: { clearPending: () => pendingSubmissions.clear() },
       viewer: {
         resetAutoPop: () => viewerRef?.resetAutoPop(),
@@ -953,6 +952,28 @@ export function applyRunner(ctx: Context, config: Config): void {
     // Footer state: model label, cwd, git branch, turn/step counters, and
     // the stats line (LLM timing, tokens, context pressure).
     const cwd = process.cwd()
+    // A5b-3b: the command authority/state machine (claims, catalog coordinator,
+    // skills/change coalescing, registration and the exact-Agent admission
+    // helpers). Constructed before the surface cleanup closure can run; the
+    // TuiCommandRunner facade it registers is late-bound (assembled below).
+    const command = createCommandSurface<Agent>({
+      ctx,
+      diag,
+      signal: lifecycleController.signal,
+      app: () => app,
+      liveAgent: () => agentNow(),
+      sessionScope,
+      ownership,
+      commandsRegistry: () => ctx.get('commands'),
+      catalog: backend.catalog,
+      launchPreset,
+      pendingPreset: () => pendingPreset,
+      clientCwd: process.cwd(),
+      runner: () => runner,
+      // The exact-Agent mapping the semantic catalog port needs; the Direct
+      // knowledge stays here in the composition root.
+      toCatalogAgent: (agent) => agent,
+    })
     // A5b-2: the surface status owner (footer/status derivation, the context
     // measurement cache and its deferred initial measure). The Direct facts and
     // the official Host service values arrive as narrow capabilities; the
@@ -1136,15 +1157,6 @@ export function applyRunner(ctx: Context, config: Config): void {
     // 0600 temp files holding FULL local-shell output (for truncated runs);
     // removed at TUI exit (default), never on their own.
     const shellTempFiles = new Set<string>()
-    // M2: the plugin keybinding-sync unsubscribe slot is A4-5 surface-owned
-    // (`surface.bindPluginKeybinds` / `surface.dispose`); the runner no longer
-    // holds it.
-    // The catalog refresh coordinator: the ONE post-mount refresh owner
-    // (first session, switches, /preset, /reload). Declared here (before
-    // cleanup) for the same TDZ guard — cleanup disposes it, and a
-    // mid-startup HMR unload must never reference it while it is still in
-    // the temporal dead zone; it is assigned during command registration.
-    let catalogCoordinator: CatalogRefreshCoordinator | undefined
     // Idempotent CLIENT-SURFACE teardown: abort lifecycle loads, stop the
     // TUI. Shared by /exit, the effect cleanup, and the startup-failure
     // path. The Direct owned-session retirement is a SEPARATE step
@@ -1173,7 +1185,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       draftFiles.clear()
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
-      catalogCoordinator?.dispose()
+      command.disposeCatalog()
       // Release the Plugin Manager install-event subscription at its original
       // EARLY position (a late install event must never notify/repaint a dying
       // surface). The subscription is surface-owned (A4-5).
@@ -1731,7 +1743,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       if (!draftHasAttachments(draft, draftImages, draftFiles)) return undefined
       if (skillInvocation) return undefined
       if (!isLocal) {
-        const claim = hostClaimOf?.(parsed)
+        const claim = command.hostClaimOf(parsed)
         if (claim?.claimed === true) {
           if (claim.attachments !== true) {
             return `/${parsed.name} does not accept attachments; remove them first`
@@ -2110,13 +2122,13 @@ export function applyRunner(ctx: Context, config: Config): void {
       // never a plain model message. It is only consumed for a line the
       // command plane actually OWNS at invocation time (`planeAdvertised`).
       const wasAdvertisedAtSubmit = parsedAtSubmit !== undefined
-        && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
+        && command.wasAdvertisedClaim(parsedAtSubmit.name) === true
       // The host catalog's view of the line at SUBMIT time, captured before any
       // session creation: a line it already knew to be a NON-invocation (an
       // argued line of an execute-kind command) stays one — no later catalog
       // change may turn it into an invocation except the final catalog
       // actually CLAIMING it.
-      const submitView = parsedAtSubmit === undefined ? undefined : hostClaimOf?.(parsedAtSubmit)
+      const submitView = parsedAtSubmit === undefined ? undefined : command.hostClaimOf(parsedAtSubmit)
       // Whether this line is an ordinary agent-facing prompt (never a Host
       // command, a TUI-local control, or a skill invocation) at submit time.
       // Such a line installs its local echo SYNCHRONOUSLY, before the FIFO
@@ -2135,7 +2147,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
         || (submitView?.claimed !== true
           && !LOCAL_COMMANDS.has(parsedAtSubmit.name)
-          && isSkillWrapperName?.(parsedAtSubmit.name) !== true)
+          && command.isSkillWrapperName(parsedAtSubmit.name) !== true)
       // Install the echo NOW for a known ordinary prompt on an existing
       // session — before the FIFO turn and the asynchronous admission. A
       // deferred start installs after the session materializes, below.
@@ -2175,8 +2187,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       const commandPlaneOwnsLine = (): boolean => {
         if (parsedAtSubmit === undefined) return true
         if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true
-        if (isSkillWrapperName?.(parsedAtSubmit.name) === true) return true
-        const finalView = hostClaimOf?.(parsedAtSubmit)
+        if (command.isSkillWrapperName(parsedAtSubmit.name) === true) return true
+        const finalView = command.hostClaimOf(parsedAtSubmit)
         // A resolved final catalog answers for itself (claimed = the plane
         // runs the command; unclaimed = an ordinary submission).
         if (finalView !== undefined) return finalView.claimed
@@ -2355,26 +2367,26 @@ export function applyRunner(ctx: Context, config: Config): void {
                 text,
                 commandIsLocalForAttachments(
                   parsed,
-                  isSkillWrapperName,
+                  command.isSkillWrapperName,
                   // The dynamic (client contribution) term is STICKY to the
                   // submit-time route.
                   n => clientLocalAtSubmit && (extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false),
                   // STICKY SUBMIT-TIME AUTHORITY: once the host catalog RESOLVED
                   // this name, the name is host territory for the lifetime of the
                   // submission.
-                  line => hostClaimOf?.(line) ?? submitView,
+                  line => command.hostClaimOf(line) ?? submitView,
                 ),
-                isSkillInvocation(parsed, text),
+                command.isSkillInvocation(parsed, text),
               )
             },
             commandSubmitAttachments: (value) => commandSubmitAttachments(value),
             isTuiOwnedCommand: () => parsedAtSubmit !== undefined
-              && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || isSkillWrapperName?.(parsedAtSubmit.name) === true),
+              && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || command.isSkillWrapperName(parsedAtSubmit.name) === true),
             commandPlaneOwnsLine,
-            submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : hostClaimOf?.(parsedAtSubmit),
+            submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : command.hostClaimOf(parsedAtSubmit),
             commandSignal: () => signal,
             invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
-              withCommandDelivery(delivery, () => {
+              command.withCommandDelivery(delivery, () => {
                 if (!commandPlaneLine || parsedAtSubmit === undefined) {
                   return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
                 }
@@ -2415,7 +2427,7 @@ export function applyRunner(ctx: Context, config: Config): void {
               extensionService?._clearRegistryError(ref as { slot: string; id: string; owner: string }),
             recordCommandHealthError: (ref, error) =>
               extensionService?._recordRegistryError(ref as { slot: string; id: string; owner: string }, error),
-            readCommandDraftDisposition: (commandId) => takeCommandDraftDisposition?.(commandId),
+            readCommandDraftDisposition: (commandId) => command.takeCommandDraftDisposition(commandId),
             shouldConsumeAdvertisedMiss,
             isIndeterminateSkillWrite: (error) => isIndeterminateSkillWrite(error),
             startArtifactSave: (name) => startArtifactSave(name, agent),
@@ -2681,21 +2693,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       }
     }
     /**
-     * Whether one submission is a TUI-owned skill invocation: a LIVE skill
-     * wrapper, or the explicit `/skill <name>` form. Skill delivery belongs
-     * to loadSkill in BOTH modes — it builds the normalized `/name` line,
-     * steers or queues it with the resolved mode, and injects the body
-     * whenever the host's dsh-tool-skill pre-step does not (a composition
-     * without that loader). A bare steered line would silently skip the
-     * skill body, and a missing skill registry is reported there too.
-     * @param parsed - the parsed slash command, undefined for a plain prompt.
-     * @param text - the submitted line.
-     */
-    const isSkillInvocation = (parsed: { name: string } | undefined, text: string): boolean =>
-      parsed !== undefined && (parsed.name === 'skill'
-        ? normalizeSkillInvocation(text) !== undefined
-        : isSkillWrapperName?.(parsed.name) === true)
-    /**
      * Dispatch one user submission end to end: the viewer guard, the input-
      * history persistence, `!` local shells, sessionless commands, the
      * busy-Enter policy, and the session dispatch. The delivery mode is
@@ -2869,7 +2866,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // catalog RESOLVES is host territory even when it does not claim this
       // line: `/compact extra` is an ordinary submission, never a same-named
       // client contribution's.
-      const hostView = parsed === undefined ? undefined : hostClaimOf?.(parsed)
+      const hostView = parsed === undefined ? undefined : command.hostClaimOf(parsed)
       // Command semantics matrix (plan §19.3): slash commands are not LLM
       // prompts — an image-bearing command line is REJECTED explicitly
       // (never a silent drop, never a stray placeholder sent to the model).
@@ -2890,11 +2887,11 @@ export function applyRunner(ctx: Context, config: Config): void {
           text,
           commandIsLocalForAttachments(
             parsed,
-            isSkillWrapperName,
+            command.isSkillWrapperName,
             n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
-            hostClaimOf,
+            command.hostClaimOf,
           ),
-          isSkillInvocation(parsed, text),
+          command.isSkillInvocation(parsed, text),
         )
         if (refusal !== undefined) {
           app.setEditorText(mergeDraft(app.getDraft(), text))
@@ -2956,7 +2953,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // catalog loaded).
       const contribution = parsed === undefined
         || !isBareCommandLine(parsed)
-        || isSkillWrapperName?.(parsed.name) === true
+        || command.isSkillWrapperName(parsed.name) === true
         // A name the host catalog RESOLVES is host territory even when it does
         // not claim THIS line: the line is an ordinary submission, so a
         // same-named contribution — reachable only in the failed-source
@@ -2997,7 +2994,7 @@ export function applyRunner(ctx: Context, config: Config): void {
             // reach this branch.) The delivery resolved before the session
             // existed, so it is a queue-mode submission: `dispatchViaSession`
             // delivers the line itself.
-            if (hostClaimOf?.(parsed) !== undefined || isSkillWrapperName?.(parsed.name) === true) {
+            if (command.hostClaimOf(parsed) !== undefined || command.isSkillWrapperName(parsed.name) === true) {
               dispatchViaSession(text, persistHistory, delivery)
               return
             }
@@ -3058,7 +3055,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         // Image placeholders ride the line untouched; the history row is
         // written by the dispatch AFTER the session exists (the
         // deferred-start gate), with the FINAL session id.
-        if (isSkillInvocation(parsed, text)) {
+        if (command.isSkillInvocation(parsed, text)) {
           dispatchViaSession(text, persistHistory, delivery)
           return
         }
@@ -3747,7 +3744,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // attach composition is surface-owned; the runner supplies only the
     // late-bound command-completion refresh (a client command contribution may
     // join the `/` menu after mount).
-    surface.attachSurfaceSeams({ refreshCommandCompletions: () => refreshCommandCompletions?.() })
+    surface.attachSurfaceSeams({ refreshCommandCompletions: () => command.refreshCompletions() })
     // (new installs default to 'on' — alt screen by default): boot applies
     // it FIRST so the alt screen owns the terminal input handler before any
     // theme query below targets "the active screen" — a query sent while the
@@ -3985,99 +3982,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       isCleanedUp: () => cleanedUp,
     })
     surface.refreshPendingInput()
-    // The TUI-owned slash commands live on the commands service's global
-    // layer, which needs no agent — register them up front so the whole
-    // surface (including Tab completion) works before the first session
-    // exists. Session-backed handlers call runner.ensureSession() first;
-    // `refreshSkills` rebuilds the agent-scoped per-skill commands once a
-    // session becomes live.
-    let commandsRegistered = false
-    /** The claim test installed by registerTuiCommands: is a slash name
-     * advertised by the CURRENT completion list? The dispatch captures it
-     * BEFORE any session creation (see dispatchViaSession). */
-    let wasAdvertisedClaim: ((name: string) => boolean) | undefined
-    /** The claim test installed by registerTuiCommands: does the CURRENT
-     * effective host catalog claim THIS LINE (and does the claiming
-     * descriptor declare `input.attachments`)? The dispatch consults it
-     * BEFORE the busy queue/steer policy and for every attachment decision
-     * (PR115-fix problem 1). */
-    let hostClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
-    /** The skill-wrapper test installed by registerTuiCommands: is a slash
-     * name a LIVE TUI-owned skill wrapper? The steer path consults it to
-     * decide whether a composition without the host skill-body loader must
-     * deliver through loadSkill instead of steering a bare line. */
-    let isSkillWrapperName: ((name: string) => boolean) | undefined
-    /** The completion re-synthesis installed by registerTuiCommands: a late
-     * CLIENT command contribution must join the `/` menu without waiting for
-     * a session refresh (the extension-invalidate hook calls it). */
-    let refreshCommandCompletions: (() => void) | undefined
-    /** The delivery binding installed by registerTuiCommands: bind one
-     * submission's resolved queue/steer mode for the synchronous window that
-     * launches a command execution (the TUI skill handlers consume it).
-     * Before the command surface is wired nothing can consume a binding, so
-     * the unwired default simply runs the launch. */
-    let withCommandDelivery = <T>(_delivery: SubmitDelivery, run: () => T): T => run()
-    /** Consume TUI-local command draft dispositions after DSH normalizes the
-     * public CommandResult. A missing id is used only for a thrown command
-     * execution, which cannot return its generated id to this sink. */
-    let takeCommandDraftDisposition: ((commandId?: string) => 'restored' | 'suppressed' | undefined) | undefined
-    /** The catalog refresh coordinator: the ONE post-mount refresh owner
-     * (first session, switches, /preset, /reload). Built inside
-     * registerCommands once the surface hooks exist. (Declared before
-     * cleanup — see the hoisted slot above.) */
-    let catalogRefreshRequest: ((request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>) | undefined
-    /** `skills/change` coalescing: bursts of invalidation notifications cost
-     * at most two reads, and the follow-up re-read observes the CURRENT
-     * ownership (live agent vs standing preset). */
-    let skillsChangeSubscribed = false
-    const skillsChangeGate = new CoalescingRefreshGate(() => {
-      runOwned('skills/change refresh', async () => {
-        const refresh = catalogRefreshRequest
-        if (refresh === undefined) return undefined
-        const target = agentNow() === undefined
-          ? { kind: 'preset', presetId: pendingPreset ?? launchPreset } as const
-          : { kind: 'agent', key: ownership.generation() } as const
-        return refresh({
-          source: 'invalidation',
-          target,
-          ...target.kind === 'agent' ? { agent: agentNow() } : {},
-        })
-      }, {
-        diag,
-        sessionId: () => agentNow()?.session.id,
-        onResult: (outcome) => {
-          // NOTIFY BEFORE settled(): if app.notify throws, runOwned routes
-          // to onError, whose settled() is then the ONLY settle — a dirty
-          // follow-up cannot be double-settled (a second settle would clear
-          // the follow-up's in-flight flag while it is still running).
-          if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
-            app.notify(outcome.notice, 'error')
-          }
-          skillsChangeGate.settled()
-        },
-        onCancel: () => { skillsChangeGate.settled() },
-        onError: (error) => {
-          skillsChangeGate.settled()
-          app.notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
-        },
-      })
-    })
-    /** Subscribe to the dsh-skill invalidation notification once, through
-     * the catalog capability (migration M1.8). The event carries no
-     * scope or cwd, so the refresh target follows the CURRENT ownership; an
-     * unavailable or throwing subscription degrades to no subscription —
-     * owner switches and /reload still refresh. The flag is set only after
-     * a successful subscribe, so a throwing subscribe can retry on a later
-     * registration attempt. */
-    const subscribeSkillsChangeEvents = (): void => {
-      if (skillsChangeSubscribed) return
-      try {
-        backend.catalog.skills.onSkillsChange(() => skillsChangeGate.notify())
-        skillsChangeSubscribed = true
-      } catch (error) {
-        diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
-      }
-    }
     /**
      * The conversation rewind picker (the ONE entry shared by the idle
      * empty-editor double-Esc and `/rewind` — plan §22). Lists the completed
@@ -4164,38 +4068,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       )
     }
     /**
-     * The exact Direct attachment of a scope, validated in ONE synchronous
-     * admission step: a stale scope throws `SupersededReadError` (never
-     * retargets to the current owner), a sessionless scope has no live read,
-     * and a current live scope that cannot resolve its matching Direct
-     * attachment breaks an internal invariant loudly.
-     */
-    const agentForLiveScope = (scope: SessionScope): Agent => {
-      if (!sessionScope.isCurrent(scope)) {
-        throw new SupersededReadError('the session changed before the read')
-      }
-      const sessionId = scope.sessionId
-      if (sessionId === undefined) throw new Error('a live read requires a Session scope')
-      const agent = agentNow()
-      if (agent === undefined || agent.session.id !== sessionId) {
-        throw new Error('a current live scope must resolve its exact Direct owner')
-      }
-      return agent
-    }
-    /**
-     * The exact Direct attachment of an already-fenced live session id: the
-     * command runtime's synchronous `liveSessionId` fence proved the scope
-     * current in the SAME stack, so this only resolves the attachment and
-     * asserts the exact-owner invariant loudly.
-     */
-    const attachmentForSession = (sessionId: string): Agent => {
-      const agent = agentNow()
-      if (agent === undefined || agent.session.id !== sessionId) {
-        throw new Error('a current live scope must resolve its exact Direct owner')
-      }
-      return agent
-    }
-    /**
      * The BOUND semantic command runtime (A3-5): it owns the scope/currentness
      * fence and the facade shapes; every Direct fact is injected here as a
      * narrow surface hook, and the Host skill catalog reads go through the
@@ -4215,9 +4087,9 @@ export function applyRunner(ctx: Context, config: Config): void {
           if (commands === undefined) throw new Error('commands service unavailable')
           return commands.list(agentNow()).map(commandSummaryOf)
         },
-        sessionRunning: (sessionId) => attachmentForSession(sessionId).status === 'running',
+        sessionRunning: (sessionId) => command.attachmentForSession(sessionId).status === 'running',
         sessionRouting: (sessionId) => {
-          const agent = attachmentForSession(sessionId)
+          const agent = command.attachmentForSession(sessionId)
           // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
           // the Direct composition may leave them unset: their absence is real
           // semantic optionality, never an invariant break.
@@ -4228,12 +4100,12 @@ export function applyRunner(ctx: Context, config: Config): void {
           }
         },
         approvalOverride: (sessionId) => {
-          attachmentForSession(sessionId)
+          command.attachmentForSession(sessionId)
           return backend.config.permissions.approvalOverrideOf(sessionId)
         },
-        sessionStats: (sessionId) => computeStats(attachmentForSession(sessionId).session.snapshotEvents()),
+        sessionStats: (sessionId) => computeStats(command.attachmentForSession(sessionId).session.snapshotEvents()),
         lastAssistantText: (sessionId) => {
-          const session = attachmentForSession(sessionId).session
+          const session = command.attachmentForSession(sessionId).session
           // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
           // materialize the whole log for one message.
           for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
@@ -4249,22 +4121,20 @@ export function applyRunner(ctx: Context, config: Config): void {
         refreshLiveCatalog: async (sessionId, source) => {
           // SYNC admission: the exact Direct owner is captured HERE, before the
           // read awaits (§10.2).
-          const agent = attachmentForSession(sessionId)
-          const refresh = catalogRefreshRequest
-          if (refresh === undefined) return { kind: 'failed', error: 'catalog refresh unavailable' }
-          return refresh({ source, target: { kind: 'agent', key: ownership.generation() }, agent })
+          const agent = command.attachmentForSession(sessionId)
+          if (!command.catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
+          return command.requestCatalogRefresh({ source, target: { kind: 'agent', key: ownership.generation() }, agent })
         },
         refreshStandingCatalog: (presetId, source) => {
-          const refresh = catalogRefreshRequest
-          return refresh === undefined
-            ? Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
-            : refresh({ source, target: { kind: 'preset', presetId } })
+          return command.catalogRefreshAvailable()
+            ? command.requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
+            : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
         },
         promptAdmission: (sessionId, line, task) => {
           // The caller already holds this scope's writer section, so this
           // synchronous read of the CURRENT Direct attachment IS the scope's
           // exact Agent (§10.1); a transition cannot swap it here.
-          const agent = attachmentForSession(sessionId)
+          const agent = command.attachmentForSession(sessionId)
           return directRuntime.withPromptAdmission(agent, draftHasImages(line, draftImages), async () => task())
         },
       },
@@ -4394,7 +4264,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       applyPermissionPreset: async (scope, presetId, presetSignal) => {
         // A stale scope BEFORE the dispatch proves nothing ran: report `refused`.
         if (!sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }
-        agentForLiveScope(scope)
+        command.agentForLiveScope(scope)
         const outcome = await backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
         // The operation WAS dispatched. Losing the surface after the fact must NOT
         // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and
@@ -4406,7 +4276,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         // Same contract for the synchronous write: validate, then dispatch in
         // the SAME stack — the exact owner, never `sessionId` re-resolved later.
         if (!sessionScope.isCurrent(scope)) return 'superseded' as const
-        agentForLiveScope(scope)
+        command.agentForLiveScope(scope)
         backend.interaction.setApprovalPolicy(scope.sessionId, value)
         return 'applied' as const
       },
@@ -4477,7 +4347,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
         markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
         beginLocalSubmission: ({ requestId, text, scope, generation, ackToken }) => {
-          const agent = agentForLiveScope(scope)
+          const agent = command.agentForLiveScope(scope)
           beginLocalSubmission(
             requestId,
             text,
@@ -4500,63 +4370,6 @@ export function applyRunner(ctx: Context, config: Config): void {
         prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
       },
     })
-    const registerCommands = (initial?: InitialCommandCatalog): void => {
-      if (commandsRegistered) return
-      const commands = ctx.get('commands')
-      if (commands === undefined) return
-      commandsRegistered = true
-      try {
-        const installed = registerTuiCommands(runner, initial)
-        wasAdvertisedClaim = installed.wasAdvertised
-        hostClaimOf = installed.hostClaimOf
-        isSkillWrapperName = installed.isSkillWrapper
-        refreshCommandCompletions = installed.refreshCommandCompletions
-        withCommandDelivery = installed.withDelivery
-        takeCommandDraftDisposition = installed.takeCommandDraftDisposition
-        // The coordinator's surface hooks point INTO the command surface;
-        // the command runtime's refresh facades (and the switch/first-session
-        // path) route every post-mount refresh through `catalogRefreshRequest`.
-        catalogCoordinator = new CatalogRefreshCoordinator({
-          readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, ctx as unknown as SurfaceCatalogContext),
-          // The sessionless (preset) target reads the STANDING skill catalog
-          // through the catalog capability (migration M1.8) — the
-          // capability-gated cold path (standing key → global → degraded
-          // global with a notice), never an Agent probe: probes emit
-          // durable session events in this deployment (see
-          // docs/surface-catalog.md).
-          readStanding: (presetId, readSignal) =>
-            backend.catalog.skills.standing(presetId, process.cwd(), readSignal),
-          installSnapshot: (next) => installed.installSnapshot(next),
-          enterCatalogTransition: () => installed.enterTransition(),
-        }, lifecycleController.signal, diag)
-        catalogRefreshRequest = (request) => catalogCoordinator!.refresh(request)
-        subscribeSkillsChangeEvents()
-      } catch (error) {
-        // A failed registration must not lock the surface forever (a locked
-        // flag would leave every later command resolving to a plain message
-        // silently): reset the flag for a later retry and surface the
-        // failure visibly instead of swallowing it.
-        commandsRegistered = false
-        const message = safeErrorMessage(error)
-        ctx.logger.error(`tui-runner: command registration failed: ${message}`)
-        diag.error('command registration failed', { error: message })
-        app.notify(`command registration failed: ${message}`, 'error')
-      }
-    }
-    /** Await one live-owner catalog refresh through the coordinator (the
-     * first deferred create and every session switch): the refresh attempt
-     * settles before the caller continues, and its outcome is an outcome —
-     * provider issues degrade fields, failures warn, the submission or the
-     * switch proceeds either way. */
-    const refreshLiveCatalog = async (agent: Agent): Promise<void> => {
-      const refresh = catalogRefreshRequest
-      if (refresh === undefined) return
-      await refresh({
-        source: 'live-session',
-        target: { kind: 'agent', key: ownership.generation() },
-        agent,
-      })
-    }
     // The startup surface: a resumed session initializes everything; the
     // deferred path shows the pre-session invitation until the first message.
     const startupAgent = agentNow()
@@ -4574,7 +4387,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // path registers here so /exit /settings /help work before any message).
     // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
     // the first terminal input cannot arrive before this call stack unwinds.
-    registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
+    command.register({ snapshot: initialSnapshot, skills: initialSkills })
     if (surfaceNotice !== undefined) {
       app.notify(surfaceNotice, 'error')
       surfaceNotice = undefined

@@ -67,7 +67,6 @@ const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = [
   { name: 'steerNow', slice: 'A5b-4', owner: 'app/submission/controller' },
   { name: 'dispatchUserInput', slice: 'A5b-4', owner: 'app/submission/controller' },
   { name: 'surfaceEvents', slice: 'A5b-5', owner: 'app/surface/application-events' },
-  { name: 'registerCommands', slice: 'A5b-3', owner: 'app/command/surface' },
   { name: 'openRewindPicker', slice: 'A5b-5', owner: 'app/surface/application-events' },
   { name: 'runner', slice: 'A5b-3', owner: 'app/command/surface' },
 ]
@@ -156,6 +155,16 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     ],
   ],
   [
+    'src/app/command/surface.ts',
+    [
+      'catalogCoordinator', 'isSkillInvocation', 'commandsRegistered', 'wasAdvertisedClaim',
+      'hostClaimOf', 'isSkillWrapperName', 'refreshCommandCompletions', 'withCommandDelivery',
+      'takeCommandDraftDisposition', 'catalogRefreshRequest', 'skillsChangeSubscribed',
+      'skillsChangeGate', 'subscribeSkillsChangeEvents', 'agentForLiveScope', 'attachmentForSession',
+      'refreshLiveCatalog', 'registerCommands',
+    ],
+  ],
+  [
     'src/app/command/model-selection.ts',
     [
       'defaultIntent', 'setDefaultIntent', 'settleIntent', 'reconcileDefaultIntent', 'selected',
@@ -217,6 +226,7 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/input-history.ts', 'createInputHistory', 'createInputHistory('],
   ['src/app/surface/settings-runtime.ts', 'createSettingsRuntime', 'createSettingsRuntime('],
   ['src/app/command/model-selection.ts', 'createModelSelectionOwner', 'createModelSelectionOwner<'],
+  ['src/app/command/surface.ts', 'createCommandSurface', 'createCommandSurface<Agent>('],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
 ]

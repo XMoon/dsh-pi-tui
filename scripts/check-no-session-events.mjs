@@ -77,7 +77,7 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // in the runner); the debt moved WITH the call site, never doubled. A3-5
   // relocated the provider bodies into the runner's command-runtime surface
   // hooks, so the same two call sites now read through `attachmentForSession`.
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'sessionStats: (sessionId) => computeStats(attachmentForSession(sessionId).session.snapshotEvents()),', why: '/status Direct stats fold over the in-process session log (A3-5 command-runtime surface hook)' },
+  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'sessionStats: (sessionId) => computeStats(command.attachmentForSession(sessionId).session.snapshotEvents()),', why: '/status Direct stats fold over the in-process session log (A3-5 command-runtime surface hook)' },
   { file: 'src/app/bootstrap.ts', call: 'eventAt', site: 'const event = session.eventAt(SessionSeq(seq))', why: '/copy last assistant-message read over the Direct in-process session log (A3-2 facade provider)' },
   // A4-7 relocated the compaction-settle working read into the injected
   // `currentWorkingFromLog` capability (the surface owns only the WHEN); the
