@@ -81,11 +81,14 @@ function stubRunner(
   options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number; initialDisplayPreset?: 'focus' | 'compact' | 'full' } = {},
 ): TuiCommandRunner {
   let displayPreset: 'focus' | 'compact' | 'full' = options.initialDisplayPreset ?? 'full'
+  // The scope-bound skill facades delegate to this REAL catalog port (exactly
+  // like the production provider).
+  const catalog = new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined)
   return {
     ctx,
     app,
     diag,
-    ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1),
+    ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1, catalog.skills),
     // The scoped collision baseline must read the FAKE registry (which
     // reflects registrations in its global view), exactly like the real
     // commands service does through the production provider.
@@ -111,7 +114,7 @@ function stubRunner(
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
-    catalog: new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
+    catalog,
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort((sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
@@ -1328,4 +1331,102 @@ test('the /skill picker resolves the delivery mode at SELECTION time, not at ope
     'an idle selection must queue — a mode frozen at picker-open time would steer')
   assert.equal(delivered[0]?.text, '/glab', 'the queued line is the /name form')
   app.stop()
+})
+
+// ── A3-2 P1: the skill catalog read and the picker selection are scope-bound ──
+
+test('a /skill picker whose catalog read settles after an owner swap never opens', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const state = { agent: fakeAgent('session-a', delivered, 'idle') }
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve })
+  let catalogReadStarted!: () => void
+  const started = new Promise<void>(resolve => { catalogReadStarted = resolve })
+  const summary = {
+    name: 'glab',
+    description: 'GitLab CLI',
+    content: 'body',
+    invocation: { modelInvocable: true, userInvocable: true },
+    source: 'bundled',
+    provider: 't',
+  }
+  ctx.provide('skills', {
+    list: async () => {
+      catalogReadStarted()
+      await catalogGate
+      return [summary]
+    },
+    get: async () => {
+      await catalogGate
+      return summary
+    },
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  const pending = (skillDef!.handler as (invocation: {
+    rawInput: string
+  }) => Promise<{ kind: string; text?: string }>)({ rawInput: '' })
+  // Wait until the scope-bound catalog read is actually in flight, then replace
+  // the owner (a NEW agent object on the SAME session id) and let it settle.
+  await started
+  state.agent = fakeAgent('session-a', delivered, 'idle')
+  releaseCatalog()
+  const result = await pending
+  assert.equal(result.kind, 'error', 'a superseded catalog read must refuse the picker')
+  assert.match(String(result.text), /session changed/u, 'the refusal names the session change')
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n').includes('glab'), false,
+    'the stale picker must never open on the replacement owner')
+})
+
+test('a /skill picker selection refuses when the owner changed while the picker was open', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const state = { agent: fakeAgent('session-a', delivered, 'running') }
+  const summary = {
+    name: 'glab',
+    description: 'GitLab CLI',
+    content: 'body',
+    invocation: { modelInvocable: true, userInvocable: true },
+    source: 'bundled',
+    provider: 't',
+  }
+  ctx.provide('skills', {
+    list: async () => [summary],
+    get: async () => summary,
+  } as never)
+  ctx.provide('tools', {
+    get: (name: string) => name === 'skill' ? { name: 'skill', execute: async () => ({}) } : undefined,
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  const opened = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
+  assert.equal(opened.kind, 'success')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('glab'), 'the picker must offer the skill')
+  // The owner changes while the modal is open (a NEW agent object on the SAME
+  // session id): the selection must refuse WITHOUT dispatching to the
+  // replacement owner and WITHOUT throwing out of the overlay callback.
+  state.agent = fakeAgent('session-a', delivered, 'idle')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(delivered, [], 'a stale picker must not deliver to the replacement owner')
 })

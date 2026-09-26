@@ -63,7 +63,15 @@ test('loadSkill uses the captured scope for every session-scoped operation', () 
   const body = span(commandsSource, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
   assert.equal(body.includes('agent.session.id'), false,
     'a session-scoped call must use scope.sessionId, never an agent-derived id')
-  assert.ok(body.includes('resolveSkill(scope.sessionId, name)'), 'the catalog read uses the scope id')
+  // Every catalog interaction goes through a SCOPE-BOUND facade: the captured
+  // scope is never downgraded to a bare sessionId handed to a current-owner
+  // resolver.
+  assert.ok(body.includes('runner.resolveScopedSkill(scope, name)'),
+    'the skill definition read is scope-bound')
+  assert.ok(body.includes('runner.hostLoadsSkillBody(scope)'),
+    'the Host skill-pre-step probe is scope-bound')
+  assert.equal(body.includes('catalog.skills.'), false,
+    'loadSkill must not reach into the raw catalog port with a bare session id')
   assert.ok(body.includes('withSessionWriter(scope.sessionId,'), 'the writer section uses the scope id')
   assert.ok(body.includes('sessionWriter.prompt(scope.sessionId,'), 'the prompt writes use the scope id')
   // The prompt admission rides the SAME captured scope; its provider reads the
@@ -108,6 +116,9 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
   // Every scope-bound read provider routes through that admission (the provider
   // spans are delimited by the NEXT facade declaration, in source order).
   const facades = [
+    'resolveScopedSkill',
+    'hostLoadsSkillBody',
+    'listScopedSkills',
     'currentSessionActivity',
     'currentSessionRouting',
     'currentApprovalOverride',
@@ -127,5 +138,71 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
       `${facades[index]} must admit through agentForLiveScope`)
     assert.ok(!body.includes('agentNow()'),
       `${facades[index]} must not read the current attachment directly`)
+    // The ASYNC skill reads validate BEFORE the dispatch AND re-validate the
+    // ORIGINAL scope after the await, so a superseded read is never presented.
+    if (facades[index] === 'resolveScopedSkill' || facades[index] === 'listScopedSkills') {
+      const awaitAt = body.indexOf('await ')
+      const recheckAt = body.indexOf('sessionScope.isCurrent(scope)')
+      assert.ok(awaitAt > 0 && recheckAt > awaitAt,
+        `${facades[index]} must re-validate the ORIGINAL scope AFTER its await`)
+      assert.ok(body.includes('throw new SupersededReadError('),
+        `${facades[index]} must refuse a superseded read`)
+    }
   }
+})
+
+test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId', () => {
+  // The frozen §3.2 write contract: a stale scope takes an EXPLICIT refusal path
+  // and its sessionId is never dispatched to a replacement-owner resolver.
+  const writes = ['applyPermissionPreset', 'setSessionApprovalPolicy']
+  const end = indexSource.indexOf('\n      switchSession:', indexSource.indexOf('setSessionApprovalPolicy: '))
+  assert.ok(end > 0, 'the write provider span end was not found')
+  for (let index = 0; index < writes.length; index += 1) {
+    const at = indexSource.indexOf(`${writes[index]}: `)
+    assert.ok(at > 0, `${writes[index]} provider not found`)
+    const next = index + 1 < writes.length
+      ? indexSource.indexOf(`${writes[index + 1]}: `, at)
+      : end
+    const body = indexSource.slice(at, next)
+    // The exact-owner admission and the explicit refusal...
+    assert.ok(body.includes('agentForLiveScope(scope)'),
+      `${writes[index]} must admit through agentForLiveScope`)
+    assert.ok(body.includes('if (!sessionScope.isCurrent(scope)) return'),
+      `${writes[index]} must REFUSE a stale scope explicitly (never retarget)`)
+    // ...BOTH of which precede the ONLY sessionId dispatch.
+    const guard = body.indexOf('agentForLiveScope(scope)')
+    const dispatch = body.indexOf('scope.sessionId')
+    assert.ok(dispatch > guard, `${writes[index]} must guard before dispatching scope.sessionId`)
+    assert.ok(!body.includes('agentNow()'), `${writes[index]} must not read the current attachment directly`)
+  }
+  // The ASYNC permission write re-checks the ORIGINAL scope after its await, so
+  // a settlement is never presented for a superseded owner.
+  const permissionWrite = indexSource.slice(
+    indexSource.indexOf('applyPermissionPreset: '),
+    indexSource.indexOf('setSessionApprovalPolicy: '),
+  )
+  assert.ok(
+    (permissionWrite.match(/sessionScope\.isCurrent\(scope\)/g) ?? []).length >= 2,
+    'the async write must re-check the ORIGINAL scope after its await',
+  )
+})
+
+test('a superseded skill/permission interaction is refused gracefully, never thrown out of the command path', () => {
+  // The /skill definition read and the picker's catalog read map a superseded
+  // read to the user-visible stale notice instead of propagating it.
+  assert.ok(commandsSource.includes("text: 'the session changed while loading the skill — try again'"),
+    'the skill definition read reports the stale refusal')
+  assert.ok(commandsSource.includes("text: 'the session changed while loading skills — try again'"),
+    'the skill catalog read reports the stale refusal')
+  // The picker SELECTION must not let the error escape the overlay callback.
+  assert.ok(commandsSource.includes("app.notify('the session changed while loading skills — try again', 'error')"),
+    'the picker selection notifies instead of throwing')
+  // The stale /settings panel CLOSES and tells the user instead of dispatching
+  // the retained scope to the replacement owner.
+  assert.ok(commandsSource.includes("app.notify('the session changed — the approval policy was not applied', 'error')"),
+    'the settings panel reports the refused write')
+  assert.ok(commandsSource.includes('closeSettings()'), 'the stale panel closes itself')
+  // /yolo maps the refused write to a command error.
+  assert.ok(commandsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
+    'the permission preset refusal is user-visible')
 })
