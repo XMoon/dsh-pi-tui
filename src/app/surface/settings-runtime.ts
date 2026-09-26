@@ -36,7 +36,7 @@ import { wheelScrollLinesOf } from '../../wheel-scroll.ts'
 import type { Diag } from '../../diag.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { Backend } from '../../runtime/backend.ts'
-import type { RoutedSessionEvent, SurfaceRuntime } from './runtime.ts'
+import type { StatusSnapshot } from '../../status/types.ts'
 
 /** The Direct settings document read (the adapter stays in the composition
  *  root); the type is DERIVED from the real persistence helper so this owner
@@ -55,18 +55,33 @@ export interface BootThemeExtensions {
   _recordRegistryError(ref: unknown, error: unknown): void
 }
 
+/** The narrow surface capabilities the settings owner needs: the mounted app
+ *  and the status store the footer command items subscribe/commit through. */
+export interface SettingsSurface {
+  readonly app: TuiApp
+  readonly status: {
+    snapshot(): StatusSnapshot
+    subscribe(listener: () => void): () => void
+  }
+}
+
+/** The narrow semantic config slice the footer settings read. */
+export interface SettingsConfigPort {
+  readonly config: Pick<Backend['config'], 'footerCommandTrust' | 'footerCustomItems'>
+}
+
 /** The narrow capabilities the settings owner consumes. */
 export interface SettingsRuntimeDeps {
-  /** The mounted surface owner (app + the status store it commits). */
-  readonly surface: SurfaceRuntime<RoutedSessionEvent>
+  /** The mounted app + the status store the footer command items use. */
+  readonly surface: SettingsSurface
   /** The runner lifetime signal (the footer command runners share it). */
   readonly signal: AbortSignal
   readonly tuiSettings: SettingsDocLike
   /** Persistence-availability gate only (the Direct forms adapter stays in the
    *  composition root; the owner never calls it). */
   readonly settingsForms: unknown
-  /** The semantic backend (the config port slice the footer settings read). */
-  readonly backend: Backend
+  /** The semantic config port slice the footer settings read. */
+  readonly backend: SettingsConfigPort
   readonly diag: Diag
   readonly status: { refresh(): void }
   readonly extensions: () => BootThemeExtensions | undefined

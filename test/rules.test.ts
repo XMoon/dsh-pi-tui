@@ -237,10 +237,17 @@ test('no keybinding settings watch callback crosses the config port (migration b
         // `x.watch(...)` / `x?.watch(...)` — property-access callee named watch.
         if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'watch') {
           const receiver = unwrapParens(callee.expression)
-          if (ts.isIdentifier(receiver)
-            && (receiver.text === 'tuiSettings' || receiver.text === 'settings'
-              || receiver.text === 'deps.tuiSettings' || receiver.text === 'deps.settingsForms'
-              || settingsAliases.has(receiver.text))) {
+          // A5b-2: owners receive the settings object through a deps field, so a
+          // watch call there is a QUALIFIED property receiver
+          // (`deps.tuiSettings.watch(...)`) — match those too, or the rule
+          // silently stops covering extracted settings behaviour.
+          const receiverName = ts.isIdentifier(receiver)
+            ? receiver.text
+            : ts.isPropertyAccessExpression(receiver) ? receiver.getText(sourceFile) : undefined
+          if (receiverName !== undefined
+            && (receiverName === 'tuiSettings' || receiverName === 'settings'
+              || receiverName === 'deps.tuiSettings' || receiverName === 'deps.settingsForms'
+              || settingsAliases.has(receiverName))) {
             return node
           }
         }
@@ -390,8 +397,14 @@ test('the restored fullscreen startup path initializes custom-item persistence b
     'fullscreen startup can synchronously invoke its persistence callback; the custom-item save projection must be initialized first')
   const root = runnerSource()
   const construction = root.indexOf('const settings = createSettingsRuntime(')
+  // The FIRST path that can reach the owner is the synchronous display-preset
+  // migration callback inside `runDetached` (it calls the save projection), so
+  // the construction must precede THAT, not merely the later boot application.
+  const migrationUse = root.indexOf('settings.userFooterItemsForSave()')
   const bootApply = root.indexOf('settings.applyBootDisplay()')
   assert.ok(construction >= 0, 'the composition root must construct the settings owner')
+  assert.ok(migrationUse > construction,
+    'the settings owner must be constructed before the display-preset migration callback can reach it (a later construction swallows the canonicalizing write through a TDZ error)')
   assert.ok(bootApply > construction, 'the boot display application must run after the owner is constructed')
 })
 
