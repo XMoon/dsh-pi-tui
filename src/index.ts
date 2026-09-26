@@ -2161,6 +2161,24 @@ export function apply(ctx: Context, config: Config): void {
           ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
           diag.error('switch failed', { session: sessionId, error: message })
         },
+        launchComposition: () => launchComposition(),
+        setResumeFailure: (failure) => { resumeFailure = failure },
+        reportFirstSessionCreateFailure: (message) => {
+          ctx.logger.warn(`tui-runner: failed to create the first session: ${message}`)
+          diag.warn('first session creation failed', { error: message })
+          resumeFailure = `could not create the first session: ${message}`
+        },
+        notifyResumeFailure: () => {
+          if (resumeFailure !== undefined) {
+            app.notify(resumeFailure, 'error')
+            resumeFailure = undefined
+          }
+        },
+        awaitPendingDefaultWrite: (signal) => awaitPendingDefaultWrite(signal),
+        newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
+        sessionCreateCwd: () => process.cwd(),
+        currentOpening: () => currentOpening(),
+        resetOpening: () => resetOpening(),
       },
       diag,
     })
@@ -4981,7 +4999,7 @@ export function apply(ctx: Context, config: Config): void {
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
       // Reserve the referenced drafts SYNCHRONOUSLY, in the SAME call stack
-      // that left the editor (review finding): ensureSession() on a
+      // that left the editor (review finding): sessionRuntime.ensureSession() on a
       // deferred start is async (create/compose/resume), and the editor is
       // already cleared — an attach-time prune during session creation must
       // not delete the images this submission is about to admit. No await
@@ -5025,7 +5043,7 @@ export function apply(ctx: Context, config: Config): void {
           await persistAfterSession(
             async () => {
               if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return undefined
-              await ensureSession()
+              await sessionRuntime.ensureSession()
               if (cleanedUp) return undefined
               return agentNow()?.session.id
             },
@@ -5838,7 +5856,7 @@ export function apply(ctx: Context, config: Config): void {
       // An owned workflow: the send's outcome drives the draft restore and
       // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
       // referenced drafts SYNCHRONOUSLY (same call stack that left the
-      // editor — review finding): ensureSession() is async on a deferred
+      // editor — review finding): sessionRuntime.ensureSession() is async on a deferred
       // start, and no await may precede the reservation.
       // The submit-flow core owns the ordering contract (shared with the
       // integration tests).
@@ -5870,7 +5888,7 @@ export function apply(ctx: Context, config: Config): void {
         // a session).
         await persistAfterSession(
           async () => {
-            await ensureSession()
+            await sessionRuntime.ensureSession()
             if (cleanedUp) return undefined
             if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return undefined
             return agentNow()?.session.id
@@ -6239,7 +6257,7 @@ export function apply(ctx: Context, config: Config): void {
           // void. The history row is written AFTER the session exists
           // (the deferred-start gate), so a `!` line that creates the
           // session carries its id.
-          runOwned('contextual shell', () => ensureSession().then(() => {
+          runOwned('contextual shell', () => sessionRuntime.ensureSession().then(() => {
             persistHistory(historySessionIdFor('agent-facing', agentNow()?.session.id))
             runLocalShell(text, shellAckToken)
           }), {
@@ -6396,7 +6414,7 @@ export function apply(ctx: Context, config: Config): void {
           // shared one. No await may precede it.
           reserve: (draft) => pinDraftAttachments(draft, draftImages, draftFiles),
           run: async () => {
-            await ensureSession()
+            await sessionRuntime.ensureSession()
             if (cleanedUp || agentNow() === undefined) return
             // AUTHORITY RE-CHECK after the session exists: the deferred start
             // commits a session whose scoped catalog the standing view could
@@ -8909,10 +8927,9 @@ export function apply(ctx: Context, config: Config): void {
     // surface exists — the commands service's GLOBAL layer needs no agent,
     // so the whole command surface (and the editor's tab completion) is
     // available before the first session (deferred start). Session-backed
-    // handlers call runner.ensureSession() themselves; the runner surface
-    // re-reads the live agent on every access, so a session swap
-    // mid-flight is always reflected. Defined after ensureSession below
-    // (the runner object closes over it).
+    // handlers call runner.ensureSession() themselves (the facade delegates to
+    // the session runtime); the runner surface re-reads the live agent on every
+    // access, so a session swap mid-flight is always reflected.
     /**
      * Rebuild every live-session surface after resume, create, or swap.
      * The surface catalog is NOT touched here: the initial owner's catalog
@@ -9020,109 +9037,6 @@ export function apply(ctx: Context, config: Config): void {
       refreshTerminalTitle()
       updateWelcomeCard()
       registerCommands({ snapshot: initialSnapshot, skills: initialSkills })
-    }
-    /**
-     * Create the first session lazily — the FIRST user message triggers it
-     * (deferred session creation). Opening the TUI with no --session carries
-     * zero session side-effects: no agent, no log, no persistence.
-     */
-    let creating: Promise<void> | undefined
-    const ensureSession = async (): Promise<void> => {
-      if (agentNow() !== undefined) return
-      if (creating !== undefined) return creating
-      // The first-session creation is a session transition too: it runs
-      // inside the single-writer gate so it can never interleave with a
-      // an ordinary session transition that is already in flight.
-      creating = ownership.gate.run(() => ownership.barrier.runTransition(async () => {
-        const launched = await launchComposition()
-        if (launched.failure !== undefined) resumeFailure = launched.failure
-        // The first-session creation follows the same transaction shape as
-        // every other transition: the id is pre-generated and the DSH
-        // create publishes the session; a create failure leaves the
-        // surface sessionless — the next user input starts a NEW attempt
-        // (no pin, no second fresh fallback).
-        const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context, agent: Agent) => Promise<void> | void }): Promise<SessionHandle> => {
-          const sessionId = SessionId(`session-${randomUUID()}`)
-          beginOpening(String(sessionId))
-          // Quiesce EVERY sessionless `/model` default write (and its fenced
-          // correction) BEFORE the create: the Direct adapter captures the
-          // settled persisted Host default for Agent activation. A failed
-          // latest intent is NOT seeded (v2 §0.8.4) — the fresh Session uses
-          // the actual Host default, not a fabricated choice.
-          await awaitPendingDefaultWrite(lifecycleController.signal)
-          lifecycleController.signal.throwIfAborted()
-          return requireCreated(await backend.sessionLifecycle.create({
-            sessionId: String(sessionId),
-            // The semantic `agentPreset` is the sole preset authority; the
-            // Direct adapter writes the actually composed preset into the
-            // durable header (never a duplicated meta field).
-            cwd: process.cwd(),
-            agentPreset: composition.agentPreset,
-            signal: lifecycleController.signal,
-          }))
-        }
-        let created: SessionHandle
-        try {
-          created = await createFirstSession(launched.composition)
-        } catch (error) {
-          if (error instanceof LifecycleError && error.ownership === 'superseded') {
-            // v2 §0.2.1: a superseded first-session create is UI-silent — no
-            // degradation notice; the surface simply stays sessionless.
-            diag.warn('first session creation superseded', {
-              settlement: error.settlement,
-              publishedSessionId: error.publishedSessionId,
-              requestedSessionId: error.requestedSessionId,
-            })
-            return
-          }
-          // A failed create leaves the surface sessionless — the next user
-          // input starts a NEW attempt (no pin, no second fresh fallback).
-          // Preset mount failures are no longer auto-replaced; the
-          // resolve-level fallback (requested → default) already happened
-          // inside launchComposition, BEFORE any DSH call.
-          const message = safeErrorMessage(error)
-          ctx.logger.warn(`tui-runner: failed to create the first session: ${message}`)
-          diag.warn('first session creation failed', { error: message })
-          resumeFailure = `could not create the first session: ${message}`
-          throw error
-        }
-        // A successful Direct create always yields the live agent (the
-        // port contract: direct.agent is present on Direct backends).
-        const createdAgent = created.direct!.agent as Agent
-        const opening = currentOpening()
-        // The first-session commit ORDER is fixed by `runFirstSessionCommit`
-        // (A2 plan §4C) inside the runtime: publish owner → completion → await
-        // the child's idle → bump(reset) → init. Unlike A/B, the bump happens
-        // AFTER publication.
-        const committed = await sessionRuntime.commitFirstSession(created)
-        if (!committed) {
-          // The lifecycle aborted during the first-session quiesce: the surface
-          // is disposed and the retirement takes over — skip the surface
-          // initialization below.
-          return
-        }
-        {
-           if (opening !== undefined) clearOpening(opening)
-         }
-         // The first real session's catalog comes from the REAL agent:
-        // await the coordinator refresh so the first submission rides the
-        // live scope (the probe snapshot is never execution
-        // authorization). Provider issues degrade fields inside the
-        // snapshot; a failed attempt is warned, never fatal.
-        try {
-          await refreshLiveCatalog(createdAgent)
-        } catch (error) {
-          diag.warn('first session catalog refresh failed', { error: safeErrorMessage(error) })
-        }
-        if (resumeFailure !== undefined) {
-          app.notify(resumeFailure, 'error')
-          resumeFailure = undefined
-        }
-      })).finally(() => {
-         creating = undefined
-         resetOpening()
-       })
-      return creating
     }
     // The TUI-owned slash commands live on the commands service's global
     // layer, which needs no agent — register them up front so the whole
@@ -9341,7 +9255,7 @@ export function apply(ctx: Context, config: Config): void {
       // the panel persists the raw string through the config port.
       setNotificationMode: (mode) => completionController.setMode(parseNotificationMode(mode)),
       setNotificationMethod: (method) => completionController.setMethod(parseNotificationMethod(method)),
-      ensureSession,
+      ensureSession: () => sessionRuntime.ensureSession(),
       get selected() { return selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
       // or unresolved) falling back to the persisted global default. A fresh
