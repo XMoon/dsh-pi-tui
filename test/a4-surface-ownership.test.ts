@@ -25,6 +25,12 @@ const viewerSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'viewer-runtime.ts'),
   'utf8',
 )
+// A5b-2: the status derivation (and its commit delegation) moved into the
+// status owner, so the commit lock follows the authority there.
+const statusSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'status-runtime.ts'),
+  'utf8',
+)
 
 /** Every TypeScript source under `src/app/surface`. */
 function surfaceSources(): Array<{ rel: string; source: string }> {
@@ -235,8 +241,14 @@ test('A4-4: the status commit and the pending-input presentation are surface-own
     'the surface must commit the status patch')
   assert.match(surface, /mounted\(\)\.setStatus\(legacyFacts\)/u,
     'the surface must commit the legacy footer facts')
-  assert.match(indexSource, /surface\.commitStatus\(patch,/u,
-    'the runner must delegate the status commit to the surface')
+  assert.match(statusSource, /deps\.surface\.commitStatus\(patch,/u,
+    'the status owner must delegate the status commit to the surface')
+  assert.doesNotMatch(statusSource, /deps\.surface\.status\.update\(/u,
+    'the status owner must not commit the status store directly')
+  assert.doesNotMatch(statusSource, /app\.setStatus\(/u,
+    'the status owner must not commit the legacy status directly')
+  assert.doesNotMatch(indexSource, /surface\.commitStatus\(patch,/u,
+    'the composition root must no longer commit the status itself')
   assert.doesNotMatch(indexSource, /surface\.status\.update\(/u,
     'the runner must not commit the status store directly')
   assert.doesNotMatch(indexSource, /app\.setStatus\(/u,

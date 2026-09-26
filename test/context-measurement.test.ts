@@ -22,6 +22,8 @@ import {
   deferInitialContextMeasure,
   type ContextMeasureReason,
 } from '../src/status/context-measurement.ts'
+import { compositionFile } from './support/composition-surface.ts'
+import { ownerFile, ownerSource } from './support/owner-modules.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { StatusStore } from '../src/status/store.ts'
 import { usageFromStats } from '../src/status/derive-usage.ts'
@@ -32,7 +34,6 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { contextRefreshKind } from '../src/index.ts'
-import { compositionSource } from './support/composition-surface.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -477,13 +478,18 @@ test('the deferred initial measure binds the captured session FIRST, then skips 
   assert.equal(coordinator.valueFor('session-old'), undefined, 'the old session value is cleared by the bind')
 })
 
-test('D2 structural gate: the runner source keeps measurement out of cheap refreshes', () => {
+test('D2 structural gate: the status owner keeps measurement out of cheap refreshes', () => {
   // The same source-audit style as test/rules.test.ts: a regression that
   // reintroduces a measuring reader (or the direct tokenMeter service)
   // into a generic status refresh fails here instead of waiting for a
   // review round. Comments are stripped so documentation cannot mask code.
-  const source = compositionSource()
-  const stripped = source
+  //
+  // A5b-2: the derivation moved into the status owner, so the audit follows the
+  // authority there; the negative check runs over the WHOLE owner surface (not
+  // just the composition root), so a reintroduced service read in an owner is
+  // still caught.
+  const owner = ownerFile('src/app/surface/status-runtime.ts')
+  const stripped = owner
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/\/\/[^\n]*/g, ' ')
   const cheapStart = stripped.indexOf('const refreshStatusCheap =')
@@ -492,8 +498,15 @@ test('D2 structural gate: the runner source keeps measurement out of cheap refre
   const cheapBlock = stripped.slice(cheapStart, cheapEnd)
   assert.ok(!cheapBlock.includes('measureContext'), 'the cheap refresh must never call a measurement reader')
   assert.ok(!cheapBlock.includes('tokenMeter'), 'the cheap refresh must never read the tokenMeter service')
-  assert.ok(!stripped.includes("ctx.get('tokenMeter')"), 'the runner no longer reads tokenMeter directly (the Direct adapter owns it)')
-  assert.ok(stripped.includes('backend.sessionReader.measureContext'), 'measurement goes through the SessionReader port')
+  const ownerStripped = ownerSource()
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+  assert.ok(!ownerStripped.includes("ctx.get('tokenMeter')"), 'no owner reads tokenMeter directly (the Direct adapter owns it)')
+  assert.ok(stripped.includes('deps.measureContext('), 'measurement goes through the injected SessionReader port')
+  // The composition root no longer derives status at all (A5b-2 location lock).
+  const root = compositionFile('src/app/bootstrap.ts')
+  assert.ok(!root.includes('const refreshStatusCheap ='), 'the composition root must not own the cheap status refresh')
+  assert.ok(!root.includes('const contextMeasurement ='), 'the composition root must not own the measurement cache')
   // P1: the legacy context fields must be projected EXPLICITLY (undefined
   // clears the TuiApp merge) — a conditional spread would leave the
   // previous session's context on the new session's first frames.
@@ -503,7 +516,7 @@ test('D2 structural gate: the runner source keeps measurement out of cheap refre
   // force/lifecycle measurement already succeeded for — the callback first
   // checks the coordinator's dirty flag instead of re-measuring blindly.
   const deferStart = stripped.indexOf('const scheduleInitialContextMeasure =')
-  const deferEnd = stripped.indexOf('let app: TuiApp')
+  const deferEnd = stripped.indexOf('const setGoal =')
   assert.ok(deferStart !== -1 && deferEnd > deferStart, 'the deferred-measure scheduler exists')
   const deferBlock = stripped.slice(deferStart, deferEnd)
   assert.ok(deferBlock.includes('.isDirty()'), 'the deferred initial measure must skip an already-measured session')
