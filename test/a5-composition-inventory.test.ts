@@ -191,7 +191,7 @@ test('A5: the composition surface keeps the startup order', () => {
   assert.ok(cursor >= 0, 'the composition surface must attach the Task Center')
   for (const step of [
     'surface.refreshPendingInput()',
-    'await initLiveSession(',
+    'await presentation.initLiveSession(',
     'registerCommands({ snapshot: initialSnapshot, skills: initialSkills })',
   ]) {
     const at = source.indexOf(step, cursor)
