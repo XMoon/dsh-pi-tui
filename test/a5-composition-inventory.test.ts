@@ -43,8 +43,8 @@ const COMPOSITION_INVENTORY: ReadonlyArray<readonly [string, string]> = [
   ['interaction provider attach', 'surface.attachInteraction('],
   ['command registration', 'registerCommands('],
   ['surface teardown', 'const disposeSurface = (): void => {'],
-  ['startup lifecycle root', 'void (async () => {'],
-  ['terminal-total fatal catch', '})().catch(async (error: unknown) => {'],
+  ['startup lifecycle root', 'const startRunner = async (): Promise<void> => {'],
+  ['terminal-total fatal catch', 'const handleStartupFailure = async (error: unknown): Promise<void> => {'],
 ]
 
 /**

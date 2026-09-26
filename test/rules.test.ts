@@ -30,6 +30,25 @@ const runnerSource = (): string => [
   readFileSync(join(srcDir, 'app', 'bootstrap.ts'), 'utf8'),
 ].join('\n')
 
+/** The runner's lifecycle-root BLOCK: the arrow whose block declares
+ * `disposeSurface`. A5-4 named that arrow (`startRunner`) and hoisted the
+ * terminal catch out of the chained call, so the root is no longer a
+ * `void (async () => …)()` expression statement. */
+function lifecycleRootBlock(sourceFile: ts.SourceFile): ts.Block {
+  const candidates: ts.ArrowFunction[] = []
+  const findArrows = (node: ts.Node): void => {
+    if (ts.isArrowFunction(node)) candidates.push(node)
+    ts.forEachChild(node, findArrows)
+  }
+  findArrows(sourceFile)
+  const root = candidates.find(arrow => ts.isBlock(arrow.body) && arrow.body.statements.some(statement =>
+    ts.isVariableStatement(statement)
+    && statement.declarationList.declarations.some(declaration =>
+      ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface')))
+  assert.ok(root !== undefined, 'the startup lifecycle root (the arrow whose block declares disposeSurface) must exist')
+  return root.body as ts.Block
+}
+
 /** Recursively list every `.ts` file under a directory. */
 function listSourceFiles(dir: string): string[] {
   const files: string[] = []
@@ -262,41 +281,10 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
   // Find the startup lifecycle root's async IIFE:
   // `void (async () => { ... })().catch(...)` — a void expression nested
   // inside the apply function. Round 31: NOT simply the first void
-  // statement — the lifecycle root is uniquely identified as the void
-  // statement whose arrow body declares `cleanup` (an earlier unrelated
-  // void expression must not hijack the anchor).
-  const candidates: ts.ExpressionStatement[] = []
-  const findVoidStatements = (node: ts.Node): void => {
-    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) candidates.push(node)
-    ts.forEachChild(node, findVoidStatements)
-  }
-  findVoidStatements(sourceFile)
-  const arrowOf = (statement: ts.ExpressionStatement): ts.ArrowFunction | undefined => {
-    let found: ts.ArrowFunction | undefined
-    const walk = (node: ts.Node): void => {
-      if (found !== undefined) return
-      if (ts.isArrowFunction(node)) {
-        found = node
-        return
-      }
-      ts.forEachChild(node, walk)
-    }
-    walk(statement.expression)
-    return found
-  }
-  const hasCleanup = (block: ts.Block): boolean =>
-    block.statements.some(statement =>
-      ts.isVariableStatement(statement)
-      && statement.declarationList.declarations.some(declaration =>
-        ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface'))
-  const lifecycleRoot = candidates.find(statement => {
-    const arrow = arrowOf(statement)
-    return arrow !== undefined && ts.isBlock(arrow.body) && hasCleanup(arrow.body)
-  })
-  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares disposeSurface) must exist')
-  const arrow = arrowOf(lifecycleRoot)!
-  const runnerBlock = arrow.body
-  assert.ok(ts.isBlock(runnerBlock), 'the lifecycle root body must be a block')
+  // statement — the lifecycle root is uniquely identified as the arrow whose
+  // block declares `disposeSurface` (A5-4 named it `startRunner`; an earlier
+  // unrelated arrow must not hijack the anchor).
+  const runnerBlock = lifecycleRootBlock(sourceFile)
 
   // Collect runner-scope `let`/`const` declarations (the arrow body's direct
   // children): name → declaration line (1-based).
@@ -435,40 +423,10 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
   const source = runnerSource()
   const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
-  // The lifecycle root IIFE (same anchor as the cleanup audit above):
-  // the void expression whose arrow body declares `cleanup`. Only
-  // bindings in THAT scope are the runner-scope slots this audit speaks
-  // about.
-  const candidates: ts.ExpressionStatement[] = []
-  const findVoidStatements = (node: ts.Node): void => {
-    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) candidates.push(node)
-    ts.forEachChild(node, findVoidStatements)
-  }
-  findVoidStatements(sourceFile)
-  const arrowOf = (statement: ts.ExpressionStatement): ts.ArrowFunction | undefined => {
-    let found: ts.ArrowFunction | undefined
-    const walk = (node: ts.Node): void => {
-      if (found !== undefined) return
-      if (ts.isArrowFunction(node)) {
-        found = node
-        return
-      }
-      ts.forEachChild(node, walk)
-    }
-    walk(statement.expression)
-    return found
-  }
-  const hasCleanup = (block: ts.Block): boolean =>
-    block.statements.some(statement =>
-      ts.isVariableStatement(statement)
-      && statement.declarationList.declarations.some(declaration =>
-        ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface'))
-  const lifecycleRoot = candidates.find(statement => {
-    const arrow = arrowOf(statement)
-    return arrow !== undefined && ts.isBlock(arrow.body) && hasCleanup(arrow.body)
-  })
-  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares disposeSurface) must exist')
-  const runnerBlock = arrowOf(lifecycleRoot)!.body as ts.Block
+  // The lifecycle root (same anchor as the cleanup audit above): the arrow
+  // whose block declares `disposeSurface`. Only bindings in THAT scope are the
+  // runner-scope slots this audit speaks about.
+  const runnerBlock = lifecycleRootBlock(sourceFile)
 
   /** Collect every bound name of a binding pattern. */
   const boundNames = (pattern: ts.BindingName, out: string[]): void => {

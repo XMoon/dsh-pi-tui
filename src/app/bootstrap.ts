@@ -323,7 +323,7 @@ export function applyRunner(ctx: Context, config: Config): void {
    */
   let currentOwnerPresentRef: (() => boolean) | undefined
 
-  void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
+  const startRunner = async (): Promise<void> => {
     // The TUI required surface is committed to running: synchronous init
     // succeeded and this async root is established, so the startup row's
     // readiness handshake must not report a missing surface. A later failure
@@ -1665,20 +1665,23 @@ export function applyRunner(ctx: Context, config: Config): void {
     // teardown is protected, the error is recorded (diag is still open —
     // retireOwnedSession closes it last), and the retirement promise is
     // always returned.
-    ctx.effect(function* () {
-      yield () => {
-        try {
-          disposeSurface()
-        } catch (error) {
+    const registerRunnerDisposal = (): void => {
+      ctx.effect(function* () {
+        yield () => {
           try {
-            diag.error('surface dispose failed', { error: safeErrorMessage(error) })
-          } catch {
-            // No lower sink.
+            disposeSurface()
+          } catch (error) {
+            try {
+              diag.error('surface dispose failed', { error: safeErrorMessage(error) })
+            } catch {
+              // No lower sink.
+            }
           }
+          return sessionRuntime.retireOwnedSession()
         }
-        return sessionRuntime.retireOwnedSession()
-      }
-    })
+      })
+    }
+    registerRunnerDisposal()
 
     /**
      * Run a `!` shell command. `!` (context mode) runs the command and then
@@ -6070,11 +6073,15 @@ export function applyRunner(ctx: Context, config: Config): void {
       lookupCallArgs: (callId) => callArgs.get(callId as never),
       dangerCommand,
     })
-  })().catch(async (error: unknown) => {
-    // Terminal-total final catch of the startup lifecycle root: error
-    // observation, logging, abort, dispose and exit are each individually
-    // protected, so a hostile rejection or a throwing dependency can never
-    // skip the teardown or leak a rejection from this discarded chain.
+  }
+
+  /**
+   * Terminal-total final catch of the startup lifecycle root: error
+   * observation, logging, abort, dispose and exit are each individually
+   * protected, so a hostile rejection or a throwing dependency can never skip
+   * the teardown or leak a rejection from this discarded chain.
+   */
+  const handleStartupFailure = async (error: unknown): Promise<void> => {
     const message = safeErrorMessage(error)
     // Release the shared terminal row BEFORE the first log line. The pre-mount
     // status owns the current row, and a TTY shares one cursor between stdout
@@ -6173,5 +6180,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     } catch {
       // The last step; there is no lower sink.
     }
-  })
+  }
+
+  void startRunner().catch(handleStartupFailure) // allowlist: startup lifecycle root — see AGENTS.md
 }
