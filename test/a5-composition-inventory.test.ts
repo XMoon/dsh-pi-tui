@@ -42,7 +42,7 @@ const COMPOSITION_INVENTORY: ReadonlyArray<readonly [string, string]> = [
   ['Task Center attach', 'surface.attachTasks('],
   ['presentation event routing attach', 'surface.attachEventRouting('],
   ['interaction provider attach', 'surface.attachInteraction('],
-  ['command registration', 'registerCommands('],
+  ['command registration', 'command.register({ snapshot: initialSnapshot, skills: initialSkills })'],
   ['surface teardown', 'const disposeSurface = (): void => {'],
   ['startup lifecycle root', 'const startRunner = async (): Promise<void> => {'],
   ['terminal-total fatal catch', 'const handleStartupFailure = async (error: unknown): Promise<void> => {'],
@@ -192,7 +192,7 @@ test('A5: the composition surface keeps the startup order', () => {
   for (const step of [
     'surface.refreshPendingInput()',
     'await presentation.initLiveSession(',
-    'registerCommands({ snapshot: initialSnapshot, skills: initialSkills })',
+    'command.register({ snapshot: initialSnapshot, skills: initialSkills })',
   ]) {
     const at = source.indexOf(step, cursor)
     assert.ok(at > cursor, `${step} must come after the previous startup step`)
