@@ -23,6 +23,20 @@ import type { SessionSubject } from './subject.ts'
 
 declare const sessionScopeBrand: unique symbol
 
+/**
+ * The write-admission refusal for a STALE scope (plan A3 §1.3): the captured
+ * owner is no longer the current one, so the operation must not run. It is
+ * deliberately DISTINCT from the barrier's `TransitionInProgressError`
+ * ("a transition owns the surface now" vs "your capture no longer owns the
+ * surface"); never merge the two, never report one as the other.
+ */
+export class SessionScopeSupersededError extends Error {
+  constructor() {
+    super('the captured session scope is no longer current')
+    this.name = 'SessionScopeSupersededError'
+  }
+}
+
 /** One synchronous read of the runtime's private owner slot. */
 export type SessionScopeLive =
   | {

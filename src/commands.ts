@@ -814,6 +814,14 @@ export interface TuiCommandRunner {
    */
   withSessionWriter<T>(sessionId: string, task: () => Promise<T> | T): Promise<T>
   /**
+   * Run one scope-bound TUI session write (A3 §1.3): the captured scope is
+   * validated ONCE, synchronously, before the operation barrier is entered, so
+   * a transition started immediately after waits for this writer. A stale
+   * scope rejects with `SessionScopeSupersededError` before the task
+   * runs; a frozen transition keeps the barrier's `TransitionInProgressError`.
+   */
+  withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
+  /**
    * Run one prompt admission + commit inside the per-Agent serialization
    * window shared with `/model` selection (rc.2 `serializeImageAdmission`)
    * when `line` references an image draft; a text-only prompt runs directly.
