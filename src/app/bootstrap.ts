@@ -1658,8 +1658,9 @@ export function applyRunner(ctx: Context, config: Config): void {
             // The steered draft is an agent-facing submission: the OWNER
             // snapshots the persist facts (ts + image check) BEFORE consuming
             // the draft, and the row is written after the session exists (the
-            // deferred-start gate) with the FINAL session id.
-            submission.steer(app.getDraft())
+            // deferred-start gate) with the FINAL session id. This action hands
+            // the still-present draft over, so the owner consumes it.
+            submission.steer(app.getDraft(), { consumeDraft: true })
             break
           }
           case 'cancel-activity': {
@@ -1696,10 +1697,11 @@ export function applyRunner(ctx: Context, config: Config): void {
         }
       },
       onSteer: (text) => {
-        // Ctrl+S: the steered draft is an agent-facing submission — the
-        // snapshot happens now, and the row is written inside steerNow
-        // AFTER the session exists (the deferred-start gate) with the
-        // FINAL session id.
+        // Ctrl+S: the steered draft is an agent-facing submission — TuiApp has
+        // ALREADY cleared and notified the editor seat before this callback, so
+        // the owner must not consume (clear) the draft a second time; the
+        // snapshot happens now and the row is written inside steerNow AFTER the
+        // session exists (the deferred-start gate) with the FINAL session id.
         submission.steer(text)
       },
       onExtensionError: ({ slot, id, error }) => {

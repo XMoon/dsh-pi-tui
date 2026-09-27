@@ -198,8 +198,12 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
 export interface SubmissionController {
   /** Submit one user input end to end. */
   submit(text: string, request?: ComposerSubmitRequest): void
-  /** Steer one draft into the running turn (Ctrl+S / steer-draft). */
-  steer(text: string): void
+  /** Steer one draft into the running turn.
+   *  `consumeDraft: true` makes THIS owner clear the editor after snapshotting
+   *  the persist facts; the caller leaves it unset when it already consumed the
+   *  draft (TuiApp's own Ctrl+S clears and notifies before calling `onSteer`,
+   *  so a second clear here would notify/revision twice). */
+  steer(text: string, options?: { readonly consumeDraft?: boolean }): void
   /** Alt+Up: pull every queued occurrence back into the editor draft. */
   dequeue(): void
   /** Abort the local shell and interrupt the live Agent (Esc / cancel). */
@@ -1588,12 +1592,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * BEFORE the draft is consumed, then steer the draft only (explicitly queued
    * messages stay queued until an empty-draft sweep).
    */
-  const steerDraft = (text: string): void => {
+  const steerDraft = (text: string, options?: { readonly consumeDraft?: boolean }): void => {
     const persist = makeSteerPersist(text)
-    // The gesture's draft is consumed HERE: AFTER the persist facts are
-    // snapshotted (timestamp + attachment state) and BEFORE the dispatch, which
-    // is the order the steered-history row has always relied on.
-    deps.app().setDraft('')
+    // The editor is cleared ONLY when the caller asks this owner to consume the
+    // draft — and only AFTER the persist facts are snapshotted (timestamp +
+    // attachment state), which is the order the steered-history row relies on.
+    // TuiApp's own Ctrl+S path already cleared and notified before `onSteer`, so
+    // clearing again there would only add a second editor revision/render.
+    if (options?.consumeDraft === true) deps.app().setDraft('')
     steerNow(text, false, persist)
   }
   /** Abort the local shell + interrupt the live Agent (Esc / cancel-activity). */
