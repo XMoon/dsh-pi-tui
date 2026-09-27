@@ -3,7 +3,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources } from './support/composition-surface.ts'
-import { ownerFile, ownerSource, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { aliasAwareConstructionSites, ownerFile, ownerSource, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -607,68 +607,9 @@ const OWNER_FACTORY_NAMES: readonly string[] = [
   'createClientActions',
 ]
 
-/**
- * Every production call site of one factory identifier (callee identity),
- * following the aliases it can resolve SYNTACTICALLY and to convergence:
- * `const make = createViewerRuntime` (any depth, source order irrelevant) and
- * `import { createViewerRuntime as makeViewer }`.
- *
- * Stated scope (deliberately narrower than "aliases in general"): resolution is
- * TEXT-based over identifiers, not binding-based, and only these two forms are
- * followed. Two consequences are accepted: a same-named unrelated local can make
- * the guard fail LOUDLY (a false positive, never a silent pass), and computed
- * indirection (`obj[key](x)`, a re-export object, a `Proxy`, a re-assigned
- * binding) is outside the guard. The architecture gate locks the dependency
- * direction only — it performs no type analysis — so the remaining layers are the
- * per-owner location locks and review.
- */
-function factoryCallSites(name: string): string[] {
-  const sources = productionSources().map(({ rel, source }) => ({
-    rel,
-    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
-  }))
-  const aliases = new Set<string>()
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const { file } of sources) {
-      const scan = (node: ts.Node): void => {
-        // `const make = createViewerRuntime` (or an alias of an alias).
-        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
-          const inner = unwrapExpression(node.initializer)
-          if (ts.isIdentifier(inner) && (inner.text === name || aliases.has(inner.text)) && !aliases.has(node.name.text)) {
-            aliases.add(node.name.text)
-            changed = true
-          }
-        }
-        // `import { createViewerRuntime as makeViewer } from '…'`.
-        if (
-          ts.isImportSpecifier(node)
-          && node.propertyName !== undefined
-          && node.propertyName.text === name
-          && !aliases.has(node.name.text)
-        ) {
-          aliases.add(node.name.text)
-          changed = true
-        }
-        ts.forEachChild(node, scan)
-      }
-      scan(file)
-    }
-  }
-  const sites: string[] = []
-  for (const { rel, file } of sources) {
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node)) {
-        const callee = unwrapExpression(node.expression)
-        if (ts.isIdentifier(callee) && (callee.text === name || aliases.has(callee.text))) sites.push(rel)
-      }
-      ts.forEachChild(node, visit)
-    }
-    visit(file)
-  }
-  return sites.sort()
-}
+/** Delegates to the shared alias-aware construction-site helper so the wrapper
+ *  and alias scope has ONE definition (`test/support/owner-modules.ts`). */
+const factoryCallSites = (name: string): string[] => aliasAwareConstructionSites(name)
 
 test('A5b: every extracted-owner factory is called exactly once, from the composition root', () => {
   // The per-module location lock above reads the hand-listed root only, so a

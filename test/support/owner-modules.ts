@@ -168,6 +168,69 @@ export function productionSources(): Array<{ rel: string; source: string }> {
   return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
 }
 
+/**
+ * Every production site that CALLS or CONSTRUCTS `name`, alias-aware.
+ *
+ * The unit is the AST callee identity (`CallExpression` / `NewExpression`
+ * expression, unwrapped), never a source spelling: an inferred-generic call, an
+ * explicit-generic call, a parenthesized callee, `new X()` and `new X<T>()` are
+ * all the same fact. Simple aliases are followed to convergence:
+ * `const F = <name>` / `const F = <alias>` and `import { <name> as F } from '…'`.
+ *
+ * Stated scope (deliberately narrower than "aliases in general"): resolution is
+ * TEXT-based over identifiers, not binding-based, and only those two forms are
+ * followed. A same-named unrelated local therefore makes a caller fail LOUDLY (a
+ * false positive, never a silent pass), while computed indirection
+ * (`obj[key](x)`, a re-export object, a `Proxy`, a re-assigned binding) is
+ * outside the helper entirely. The architecture gate locks the dependency
+ * direction only — it performs no type analysis.
+ */
+export function aliasAwareConstructionSites(name: string): string[] {
+  const files = productionSources().map(({ rel, source }) => ({
+    rel,
+    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+  }))
+  const aliases = new Set<string>()
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const { file } of files) {
+      const scan = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+          const inner = unwrapExpression(node.initializer)
+          if (ts.isIdentifier(inner) && (inner.text === name || aliases.has(inner.text)) && !aliases.has(node.name.text)) {
+            aliases.add(node.name.text)
+            changed = true
+          }
+        }
+        if (
+          ts.isImportSpecifier(node)
+          && node.propertyName !== undefined
+          && node.propertyName.text === name
+          && !aliases.has(node.name.text)
+        ) {
+          aliases.add(node.name.text)
+          changed = true
+        }
+        ts.forEachChild(node, scan)
+      }
+      scan(file)
+    }
+  }
+  const sites: string[] = []
+  for (const { rel, file } of files) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+        const callee = unwrapExpression(node.expression)
+        if (ts.isIdentifier(callee) && (callee.text === name || aliases.has(callee.text))) sites.push(rel)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+  }
+  return sites.sort()
+}
+
 /** The whole production `src/` tree joined with file banners, for count/scan locks. */
 export function productionSource(): string {
   return productionSources().map(({ rel, source }) => `// >>> ${rel}\n${source}`).join('\n')
