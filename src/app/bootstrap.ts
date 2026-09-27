@@ -20,7 +20,7 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
-import { lstatSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -64,15 +64,10 @@ import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface } from './command/surface.ts'
+import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
-import { renderTranscriptMarkdown } from '../transcript.ts'
-import { sessionArtifactFilename } from '../session-artifact-filename.ts'
-import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from '../client-artifact-save.ts'
-import type { SaveLocationResult } from '../save-location.ts'
-import { completeDirectory } from '../file-completion/directory-completion.ts'
-import { LocalFileSource } from '../file-completion/local-file-source.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
 import { isFocusDisplayPreset, resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
@@ -2034,127 +2029,18 @@ export function applyRunner(ctx: Context, config: Config): void {
         return provider === undefined || launchModel === undefined ? undefined : { provider, model: launchModel }
       },
     }
-    // ── Pre-Stage-D export convergence: the post-command-success artifact
-    // save workflows. The save NEVER starts inside the command handler —
-    // it starts here, after `commands.execute()` resolved (command/done
-    // durable), from the CAPTURED originating Agent/Session identity (never
-    // a later `liveAgent` read). The Client-local Save Location prompt, the
-    // fixed filename, the collision handling and the local sink are shared
-    // by /export (archive) and /transcript (Markdown).
-    const artifactInFlight = new Set<string>()
-    /** A user-facing artifact failure with a STABLE message (never a raw
-     * Host path from an upstream exception). */
-    class ArtifactSaveFailure extends Error {
-      constructor(message: string) {
-        super(message)
-        this.name = 'ArtifactSaveFailure'
-      }
-    }
-    /** The Client-local directory completion source (the shared engine). */
-    const localFileSource = new LocalFileSource()
-    /** One artifact save workflow outcome. */
-    type ArtifactSaveOutcome =
-      | { readonly kind: 'saved'; readonly path: string }
-      | { readonly kind: 'cancelled' }
-    const saveArtifact = async (
-      name: 'export' | 'transcript',
-      agent: Agent,
-    ): Promise<ArtifactSaveOutcome> => {
-      const sessionId = agent.session.id
-      const filename = sessionArtifactFilename(sessionId, name === 'export' ? 'archive' : 'transcript')
-      let result: SaveLocationResult
-      try {
-        result = await app.askSaveLocation({
-          title: name === 'export' ? 'Save session archive' : 'Save readable transcript',
-          filename,
-          initialDirectory: './',
-        }, {
-          // Save Location is CLIENT-local filesystem UI: resolution, validation
-          // and completion all run against the Client process cwd — never the
-          // Host/session cwd, and never a Host call.
-          resolveDirectory: (input) => resolveClientDirectory(input, cwd),
-          isDirectory: (path) => isDirectoryPath(path),
-          targetExists: (directory, filename) => {
-            try {
-              // lstatSync: a dangling symlink is a real directory entry and
-              // must surface the collision confirmation too (the sink's
-              // commit guard uses the same non-following check).
-              lstatSync(join(directory, filename))
-              return true
-            } catch {
-              return false
-            }
-          },
-          complete: (raw, completionSignal) => completeDirectory(raw, cwd, localFileSource, completionSignal),
-        }, signal)
-      } catch (error) {
-        // A REFUSAL (a duplicate prompt, or an active Host question/approval)
-        // is a real user-visible failure — never a silent cancellation: the
-        // runOwned onCancel path emits no notice, so a second concurrent
-        // artifact save would silently disappear. The signal-abort path stays
-        // a cancellation (the task-local predicate classifies it).
-        if (isCancellation(error) && !signal.aborted) {
-          throw new ArtifactSaveFailure(safeErrorMessage(error))
-        }
-        throw error
-      }
-      if (cleanedUp) return { kind: 'cancelled' }
-      if (result.kind === 'cancelled') return { kind: 'cancelled' }
-      const target = join(result.directory, filename)
-      if (name === 'export') {
-        const opened = await backend.sessionArchive.open(sessionId, signal)
-        if (cleanedUp) return { kind: 'cancelled' }
-        if (opened.kind === 'unavailable') throw new ArtifactSaveFailure('Session archive export is unavailable.')
-        if (opened.kind === 'none') throw new ArtifactSaveFailure('Session was not found.')
-        const path = await streamToFile(target, opened.artifact.stream, signal, result.overwrite)
-        if (cleanedUp) return { kind: 'cancelled' }
-        return { kind: 'saved', path }
-      }
-      // /transcript: render from the CAPTURED originating Session after the
-      // command lifecycle settled — never `liveAgent` at delayed settle time.
-      if (cleanedUp) return { kind: 'cancelled' }
-      const markdown = renderTranscriptMarkdown(agent.session)
-      const path = await writeTextAtomically(target, markdown, signal, result.overwrite)
-      if (cleanedUp) return { kind: 'cancelled' }
-      return { kind: 'saved', path }
-    }
-    const startArtifactSave = (name: 'export' | 'transcript', agent: Agent): void => {
-      if (cleanedUp) return
-      const sessionId = agent.session.id
-      const key = `${name}:${sessionId}`
-      // A narrow Client-local in-flight key: two simultaneous writes for the
-      // same logical artifact/session must never race the fixed filename.
-      if (artifactInFlight.has(key)) {
-        app.notify('this artifact is already being saved', 'error')
-        return
-      }
-      artifactInFlight.add(key)
-      runOwned(`artifact save: ${name}`, () => saveArtifact(name, agent).finally(() => {
-        artifactInFlight.delete(key)
-      }), {
-        diag,
-        sessionId: () => sessionId,
-        isCancellation: () => signal.aborted,
-        onResult: (outcome) => {
-          if (cleanedUp) return
-          if (outcome.kind === 'saved') app.notify(`saved to ${outcome.path}`, 'info')
-        },
-        onError: (error) => {
-          if (cleanedUp) return
-          // The detailed diagnostic (including any Host path inside an
-          // upstream exception) stays in the runOwned diag path; the user
-          // sees a stable artifact-level message.
-          const message = error instanceof ArtifactSaveFailure
-            ? error.message
-            : (name === 'export' ? 'session archive export failed' : 'transcript export failed')
-          app.notify(message, 'error')
-        },
-        onCancel: () => {
-          // A cancelled save (surface dispose / runner abort) needs no
-          // user notice; the temp cleanup is owned by the sink.
-        },
-      })
-    }
+    // A5b-3c: the client-local artifact-save workflow (`/export` +
+    // `/transcript`), including its in-flight dedupe set and save-location
+    // dialog. Consumed by the session dispatch below.
+    const artifacts = createArtifactSaveOwner<Agent>({
+      app: () => app,
+      isCleanedUp: () => cleanedUp,
+      signal,
+      diag,
+      sessionArchive: backend.sessionArchive,
+      clientCwd: cwd,
+    })
+
     // Every accepted user submission takes one FIFO turn before async
     // preparation. The turn is released only after its semantic write settles,
     // so a later gesture cannot overtake an earlier canonicalization.
@@ -2515,7 +2401,7 @@ export function applyRunner(ctx: Context, config: Config): void {
             readCommandDraftDisposition: (commandId) => command.takeCommandDraftDisposition(commandId),
             shouldConsumeAdvertisedMiss,
             isIndeterminateSkillWrite: (error) => isIndeterminateSkillWrite(error),
-            startArtifactSave: (name) => startArtifactSave(name, agent),
+            startArtifactSave: (name) => artifacts.start(name, agent),
             submitPrompt: (submission) => submissionRuntime.submitPrompt(submission),
             commandSessionId: () => agent.session.id,
             markTurnTransferred: () => { submitTurnTransferred = true },
