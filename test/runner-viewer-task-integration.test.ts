@@ -4,11 +4,12 @@
  * surfaces bound to the correct Session owner. */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
-import type {} from '@deepseek-ai/dsh-subagent'
+import type { SubagentDescendantListEntry } from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
 import {
@@ -1266,4 +1267,356 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   assert.ok(!view().includes('Esc back'), `the old Job View must not survive the switch:\n${view()}`)
   assert.ok(!view().includes('build'), `the old browser must not survive the switch:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'editor', 'the new-session editor owns the keyboard')
+})
+
+/** One catalog descendant entry for the Task Center coalescing regressions. */
+function descendantEntry(id: string, label: string, parentId: string): SubagentDescendantListEntry {
+  return {
+    kind: 'child',
+    id,
+    label,
+    mode: 'one-shot',
+    activity: 'inactive',
+    hasChildren: false,
+    parentId,
+    depth: 1,
+  } as unknown as SubagentDescendantListEntry
+}
+
+test('task catalog invalidation burst coalesces recursive descendant reads', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-catalog-burst-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  // Opt-in profiling is OFF by default; this test enables it to prove one
+  // structured line is written per REAL traversal (and that the default path
+  // would print nothing to the TUI).
+  const previousProfile = process.env.DSH_TUI_TASK_REFRESH_PROFILE
+  process.env.DSH_TUI_TASK_REFRESH_PROFILE = '1'
+  life.defer(() => {
+    if (previousProfile === undefined) delete process.env.DSH_TUI_TASK_REFRESH_PROFILE
+    else process.env.DSH_TUI_TASK_REFRESH_PROFILE = previousProfile
+  })
+  // Pin the diag FILE sink to the default `$DSH_HOME/logs` path (and info
+  // level) so the assertion reads the path the TUI really wrote, regardless of
+  // an ambient DSH_PI_TUI_LOG / DSH_PI_TUI_LOG_LEVEL.
+  const previousLogPath = process.env.DSH_PI_TUI_LOG
+  const previousLogLevel = process.env.DSH_PI_TUI_LOG_LEVEL
+  delete process.env.DSH_PI_TUI_LOG
+  process.env.DSH_PI_TUI_LOG_LEVEL = 'info'
+  life.defer(() => {
+    if (previousLogPath === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLogPath
+    if (previousLogLevel === undefined) delete process.env.DSH_PI_TUI_LOG_LEVEL
+    else process.env.DSH_PI_TUI_LOG_LEVEL = previousLogLevel
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  // The coordinator's summary is the projection the panel renders from: its
+  // descendant total proves exactly which membership landed.
+  const agentTotals: number[] = []
+  const originalSetTaskSummary = TuiApp.prototype.setTaskSummary
+  TuiApp.prototype.setTaskSummary = function (summary: unknown) {
+    agentTotals.push((summary as { totalAgents: number }).totalAgents)
+    return originalSetTaskSummary.call(this, summary as never)
+  }
+  life.defer(() => { TuiApp.prototype.setTaskSummary = originalSetTaskSummary })
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-catalog-burst-parent',
+    header: { id: 'task-catalog-burst-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  // A DEFERRED descendant read: every catalog traversal gets its own resolver,
+  // so the test controls exactly when each recursive read settles.
+  const listings: { sessionId: string; resolve: (entries: readonly SubagentDescendantListEntry[]) => void }[] = []
+  const subagents = {
+    listDescendants: (sessionId: string) => new Promise<readonly SubagentDescendantListEntry[]>((resolve) => {
+      listings.push({ sessionId, resolve })
+    }),
+  }
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  const emitSubagent = (name: string): void => {
+    (context as unknown as { emit(name: string, payload: unknown): void }).emit(name, {})
+  }
+  await settle()
+  assert.equal(listings.length, 1,
+    `the mount must start exactly ONE recursive descendant read (started ${listings.length})`)
+  assert.equal(listings[0]!.sessionId, parent.id)
+
+  // Burst while the first traversal is pending: repeated lifecycle events, a
+  // Task Center open and a Job membership event must ALL coalesce into the
+  // pending read — never a second concurrent traversal.
+  for (let index = 0; index < 4; index += 1) emitSubagent('subagent/start')
+  await tasksHandler()
+  jobs.emit('registered')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(listings.length, 1,
+    `a burst during a pending traversal must not start another read (started ${listings.length})`)
+
+  const oldChildren = Array.from({ length: 30 }, (_, index) => {
+    const id = `child-${String(index + 1).padStart(2, '0')}`
+    return descendantEntry(id, `child ${index + 1}`, parent.id)
+  })
+  // Settle the first traversal: the accumulated invalidations must produce
+  // EXACTLY ONE trailing read that observes the latest membership.
+  listings[0]!.resolve(oldChildren)
+  await settle()
+  assert.equal(listings.length, 2,
+    `settle must start exactly one trailing read (started ${listings.length})`)
+  assert.equal(listings[1]!.sessionId, parent.id)
+
+  const newChild = descendantEntry('child-new', 'new child', parent.id)
+  listings[1]!.resolve([newChild, ...oldChildren])
+  await settle()
+  await vt.waitForRender()
+  assert.equal(listings.length, 2, 'the trailing read must settle without starting another read')
+  assert.equal(agentTotals.at(-1), 31,
+    `the trailing read's child-new must reach the Task Center projection (totals: ${agentTotals.join(',')})`)
+
+  // The opt-in profile records one line per REAL traversal in the diag log
+  // (never on stderr by default). Assert on the TRAILING line specifically:
+  // the first read's line already carried the old count, so a whole-log
+  // `includes()` would pass without locking the trailing read at all.
+  const profileLines = readFileSync(join(home, 'logs', `pi-tui-${process.pid}.log`), 'utf8')
+    .split('\n')
+    .filter(line => line.includes('task catalog refresh profile'))
+  const initialLine = profileLines.find(line => line.includes('trailing=false'))
+  const trailingLine = profileLines.find(line => line.includes('trailing=true'))
+  assert.ok(initialLine !== undefined,
+    `the opt-in profiler must log the initial read:\n${profileLines.join('\n')}`)
+  assert.ok(trailingLine !== undefined,
+    `the coalesced trailing read must be marked as such:\n${profileLines.join('\n')}`)
+  assert.ok(initialLine.includes('descendants=30'),
+    `the initial read must report its durable descendant count:\n${initialLine}`)
+  assert.ok(trailingLine.includes('descendants=31'),
+    `the trailing read must report the NEW durable descendant count:\n${trailingLine}`)
+  assert.ok(trailingLine.includes('outcome=ok'),
+    `a settled read must record its outcome:\n${trailingLine}`)
+  assert.ok(trailingLine.includes('superseded=false'),
+    `a current-generation read must not be marked superseded:\n${trailingLine}`)
+  assert.ok(/invalidations=\d+/.test(trailingLine),
+    `the absorbed invalidation count must be recorded:\n${trailingLine}`)
+})
+
+test('session switch does not let an old coalesced refresh block the new session', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-catalog-switch-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  // Opt-in profiling (with the diag file sink pinned) so the superseded
+  // generation's late traversal must still leave an honest profile line.
+  const previousProfile = process.env.DSH_TUI_TASK_REFRESH_PROFILE
+  const previousLogPath = process.env.DSH_PI_TUI_LOG
+  const previousLogLevel = process.env.DSH_PI_TUI_LOG_LEVEL
+  process.env.DSH_TUI_TASK_REFRESH_PROFILE = '1'
+  delete process.env.DSH_PI_TUI_LOG
+  process.env.DSH_PI_TUI_LOG_LEVEL = 'info'
+  life.defer(() => {
+    if (previousProfile === undefined) delete process.env.DSH_TUI_TASK_REFRESH_PROFILE
+    else process.env.DSH_TUI_TASK_REFRESH_PROFILE = previousProfile
+    if (previousLogPath === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLogPath
+    if (previousLogLevel === undefined) delete process.env.DSH_PI_TUI_LOG_LEVEL
+    else process.env.DSH_PI_TUI_LOG_LEVEL = previousLogLevel
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'coalesce-switch-a',
+    header: { id: 'coalesce-switch-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer a'),
+  })
+  const sessionB: FakeSession = fakeSession({
+    id: 'coalesce-switch-b',
+    header: { id: 'coalesce-switch-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer b'),
+  })
+  const childB: FakeSession = fakeSession({
+    id: 'coalesce-switch-child-b',
+    header: {
+      id: 'coalesce-switch-child-b',
+      cwd: home,
+      createdAt: 1_700_000_000_001,
+      version: SESSION_FORMAT_VERSION,
+      parentSession: 'coalesce-switch-b',
+    },
+    events: sessionEvents('child b answer'),
+  })
+  const listings: { sessionId: string; resolve: (entries: readonly SubagentDescendantListEntry[]) => void }[] = []
+  const subagents = {
+    listDescendants: (sessionId: string) => new Promise<readonly SubagentDescendantListEntry[]>((resolve) => {
+      listings.push({ sessionId, resolve })
+    }),
+  }
+  const harness = makeHarness(home, [sessionA, sessionB, childB], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  // The child's live driver: session B's catalog must project it as running.
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: childB.id })
+  life.defer(() => childHandle.dispose())
+  ;(harness.agents as { get(id: string): { status: string } }).get(childB.id).status = 'running'
+
+  const badges: Array<readonly { id: string }[]> = []
+  const originalSetAgents = TuiApp.prototype.setAgents
+  TuiApp.prototype.setAgents = function (agents: unknown) {
+    badges.push([...(agents as readonly { id: string }[])])
+    return originalSetAgents.call(this, agents as never)
+  }
+  life.defer(() => { TuiApp.prototype.setAgents = originalSetAgents })
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const emitSubagent = (name: string): void => {
+    (context as unknown as { emit(name: string, payload: unknown): void }).emit(name, {})
+  }
+  await settle()
+  assert.equal(listings.length, 1, 'the mount must start exactly one session-A read')
+  assert.equal(listings[0]!.sessionId, sessionA.id)
+
+  emitSubagent('subagent/start')
+  await settle()
+  assert.equal(listings.length, 1, 'an A invalidation during the pending A read must coalesce (mark dirty)')
+
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register the /resume alias')
+  const resume = resumeHandler as (invocation: { rawInput: string }) => unknown
+  await resume({ rawInput: sessionB.id })
+  await settle()
+  assert.equal(listings.length, 2,
+    'the new session must start its own read while the old read is still pending')
+  assert.equal(listings[1]!.sessionId, sessionB.id)
+
+  // The OLD session settles while B's FIRST read is still in flight. The
+  // generation fence must make it a total no-op: no A trailing read, and — the
+  // point of this ordering — it must NOT clear B's in-flight mark.
+  listings[0]!.resolve([descendantEntry('coalesce-switch-child-a', 'child a', sessionA.id)])
+  await settle()
+  assert.equal(listings.length, 2,
+    'a superseded generation must not schedule a trailing read while the new session is in flight')
+  // The superseded traversal is still PROFILED, but only with its own
+  // start-time facts: it must never report the new session's catalog state.
+  const supersededLine = readFileSync(join(home, 'logs', `pi-tui-${process.pid}.log`), 'utf8')
+    .split('\n')
+    .find(line => line.includes('task catalog refresh profile') && line.includes('superseded=true'))
+  assert.ok(supersededLine !== undefined,
+    'the superseded traversal must leave a profile line (not be silently dropped)')
+  assert.ok(supersededLine.includes('outcome=ok'),
+    `a successfully-read-but-superseded traversal must report its outcome:\n${supersededLine}`)
+  assert.ok(!supersededLine.includes('descendants='),
+    `a superseded line must not attribute the new generation's catalog to the old read:\n${supersededLine}`)
+  // B is STILL in flight: this invalidation must coalesce into B's pending read.
+  // If A's late settle had cleared B's in-flight mark, it would start a third
+  // read here instead.
+  emitSubagent('subagent/start')
+  await settle()
+  assert.equal(listings.length, 2,
+    "the old settle must not clear the new session's in-flight gate")
+
+  // B's first read settles: the coalesced B invalidation produces exactly ONE
+  // trailing B read, then B is idle again.
+  listings[1]!.resolve([descendantEntry(childB.id, 'child b', sessionB.id)])
+  await settle()
+  assert.equal(listings.length, 3, 'session B must produce its own trailing read')
+  assert.equal(listings[2]!.sessionId, sessionB.id)
+  listings[2]!.resolve([descendantEntry(childB.id, 'child b', sessionB.id)])
+  await settle()
+  assert.deepEqual(badges.at(-1)?.map(entry => entry.id), [childB.id],
+    'session B must project its running child into the badge')
+  assert.equal(listings.length, 3,
+    'the old session\'s late settle must not touch the switched-in session')
+})
+
+test('a failed coalesced catalog read still runs exactly one trailing refresh', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-catalog-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-catalog-failure-parent',
+    header: { id: 'task-catalog-failure-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const listings: {
+    sessionId: string
+    resolve: (entries: readonly SubagentDescendantListEntry[]) => void
+    reject: (error: Error) => void
+  }[] = []
+  const subagents = {
+    listDescendants: (sessionId: string) => new Promise<readonly SubagentDescendantListEntry[]>((resolve, reject) => {
+      listings.push({ sessionId, resolve, reject })
+    }),
+  }
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const emitSubagent = (name: string): void => {
+    (context as unknown as { emit(name: string, payload: unknown): void }).emit(name, {})
+  }
+  await settle()
+  assert.equal(listings.length, 1, 'the mount must start exactly one catalog read')
+
+  // An invalidation while the read is in flight marks the gate dirty.
+  emitSubagent('subagent/start')
+  await settle()
+  assert.equal(listings.length, 1, 'the invalidation must coalesce, not start a concurrent read')
+
+  // The in-flight read FAILS: the dirty invalidation must not be swallowed —
+  // exactly one trailing read still starts and can recover the membership.
+  listings[0]!.reject(new Error('descendant read failed'))
+  await settle()
+  assert.equal(listings.length, 2,
+    `a failed read must still schedule the coalesced trailing read (started ${listings.length})`)
+  assert.equal(listings[1]!.sessionId, parent.id)
+  listings[1]!.resolve([descendantEntry('child-after-failure', 'after failure', parent.id)])
+  await settle()
+  await vt.waitForRender()
+  assert.equal(listings.length, 2, 'the trailing read must settle without starting another read')
 })

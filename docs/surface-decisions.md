@@ -405,8 +405,11 @@ read the DURABLE descendant catalog, not the live-child list:
   remains re-entrant and correct for any direct or future caller); this gate
   is only the performance (single-flight) authority. The opt-in
   `DSH_TUI_TASK_REFRESH_PROFILE=1` logs one line per REAL traversal (elapsed,
-  absorbed invalidations, trailing, rows, outcome) so a live session can
-  prove the refresh storm is flattened.
+  absorbed invalidations, trailing, outcome, superseded, and — for a
+  current-generation read — the committed durable descendant count) so a live
+  session can prove the refresh storm is flattened. A traversal superseded by a
+  session switch is still recorded, with only its own start-time facts; it never
+  reports the new session's catalog state.
 - **Jobs are a separate flat group**, sorted by their own registry
   ordering; the background one-shot duplication (job row + child row with
   no cross-reference) is contract, locked in by test.

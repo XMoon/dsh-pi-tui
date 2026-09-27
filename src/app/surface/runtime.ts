@@ -855,6 +855,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let taskCatalogRefreshInFlight = false
   let taskCatalogRefreshDirty = false
   let taskCatalogRefreshPendingInvalidations = 0
+  /** The GLOBAL durable descendant count of the last committed catalog (NOT the
+   *  scope-filtered presentation rows): profiler-only instrumentation state. */
+  let taskCatalogDescendants = 0
   // A4-7 presentation event routing (plan §16): the injected routing source and
   // the surface-owned compaction fold id. The `compactingId` is routing state
   // (which compaction bracket is live for the presentation), not Direct state.
@@ -1528,11 +1531,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
   /**
    * Release the gate after ONE traversal settles. A settled refresh of a
-   * SUPERSEDED generation (a session switch happened mid-flight) is a no-op:
-   * the new generation owns the gate, and the old traversal must neither clear
-   * the new session's in-flight mark nor schedule a trailing read. Otherwise
-   * the gate is released and, when any invalidation arrived while the traversal
-   * was in flight, EXACTLY ONE trailing refresh starts.
+   * SUPERSEDED generation (a session switch happened mid-flight) is a gate
+   * no-op: the new generation owns the gate, and the old traversal must neither
+   * clear the new session's in-flight mark nor schedule a trailing read. (It is
+   * still profiled, with only its own start-time facts.) Otherwise the gate is
+   * released and, when any invalidation arrived while the traversal was in
+   * flight, EXACTLY ONE trailing refresh starts.
    */
   const settleTaskCatalogRefresh = (
     generation: number,
@@ -1541,23 +1545,32 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     startedAt: number,
     outcome: 'ok' | 'cancelled' | 'error',
   ): void => {
-    if (generation !== taskCatalogRefreshGeneration) return
-    taskCatalogRefreshInFlight = false
+    const superseded = generation !== taskCatalogRefreshGeneration
     if (taskCatalogRefreshProfilingEnabled()) {
-      // Opt-in profile (default off): one line per REAL traversal, answering
-      // "how long does one recursive descendant read take, and how many
-      // invalidations did it absorb?". Never records session ids, prompts or
-      // child labels.
-      taskDiag().info('task catalog refresh profile', {
+      // Opt-in profile (default off): one line per REAL started traversal —
+      // including one of a SUPERSEDED generation, whose result never commits.
+      // A superseded line carries ONLY the facts captured when the read
+      // started; the current gate/catalog state belongs to the new session and
+      // must not be attributed to the old read. Never records session ids,
+      // prompts or child labels.
+      const fields: Record<string, unknown> = {
         elapsedMs: Date.now() - startedAt,
         invalidations,
-        rows: taskRuntime?.rows().length ?? 0,
         trailing,
         outcome,
         generation,
-        dirtyAtSettle: taskCatalogRefreshDirty,
-      })
+        superseded,
+      }
+      if (!superseded) {
+        // The durable descendant count this read committed (GLOBAL, never the
+        // open browser's scope-filtered presentation rows).
+        fields.descendants = taskCatalogDescendants
+        fields.dirtyAtSettle = taskCatalogRefreshDirty
+      }
+      taskDiag().info('task catalog refresh profile', fields)
     }
+    if (superseded) return
+    taskCatalogRefreshInFlight = false
     if (!taskCatalogRefreshDirty) return
     taskCatalogRefreshDirty = false
     startTaskCatalogRefresh(true)
@@ -1587,6 +1600,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     })))
   }
   const commitSummary = (summary: TaskBrowserSummary): void => {
+    // Profiler-only: remember the GLOBAL durable descendant count of this
+    // commit. `summary.totalAgents` is projected before the browser's dataset
+    // scope filters the rows, so it stays the catalog scale for a scoped
+    // browser too — and it excludes the Job rows that `rows()` carries.
+    taskCatalogDescendants = summary.totalAgents
     if (isCleanedUp()) return
     mounted().setTaskSummary(summary)
   }
