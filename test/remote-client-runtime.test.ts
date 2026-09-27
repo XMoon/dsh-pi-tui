@@ -19,8 +19,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import type { TestContext } from 'node:test'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -53,6 +53,7 @@ import {
 } from '../src/app/remote/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../src/app/remote/host-runtime.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 const SEED_SESSION_ID = 'm3-l5-seed'
 const PRESET = 'm3-l5-preset'
@@ -100,13 +101,14 @@ interface HostFixture {
   dispose(): Promise<void>
 }
 
-async function createHostFixture(): Promise<HostFixture> {
-  const workRoot = mkdtempSync(join(tmpdir(), 'dsh-m3-l5-'))
+async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
+  const workRoot = life.tempDir('dsh-m3-l5-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
   const ctx = new Context()
   let persistenceFiber: Fiber | undefined
   let harness: Awaited<ReturnType<typeof mountAgentLoopTestHarness>> | undefined
+  let disposed = false
   try {
     await ctx.plugin(TypertRegistry)
     await mountAgentLoopTestDependencies(ctx)
@@ -156,21 +158,26 @@ async function createHostFixture(): Promise<HostFixture> {
       new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
     })
   } catch (error) {
+    disposed = true
     await persistenceFiber?.dispose()
     await ctx.fiber.dispose()
-    rmSync(workRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
     throw error
   }
+  const dispose = async (): Promise<void> => {
+    if (disposed) return
+    disposed = true
+    await persistenceFiber?.dispose()
+    await ctx.fiber.dispose()
+  }
+  // The owning lifecycle also disposes the fixture (idempotent) before its
+  // temp roots are removed.
+  life.defer(dispose)
   return {
     ctx,
     workRoot,
     anchorDir,
     harness: harness!,
-    async dispose(): Promise<void> {
-      await persistenceFiber?.dispose()
-      await ctx.fiber.dispose()
-      rmSync(workRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
-    },
+    dispose,
   }
 }
 
@@ -185,37 +192,197 @@ function loadRuntimeModule(): Promise<typeof import('../src/app/remote/runtime.t
 }
 
 // ---------------------------------------------------------------------------
-// Shared main fixture: one Host + one composed runtime for the behavior axis.
+// Shared main fixture: one Host + one composed runtime for the behavior axis,
+// owned by the parent test below and disposed before its subtests' assertions
+// in K run last.
 // ---------------------------------------------------------------------------
 
-interface SharedRuntime {
-  host: HostFixture
-  runtime: ExperimentalRemoteRuntime
-  client: RemoteClientRuntime
-  hostRuntime: RemoteHostRuntime
-}
-
-let shared: SharedRuntime | undefined
-
-async function getSharedRuntime(): Promise<SharedRuntime> {
-  if (shared !== undefined) return shared
-  const host = await createHostFixture()
-  await seedHostSession(host)
-  const runtime = (await loadRuntimeModule()).createExperimentalRemoteRuntime({
+test('D–K. the composed runtime behavior axis over one shared Host + Client composition', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  seedHostSession(host)
+  const composed = await (await loadRuntimeModule()).createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })
-  const composed = await runtime
-  shared = { host, runtime: composed, client: composed.client, hostRuntime: composed.host }
-  return shared
-}
+  const client = composed.client
+  const hostRuntime = composed.host
+  t.after(async () => {
+    await composed.dispose()
+    await host.dispose()
+  })
+
+  await t.test('D. real connect reaches a defined generation and the ready Session list carries the seeded Session', () => {
+    assert.notEqual(client.connection.generation.getSnapshot(), undefined)
+    const list = client.sessions.list.getSnapshot()
+    assert.equal(list.phase, 'ready')
+    assert.ok(list.ids.map(String).includes(SEED_SESSION_ID), 'the seeded Host Session must appear in the Client list')
+  })
+
+  await t.test('E. the Client composes the real official fileUpload service before Sessions', () => {
+    assert.notEqual(client.context.reflect.get('fileUpload'), undefined, 'the official Client fileUpload service must be live')
+    assert.notEqual(client.context.reflect.get('sessions'), undefined, 'the Session Client started with fileUpload present')
+  })
+
+  await t.test('F. the official retained Session carries the sessionStats and turnOutline projection surface', async () => {
+    const reference = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
+    try {
+      await reference.ready
+      await waitFor('the retained Session history window to open', () =>
+        reference.binding.session.getSnapshot().openState === 'open')
+      const statsFace = reference.binding.session.projections.faceOf('sessionStats')
+      const outlineFace = reference.binding.session.projections.faceOf('turnOutline')
+      await waitFor('the whole-log projections to publish', () =>
+        statsFace.getSnapshot() !== undefined && outlineFace.getSnapshot() !== undefined)
+      // Presence/authority is the M3-1 proof: an empty Session legitimately
+      // carries an empty outline.
+      assert.ok(Array.isArray(outlineFace.getSnapshot()), 'turnOutline must publish an array surface')
+    } finally {
+      reference.release()
+    }
+    await waitFor('the reference count to return', () =>
+      client.sessions.retainInfo(SessionId(SEED_SESSION_ID)).getSnapshot().referenceCount === 0)
+  })
+
+  await t.test('G. two retained references of one materialized generation share the exact binding identity', async () => {
+    const first = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
+    const second = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
+    try {
+      await first.ready
+      await second.ready
+      assert.ok(Object.is(first.binding, second.binding), 'same-generation retains must share one SessionBinding')
+      assert.equal(
+        client.sessions.retainInfo(SessionId(SEED_SESSION_ID)).getSnapshot().referenceCount,
+        2,
+        'both references must be counted',
+      )
+    } finally {
+      first.release()
+      second.release()
+    }
+  })
+
+  await t.test('H. the Job Client mirrors a real Host job roster', async () => {
+    const jobs = host.ctx.jobs as LocalJobRegistry
+    // A background job's owner must have a live Agent: compose a real
+    // production Agent (and its Session) through the AgentLoop harness, then
+    // start one real owned job for that session.
+    const ownerId = SessionId('m3-l5-job-owner')
+    await host.harness.create(ownerId)
+    const releaseWatch = client.jobs.watchRows(ownerId)
+    let jobId: JobId | undefined
+    try {
+      // The producer settles on cancellation, so the fixture leaves no
+      // never-settling registry record behind.
+      let settle!: (outcome: { status: 'completed' | 'killed' | 'failed' }) => void
+      const done = new Promise<{ status: 'completed' | 'killed' | 'failed' }>(resolve => { settle = resolve })
+      jobId = jobs.start({
+        kind: 'bash',
+        label: 'm3-l5 fixture job',
+        owner: ownerId,
+        run: () => ({
+          cancel: () => settle({ status: 'killed' }),
+          done,
+        }),
+      })
+      await waitFor('the known job to appear in the Client roster', () => {
+        const rows = client.jobs.state.getSnapshot().rows[ownerId] ?? []
+        return rows.some(row => String(row.id) === String(jobId))
+      })
+    } finally {
+      releaseWatch()
+      if (jobId !== undefined) jobs.kill(jobId, ownerId)
+    }
+  })
+
+  await t.test('I. reconnect replaces the connection generation, fires connection/reset, and recovers the Session list', async () => {
+    const generationBefore = client.connection.generation.getSnapshot()
+    assert.notEqual(generationBefore, undefined)
+    const reference = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
+    await reference.ready
+    const bindingBefore = reference.binding
+    let resets = 0
+    const unsubscribe = client.context.on('connection/reset', () => { resets += 1 })
+    try {
+      client.connection.reconnect()
+      await waitFor('a different connection generation', () => {
+        const generation = client.connection.generation.getSnapshot()
+        return generation !== undefined && generation.id !== generationBefore?.id
+      })
+      await waitFor('the official connection/reset event to be observed', () => resets >= 1)
+      await waitFor('the Session list to return to ready', () =>
+        client.sessions.list.getSnapshot().phase === 'ready')
+      // The retained logical Session stays usable across the reset: a fresh
+      // history round-trip answers on the new generation, and the binding keeps
+      // its official identity-stable object.
+      assert.ok(Object.is(reference.binding, bindingBefore), 'the retained binding must stay identity-stable')
+      await reference.binding.session.loadOlder()
+      assert.equal(reference.binding.session.getSnapshot().openState, 'open', 'the retained Session must stay open')
+    } finally {
+      unsubscribe()
+      reference.release()
+    }
+  })
+
+  await t.test('J. the archive route answers through the production Host carrier', async () => {
+    // The exporter answers from the persisted/query layer, so the known Session
+    // here is one created through the official wire (controller-owned).
+    const created = await client.sessions.create({ cwd: host.anchorDir })
+    const response = await hostRuntime.carrier.fetch(
+      `${SESSION_LOG_EXPORT_PATH}?sessionId=${String(created)}`,
+      { method: 'GET' },
+    )
+    assert.equal(response.status, 200, 'the session exporter route must answer, not a generic 404')
+    assert.match(response.headers.get('content-type') ?? '', /application\/zip/)
+    await response.arrayBuffer()
+  })
+
+  await t.test('K. reverse disposal is idempotent, leaves zero owned refs/watchers, and the ordinary Host survives', async () => {
+    await waitFor('all test references released', () =>
+      client.sessions.retainInfo(SessionId(SEED_SESSION_ID)).getSnapshot().referenceCount === 0)
+
+    let resetsAfterDispose = 0
+    const unsubscribe = client.connection.generation.subscribe(() => { resetsAfterDispose += 1 })
+
+    const jobControllerBefore = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
+    await composed.dispose()
+    await composed.dispose() // second call must be safe
+
+    // Let any dispose-time side effect (final generation loss publication) pass,
+    // then require a quiet window with the listener still attached.
+    await new Promise(resolve => setTimeout(resolve, 150))
+    resetsAfterDispose = 0
+    await new Promise(resolve => setTimeout(resolve, 250))
+    unsubscribe()
+    assert.equal(resetsAfterDispose, 0, 'no listener may fire after disposal')
+    assert.equal('window' in globalThis, false, 'the temporary module-loader global stays absent')
+
+    // M3 Host additive services are removed; the existing rows survive.
+    assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 Host connection must be removed')
+    assert.equal(host.ctx.reflect.get('fileUploads'), undefined, 'the real fileUploads row must be removed')
+    assert.equal(host.ctx.reflect.get('settingsController'), undefined, 'the settings controller must be removed')
+    assert.equal(host.ctx.reflect.get('sessionController'), undefined, 'the M3 Session controller must be removed')
+    const jobControllerAfter = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
+    assert.ok(
+      jobControllerAfter?.typertRemote !== undefined && jobControllerAfter.typertRemote === jobControllerBefore.typertRemote,
+      'the existing jobController must survive',
+    )
+
+    // The ordinary Host Context is still alive and usable.
+    assert.notEqual(host.ctx.sessions.get(SessionId(SEED_SESSION_ID)), undefined, 'the ordinary Host Session store must remain active')
+    assert.ok(
+      host.ctx.sessions.list().some(session => String(session.id) === SEED_SESSION_ID),
+      'the ordinary Host Session store must remain servable',
+    )
+  })
+})
 
 // ---------------------------------------------------------------------------
 // A — host prerequisite barrier
 // ---------------------------------------------------------------------------
 
-test('A. the runtime cannot compose or become ready ahead of the Host prerequisites', async () => {
-  const host = await createHostFixture()
+test('A. the runtime cannot compose or become ready ahead of the Host prerequisites', async (t) => {
+  const host = await createHostFixture(testLifecycle(t))
   try {
     let resolvePrerequisites: (() => void) | undefined
     const pending = (await loadRuntimeModule()).createExperimentalRemoteRuntime({
@@ -303,7 +470,7 @@ test('B. the scoped loader capture is exact, single-flight, and restores the pro
 // C — no browser/global carrier dependency
 // ---------------------------------------------------------------------------
 
-test('C. compose/connect/list run with every browser global trapped or absent', async () => {
+test('C. compose/connect/list run with every browser global trapped or absent', async (t) => {
   const globalScope = globalThis as Record<string, unknown>
   const trapped = ['fetch', 'WebSocket', 'Worker', 'document', 'navigator', 'location']
   const previous = new Map<string, PropertyDescriptor | undefined>()
@@ -318,7 +485,7 @@ test('C. compose/connect/list run with every browser global trapped or absent', 
   }
   let host: HostFixture | undefined
   try {
-    host = await createHostFixture()
+    host = await createHostFixture(testLifecycle(t))
     await seedHostSession(host)
     const runtime = await (await loadRuntimeModule()).createExperimentalRemoteRuntime({
       hostContext: host.ctx,
@@ -338,192 +505,11 @@ test('C. compose/connect/list run with every browser global trapped or absent', 
 })
 
 // ---------------------------------------------------------------------------
-// D–J — the shared-runtime behavior axis
-// ---------------------------------------------------------------------------
-
-test('D. real connect reaches a defined generation and the ready Session list carries the seeded Session', async () => {
-  const { client } = await getSharedRuntime()
-  assert.notEqual(client.connection.generation.getSnapshot(), undefined)
-  const list = client.sessions.list.getSnapshot()
-  assert.equal(list.phase, 'ready')
-  assert.ok(list.ids.map(String).includes(SEED_SESSION_ID), 'the seeded Host Session must appear in the Client list')
-})
-
-test('E. the Client composes the real official fileUpload service before Sessions', async () => {
-  const { client } = await getSharedRuntime()
-  assert.notEqual(client.context.reflect.get('fileUpload'), undefined, 'the official Client fileUpload service must be live')
-  assert.notEqual(client.context.reflect.get('sessions'), undefined, 'the Session Client started with fileUpload present')
-})
-
-test('F. the official retained Session carries the sessionStats and turnOutline projection surface', async () => {
-  const { client } = await getSharedRuntime()
-  const reference = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
-  try {
-    await reference.ready
-    await waitFor('the retained Session history window to open', () =>
-      reference.binding.session.getSnapshot().openState === 'open')
-    const statsFace = reference.binding.session.projections.faceOf('sessionStats')
-    const outlineFace = reference.binding.session.projections.faceOf('turnOutline')
-    await waitFor('the whole-log projections to publish', () =>
-      statsFace.getSnapshot() !== undefined && outlineFace.getSnapshot() !== undefined)
-    // Presence/authority is the M3-1 proof: an empty Session legitimately
-    // carries an empty outline.
-    assert.ok(Array.isArray(outlineFace.getSnapshot()), 'turnOutline must publish an array surface')
-  } finally {
-    reference.release()
-  }
-  await waitFor('the reference count to return', () =>
-    client.sessions.retainInfo(SessionId(SEED_SESSION_ID)).getSnapshot().referenceCount === 0)
-})
-
-test('G. two retained references of one materialized generation share the exact binding identity', async () => {
-  const { client } = await getSharedRuntime()
-  const first = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
-  const second = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
-  try {
-    await first.ready
-    await second.ready
-    assert.ok(Object.is(first.binding, second.binding), 'same-generation retains must share one SessionBinding')
-    assert.equal(
-      client.sessions.retainInfo(SessionId(SEED_SESSION_ID)).getSnapshot().referenceCount,
-      2,
-      'both references must be counted',
-    )
-  } finally {
-    first.release()
-    second.release()
-  }
-})
-
-test('H. the Job Client mirrors a real Host job roster', async () => {
-  const { host, client } = await getSharedRuntime()
-  const jobs = host.ctx.jobs as LocalJobRegistry
-  // A background job's owner must have a live Agent: compose a real
-  // production Agent (and its Session) through the AgentLoop harness, then
-  // start one real owned job for that session.
-  const ownerId = SessionId('m3-l5-job-owner')
-  await host.harness.create(ownerId)
-  const releaseWatch = client.jobs.watchRows(ownerId)
-  let jobId: JobId | undefined
-  try {
-    // The producer settles on cancellation, so the fixture leaves no
-    // never-settling registry record behind.
-    let settle!: (outcome: { status: 'completed' | 'killed' | 'failed' }) => void
-    const done = new Promise<{ status: 'completed' | 'killed' | 'failed' }>(resolve => { settle = resolve })
-    jobId = jobs.start({
-      kind: 'bash',
-      label: 'm3-l5 fixture job',
-      owner: ownerId,
-      run: () => ({
-        cancel: () => settle({ status: 'killed' }),
-        done,
-      }),
-    })
-    await waitFor('the known job to appear in the Client roster', () => {
-      const rows = client.jobs.state.getSnapshot().rows[ownerId] ?? []
-      return rows.some(row => String(row.id) === String(jobId))
-    })
-  } finally {
-    releaseWatch()
-    if (jobId !== undefined) jobs.kill(jobId, ownerId)
-  }
-})
-
-test('I. reconnect replaces the connection generation, fires connection/reset, and recovers the Session list', async () => {
-  const { client } = await getSharedRuntime()
-  const generationBefore = client.connection.generation.getSnapshot()
-  assert.notEqual(generationBefore, undefined)
-  const reference = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
-  await reference.ready
-  const bindingBefore = reference.binding
-  let resets = 0
-  const unsubscribe = client.context.on('connection/reset', () => { resets += 1 })
-  try {
-    client.connection.reconnect()
-    await waitFor('a different connection generation', () => {
-      const generation = client.connection.generation.getSnapshot()
-      return generation !== undefined && generation.id !== generationBefore?.id
-    })
-    await waitFor('the official connection/reset event to be observed', () => resets >= 1)
-    await waitFor('the Session list to return to ready', () =>
-      client.sessions.list.getSnapshot().phase === 'ready')
-    // The retained logical Session stays usable across the reset: a fresh
-    // history round-trip answers on the new generation, and the binding keeps
-    // its official identity-stable object.
-    assert.ok(Object.is(reference.binding, bindingBefore), 'the retained binding must stay identity-stable')
-    await reference.binding.session.loadOlder()
-    assert.equal(reference.binding.session.getSnapshot().openState, 'open', 'the retained Session must stay open')
-  } finally {
-    unsubscribe()
-    reference.release()
-  }
-})
-
-test('J. the archive route answers through the production Host carrier', async () => {
-  const { host, client, hostRuntime } = await getSharedRuntime()
-  // The exporter answers from the persisted/query layer, so the known Session
-  // here is one created through the official wire (controller-owned).
-  const created = await client.sessions.create({ cwd: host.anchorDir })
-  const response = await hostRuntime.carrier.fetch(
-    `${SESSION_LOG_EXPORT_PATH}?sessionId=${String(created)}`,
-    { method: 'GET' },
-  )
-  assert.equal(response.status, 200, 'the session exporter route must answer, not a generic 404')
-  assert.match(response.headers.get('content-type') ?? '', /application\/zip/)
-  await response.arrayBuffer()
-})
-
-// ---------------------------------------------------------------------------
-// K — reverse disposal / no leaks (must stay after D–J)
-// ---------------------------------------------------------------------------
-
-test('K. reverse disposal is idempotent, leaves zero owned refs/watchers, and the ordinary Host survives', async () => {
-  const { host, runtime, client } = await getSharedRuntime()
-  await waitFor('all test references released', () =>
-    client.sessions.retainInfo(SessionId(SEED_SESSION_ID)).getSnapshot().referenceCount === 0)
-
-  const jobControllerBefore = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
-  let resetsAfterDispose = 0
-  const unsubscribe = client.connection.generation.subscribe(() => { resetsAfterDispose += 1 })
-  await runtime.dispose()
-  await runtime.dispose() // second call must be safe
-
-  // Let any dispose-time side effect (final generation loss publication) pass,
-  // then require a quiet window with the listener still attached.
-  await new Promise(resolve => setTimeout(resolve, 150))
-  resetsAfterDispose = 0
-  await new Promise(resolve => setTimeout(resolve, 250))
-  unsubscribe()
-  assert.equal(resetsAfterDispose, 0, 'no listener may fire after disposal')
-  assert.equal('window' in globalThis, false, 'the temporary module-loader global stays absent')
-
-  // M3 Host additive services are removed; the existing rows survive.
-  assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 Host connection must be removed')
-  assert.equal(host.ctx.reflect.get('fileUploads'), undefined, 'the real fileUploads row must be removed')
-  assert.equal(host.ctx.reflect.get('settingsController'), undefined, 'the settings controller must be removed')
-  assert.equal(host.ctx.reflect.get('sessionController'), undefined, 'the M3 Session controller must be removed')
-  const jobControllerAfter = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
-  assert.ok(
-    jobControllerAfter?.typertRemote !== undefined && jobControllerAfter.typertRemote === jobControllerBefore.typertRemote,
-    'the existing jobController must survive',
-  )
-
-  // The ordinary Host Context is still alive and usable.
-  assert.notEqual(host.ctx.sessions.get(SessionId(SEED_SESSION_ID)), undefined, 'the ordinary Host Session store must remain active')
-  assert.ok(
-    host.ctx.sessions.list().some(session => String(session.id) === SEED_SESSION_ID),
-    'the ordinary Host Session store must remain servable',
-  )
-
-  await host.dispose()
-})
-
-// ---------------------------------------------------------------------------
 // L — partial construction failure
 // ---------------------------------------------------------------------------
 
-test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async () => {
-  const host = await createHostFixture()
+test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async (t) => {
+  const host = await createHostFixture(testLifecycle(t))
   await seedHostSession(host)
   try {
     // A foreign fileUploads double must make the real row fail loudly.
@@ -553,8 +539,8 @@ test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leav
   }
 })
 
-test('L2. a Client-side readiness failure unwinds the partial Client cleanly', async () => {
-  const host = await createHostFixture()
+test('L2. a Client-side readiness failure unwinds the partial Client cleanly', async (t) => {
+  const host = await createHostFixture(testLifecycle(t))
   try {
     const jobControllerBefore = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     const hostRuntime = await createRemoteHostRuntime(host.ctx)
