@@ -20,30 +20,7 @@ import type {
   PresentationReadSnapshot,
   PresentationReader,
 } from '../src/runtime/presentation-read-port.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe(listener) {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
-}
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 function event(type: string, seq: number, data: Record<string, unknown>): PresentationDurableEvent {
   return { type, seq, time: 1_700_000_000_000 + seq, data }
@@ -125,7 +102,7 @@ function settledEvents(): PresentationDurableEvent[] {
 }
 
 test('compares an official eventSource cut through Transcript, Window, and Focus semantics', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const events = settledEvents()
   const liveInputs = [start(), textChunk('live')]
   const directAgent = { session: { snapshotEvents: () => events } }
@@ -176,7 +153,7 @@ test('Compact projection is produced beside the Focus projection', () => {
 })
 
 test('canonical Full projection keeps Direct/Remote parity', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const events = [
     event('turn/start', 0, { turn: 0 }),
     event('user/message', 1, {
@@ -240,7 +217,7 @@ test('canonical Full projection keeps Direct/Remote parity', async () => {
 })
 
 test('Delivered Files survive Direct/Remote Transcript, Window, and Focus parity', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const events = [
     event('turn/start', 0, { turn: 1 }),
     event('user/message', 1, {
@@ -327,7 +304,7 @@ test('Delivered Files survive Direct/Remote Transcript, Window, and Focus parity
 })
 
 test('fresh same-turn steer parity hydrates durable history before replaying the later live owner', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const events = [
     event('turn/start', 0, { turn: 0 }),
     event('step/start', 1, { turn: 0, step: 1 }),
@@ -397,7 +374,7 @@ test('fresh same-turn steer parity hydrates durable history before replaying the
 })
 
 test('reports durable payload, live inputs, and presentation semantic mismatches with bounded output', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const events = settledEvents()
   const direct = directSnapshot(events, [start(), textChunk('direct')])
   const remote = directSnapshot(
@@ -454,7 +431,7 @@ test('preserves Focus context/final ownership and history no-op semantics', () =
 })
 
 test('discards stale presentation success and failure after generation reset', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   let releaseSuccess!: () => void
   const successGate = new Promise<void>(resolve => { releaseSuccess = resolve })
   const delayedSuccess: PresentationReader = {
@@ -489,7 +466,7 @@ test('discards stale presentation success and failure after generation reset', a
 })
 
 test('generation reset, supersession, cancellation, and dispose discard stale presentation work', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   let calls = 0
@@ -510,7 +487,7 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
   assert.deepEqual(await stale, { status: 'discarded', generation: '1', reason: 'stale-generation' })
   shadow.dispose()
 
-  const secondGenerations = generationHarness()
+  const secondGenerations = createObservableGenerationHarness()
   let secondRelease!: () => void
   const secondGate = new Promise<void>(resolve => { secondRelease = resolve })
   let secondCalls = 0
@@ -531,7 +508,7 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
   assert.equal((await next).status, 'compared')
   superseding.dispose()
 
-  const thirdGenerations = generationHarness()
+  const thirdGenerations = createObservableGenerationHarness()
   let thirdRelease!: () => void
   const thirdGate = new Promise<void>(resolve => { thirdRelease = resolve })
   const pendingReader: PresentationReader = {
@@ -546,7 +523,7 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
   assert.deepEqual(await cancelled, { status: 'cancelled', generation: '1' })
   cancelledShadow.dispose()
 
-  const disposeGenerations = generationHarness()
+  const disposeGenerations = createObservableGenerationHarness()
   let disposeRelease!: () => void
   const disposeGate = new Promise<void>(resolve => { disposeRelease = resolve })
   const disposable: PresentationReader = {

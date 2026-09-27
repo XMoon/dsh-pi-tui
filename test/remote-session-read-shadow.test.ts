@@ -10,33 +10,7 @@ import type {
   SessionReader,
   SessionSummary,
 } from '../src/runtime/session-reader-port.ts'
-import type {
-  RemoteConnectionGeneration,
-  RemoteConnectionGenerationSource,
-} from '../src/runtime/remote/session-reader-remote.ts'
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: listener => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
-}
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 function row(id: string, updatedAt: number, extra: Partial<SessionSummary> = {}): SessionSummary {
   return { id, updatedAt, createdAt: updatedAt, live: false, ...extra }
@@ -61,7 +35,7 @@ function outcomeReport(outcome: SessionReadShadowOutcome) {
 }
 
 test('reports comparable list/projection/search fields and explicit non-comparable fields', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const direct = reader({
     projections: async () => new Map([['session-a', { title: 'title', preset: 'ptc' }]]),
     search: async () => ({ items: [{ sessionId: 'session-a', snippet: 'needle' }], hasMore: false }),
@@ -81,7 +55,7 @@ test('reports comparable list/projection/search fields and explicit non-comparab
 })
 
 test('reports membership/order, row, projection, and search mismatches without changing Direct authority', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const direct = reader({
     list: async () => [
       row('session-a', 10, { cwd: '/a', parentSession: 'session-parent', origin: 'subagent' }),
@@ -118,7 +92,7 @@ test('reports membership/order, row, projection, and search mismatches without c
 })
 
 test('bounds large parity diagnostics and never returns raw read objects', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const directRows = Array.from({ length: 300 }, (_, index) => row(`session-${index}`, index, { cwd: `/${'x'.repeat(600)}` }))
   const remoteRows = directRows.map(value => ({ ...value, updatedAt: value.updatedAt + 1 }))
   remoteRows.push(row('session-extra', 1))
@@ -139,7 +113,7 @@ test('bounds large parity diagnostics and never returns raw read objects', async
 })
 
 test('returns unavailable while disconnected and does not call either reader', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   generations.set(undefined)
   let reads = 0
   const direct = reader({ list: async () => { reads += 1; return [] } })
@@ -152,7 +126,7 @@ test('returns unavailable while disconnected and does not call either reader', a
 })
 
 test('does not turn a reader-unavailable result into an empty parity match', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const direct = reader({ list: async () => [] })
   const remote = reader({ list: async () => undefined })
   const shadow = new RemoteSessionReadShadow(direct, remote, generations.source)
@@ -166,7 +140,7 @@ test('does not turn a reader-unavailable result into an empty parity match', asy
 })
 
 test('discards a stale successful result after Connection reset, then compares the new generation', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const stale = Promise.withResolvers<SessionSummary[]>()
   let first = true
   const direct = reader({
@@ -194,7 +168,7 @@ test('discards a stale successful result after Connection reset, then compares t
 })
 
 test('discards a stale error instead of publishing it as the current shadow failure', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const stale = Promise.withResolvers<SessionSummary[]>()
   const direct = reader({ list: async () => stale.promise })
   const remote = reader({ list: async () => [row('session-a', 10)] })
@@ -208,7 +182,7 @@ test('discards a stale error instead of publishing it as the current shadow fail
 })
 
 test('supersedes an older compare and explicitly discards its late success', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const first = Promise.withResolvers<SessionSummary[]>()
   let calls = 0
   const direct = reader({
@@ -229,7 +203,7 @@ test('supersedes an older compare and explicitly discards its late success', asy
 })
 
 test('external abort returns cancelled for the current shadow operation', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const pending = Promise.withResolvers<SessionSummary[]>()
   const shadow = new RemoteSessionReadShadow(
     reader({ list: async () => pending.promise }),
@@ -245,7 +219,7 @@ test('external abort returns cancelled for the current shadow operation', async 
 })
 
 test('a generation reset wins over an external abort for stale completion classification', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const pending = Promise.withResolvers<SessionSummary[]>()
   const shadow = new RemoteSessionReadShadow(
     reader({ list: async () => pending.promise }),
@@ -262,7 +236,7 @@ test('a generation reset wins over an external abort for stale completion classi
 })
 
 test('dispose invalidates and cancels an in-flight compare', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const pending = Promise.withResolvers<SessionSummary[]>()
   const shadow = new RemoteSessionReadShadow(
     reader({ list: async () => pending.promise }),

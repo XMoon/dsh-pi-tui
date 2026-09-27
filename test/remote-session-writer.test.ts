@@ -19,30 +19,7 @@ import {
 } from '../src/runtime/remote/session-writer-remote.ts'
 import { classifyRemoteWriteFailure } from '../src/runtime/remote/write-failure.ts'
 import { retainableSource, type RetainableSource } from './remote-reference-source.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: listener => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
-}
+import { createObservableGenerationHarness, type GenerationHarness } from './support/remote-generation.ts'
 
 interface SessionCalls {
   beginInputs: unknown[]
@@ -82,7 +59,7 @@ function writerHarness(): WriterHarness {
     abandonCalls: 0,
     openCalls: 0,
   }
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   let promptResult: { ok: true; value: { accepted: true } } | { ok: false; error: unknown } = {
     ok: true,
     value: { accepted: true },

@@ -14,30 +14,8 @@ import {
   type RemotePendingSessionFace,
   type RemotePendingSessionsSource,
 } from '../src/runtime/remote/pending-input-reader-remote.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: listener => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
-}
+import type { RemoteConnectionGeneration } from '../src/runtime/remote/session-reader-remote.ts'
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 function sessionsSource(byId: Readonly<Record<string, RemotePendingSessionFace>>): RemotePendingSessionsSource {
   return { binding: id => byId[id] === undefined ? undefined : { session: byId[id] } }
@@ -70,7 +48,7 @@ test('official Session face satisfies the pending-input boundary structurally', 
 })
 
 test('next-turn is queued and next-step splits into steering and context by source kind', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({
       running: true,
@@ -103,7 +81,7 @@ test('next-turn is queued and next-step splits into steering and context by sour
 })
 
 test('rpcId is taken only from a user source carrying a string rpcId', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({
       inbox: {
@@ -127,7 +105,7 @@ test('rpcId is taken only from a user source carrying a string rpcId', () => {
 })
 
 test('content is detached and frozen so Client-owned nested values cannot escape', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const content = text('original')
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({ inbox: { 'next-turn': [{ id: 'q-1', content, source: { kind: 'user' } }], 'next-step': [] } }),
@@ -141,7 +119,7 @@ test('content is detached and frozen so Client-owned nested values cannot escape
 })
 
 test('placement is derived only from the inbox list and source kind, never from running', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({
       running: true,
@@ -155,7 +133,7 @@ test('placement is derived only from the inbox list and source kind, never from 
 })
 
 test('an empty durable inbox is an empty projection, never undefined', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({ inbox: { 'next-turn': [], 'next-step': [] } }),
   }), generation.source)
@@ -163,7 +141,7 @@ test('an empty durable inbox is an empty projection, never undefined', () => {
 })
 
 test('an absent inbox projection baseline is an empty projection', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({ inbox: undefined }),
   }), generation.source)
@@ -171,13 +149,13 @@ test('an absent inbox projection baseline is an empty projection', () => {
 })
 
 test('an absent binding has no fabricated snapshot', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const reader = new RemotePendingInputReader(sessionsSource({}), generation.source)
   assert.equal(reader.snapshot('missing'), undefined)
 })
 
 test('a replaced generation is unavailable rather than stale data', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const generationAtRead: RemoteConnectionGeneration = { id: 1 }
   generation.set(generationAtRead)
   const session = face({
@@ -189,7 +167,7 @@ test('a replaced generation is unavailable rather than stale data', () => {
 })
 
 test('a disconnected generation has no snapshot', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   generation.set(undefined)
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({ inbox: { 'next-turn': [], 'next-step': [] } }),
@@ -198,7 +176,7 @@ test('a disconnected generation has no snapshot', () => {
 })
 
 test('Direct inbox collection names never appear in the projection', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const reader = new RemotePendingInputReader(sessionsSource({
     'session-a': face({
       inbox: { 'next-turn': [{ id: 'q-1', content: text('A'), source: { kind: 'user' } }], 'next-step': [] },
@@ -210,7 +188,7 @@ test('Direct inbox collection names never appear in the projection', () => {
 })
 
 test('a PRESENT inbox value violating the official shape is a contract error, never an empty queue', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   // `undefined` alone means "no baseline yet" (reads empty). Every other
   // non-conforming value is a wire-contract violation: reporting it as an empty
   // queue would hide durable input the Host may still execute, and reusing
@@ -226,7 +204,7 @@ test('a PRESENT inbox value violating the official shape is a contract error, ne
 })
 
 test('a PRESENT inbox row violating the official shape is a contract error, never a dropped row', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   for (const row of [{ id: '', content: text('x') }, { id: 'q-1', content: 'not-an-array' }, { content: text('x') }, 'not-a-message', null, 7]) {
     const reader = new RemotePendingInputReader(sessionsSource({
       'session-a': face({ inbox: { 'next-turn': [row], 'next-step': [] } }),

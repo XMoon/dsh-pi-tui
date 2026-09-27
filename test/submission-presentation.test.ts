@@ -14,25 +14,7 @@ import {
   type RemoteSubmissionSessionFace,
   type RemoteSubmissionSessionsSource,
 } from '../src/submission-presentation.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
-
-function generationHarness(): { source: RemoteConnectionGenerationSource; set(value: RemoteConnectionGeneration | undefined): void } {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: listener => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
-}
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 function remoteSessions(byId: Readonly<Record<string, RemoteSubmissionSessionFace>>): RemoteSubmissionSessionsSource {
   return { binding: id => byId[id] === undefined ? undefined : { session: byId[id] } }
@@ -71,7 +53,7 @@ test('two same-text submissions remain identity-distinct and are never deduped b
 })
 
 test('the Remote source maps official pending submissions and attachment labels', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const source = new RemoteSubmissionPresentation(remoteSessions({
     'session-a': sessionFace([
       { requestId: 'req-1', placement: 'queued', time: 100, text: 'A', attachments: [] },
@@ -102,7 +84,7 @@ test('the Remote source maps official pending submissions and attachment labels'
 })
 
 test('the Remote source preserves the transcript placement for an idle submission', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const source = new RemoteSubmissionPresentation(remoteSessions({
     'session-a': sessionFace([
       { requestId: 'req-3', placement: 'transcript', time: 200, text: 'C', attachments: [] },
@@ -113,7 +95,7 @@ test('the Remote source preserves the transcript placement for an idle submissio
   ])
 })
 
-test('an unnamed image keeps a stable label', () => {  const generation = generationHarness()
+test('an unnamed image keeps a stable label', () => {  const generation = createObservableGenerationHarness()
   const source = new RemoteSubmissionPresentation(remoteSessions({
     'session-a': sessionFace([
       { requestId: 'req-1', placement: 'queued', time: 1, text: '', attachments: [{ type: 'image', value: { previewUrl: 'blob:x' } }] },
@@ -123,7 +105,7 @@ test('an unnamed image keeps a stable label', () => {  const generation = genera
 })
 
 test('switching sessions drops the previous session echoes', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const source = new RemoteSubmissionPresentation(remoteSessions({
     'session-a': sessionFace([{ requestId: 'req-a', placement: 'queued', time: 1, text: 'A', attachments: [] }]),
     'session-b': sessionFace([{ requestId: 'req-b', placement: 'transcript', time: 2, text: 'B', attachments: [] }]),
@@ -133,7 +115,7 @@ test('switching sessions drops the previous session echoes', () => {
 })
 
 test('a replaced generation is unavailable rather than a stale echo', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const face: RemoteSubmissionSessionFace = {
     getSnapshot: () => {
       generation.set({ id: 2 })
@@ -145,7 +127,7 @@ test('a replaced generation is unavailable rather than a stale echo', () => {
 })
 
 test('a disconnected generation or absent binding has no presentation', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   generation.set(undefined)
   const source = new RemoteSubmissionPresentation(remoteSessions({
     'session-a': sessionFace([]),
@@ -156,7 +138,7 @@ test('a disconnected generation or absent binding has no presentation', () => {
 })
 
 test('the Remote source reports no active session as undefined, never an empty list', () => {
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const source = new RemoteSubmissionPresentation(remoteSessions({}), generation.source)
   assert.equal(source.snapshot(undefined), undefined)
 })

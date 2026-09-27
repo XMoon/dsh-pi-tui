@@ -14,10 +14,9 @@ import {
   type RemoteSurfaceAuthoritySource,
 } from '../src/runtime/remote/surface-authority-remote.ts'
 import type {
-  RemoteConnectionGeneration,
-  RemoteConnectionGenerationSource,
   RemoteReadResult,
 } from '../src/runtime/remote/session-reader-remote.ts'
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 function deferred<T>(): {
   promise: Promise<T>
@@ -29,27 +28,6 @@ function deferred<T>(): {
 
 function result<T>(value: T): RemoteReadResult<T> {
   return { ok: true, value }
-}
-
-function generations(initial: RemoteConnectionGeneration | undefined = { id: 'g1' }): {
-  source: RemoteConnectionGenerationSource
-  set: (generation: RemoteConnectionGeneration | undefined) => void
-} {
-  let current: RemoteConnectionGeneration | undefined = initial
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: (listener) => {
-        listeners.add(listener)
-        return () => listeners.delete(listener)
-      },
-    },
-    set: (generation) => {
-      current = generation
-      for (const listener of listeners) listener()
-    },
-  }
 }
 
 function sourceOf(options: {
@@ -69,7 +47,7 @@ function sourceOf(options: {
 test('returns undefined without a Connection generation and does not probe Remotes', async () => {
   let commandCalls = 0
   let skillCalls = 0
-  const clock = generations()
+  const clock = createObservableGenerationHarness()
   clock.set(undefined)
   const reader = new RemoteSurfaceAuthorityReader(
     sourceOf({
@@ -126,7 +104,7 @@ test('maps and freezes only official command/skill authority metadata', async ()
         return result({ skills })
       },
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   const snapshot = await reader.read('session-a')
@@ -171,7 +149,7 @@ test('unwraps a failed RemoteResult immediately instead of fabricating an empty 
       commands: async () => ({ ok: false, error: { code: 'COMMANDS_DOWN', message: 'try later' } }),
       skills: async () => pendingSkills.promise,
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   await assert.rejects(reader.read('session-a'), /commands\/list failed: COMMANDS_DOWN: try later/u)
@@ -183,7 +161,7 @@ test('wraps ordinary Remote promise rejection with a bounded provider error', as
     sourceOf({
       commands: async () => { throw new Error('commands promise failed') },
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   await assert.rejects(reader.read('session-a'), /commands\/list failed: commands promise failed/u)
@@ -194,7 +172,7 @@ test('throws a failed skills RemoteResult instead of returning an empty skill li
     sourceOf({
       skills: async () => ({ ok: false, error: { code: 'SKILLS_DOWN', message: 'try later' } }),
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   await assert.rejects(reader.read('session-a'), /skills\/list failed: SKILLS_DOWN: try later/u)
@@ -203,7 +181,7 @@ test('throws a failed skills RemoteResult instead of returning an empty skill li
 test('discards stale success after a Connection generation change', async () => {
   const commandRead = deferred<RemoteReadResult<readonly RemoteCommandDescriptor[]>>()
   const skillRead = deferred<RemoteReadResult<{ readonly skills: readonly RemoteSkillEntry[] }>>()
-  const clock = generations()
+  const clock = createObservableGenerationHarness()
   const reader = new RemoteSurfaceAuthorityReader(
     sourceOf({ commands: async () => commandRead.promise, skills: async () => skillRead.promise }),
     clock.source,
@@ -219,7 +197,7 @@ test('discards stale success after a Connection generation change', async () => 
 test('discards stale Remote failure after a Connection generation change', async () => {
   const commandRead = deferred<RemoteReadResult<readonly RemoteCommandDescriptor[]>>()
   const skillRead = deferred<RemoteReadResult<{ readonly skills: readonly RemoteSkillEntry[] }>>()
-  const clock = generations()
+  const clock = createObservableGenerationHarness()
   const reader = new RemoteSurfaceAuthorityReader(
     sourceOf({ commands: async () => commandRead.promise, skills: async () => skillRead.promise }),
     clock.source,
@@ -244,7 +222,7 @@ test('caller cancellation wins over a Remote rejection', async () => {
         return skillRead.promise
       },
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   const read = reader.read('session-a', controller.signal)
   controller.abort()
