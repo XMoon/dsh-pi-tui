@@ -1,5 +1,6 @@
 {
-  "generatedFrom": "src/app/bootstrap.ts @ b6db374a",
+  "generatedFrom": "src/app/bootstrap.ts",
+  "sourceHash": "sha256:06d2ddf3c622c22b",
   "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
   "total": 78,
   "rows": [
@@ -27,8 +28,8 @@
         "viewer",
         "root-statement@265",
         "root-statement@614",
-        "root-statement@2149",
-        "root-statement@2275"
+        "root-statement@2151",
+        "root-statement@2277"
       ]
     },
     {
@@ -77,8 +78,8 @@
         "surfaceEvents",
         "flushTurn",
         "root-statement@265",
-        "root-statement@2024",
-        "root-statement@2149"
+        "root-statement@2026",
+        "root-statement@2151"
       ]
     },
     {
@@ -135,7 +136,7 @@
         "sessionRuntime",
         "command",
         "submission",
-        "root-statement@2441"
+        "root-statement@2443"
       ]
     },
     {
@@ -158,7 +159,7 @@
         "sessionRuntime",
         "command",
         "submission",
-        "root-statement@2441"
+        "root-statement@2443"
       ]
     },
     {
@@ -177,7 +178,7 @@
       "callers": [
         "localShell",
         "submission",
-        "root-statement@2275"
+        "root-statement@2277"
       ]
     },
     {
@@ -188,9 +189,7 @@
       "refs": 4,
       "hostDependency": false,
       "head": "const submissionWriterSection = <T>(task: () => Promise<T>): Promise<T> => {",
-      "tests": [
-        "a5b-root-matrix.test.ts"
-      ],
+      "tests": [],
       "classification": "MUST_MOVE:app-submission",
       "owner": "app-submission",
       "capabilities": "SessionScopeAuthority.captureLive + SubmissionRuntime.withWriter",
@@ -252,7 +251,7 @@
         "submission",
         "surfaceEvents",
         "root-statement@590",
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
@@ -314,7 +313,7 @@
         "directRuntime",
         "command",
         "root-statement@590",
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
@@ -515,7 +514,7 @@
       "lifecycle": "live read, per call (ownership subject fence)",
       "callers": [
         "submission",
-        "root-statement@2275"
+        "root-statement@2277"
       ]
     },
     {
@@ -534,7 +533,7 @@
       "capabilities": "DirectApplicationRuntime.owners.currentDirectAttachment",
       "lifecycle": "live read, per call (currentness check)",
       "callers": [
-        "root-statement@2149"
+        "root-statement@2151"
       ]
     },
     {
@@ -579,7 +578,7 @@
         "status",
         "submission",
         "surfaceEvents",
-        "root-statement@2149"
+        "root-statement@2151"
       ]
     },
     {
@@ -607,8 +606,8 @@
         "openRewindPicker",
         "root-statement@561",
         "root-statement@1314",
-        "root-statement@2275",
-        "root-statement@2441"
+        "root-statement@2277",
+        "root-statement@2443"
       ]
     },
     {
@@ -671,10 +670,10 @@
         "root-statement@346",
         "root-statement@590",
         "root-statement@614",
-        "root-statement@2024",
-        "root-statement@2078",
-        "root-statement@2079",
-        "root-statement@2133"
+        "root-statement@2026",
+        "root-statement@2080",
+        "root-statement@2081",
+        "root-statement@2135"
       ]
     },
     {
@@ -779,7 +778,7 @@
         "sessionRuntime",
         "root-statement@661",
         "root-statement@781",
-        "root-statement@2503"
+        "root-statement@2505"
       ]
     },
     {
@@ -861,7 +860,7 @@
       "callers": [
         "presentation",
         "root-statement@781",
-        "root-statement@2498"
+        "root-statement@2500"
       ]
     },
     {
@@ -882,7 +881,7 @@
       "callers": [
         "presentation",
         "root-statement@781",
-        "root-statement@2498"
+        "root-statement@2500"
       ]
     },
     {
@@ -900,7 +899,7 @@
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
         "root-statement@781",
-        "root-statement@2499"
+        "root-statement@2501"
       ]
     },
     {
@@ -991,9 +990,9 @@
         "status",
         "viewer",
         "surfaceEvents",
-        "root-statement@2149",
-        "root-statement@2484",
-        "root-statement@2600"
+        "root-statement@2151",
+        "root-statement@2486",
+        "root-statement@2602"
       ]
     },
     {
@@ -1023,7 +1022,7 @@
         "artifacts",
         "surfaceEvents",
         "root-statement@614",
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
@@ -1055,8 +1054,8 @@
         "runCopyCommand",
         "surfaceEvents",
         "openRewindPicker",
-        "root-statement@2024",
-        "root-statement@2109"
+        "root-statement@2026",
+        "root-statement@2111"
       ]
     },
     {
@@ -1114,8 +1113,8 @@
         "presentation",
         "submission",
         "surfaceEvents",
-        "root-statement@2024",
-        "root-statement@2146"
+        "root-statement@2026",
+        "root-statement@2148"
       ]
     },
     {
@@ -1146,7 +1145,7 @@
         "submission",
         "artifacts",
         "surfaceEvents",
-        "root-statement@2149"
+        "root-statement@2151"
       ]
     },
     {
@@ -1234,21 +1233,22 @@
       "kind": "const",
       "mutable": false,
       "lines": "1185-1189",
-      "refs": 3,
+      "refs": 4,
       "hostDependency": false,
       "head": "const present = toolPresenterFrom(name => {",
       "tests": [
         "a2-ownership-cutover.test.ts",
+        "a5b-bootstrap-closure.test.ts",
         "action-tool-card.test.ts",
-        "authorization-login.test.ts",
-        "autocomplete-active-screen-repaint.test.ts"
+        "authorization-login.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
       "capabilities": "pure / owner capability",
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
-        "root-statement@2024"
+        "surfaceEvents",
+        "root-statement@2026"
       ]
     },
     {
@@ -1305,7 +1305,7 @@
         "disposeSurface",
         "submission",
         "surfaceEvents",
-        "root-statement@2441"
+        "root-statement@2443"
       ]
     },
     {
@@ -1327,7 +1327,7 @@
         "disposeSurface",
         "submission",
         "surfaceEvents",
-        "root-statement@2441"
+        "root-statement@2443"
       ]
     },
     {
@@ -1447,7 +1447,7 @@
       "callers": [
         "presentation",
         "viewer",
-        "root-statement@2550"
+        "root-statement@2552"
       ]
     },
     {
@@ -1476,8 +1476,8 @@
         "submission",
         "surfaceEvents",
         "root-statement@1379",
-        "root-statement@2149",
-        "root-statement@2275"
+        "root-statement@2151",
+        "root-statement@2277"
       ]
     },
     {
@@ -1504,9 +1504,9 @@
         "command",
         "localShell",
         "surfaceEvents",
-        "root-statement@2149",
-        "root-statement@2275",
-        "root-statement@2441"
+        "root-statement@2151",
+        "root-statement@2277",
+        "root-statement@2443"
       ]
     },
     {
@@ -1539,9 +1539,7 @@
       "refs": 4,
       "hostDependency": false,
       "head": "const runClipboardCommand = createClipboardRunner()",
-      "tests": [
-        "a5b-root-matrix.test.ts"
-      ],
+      "tests": [],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
       "capabilities": "client-local clipboard policy only (no Host port)",
@@ -1549,7 +1547,7 @@
       "callers": [
         "runCopyCommand",
         "surfaceEvents",
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
@@ -1560,9 +1558,7 @@
       "refs": 6,
       "hostDependency": true,
       "head": "const clipboardEnv: ClipboardEnvironment = {",
-      "tests": [
-        "a5b-root-matrix.test.ts"
-      ],
+      "tests": [],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
       "capabilities": "client-local clipboard environment (no Host port)",
@@ -1570,7 +1566,7 @@
       "callers": [
         "copyEnv",
         "surfaceEvents",
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
@@ -1581,16 +1577,14 @@
       "refs": 4,
       "hostDependency": false,
       "head": "const runCopyCommand: CopyExecutor = (command, args, input) =>",
-      "tests": [
-        "a5b-root-matrix.test.ts"
-      ],
+      "tests": [],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
       "capabilities": "client-local copy executor (no Host port)",
       "lifecycle": "process-lifetime: immutable client executor",
       "callers": [
         "command",
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
@@ -1601,16 +1595,14 @@
       "refs": 4,
       "hostDependency": true,
       "head": "const copyEnv: CopyEnvironment = {",
-      "tests": [
-        "a5b-root-matrix.test.ts"
-      ],
+      "tests": [],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
       "capabilities": "client-local copy environment (no Host port)",
       "lifecycle": "process-lifetime: immutable client policy",
       "callers": [
         "command",
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
@@ -1639,27 +1631,26 @@
       "name": "surfaceEvents",
       "kind": "const",
       "mutable": false,
-      "lines": "1543-2018",
+      "lines": "1543-2020",
       "refs": 2,
       "hostDependency": true,
       "head": "const surfaceEvents: TuiAppEvents = {",
       "tests": [
-        "a5b-bootstrap-closure.test.ts",
-        "a5b-root-matrix.test.ts"
+        "a5b-bootstrap-closure.test.ts"
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
       "capabilities": "SubmissionController, CommandSurface, presentation/status/settings owners, SurfaceRuntime, extension semantic hooks, lifecycle/exit callbacks (A5b-5: app/surface/application-events.ts; must not become a callback bag)",
       "lifecycle": "mount-owned: installed by surface.start(), disposed with the surface",
       "callers": [
-        "root-statement@2024"
+        "root-statement@2026"
       ]
     },
     {
       "name": "jobs",
       "kind": "const",
       "mutable": false,
-      "lines": "2269-2269",
+      "lines": "2271-2271",
       "refs": 22,
       "hostDependency": true,
       "head": "const jobs = ctx.get('jobs')",
@@ -1677,14 +1668,14 @@
         "disposeSurface",
         "surfaceEvents",
         "jobSnapshot",
-        "root-statement@2275"
+        "root-statement@2277"
       ]
     },
     {
       "name": "subagents",
       "kind": "const",
       "mutable": false,
-      "lines": "2270-2270",
+      "lines": "2272-2272",
       "refs": 7,
       "hostDependency": true,
       "head": "const subagents = ctx.get('subagents')",
@@ -1700,14 +1691,14 @@
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
         "surfaceEvents",
-        "root-statement@2275"
+        "root-statement@2277"
       ]
     },
     {
       "name": "jobSnapshot",
       "kind": "let",
       "mutable": true,
-      "lines": "2274-2274",
+      "lines": "2276-2276",
       "refs": 4,
       "hostDependency": false,
       "head": "let jobSnapshot: { key: string; rows: ReturnType<NonNullable<typeof jobs>['list']> } | undefined",
@@ -1717,22 +1708,22 @@
       "capabilities": "pure / owner capability",
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
-        "root-statement@2275"
+        "root-statement@2277"
       ]
     },
     {
       "name": "openRewindPicker",
       "kind": "function",
       "mutable": false,
-      "lines": "2355-2431",
+      "lines": "2357-2433",
       "refs": 4,
       "hostDependency": false,
       "head": "function openRewindPicker(): void {",
       "tests": [
         "a5b-bootstrap-closure.test.ts",
-        "a5b-root-matrix.test.ts",
         "authorization-login.test.ts",
-        "busy-enter.test.ts"
+        "busy-enter.test.ts",
+        "command-catalog.test.ts"
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
@@ -1747,7 +1738,7 @@
       "name": "startupAgent",
       "kind": "const",
       "mutable": false,
-      "lines": "2483-2483",
+      "lines": "2485-2485",
       "refs": 3,
       "hostDependency": false,
       "head": "const startupAgent = agentNow()",
@@ -1757,14 +1748,14 @@
       "capabilities": "pure / owner capability",
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
-        "root-statement@2484"
+        "root-statement@2486"
       ]
     },
     {
       "name": "currentWorkingFromLog",
       "kind": "const",
       "mutable": false,
-      "lines": "2515-2518",
+      "lines": "2517-2520",
       "refs": 3,
       "hostDependency": false,
       "head": "const currentWorkingFromLog = (): boolean => {",
@@ -1774,14 +1765,14 @@
       "capabilities": "pure / owner capability",
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
-        "root-statement@2149"
+        "root-statement@2151"
       ]
     },
     {
       "name": "flushTurn",
       "kind": "const",
       "mutable": false,
-      "lines": "2520-2533",
+      "lines": "2522-2535",
       "refs": 3,
       "hostDependency": false,
       "head": "const flushTurn = (): void => {",
@@ -1791,14 +1782,14 @@
       "capabilities": "pure / owner capability",
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
-        "root-statement@2149"
+        "root-statement@2151"
       ]
     },
     {
       "name": "assistantStreamHandle",
       "kind": "const",
       "mutable": false,
-      "lines": "2543-2549",
+      "lines": "2545-2551",
       "refs": 3,
       "hostDependency": true,
       "head": "const assistantStreamHandle = directRuntime.installAssistantStream({",
@@ -1808,15 +1799,15 @@
       "capabilities": "Host/Direct-touching composition seam",
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
-        "root-statement@2550",
-        "root-statement@2551"
+        "root-statement@2552",
+        "root-statement@2553"
       ]
     },
     {
       "name": "disposeCredentialSubscription",
       "kind": "const",
       "mutable": false,
-      "lines": "2588-2588",
+      "lines": "2590-2590",
       "refs": 2,
       "hostDependency": false,
       "head": "const disposeCredentialSubscription = backend.config.credentials.onChanged(() => surface.routeProviderRefresh())",
@@ -1828,7 +1819,7 @@
       "capabilities": "pure / owner capability",
       "lifecycle": "n/a (category documents ownership)",
       "callers": [
-        "root-statement@2589"
+        "root-statement@2591"
       ]
     }
   ]

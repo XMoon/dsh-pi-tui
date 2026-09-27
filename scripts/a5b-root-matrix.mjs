@@ -15,7 +15,7 @@
 // the shrink-only MUST_MOVE residual; re-run `--write` after every A5b slice.
 import ts from 'typescript'
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -73,7 +73,9 @@ for (const stmt of startRunner.body.statements) {
 }
 
 // Which test files mention each declaration (lock re-anchoring candidates).
-const testFiles = readdirSync(join(ROOT, 'test')).filter((f) => f.endsWith('.ts'))
+// The matrix's own guard file is not a lock candidate: including it would make
+// the artifact self-referential (its own text mentions declaration names).
+const testFiles = readdirSync(join(ROOT, 'test')).filter((f) => f.endsWith('.ts') && f !== 'a5b-root-matrix.test.ts')
 const testText = new Map(testFiles.map((f) => [f, readFileSync(join(ROOT, 'test', f), 'utf8')]))
 for (const row of rows) {
   const re = new RegExp(`\\b${row.name.replace(/[$]/g, '\\$')}\\b`)
@@ -171,8 +173,6 @@ for (const row of rows) {
     throw new Error(`${row.name} (${row.classification}) needs curated lifecycle + minimum capabilities`)
   }
 }
-const rev = execSync('git rev-parse --short HEAD', { cwd: ROOT }).toString().trim()
-const dirty = execSync('git status --porcelain src/app/bootstrap.ts', { cwd: ROOT }).toString().trim() !== ''
 // ── callers: the other root declarations whose text reads this name ────────
 const declText = new Map()
 {
@@ -220,7 +220,10 @@ for (const row of rows) {
 }
 
 const out = {
-  generatedFrom: `src/app/bootstrap.ts @ ${rev}${dirty ? '+working-tree' : ''}`,
+  generatedFrom: 'src/app/bootstrap.ts',
+  // Freshness is tied to the SOURCE CONTENT, never to a commit SHA: a SHA moves
+  // on unrelated commits, while this hash moves exactly when bootstrap does.
+  sourceHash: `sha256:${createHash('sha256').update(source).digest('hex').slice(0, 16)}`,
   note: 'One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).',
   total: rows.length,
   rows,
@@ -230,18 +233,28 @@ if (process.argv.includes('--write')) {
   console.error(`wrote ${ARTIFACT} (${rows.length} declarations)`)
 } else if (process.argv.includes('--check')) {
   const current = JSON.parse(readFileSync(ARTIFACT, 'utf8'))
-  const declared = new Set(rows.map((r) => r.name))
-  const stored = new Set(current.rows.map((r) => r.name))
-  const missing = [...declared].filter((n) => !stored.has(n))
-  const stale = [...stored].filter((n) => !declared.has(n))
-  if (missing.length || stale.length) {
-    console.error(`matrix is STALE: ${missing.length} missing, ${stale.length} stale`)
-    if (missing.length) console.error(`  missing: ${missing.join(', ')}`)
-    if (stale.length) console.error(`  stale:   ${stale.join(', ')}`)
+  // Provenance text is not freshness: compare everything else, including the
+  // per-row lines/refs/hostDependency/head/tests/callers/lifecycle/capabilities/
+  // classification/owner and the bootstrap content hash.
+  const normalize = ({ generatedFrom: _generatedFrom, ...rest }) => rest
+  const before = normalize(current)
+  const after = normalize(out)
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    const stored = new Map(current.rows.map((r) => [r.name, JSON.stringify(r)]))
+    const fresh = new Map(out.rows.map((r) => [r.name, JSON.stringify(r)]))
+    const added = [...fresh.keys()].filter((n) => !stored.has(n))
+    const removed = [...stored.keys()].filter((n) => !fresh.has(n))
+    const changed = [...fresh.keys()].filter((n) => stored.has(n) && stored.get(n) !== fresh.get(n))
+    console.error('matrix is STALE (regenerated content differs)')
+    if (before.sourceHash !== after.sourceHash) console.error(`  bootstrap content changed: ${before.sourceHash} -> ${after.sourceHash}`)
+    if (added.length) console.error(`  new declarations:   ${added.join(', ')}`)
+    if (removed.length) console.error(`  gone declarations:  ${removed.join(', ')}`)
+    if (changed.length) console.error(`  changed metadata:   ${changed.join(', ')}`)
+    if (!added.length && !removed.length && !changed.length) console.error('  (only the source hash / top-level metadata differs)')
     console.error('run: node scripts/a5b-root-matrix.mjs --write')
     process.exit(1)
   }
-  console.error(`matrix is current (${rows.length} declarations)`)
+  console.error(`matrix is current (${rows.length} declarations, ${out.sourceHash})`)
 } else {
   const counts = new Map()
   for (const r of rows) counts.set(r.classification, (counts.get(r.classification) ?? 0) + 1)
