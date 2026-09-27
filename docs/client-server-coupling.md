@@ -253,6 +253,16 @@ clipboard semantic port or Remote RPC exists for this.
 | `src/startup.ts` | (none by design) | Zero-dependency compatibility island; must never import experimental client/runtime code (plan §23). |
 | `src/builtins.ts`, `src/extensions.ts` | `ctx.get(TUI_STARTUP_SERVICE)` / `ctx.get(PI_TUI_EXTENSIONS_SERVICE)` | The TUI's own services, not Host services; excluded from the gate patterns. |
 | `src/index.ts` (`loader`, `appExit`) | `ctx.get('loader')`, `ctx.get('appExit')` | Cordis/dsh process services with no Host business state; excluded from the gate patterns. |
+| `src/app/remote/host-runtime.ts` | `import:dsh-session` (baseline entry) | M3-1 experimental Remote Host composition owner (`docs/m3-entry-contract.md` §2.4.1). The gate pattern is a substring artifact: the module imports the `dsh-session-stats` / `dsh-session-turn-outline` projection plugin rows and `dsh-session-log-export` — never the Host `dsh-session` type package. |
+| `src/app/remote/client-runtime.ts` | `import:dsh-agent` (baseline entry) | M3-1 experimental Client composition owner (`docs/m3-entry-contract.md` §2.4.2/§2.4.3). The gate pattern is a substring artifact: the import is the `dsh-agent-preset-registry/remote` Remote contribution — not the Host `dsh-agent` type package. |
+
+The M3-1 composition owners also introduce the first scanned `src/app/remote/**`
+coupling of a new kind: they mount official Host plugin rows by plugin object
+(the rows' own `inject` declarations carry the service dependencies) and read
+service presence through `ctx.reflect.get(...)` for fail-fast diagnostics. This
+is Host-side composition sanctioned by the frozen M3-0 contract, not Client-side
+business coupling; the M3-4 bootstrap integration owns any future inventory
+relocation.
 
 ## Locality rules for new features
 

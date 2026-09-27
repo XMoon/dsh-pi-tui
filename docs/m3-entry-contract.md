@@ -178,7 +178,9 @@ The in-process Client Context mounts in this order:
 
 ```text
 typert registry
-  -> Connection (installConnection + composition-owned rpc carrier)
+  -> Connection (installConnection + explicit composition-owned transport:
+     fetch = Host createSharedFetchHandler('/api') adapter,
+     openStream = Host typertGateway.wireStream.open adapter, ownsHost: true)
   -> API Gateway
   -> explicit /remote contributions
   -> Client fileUpload service
@@ -361,7 +363,7 @@ Existing DSH Host Context (base + normal pi-tui patch)
        |- api-remotes (forwarded events)
        '- session-log-export
             |
-            '- in-process ClientConnectionRpc (composition-owned bridge)
+            '- in-process transport (composition-owned: shared Fetch handler + wireStream.open)
                     |
 Client Context (M3-1 owner: src/app/remote/client-runtime.ts)
   |- typert registry
@@ -384,9 +386,9 @@ Cordis row whose `disabled` expression must predict a future backend choice.
 |---|---|---|---|---|---|
 | existing Host Context | DSH Loader + normal pi-tui patch | existing Host startup gate | n/a | disposed after RemoteHostRuntime and Client Context | Cordis disposers may run synchronously |
 | `RemoteHostRuntime` | additive Host plugins from §2.4.1, in dependency order | every plugin fiber mounted; required services (`connection`, `fileUploads`) present | Host connection owns carrier state | after Client Context, reverse plugin order; then existing Host lifecycle continues | no plugin callback may target a disposed Client |
-| in-process RPC bridge | composition-owned `ClientConnectionRpc` over the Host connection/Gateway carrier | available before Client Connection install | follows Host connection generation | with RemoteHostRuntime | close/abort may synchronously settle client requests |
+| in-process RPC bridge | composition-owned explicit transport over the Host `createSharedFetchHandler('/api')` + `typertGateway.wireStream.open` seams | available before Client Connection install | follows Host connection generation | with RemoteHostRuntime | close/abort may synchronously settle client requests |
 | Client Context | `client-runtime.ts` exact sequence from §2.4.3 | connection generation defined + Session list phase `ready`; Job roster has its own readiness and must be proven by M3-1 L5 but does not block main-session readiness | owner observes official generation/reset only; no watchdog | adapters/refs first, then Client fiber in reverse mount order | plugin disposers/generation subscribers may fire synchronously |
-| Connection | official Client plugin with `installConnection({transport:{rpc}})` | `generation.getSnapshot() !== undefined` | official loop; `connection/reset` is cache invalidation | late in Client reverse-dispose | reset clears generation synchronously |
+| Connection | official Client plugin with `installConnection({transport:{fetch, openStream, ownsHost:true}})` over the composition-owned in-process carrier | `generation.getSnapshot() !== undefined` | official loop; `connection/reset` is cache invalidation | late in Client reverse-dispose | reset clears generation synchronously |
 | Gateway | official Client plugin | after Connection generation | owns `$events`, streams and forwarded events | before Connection | listeners are removed while Context is live |
 | `/remote` contributions | explicit §2.4.2 list | namespace mount complete | follow Gateway generation | reverse mount order | namespace unregister may invalidate readers synchronously |
 | Client fileUpload | official Client plugin after `fileUploads` Remote contribution | service provided | follows Gateway generation | before Gateway, after Session/Job users are gone | no Worker/browser path may be reached merely by mounting it |
@@ -424,8 +426,12 @@ M3-1 freezes one packaging-only adaptation in
 2. install a minimal `window.__ModuleLoader__.load` implementation whose
    accepted bundle ids are exactly the six §2.4.3 entries;
 3. dynamically import and instantiate those entries in dependency order;
-4. use the public Connection `installConnection(ctx, { transport: { rpc } })`
-   hook with the composition-owned in-process `ClientConnectionRpc`;
+4. use the public Connection `installConnection(ctx, { transport })` hook with
+   the explicit composition-owned carrier: `transport.fetch` adapts the Host
+   `connection.createSharedFetchHandler('/api')` and `transport.openStream`
+   adapts the Host `typertGateway.wireStream.open`; `ownsHost: true` and no
+   `location` are passed (the verified rc.2 public carrier — the M3-1
+   implementation supersedes the earlier `transport.rpc` wording);
 5. restore the previous global immediately after construction (and in every
    failure path). Disposal may not depend on the shim still being installed.
 

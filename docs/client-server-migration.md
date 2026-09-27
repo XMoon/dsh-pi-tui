@@ -15,7 +15,7 @@ M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority 
 Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
 Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer ownership convergence, NO behavior change — A5a + A5b; see the Pre-M3 TS Architecture Convergence status section)
 M3-0 DONE          (entry contract frozen — the M3 architecture contract is docs/m3-entry-contract.md)
-M3-1 NEXT          (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
+M3-1 DONE          (experimental in-process wire composition spine: reusable `RemoteHostRuntime` + `RemoteClientRuntime` + `backend-loader.ts` dynamic boundary, zero product cutover — see the M3-1 status section)
 M3 product composition NOT STARTED (Direct production/default behavior unchanged; Remote composition NOT active)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -1896,6 +1896,83 @@ needs:
 The split suites stay directly under `test/` so `test:product`
 (`test/*.test.ts`) keeps discovering them; post-M3 may move them into
 directories once the test runner is deliberately made recursive.
+
+## M3-1 status (COMPLETE, zero product cutover)
+
+M3-1 landed the reusable experimental Remote **composition spine** — it makes
+the official DSH Client runtime boring to instantiate and boring to dispose
+while changing nothing about which backend the user runs. Direct remains the
+production default; `BackendKind` stays `'direct'`; `cordis.patch.yml`,
+`src/startup.ts`, the public CLI and the entry exports are byte-for-byte
+unchanged; no production bootstrap call site exists.
+
+### Implementation owners (actual files)
+
+- `src/app/remote/host-runtime.ts` — `RemoteHostRuntime`: fail-fast Host
+  prerequisite barrier (`credentials, typert, typertGateway, agents,
+  agentDefaultModel, attachments, commands, fs, llm, sessions,
+  sessionProjections, sessionQuery, workspaceRegistry, jobController`),
+  then the exact §2.4.1 additive rows as tracked fibers
+  (client-connection → real client-file-upload → sessionStats →
+  turnOutline → api-session-controller `{nativeOpen: false}` →
+  api-settings-controller → api-remotes → session-log-export), the existing
+  `jobController` asserted (same Typert binding, never duplicated), the
+  in-process carrier (`createSharedFetchHandler('/api')` +
+  `typertGateway.wireStream.open`, `ownsHost: true`), and reverse disposal.
+- `src/app/remote/client-runtime.ts` — `RemoteClientRuntime` +
+  `loadOfficialClientModulesOnce()`: process-wide single-flight scoped
+  `window.__ModuleLoader__` capture of the exact six Web bundle entries
+  (unknown/duplicate/non-function/missing registration rejected,
+  `/client` dependencies resolved in capture order, globals restored in
+  `finally` before any plugin runs), then the exact §2.4.3 Client order
+  (typert → `installConnection` with the explicit composition transport →
+  Gateway → the ten §2.4.2 `/remote` contributions → fileUpload → Sessions
+  → Jobs), subscription-driven initial readiness (no production timeout,
+  lifecycle-signal abort), and reverse disposal.
+- `src/app/remote/runtime.ts` — `createExperimentalRemoteRuntime`:
+  `waitForHostPrerequisites()` → `signal.throwIfAborted()` → Host runtime →
+  Client runtime; failure unwinds (Host partial → no Client; Client partial →
+  Host disposed → rethrow); overall disposal is Client then Host, idempotent.
+- `src/runtime/backend-loader.ts` — the only value dynamic import of
+  `app/remote/runtime.ts`; no static type edge. The architecture gate now
+  enforces this single owner (`remote-dynamic-import-owner`) and classifies
+  `app/remote/**` plus every `@deepseek-ai/dsh-*` `/client` `/remote` face
+  as Remote composition for the startup static-graph rule.
+- `test/remote-client-runtime.test.ts` — the L5 acceptance matrix (plan
+  §22 A–L): prerequisite barrier, loader exactness/single-flight/global
+  restoration, no-browser-global connect/list, real connect + ready list,
+  real `fileUpload` dependency, `sessionStats`+`turnOutline` projection
+  surfaces, same-binding identity, real Job roster, reconnect/generation
+  reset/`connection/reset`/list recovery, `/api/session.export` through the
+  production carrier, idempotent reverse disposal with zero owned
+  refs/watchers and a surviving ordinary Host, and one Host-partial plus one
+  Client failure class with full unwind.
+- `package.json` — the nine composition peers (`dsh-api-gateway`,
+  `dsh-api-job-controller`, `dsh-api-remotes`, `dsh-api-settings-controller`,
+  `dsh-client-connection`, `dsh-client-file-upload`, `dsh-session-stats`,
+  `dsh-session-turn-outline`, `dsh-typert-registry`) at `>=0.1.7-rc.2` and
+  the four missing exact rc.2 dev pins.
+- `scripts/client-boundary-baseline.json` — two deliberate entries for the
+  composition owners: `app/remote/host-runtime.ts: import:dsh-session` and
+  `app/remote/client-runtime.ts: import:dsh-agent`. Both are substring
+  artifacts of the gate's import heuristic (the files import
+  `dsh-session-stats` / `dsh-session-turn-outline` /
+  `dsh-session-log-export` projection plugins and the
+  `dsh-agent-preset-registry/remote` contribution — not the Host
+  `dsh-agent`/`dsh-session` type packages); the entries record the M3-1
+  composition owners in the inventory per the sanctioned baseline procedure.
+
+### Carrier correction (supersedes the M3-0 `transport.rpc` wording)
+
+The verified rc.2 public carrier is the explicit `installConnection(ctx,
+{ transport })` hook, not a composition-owned `ClientConnectionRpc`:
+`transport.fetch` adapts the Host `connection.createSharedFetchHandler('/api')`,
+`transport.openStream` adapts the Host `typertGateway.wireStream.open`, and
+`transport.ownsHost: true` is passed with no `location`. No global `fetch`,
+WebSocket, fake `location`, or browser `Worker` is reachable on the
+in-process path (proven by the trapped-globals L5 case). The frozen wording
+in `docs/m3-entry-contract.md` §2.4.3/§4.2 has been corrected in place; no
+ownership, stage boundary, or seam policy changed.
 
 ## Known coverage follow-ups
 
