@@ -216,8 +216,10 @@ test('the queue-recall state and the plain-submit write body live in app/submiss
     'the settle body must live in app/submission')
   // The plain-prompt write orchestration (prepare → semantic write → consume)
   // is gone from the runner: the two write sites delegate to the submission
-  // runtime through `submitPrompt`.
-  assert.equal((index.match(/submissionRuntime\.submitPrompt\(/g) ?? []).length, 2,
+  // runtime through `submitPrompt`. A5b-4 moved the sites into the submission
+  // controller owner, so the lock follows the authority there.
+  const controller = readFileSync(new URL('../src/app/submission/controller.ts', import.meta.url), 'utf8')
+  assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 2,
     'the command-fallback and direct prompt sites must delegate to the submission runtime')
 })
 
@@ -417,8 +419,10 @@ test('P1-1 static: no production fence carries the transition gate into an admit
   assert.ok(index.includes('fence: () => cleanedUp || app.getViewerGeneration() !== childViewerGeneration,'),
     'the child-viewer steer keeps its own viewer-generation axis')
   // The pull-back's delayed-representation reconciliation still reads the
-  // queued transition + the frozen barrier together.
-  assert.ok(index.includes('isTransitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,'),
+  // queued transition + the frozen barrier together. A5b-4 moved the pull-back
+  // body into the submission controller owner, so the composition root now
+  // supplies the narrow `transitionPending` capability the owner reads.
+  assert.ok(index.includes('transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,'),
     'the pull-back transition reconciliation is untouched')
 })
 
