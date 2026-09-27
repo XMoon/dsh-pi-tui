@@ -281,6 +281,29 @@ export interface RemoteClientRuntimeOptions {
 }
 
 /**
+ * Reverse-dispose the recorded `/remote` contribution disposers. Per-step
+ * error isolation: one rejecting disposer cannot truncate the remaining
+ * cleanup. Returns the collected cleanup errors in encounter order.
+ *
+ * Exported so the L5 suite can exercise the exact collection semantics the
+ * production composition relies on (module-internal seam, like
+ * `createScopedClientModuleLoader`).
+ */
+export async function disposeRemoteContributions(
+  disposers: ReadonlyArray<() => Promise<void> | void>,
+): Promise<unknown[]> {
+  const errors: unknown[] = []
+  for (let index = disposers.length - 1; index >= 0; index -= 1) {
+    try {
+      await disposers[index]()
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  return errors
+}
+
+/**
  * Compose one fresh official Client `Context` over the Host carrier:
  * typert -> Connection (explicit transport) -> Gateway -> the ten explicit
  * `/remote` contributions -> fileUpload -> Sessions -> Jobs, then wait for
@@ -320,14 +343,7 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     for (const fiber of [jobsFiber, sessionFiber, fileUploadFiber]) {
       await fiber?.dispose()
     }
-    const contributionErrors: unknown[] = []
-    for (let index = contributionDisposers.length - 1; index >= 0; index -= 1) {
-      try {
-        await contributionDisposers[index]()
-      } catch (error) {
-        contributionErrors.push(error)
-      }
-    }
+    const contributionErrors = await disposeRemoteContributions(contributionDisposers)
     contributionDisposers.length = 0
     for (const fiber of [gatewayFiber, connectionFiber, typertFiber]) {
       await fiber?.dispose()
