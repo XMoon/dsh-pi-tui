@@ -98,7 +98,7 @@ const SUB = 'MUST_MOVE:app-submission'
 const CLASSIFICATION = {
   // Host-service resolution needed for owner construction / Host wiring.
   agents: HOST, defaultModel: HOST, sessions: HOST, settingsForms: HOST, tools: HOST,
-  jobs: HOST, subagents: HOST, jobSnapshot: HOST, present: HOST,
+  jobs: HOST, subagents: HOST, present: HOST,
   assistantStreamHandle: HOST, disposeCredentialSubscription: HOST,
   // A5b-6 sweep refinements (evidence = the sweep note): these are NOT Host
   // service lookups; they are narrow composition-to-owner connectors, so the
@@ -197,7 +197,6 @@ const SWEEP_NOTES = {
   present: 'toolPresenterFrom over the live Agent plus the tools registry; narrow Host read for presentation.',
   jobs: 'ctx.get(jobs) Host job registry forwarded to surface.attachTasks; narrow list/get/kill reads only.',
   subagents: 'ctx.get(subagents) Host subagent registry forwarded to surface.attachTasks; narrow descendant reads only.',
-  jobSnapshot: 'session-fenced retained jobs read for surface.attachTasks; a narrow read-through cache, left in scope for A5b-6 (see report observation).',
   assistantStreamHandle: 'directRuntime.installAssistantStream handle plus the abort listener; Direct install coordination.',
   disposeCredentialSubscription: 'credentials.onChanged subscription handle disposed on abort; Host event wiring (thin delegation).',
   // process-cordis-prerequisite: process/Cordis lifetime input or boot state the
