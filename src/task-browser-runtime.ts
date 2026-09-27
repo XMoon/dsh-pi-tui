@@ -167,8 +167,9 @@ export class TaskBrowserRuntime {
    * commit. Runtime statuses are projected from the Agent registry AT
    * COMMIT, so a stale catalog response can never flip an already-idle
    * child back to `running` (plan §7.3). The epoch orders OVERLAPPING
-   * refreshes of the same session (the initial listing and an
-   * open-browser listing may be in flight together): only the LATEST
+   * refreshes of the same session from overlapping direct/future callers
+   * (the production surface's catalog gate is single-flight, so it no
+   * longer creates such an overlap itself): only the LATEST
    * SUCCESSFULLY COMMITTED response wins — an older success response
    * never overwrites a newer committed membership/tree catalog, and a
    * FAILED newer request never invalidates a valid older response. No
