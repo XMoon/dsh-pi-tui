@@ -1621,8 +1621,10 @@ TypeScript restructure. It is structural only:
   `runtime → app`, Direct imports from any module that is not a composition
   owner (`index.ts`, `app/bootstrap.ts`, `app/direct/**`, `runtime/**`) — the
   §5.2 presentation boundary in enumeration-free form, with one type-only
-  historical exception allowlisted — Remote composition statically reachable
-  from `startup.ts`, and Direct adapter construction in `app/surface`. It is
+  historical exception allowlisted — `owner → bootstrap` (the
+  `owner-imports-bootstrap` rule: `index -> bootstrap -> owners`, never the
+  reverse), Remote composition statically reachable from `startup.ts`, and
+  Direct adapter construction in `app/surface`. It is
   separate from `scripts/client-boundary-gate.mjs`, which remains the
   Host-coupling authority (see `docs/client-server-coupling.md`).
 

@@ -3,7 +3,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources } from './support/composition-surface.ts'
-import { ownerFile, ownerSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { ownerFile, ownerSource, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -182,49 +182,96 @@ interface TuiAppEventsLiteral {
   readonly passesThroughDepsEvents: boolean
 }
 
+/** One object literal whose declared/asserted type is `typeName`. */
+interface TypedObjectLiteral {
+  readonly rel: string
+  /** the declared variable name, or `<expression>` for an inline literal */
+  readonly name: string
+  readonly line: number
+  readonly node: ts.ObjectLiteralExpression
+}
+
 /**
- * Every `TuiAppEvents` object-literal construction in `source`, via the
- * TypeScript parser: a variable declaration whose type annotation — on the
- * declaration OR on any `as` / `satisfies` / `<T>` wrapper — is the
- * `TuiAppEvents` type reference and whose initializer, once fully unwrapped, is
- * an object literal.
+ * Every object literal typed as `typeName` ANYWHERE in `source`, via the
+ * TypeScript parser: the type may travel on the variable declaration
+ * (`const x: T = { ... }`) or on an `as` / `satisfies` / `<T>` wrapper around
+ * the literal, wherever that literal appears — a call argument
+ * (`register({ ... } satisfies T)`), a return statement
+ * (`return { ... } as T`), a property assignment, or a variable initializer.
  *
- * A plain substring count cannot tell the semantic implementation from a NEW
- * rogue literal in an unlisted module, and the old test only checked one
- * hand-named wrapper by name (plan §8.2(4)).
+ * Wrappers are unwrapped with the shared {@link unwrapExpression} contract, so
+ * a rogue implementation can hide neither behind a parenthesized / non-null /
+ * cast / satisfies wrapper nor in an inline (non-`VariableDeclaration`)
+ * position. A plain substring count cannot tell the semantic implementation
+ * from a NEW rogue literal in an unlisted module, and the previous scanner only
+ * inspected `VariableDeclaration`s (plan §8.2(4)/§8.2(5)).
+ *
+ * Results are deduplicated by object-literal node (a literal reachable through
+ * both its variable declaration and its wrapper is recorded once, under the
+ * declared variable name).
  */
-function tuiAppEventsLiterals(rel: string, source: string): TuiAppEventsLiteral[] {
+function typedObjectLiterals(rel: string, source: string, typeName: string): TypedObjectLiteral[] {
   const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
-  const out: TuiAppEventsLiteral[] = []
-  const isTuiAppEventsType = (node: ts.TypeNode | undefined): boolean =>
+  const isType = (node: ts.TypeNode | undefined): boolean =>
     node !== undefined
     && ts.isTypeReferenceNode(node)
     && ts.isIdentifier(node.typeName)
-    && node.typeName.text === 'TuiAppEvents'
-  const record = (name: string, initializer: ts.Expression, annotation: ts.TypeNode | undefined): void => {
-    let typed = isTuiAppEventsType(annotation)
-    const expr = unwrapExpression(initializer, (type) => {
-      if (isTuiAppEventsType(type)) typed = true
+    && node.typeName.text === typeName
+  const found = new Map<ts.ObjectLiteralExpression, TypedObjectLiteral>()
+  const consider = (expr: ts.Expression, declaredName: string | undefined, annotation: ts.TypeNode | undefined): void => {
+    let typed = isType(annotation)
+    const inner = unwrapExpression(expr, (type) => {
+      if (isType(type)) typed = true
     })
-    if (!typed || !ts.isObjectLiteralExpression(expr)) return
-    const passesThroughDepsEvents = expr.properties.some(
-      property => ts.isSpreadAssignment(property) && property.expression.getText(sf) === 'deps.events',
-    )
-    out.push({ rel, name, line: sf.getLineAndCharacterOfPosition(expr.getStart(sf)).line + 1, passesThroughDepsEvents })
+    if (!typed || !ts.isObjectLiteralExpression(inner)) return
+    if (found.has(inner)) return
+    found.set(inner, {
+      rel,
+      name: declaredName ?? '<expression>',
+      line: sf.getLineAndCharacterOfPosition(inner.getStart(sf)).line + 1,
+      node: inner,
+    })
   }
   const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
-      record(node.name.text, node.initializer, node.type)
+    if (ts.isVariableDeclaration(node) && node.initializer !== undefined) {
+      consider(node.initializer, ts.isIdentifier(node.name) ? node.name.text : undefined, node.type)
+    }
+    if (
+      ts.isAsExpression(node)
+      || ts.isSatisfiesExpression(node)
+      || ts.isTypeAssertionExpression(node)
+      || ts.isParenthesizedExpression(node)
+      || ts.isNonNullExpression(node)
+    ) {
+      consider(node, undefined, undefined)
     }
     ts.forEachChild(node, visit)
   }
   visit(sf)
-  return out
+  return [...found.values()].sort((a, b) => a.line - b.line)
 }
 
-test('A5b: tuiAppEventsLiterals detects every TuiAppEvents wrapper spelling', () => {
+/** Every `TuiAppEvents` object literal in `source` (shared AST contract). */
+function tuiAppEventsLiterals(rel: string, source: string): TuiAppEventsLiteral[] {
+  return typedObjectLiterals(rel, source, 'TuiAppEvents').map(({ rel: file, name, line, node }) => ({
+    rel: file,
+    name,
+    line,
+    passesThroughDepsEvents: node.properties.some(
+      property => ts.isSpreadAssignment(property) && property.expression.getText() === 'deps.events',
+    ),
+  }))
+}
+
+/** Every `TuiCommandRunner` object literal in `source` (plan §8.2(5)). */
+function tuiCommandRunnerLiterals(rel: string, source: string): TypedObjectLiteral[] {
+  return typedObjectLiterals(rel, source, 'TuiCommandRunner')
+}
+
+test('A5b: tuiAppEventsLiterals detects every TuiAppEvents literal form', () => {
   // A rogue implementation must not be able to hide behind an ordinary
-  // expression wrapper or move its type annotation onto the wrapper.
+  // expression wrapper, move its type annotation onto the wrapper, or sit in a
+  // non-`VariableDeclaration` position (call argument, return, property).
   const positive: ReadonlyArray<readonly [string, string]> = [
     ['const rogue: TuiAppEvents = { onSubmit: () => {} }\n', 'rogue'],
     ['const rogue: TuiAppEvents = ({ onSubmit: () => {} })\n', 'rogue'],
@@ -232,6 +279,9 @@ test('A5b: tuiAppEventsLiterals detects every TuiAppEvents wrapper spelling', ()
     ['const rogue = ({ onSubmit: () => {} } as TuiAppEvents)\n', 'rogue'],
     ['const rogue = ({ onSubmit: () => {} } as TuiAppEvents)!\n', 'rogue'],
     ['const rogue = <TuiAppEvents>{ onSubmit: () => {} }\n', 'rogue'],
+    ['register({ onSubmit: () => {} } satisfies TuiAppEvents)\n', '<expression>'],
+    ['function make() { return { onSubmit: () => {} } as TuiAppEvents }\n', '<expression>'],
+    ['const holder = { events: { onSubmit: () => {} } as TuiAppEvents }\n', '<expression>'],
   ]
   for (const [source, name] of positive) {
     assert.deepEqual(
@@ -244,12 +294,44 @@ test('A5b: tuiAppEventsLiterals detects every TuiAppEvents wrapper spelling', ()
     'const ok = ({ onSubmit: () => {} } satisfies TuiCommandRunner)\n',
     'const ok: TuiCommandRunner = { onSubmit: () => {} }\n',
     'const ok = ({ onSubmit: () => {} })\n',
+    'register({ onSubmit: () => {} })\n',
   ]
   for (const source of negative) {
     assert.deepEqual(
       tuiAppEventsLiterals('synthetic.ts', source),
       [],
       `${source.trim()} is not a TuiAppEvents literal`,
+    )
+  }
+})
+
+test('A5b: tuiCommandRunnerLiterals detects every TuiCommandRunner literal form', () => {
+  const positive: ReadonlyArray<string> = [
+    'const rogue: TuiCommandRunner = { onSubmit: () => {} }\n',
+    'const rogue = ({ onSubmit: () => {} } satisfies TuiCommandRunner)\n',
+    'const rogue = ({ onSubmit: () => {} } as TuiCommandRunner)\n',
+    'const rogue = <TuiCommandRunner>{ onSubmit: () => {} }\n',
+    'register({ onSubmit: () => {} } satisfies TuiCommandRunner)\n',
+    'function make() { return { onSubmit: () => {} } as TuiCommandRunner }\n',
+  ]
+  for (const source of positive) {
+    assert.equal(
+      tuiCommandRunnerLiterals('synthetic.ts', source).length,
+      1,
+      `${source.trim()} must be detected as a TuiCommandRunner literal`,
+    )
+  }
+  const negative: ReadonlyArray<string> = [
+    'const ok: TuiAppEvents = { onSubmit: () => {} }\n',
+    'const ok = ({ onSubmit: () => {} } satisfies TuiAppEvents)\n',
+    'const ok = ({ onSubmit: () => {} })\n',
+    'const ok: TuiCommandRunner[\'agents\'] = { onSubmit: () => {} }\n',
+  ]
+  for (const source of negative) {
+    assert.deepEqual(
+      tuiCommandRunnerLiterals('synthetic.ts', source),
+      [],
+      `${source.trim()} is not a TuiCommandRunner literal`,
     )
   }
 })
@@ -285,6 +367,35 @@ test('A5b: exactly one TuiAppEvents SEMANTIC implementation, wrappers are pass-t
     [],
     'every other TuiAppEvents object literal is a second implementation (plan §8.2(4))',
   )
+})
+
+test('A5b: NO production module implements a typed TuiCommandRunner object literal', () => {
+  // Plan §8.2(5)/§7.6.2: `TuiCommandRunner` is an interface, and the final A5
+  // state has NO implementation literal for it — not in the composition root
+  // and not anywhere else. The command owner builds the facade as the
+  // fully type-checked `RunnerFacade<Selection, Id>`
+  // (`app/command/surface.ts`, via `buildRunner`) and performs the ONE
+  // documented generic→concrete bridge (`facade as unknown as TuiCommandRunner`).
+  //
+  // There is deliberately NO allowlist here: the current production tree has
+  // ZERO typed `TuiCommandRunner` literals, and a future legitimate one would
+  // have to come with its own explicit, documented lock rather than sliding
+  // into this scan. The scan is the same whole-tree AST contract as the
+  // `TuiAppEvents` lock, so `satisfies`/`as`/`<T>` and inline positions cannot
+  // hide a second implementation.
+  const literals = productionSources().flatMap(({ rel, source }) => tuiCommandRunnerLiterals(rel, source))
+  assert.deepEqual(
+    literals.map(literal => `${literal.rel}:${literal.line} ${literal.name}`),
+    [],
+    'no production module may implement TuiCommandRunner as an object literal (plan §8.2(5))',
+  )
+  // The allowed reality: the facade is the type-checked RunnerFacade, bridged
+  // by the documented identity cast — never an object literal.
+  const command = ownerFile('src/app/command/surface.ts')
+  assert.match(command, /const facade: RunnerFacade<Selection, Id> = \{/u,
+    'the command owner must build the TuiCommandRunner facade as the type-checked RunnerFacade')
+  assert.match(command, /runnerFacade = facade as unknown as TuiCommandRunner/u,
+    'the command owner must bridge the RunnerFacade to TuiCommandRunner with the documented cast')
 })
 
 /**
@@ -431,6 +542,69 @@ test('A5b: each extracted owner is constructed exactly once, from the compositio
       `${rel} must export the ${factory} factory`,
     )
     assert.equal(root.split(site).length - 1, 1, `the composition root must construct ${factory} exactly once`)
+  }
+})
+
+/**
+ * The whole-tree production file set each `OWNER_CONSTRUCTIONS` site may appear
+ * in, in the SAME style as the A5 composition inventory's
+ * `WHOLE_TREE_NON_OWNER_SITES` guard.
+ *
+ * Six of the twelve site strings also match the owner's own factory DECLARATION
+ * (`export function createStatusRuntime(`), so their whole-tree file set is the
+ * owner module plus the composition root. The other six spell the concrete
+ * type arguments of a generic call (`createViewerRuntime<SessionEvent, Agent>(`),
+ * which the declaration does not, so they exist only at the bootstrap call
+ * site.
+ *
+ * The rows are EXPLICIT and never derived from the file under test: a second,
+ * type-correct construction in ANY production module (including a generic owner
+ * re-called from its own module) changes the file set or the total count and
+ * fails, even while the existing root-count assertion stays at 1. This closes
+ * the review gap where `OWNER_CONSTRUCTIONS` uniqueness was only counted inside
+ * bootstrap.
+ */
+const OWNER_CONSTRUCTION_FILES: Readonly<Record<string, readonly string[]>> = {
+  'createStatusRuntime(': ['src/app/bootstrap.ts', 'src/app/surface/status-runtime.ts'],
+  'createInputHistory(': ['src/app/bootstrap.ts', 'src/app/surface/input-history.ts'],
+  'createSettingsRuntime(': ['src/app/bootstrap.ts', 'src/app/surface/settings-runtime.ts'],
+  'createModelSelectionOwner<': ['src/app/bootstrap.ts', 'src/app/command/model-selection.ts'],
+  'createCommandSurface<ModelSelection, SessionId, Agent>(': ['src/app/bootstrap.ts'],
+  'createArtifactSaveOwner<Agent>(': ['src/app/bootstrap.ts'],
+  'createSessionPresentation<SessionEvent>(': ['src/app/bootstrap.ts'],
+  'createViewerRuntime<SessionEvent, Agent>(': ['src/app/bootstrap.ts'],
+  'createSubmissionController<Agent>(': ['src/app/bootstrap.ts'],
+  'createLocalShell<Agent>(': ['src/app/bootstrap.ts'],
+  'createApplicationEvents(': ['src/app/bootstrap.ts', 'src/app/surface/application-events.ts'],
+  'createClientActions(': ['src/app/bootstrap.ts', 'src/app/surface/client-actions.ts'],
+}
+
+test('A5b: every extracted-owner construction is pinned across production src/**', () => {
+  // The per-module location lock above reads the hand-listed root only, so a
+  // second, type-correct `createViewerRuntime(...)` added in ANY other
+  // production file leaves the root count at 1 and is invisible to it. This is
+  // the repo-wide file-set + total-count companion the A5 composition inventory
+  // uses (plan A5b §8.1/§8.3), over the SHARED production walkers.
+  assert.deepEqual(
+    Object.keys(OWNER_CONSTRUCTION_FILES).sort(),
+    OWNER_CONSTRUCTIONS.map(([, , site]) => site).sort(),
+    'OWNER_CONSTRUCTION_FILES must pin exactly the OWNER_CONSTRUCTIONS sites',
+  )
+  const sources = productionSources()
+  const whole = productionSource()
+  for (const [, factory, site] of OWNER_CONSTRUCTIONS) {
+    const expected = OWNER_CONSTRUCTION_FILES[site]!
+    const files = sources.filter(({ source }) => source.includes(site)).map(({ rel }) => rel)
+    assert.deepEqual(
+      files,
+      [...expected].sort(),
+      `${factory} (${site}) must occur only in its owner module and src/app/bootstrap.ts across production src/**`,
+    )
+    assert.equal(
+      whole.split(site).length - 1,
+      expected.length,
+      `${factory} (${site}) must occur exactly ${expected.length} time(s) across production src/**`,
+    )
   }
 })
 

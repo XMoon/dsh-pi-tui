@@ -43,6 +43,7 @@ import {
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 import { compositionSource } from './support/composition-surface.ts'
+import { productionSources } from './support/owner-modules.ts'
 
 const SCOPE = { sessionId: 's1' } as unknown as LiveSessionScope
 
@@ -384,11 +385,21 @@ test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachmen
     'const stageAttachmentCommand = (',
     "\n  registerTuiCommand({\n    name: 'attach'",
   )
-  const all = commands.match(/sessionTransitionPending\(\)/g) ?? []
   const fenced = intake.match(/sessionTransitionPending\(\)/g) ?? []
   assert.equal(fenced.length, 3, 'the attachment intake keeps its three UX checks')
-  assert.equal(all.length, fenced.length + 1,
-    'the only sessionTransitionPending() outside the intake fence is the interface declaration')
+  // The lock scans EVERY production source, not just commands.ts (A5b review
+  // finding): deriving `all` from the same file as `fenced` made a second
+  // caller in any other module invisible. Every occurrence across src/** must
+  // be in commands.ts, and the only non-fence occurrence there is the
+  // interface declaration.
+  const sites = productionSources().flatMap(({ rel, source }) =>
+    Array.from(source.matchAll(/sessionTransitionPending\(\)/g), () => rel),
+  )
+  assert.deepEqual(
+    sites,
+    Array.from({ length: fenced.length + 1 }, () => 'src/commands.ts'),
+    'the only sessionTransitionPending() outside the intake fence is the interface declaration in src/commands.ts (whole-tree)',
+  )
 })
 
 test('A3-4 static exit: SessionRuntime is the SOLE operation-barrier writer admission owner', () => {
@@ -467,12 +478,16 @@ test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a
 
 test('the transition gate has exactly ONE production reader: the intake UX fence', () => {
   const runtime = readFileSync(new URL('../src/app/submission/runtime.ts', import.meta.url), 'utf8')
-  const index = compositionSource()
-  // The gate has exactly ONE production reader in `src`: the attachment-intake
-  // UX fence (`sessionTransitionPending`). The HostCommand quick fence was
-  // removed; `SessionRuntime.withWriter` is the sole writer-admission authority.
-  assert.equal((index.match(/ownership\.gate\.busy/g) ?? []).length, 1,
-    'the gate may be read only by the attachment-intake UX fence')
+  // The gate has exactly ONE production reader across ALL of `src/**` (not just
+  // the composition surface): the attachment-intake UX fence
+  // (`sessionTransitionPending`). Reading only the composition surface made a
+  // second reader in an unlisted module invisible. The HostCommand quick fence
+  // was removed; `SessionRuntime.withWriter` is the sole writer-admission
+  // authority.
+  const readers = productionSources()
+    .flatMap(({ rel, source }) => Array.from(source.matchAll(/ownership\.gate\.busy/g), () => rel))
+  assert.deepEqual(readers, ['src/app/bootstrap.ts'],
+    'the gate may be read only by the attachment-intake UX fence (in src/app/bootstrap.ts)')
   assert.equal(runtime.includes('isTransitionBusy'), false,
     'app/submission must not read the transition gate')
   const command = runtime.slice(

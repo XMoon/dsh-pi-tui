@@ -178,6 +178,14 @@ test('A4-7: the four presentation routing bodies live in app/surface, not the ru
   // match a regression that moved the call back into the composition root.
   assert.doesNotMatch(indexSource, /viewer\.folder\.apply\(/u,
     'the viewed-child transcript application must live in the surface routing')
+  // ...and the spelling lock alone is not enough: the composition root could
+  // reach the SAME folder through the public capability path
+  // (`viewer.presentation().folder.apply(...)`, see
+  // `app/surface/viewer-runtime.ts` + `app/surface/runtime.ts`). No
+  // composition-root call may apply a folder through ANY receiver — the only
+  // folder application is the surface owner's routing (A5b review finding).
+  assert.doesNotMatch(indexSource, /folder\.apply\(/u,
+    'the composition root must not apply a folder through any receiver (the surface routing owns every folder application)')
   assert.match(surface, /const routeSessionEvent = /u,
     'the surface must own the session/event routing body')
   assert.match(surface, /openingJournal\.isOpening\(session\.id\)/u,
