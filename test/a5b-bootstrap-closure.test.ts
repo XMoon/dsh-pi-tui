@@ -206,10 +206,14 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     [
       'localEcho', 'failSubmission', 'restoreSubmissionDraft', 'localSubmitAck',
       'submitLatencyTracker', 'pendingSubmissions', 'submissionPresentation',
-      'acceptLocalSubmitAck', 'settleLocalSubmitAck', 'beginLocalSubmission',
+      'acceptLocalSubmitAck', 'settleLocalSubmitAck', 'installLocalEcho',
       'settleLocalSubmission', 'notifySubmissionFailure', 'submitDeps',
       'submitSerialTail', 'takeSubmitTurn', 'dispatchViaSession', 'runLocalCommand',
       'steerNow', 'makeSteerPersist', 'dispatchUserInput', 'dequeue',
+      // A5b-4 review fix: the submission-presentation policy the composition
+      // root used to define (attachment refusal, command-submit attachment
+      // expansion, local-echo placement) is controller-owned.
+      'attachmentRefusal', 'commandSubmitAttachments', 'submissionPlacement',
     ],
   ],
   [
@@ -353,4 +357,48 @@ test('A5b: the Task Center viewer adapter forwards the nested depth to the viewe
     /enterView: \(childId: string, label: string \| undefined, mode: 'one-shot' \| 'continuable', parentSessionId: string, activity: 'running' \| 'inactive', depth\?: number\) =>\n\s*viewer\.enterView\(childId, label, mode, parentSessionId, activity, depth\)/u,
     'the Task Center enterView adapter must forward `depth` to the viewer owner',
   )
+})
+
+test('A5b-4: the submission owner derives the local-echo placement from reported facts', () => {
+  // Review fix P2: the composition root used to compute the official
+  // `beginSubmission` placement at the connector. It must only resolve the
+  // exact Agent and report `mode`/`running`/`sessionId`; the placement
+  // DECISION (queued/steering/transcript) is owner-side.
+  const root = compositionFile('src/app/bootstrap.ts')
+  const owner = ownerFile('src/app/submission/controller.ts')
+  assert.doesNotMatch(root, /submissionPlacement\(/u,
+    'the composition root must not compute the submission placement')
+  assert.match(owner, /const submissionPlacement = \(mode: 'queue' \| 'steer', running: boolean\)/u,
+    'the submission owner must own the placement policy')
+  assert.match(
+    root,
+    /beginLocalSubmission: \(\{ requestId, text, scope, generation, ackToken \}\) => \{[\s\S]*?mode: 'queue',[\s\S]*?running: agent\.status === 'running',[\s\S]*?sessionId: agent\.session\.id,/u,
+    'the composition connector must report the facts (mode/running/sessionId), not the placement',
+  )
+  assert.match(owner, /installLocalEcho\(requestId, text, submissionPlacement\(mode, running\), sessionId, generation, ackToken\)/u,
+    'the exposed owner seam must derive the placement from the reported facts')
+})
+
+test('A5b-4: the input-history owner owns the submission persistence policy', () => {
+  // Review fix P2: trim/dedupe/cwd/file-path/detached write/last-content are
+  // the input-history owner's policy; the submission controller only decides
+  // WHEN to persist.
+  const root = compositionFile('src/app/bootstrap.ts')
+  const controller = ownerFile('src/app/submission/controller.ts')
+  const history = ownerFile('src/app/surface/input-history.ts')
+  assert.match(history, /from '\.\.\/\.\.\/history-persist\.ts'/u,
+    'the history owner must own the persist decision + ordering gate')
+  assert.match(history, /runDetached\('input history write'/u,
+    'the history owner must own the detached write')
+  assert.doesNotMatch(root, /runDetached\('input history write'/u,
+    'the composition root must not write input history')
+  assert.doesNotMatch(controller, /runDetached\('input history write'/u,
+    'the submission controller must not write input history')
+  assert.doesNotMatch(controller, /from '\.\.\/\.\.\/history-persist\.ts'/u,
+    'the submission controller must consume the owner, not history-persist directly')
+  assert.doesNotMatch(controller, /from '\.\.\/\.\.\/history\.ts'/u,
+    'the submission controller must not resolve history file paths directly')
+  // Exactly ONE last-content state: the submission deps no longer expose it.
+  assert.doesNotMatch(controller, /deps\.history\.(?:lastContent|setLastContent)\b/u,
+    'the controller must not keep a second last-content state')
 })

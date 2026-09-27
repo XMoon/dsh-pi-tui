@@ -18,19 +18,17 @@
 
 import { randomUUID } from 'node:crypto'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { expandAttachmentPlaceholders } from '../../attachment/placeholder.ts'
+import { draftHasFiles, expandAttachmentPlaceholders } from '../../attachment/placeholder.ts'
 import type { DraftFileStore } from '../../attachment/file-draft.ts'
 import { formatBytes } from '../../bounded-output.ts'
 import type { Diag } from '../../diag.ts'
-import { dshHome } from '../../diag.ts'
-import { runDetached, runOwned } from '../../detached.ts'
+import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { ImageInputError } from '../../image/errors.ts'
 import { runReservedSubmit } from '../../image/submit-flow.ts'
 import type { DraftImageStore } from '../../image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments, prepareUserMessage, type PrepareInputDeps } from '../../image/submit.ts'
-import { historyFilePath } from '../../history.ts'
-import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../../history-persist.ts'
+import { expandImagePlaceholders } from '../../image/placeholder.ts'
 import { commandIsLocalForAttachments, isBareCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
@@ -154,10 +152,11 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly status: { sessionCwd(): string }
   /** The mounted-surface pending-input refresh. */
   readonly surface: { refreshPendingInput(): void }
-  /** The input-history owner seams. */
+  /** The input-history owner seams (the owner's write policy + the
+   *  deferred-start ordering gate). */
   readonly history: {
-    lastContent(): string | undefined
-    setLastContent(content: string | undefined): void
+    persist(record: { readonly text: string; readonly sessionId: string | undefined; readonly hasAttachments: boolean; readonly timestamp: number }): void
+    persistAfterSession(resolveSession: () => Promise<string | undefined>, persist: (sessionId: string | undefined) => void): Promise<void>
   }
   /** The subagent viewer guard. */
   readonly viewer: { isViewing(): boolean }
@@ -183,17 +182,6 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly tuiSettings: { get(): TuiSettingsDoc } | undefined
   /** The submission writer section (captures a fresh live scope). */
   readonly submissionWriterSection: <T>(task: () => Promise<T>) => Promise<T>
-  /** The official local-echo placement. */
-  readonly submissionPlacement: (mode: 'queue' | 'steer', running: boolean) => PendingSubmissionPlacement
-  /** The composer-side attachment policy (kept in the composition root). */
-  readonly attachmentRefusal: (
-    parsed: { name: string; rawInput?: string },
-    draft: string,
-    isLocal: boolean,
-    skillInvocation: boolean,
-  ) => string | undefined
-  /** The encoded images one command invocation carries. */
-  readonly commandSubmitAttachments: (draft: string) => readonly unknown[]
   /** The exact owner-subject currentness fence. */
   readonly captureMatches: (subject: SessionSubject | undefined) => boolean
   /** The owner-resolved per-Agent prompt admission window. */
@@ -230,15 +218,17 @@ export interface SubmissionController {
   snapshotEchoes(sessionId: string | undefined): readonly import('../../submission-presentation.ts').SubmissionPresentationItem[] | undefined
   /** The image submission deps the command runner consumes. */
   prepareDeps(): PrepareInputDeps
-  /** Publish one local submission echo (the runner owns the placement). */
-  beginLocalSubmission(
-    requestId: string,
-    text: string,
-    placement: PendingSubmissionPlacement,
-    sessionId: string | undefined,
-    generation: number,
-    ackToken: number,
-  ): void
+  /** Publish one local submission echo. The composition root resolves the
+   *  exact Agent and reports the facts; the OWNER derives the placement. */
+  beginLocalSubmission(input: {
+    readonly requestId: string
+    readonly text: string
+    readonly mode: 'queue' | 'steer'
+    readonly running: boolean
+    readonly sessionId: string | undefined
+    readonly generation: number
+    readonly ackToken: number
+  }): void
   /** Remove one local submission echo on a known terminal exit. */
   settleLocalSubmission(requestId: string | undefined): void
   /** Start the latency dispatch mark for one session. */
@@ -272,6 +262,80 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     }
     return { text: parts.join(' '), foldableText }
   }
+
+  /**
+   * The COMPOSER-side attachment policy for one parsed line (DSH web
+   * parity): returns the refusal text, or undefined when the line may carry
+   * the staged attachments.
+   * - a TUI/core local command and a client contribution are UI controls —
+   *   refused;
+   * - an explicit `/skill <name> ...` invocation and a LIVE skill wrapper
+   *   are agent-facing — loadSkill delivers them and their attachments to
+   *   the model (never classified as a command);
+   * - a line the HOST catalog CLAIMS accepts attachments ONLY when the
+   *   claiming descriptor declares `input.attachments` (upstream refuses
+   *   otherwise before dispatch). The claim is LINE-level: an argued line
+   *   of an execute-kind command is no invocation at all (it falls back to
+   *   the ordinary submission) and keeps its attachments;
+   * - a declared command still refuses a FILE attachment: the host expects
+   *   an upload receipt, which this client has no seam to produce (fail
+   *   closed rather than silently drop the file).
+   * The host executor re-enforces the declaration at admission.
+   */
+  const attachmentRefusal = (
+    parsed: { name: string; rawInput?: string },
+    draft: string,
+    // Whether THIS LINE is a local command line — the dispatch's ONE
+    // classification (`commandIsLocalForAttachments`), computed by the
+    // caller because it must be re-readable against the FINAL catalog for a
+    // deferred start.
+    isLocal: boolean,
+    // The ONE skill-invocation predicate (`isSkillInvocation`: an explicit
+    // `/skill <name> ...` or a live skill wrapper) — TUI-owned agent-facing
+    // input that loadSkill owns. It is supplied rather than re-derived: the
+    // predicate applies the argued-`/skill` short-circuit, and WITHOUT it
+    // the line would fall into the HOST branch below (`/skill` is itself a
+    // registered TUI command) and be refused as a non-declaring command.
+    skillInvocation: boolean,
+  ): string | undefined => {
+    if (!draftHasAttachments(draft, deps.drafts.images, deps.drafts.files)) return undefined
+    if (skillInvocation) return undefined
+    if (!isLocal) {
+      const claim = deps.command.hostClaimOf(parsed)
+      if (claim?.claimed === true) {
+        if (claim.attachments !== true) {
+          return `/${parsed.name} does not accept attachments; remove them first`
+        }
+        if (draftHasFiles(draft, deps.drafts.images, deps.drafts.files)) {
+          return `/${parsed.name} cannot receive file attachments in this client; remove them first`
+        }
+      }
+      return undefined
+    }
+    return 'Attachments cannot be included in a local command.'
+  }
+
+  /** The encoded images ONE command invocation carries (DSH
+   * `CommandSubmitAttachment`): the draft store holds the exact bytes, and
+   * the host admits them through its own store at execute time. Only a
+   * declared host command reaches this builder — an undeclared command and
+   * any file attachment are refused before dispatch. A RECALLED image
+   * carries no local bytes (it is already durable): the wire has no
+   * ref-based variant, so the host's admission rejects the empty payload
+   * and the command settles as an error — the draft and its attachments
+   * are kept for correction (never silently dropped). */
+  const commandSubmitAttachments = (draft: string) => expandImagePlaceholders(draft, deps.drafts.images)
+    .flatMap(segment => segment.type === 'image' ? [segment.image] : [])
+    .map(image => ({
+      type: 'image' as const,
+      mediaType: image.mediaType,
+      data: Buffer.from(image.bytes).toString('base64'),
+      ...(image.name === undefined ? {} : { name: image.name }),
+    }))
+
+  /** The official `beginSubmission` placement for one local echo. */
+  const submissionPlacement = (mode: 'queue' | 'steer', running: boolean): PendingSubmissionPlacement =>
+    running ? (mode === 'steer' ? 'steering' : 'queued') : 'transcript'
 
   /** Error sink for a failed session creation: restore the draft and
    * surface the reason instead of silently dropping the submission. The
@@ -405,7 +469,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * feedback and the durable row replaces it.
    */
   
-  const beginLocalSubmission = (
+  const installLocalEcho = (
     requestId: string,
     text: string,
     placement: PendingSubmissionPlacement,
@@ -583,10 +647,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // deferred start installs after the session materializes, below.
     let localEchoInstalled = false
     if (ordinaryPromptAtSubmit && submittedAgent !== undefined && !deps.isCleanedUp()) {
-      beginLocalSubmission(
+      installLocalEcho(
         submitRequestId,
         text,
-        deps.submissionPlacement('queue', submittedAgent.status === 'running'),
+        submissionPlacement('queue', submittedAgent.status === 'running'),
         submittedAgent.session.id,
         submittedGeneration,
         submitAckToken,
@@ -686,7 +750,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // failed) persists nothing — the submission never reached a
         // session; a resolution that resolves undefined (sessionless)
         // persists a row without a sessionId.
-        await persistAfterSession(
+        await deps.history.persistAfterSession(
           async () => {
             if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return undefined
             await deps.session.ensureSession()
@@ -791,7 +855,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // FINAL catalog BEFORE the command plane runs.
           lateAttachmentRefusal: () => {
             if (parsed === undefined) return undefined
-            return deps.attachmentRefusal(
+            return attachmentRefusal(
               parsed,
               text,
               commandIsLocalForAttachments(
@@ -808,7 +872,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
               deps.command.isSkillInvocation(parsed, text),
             )
           },
-          commandSubmitAttachments: (value) => deps.commandSubmitAttachments(value),
+          commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: () => parsedAtSubmit !== undefined
             && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true),
           commandPlaneOwnsLine,
@@ -935,10 +999,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     persistHistory: (sessionId: string | undefined) => void,
     delivery: SubmitDelivery,
     // The history identity of THIS call site: a sessionless command writes
-    // an unscoped row (Current directory / All directories), while a local
-    // command submitted inside a live session scopes its row to that
-    // session like every other local command (/status).
-    historyKind: 'agent-facing' | 'sessionless',
+    // an unscoped row (`undefined`; Current directory / All directories),
+    // while a local command submitted inside a live session scopes its row
+    // to that session like every other local command (/status).
+    sessionId: string | undefined,
   ): void => {
     // M5: a plugin-declared local command with a bridge handler routes
     // to the bridge FIRST (its rawInput is passed verbatim — never
@@ -975,7 +1039,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // needed for the EXECUTION. The row follows the call site's identity
     // (sessionless commands write an unscoped row; a local command inside
     // a live session carries that session id).
-    persistHistory(historySessionIdFor(historyKind, deps.liveAgent()?.session.id))
+    persistHistory(sessionId)
     // An owned workflow: the result decides the notify, the failure lands
     // in diagnostics — runOwned (AGENTS.md), never a bare void. The
     // handler may be a SYNC implementation, so the factory must run inside
@@ -1054,10 +1118,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
       settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
       beginLocalSteerEcho: ({ requestId, text: echoText, running, sessionId, generation, ackToken }) => {
-        beginLocalSubmission(
+        installLocalEcho(
           requestId,
           echoText,
-          deps.submissionPlacement(running ? 'steer' : 'queue', running),
+          submissionPlacement(running ? 'steer' : 'queue', running),
           sessionId,
           generation,
           ackToken,
@@ -1065,7 +1129,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       },
       takeSubmitTurn,
       pinDraftAttachments: (value) => pinDraftAttachments(value, deps.drafts.images, deps.drafts.files),
-      persistAfterSession,
+      persistAfterSession: deps.history.persistAfterSession,
       ensureSession: () => deps.session.ensureSession(),
       withPromptAdmission: (agent, hasImages, task) =>
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),
@@ -1098,32 +1162,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    */
   
   const makeSteerPersist = (text: string): ((sessionId: string | undefined) => void) => {
-    const trimmed = text.trim()
     const historyTs = Date.now()
     const historyHasAttachments = draftHasAttachments(text, deps.drafts.images, deps.drafts.files)
     return (sessionId: string | undefined): void => {
-      if (trimmed === '' || trimmed === deps.history.lastContent() || historyHasAttachments) return
-      const historyCwd = deps.status.sessionCwd()
-      const file = historyFilePath(dshHome(process.env), historyCwd)
-      runDetached('input history write', () => {
-        const written = persistHistoryRecord({
-          content: trimmed,
-          cwd: historyCwd,
-          sessionId: historySessionIdFor('agent-facing', sessionId),
-          ts: historyTs,
-          lastContent: deps.history.lastContent(),
-          hasAttachments: historyHasAttachments,
-          file,
-        })
-        if (written) deps.history.setLastContent(trimmed)
-      }, {
-        diag: deps.diag,
-        notify: (message) => {
-            if (deps.isCleanedUp()) return
-            deps.app().notify(message, 'error')
-          },
-        recoverable: () => true,
-      })
+      deps.history.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
     }
   }
 
@@ -1176,7 +1218,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // history; a failed write is user-recoverable: notify instead of
     // dropping it. `!` shell lines persist verbatim so ↑ recall re-runs
     // the shell branch.
-    const trimmed = text.trim()
     // Submission-time facts snapshotted BEFORE any async work: the
     // timestamp (the row must record the USER's submission time, not the
     // disk-write time — an agent-facing write lands after session
@@ -1198,32 +1239,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
      * written before creation would carry no sessionId and vanish from
      * the Ctrl+R `Current session` scope). Sessionless submissions pass
      * undefined and stay visible in `Current directory` / `All
-     * directories`. The cwd is resolved at PERSIST time so the row
-     * lands in the session's cwd file with a `cwd` field that agrees
-     * with the file hash.
+     * directories`. The trim/dedupe and the cwd/file resolution are the
+     * input-history owner's write policy.
      */
     const persistHistory = (sessionId: string | undefined): void => {
-      const historyCwd = deps.status.sessionCwd()
-      const file = historyFilePath(dshHome(process.env), historyCwd)
-      runDetached('input history write', () => {
-        const written = persistHistoryRecord({
-          content: trimmed,
-          cwd: historyCwd,
-          sessionId,
-          ts: historyTs,
-          lastContent: deps.history.lastContent(),
-          hasAttachments: historyHasAttachments,
-          file,
-        })
-        if (written) deps.history.setLastContent(trimmed)
-      }, {
-        diag: deps.diag,
-        notify: (message) => {
-            if (deps.isCleanedUp()) return
-            deps.app().notify(message, 'error')
-          },
-        recoverable: () => true,
-      })
+      deps.history.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
     }
     // `!` runs the command and submits the completed command+output to
     // the session (kimi parity); `!!` runs purely locally with no session
@@ -1245,7 +1265,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // `!!` runs purely locally with NO session write (pi's
         // excluded-from-context escape hatch) — the row is sessionless
         // (Current directory / All directories, never Current session).
-        persistHistory(historySessionIdFor('sessionless', deps.liveAgent()?.session.id))
+        persistHistory(undefined)
         deps.shell.run(text, undefined)
       } else if (shellCommandOf(text) !== '') {
         // Local submit acknowledgement (plan D), armed AT THE GESTURE —
@@ -1262,7 +1282,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // (the deferred-start gate), so a `!` line that creates the
         // session carries its id.
         runOwned('contextual shell', () => deps.session.ensureSession().then(() => {
-          persistHistory(historySessionIdFor('agent-facing', deps.liveAgent()?.session.id))
+          persistHistory(deps.liveAgent()?.session.id)
           deps.shell.run(text, shellAckToken)
         }), {
           diag: deps.diag,
@@ -1286,7 +1306,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         })
       } else {
         // A bare `!` (no command) is a no-op — sessionless.
-        persistHistory(historySessionIdFor('sessionless', deps.liveAgent()?.session.id))
+        persistHistory(undefined)
       }
       return
     }
@@ -1318,7 +1338,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // an argued line of a contribution name is an ordinary submission, with
     // its attachments.
     if (parsed !== undefined) {
-      const refusal = deps.attachmentRefusal(
+      const refusal = attachmentRefusal(
         parsed,
         text,
         commandIsLocalForAttachments(
@@ -1399,11 +1419,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       : deps.extensions.findContribution(parsed.name)
     if (parsed !== undefined && contribution !== undefined) {
       if (contribution.sessionless) {
-        runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
+        runLocalCommand(parsed, text, persistHistory, delivery, undefined)
         return
       }
       if (deps.liveAgent() !== undefined) {
-        runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
+        runLocalCommand(parsed, text, persistHistory, delivery, deps.liveAgent()?.session.id)
         return
       }
       // The captured contribution is a PROVISIONAL authority: it is bound
@@ -1445,7 +1465,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             restoreSubmissionDraft(text)
             return
           }
-          runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
+          runLocalCommand(parsed, text, persistHistory, delivery, deps.liveAgent()?.session.id)
         },
         restore: (draft) => restoreSubmissionDraft(draft),
       }, text), {
@@ -1467,9 +1487,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // service, but the persist closure still supplies undefined.
     if (parsed !== undefined && isSessionless) {
       if (deps.liveAgent() === undefined) {
-        runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
+        runLocalCommand(parsed, text, persistHistory, delivery, undefined)
       } else {
-        dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', deps.liveAgent()?.session.id)), delivery)
+        dispatchViaSession(text, () => persistHistory(undefined), delivery)
       }
       return
     }
@@ -1570,6 +1590,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    */
   const steerDraft = (text: string): void => {
     const persist = makeSteerPersist(text)
+    // The gesture's draft is consumed HERE: AFTER the persist facts are
+    // snapshotted (timestamp + attachment state) and BEFORE the dispatch, which
+    // is the order the steered-history row has always relied on.
+    deps.app().setDraft('')
     steerNow(text, false, persist)
   }
   /** Abort the local shell + interrupt the live Agent (Esc / cancel-activity). */
@@ -1590,8 +1614,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     observeDurable: (rpcId) => pendingSubmissions.observeDurable(rpcId),
     snapshotEchoes: (sessionId) => submissionPresentation.snapshot(sessionId),
     prepareDeps: () => submitDeps,
-    beginLocalSubmission: (requestId, text, placement, sessionId, generation, ackToken) =>
-      beginLocalSubmission(requestId, text, placement, sessionId, generation, ackToken),
+    beginLocalSubmission: ({ requestId, text, mode, running, sessionId, generation, ackToken }) =>
+      installLocalEcho(requestId, text, submissionPlacement(mode, running), sessionId, generation, ackToken),
     settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
     markDispatch: (sessionId) => { submitLatencyTracker.mark(sessionId, 'dispatch') },
     prepareMessage,

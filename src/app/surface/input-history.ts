@@ -12,6 +12,9 @@
  *   switched after startup is immediately recoverable;
  * - the canonical "last row" persistence anchor and the per-session recall
  *   projection;
+ * - the WRITE policy for a submitted row: trim, empty/repeat/attachment
+ *   dedupe, the persist-time cwd + file path, the detached append and the
+ *   remembered last content (the submission side only decides WHEN);
  * - the boot recall seed (a deferred start has no session yet).
  *
  * It is client-local: the history files live in the CLIENT's `$DSH_HOME` and
@@ -20,8 +23,10 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/input-history
  */
 
-import { dshHome } from '../../diag.ts'
+import { dshHome, type Diag } from '../../diag.ts'
+import { runDetached } from '../../detached.ts'
 import { historyFilePath, loadHistoryFile, loadHistoryRecords, type ParsedHistoryRecord } from '../../history.ts'
+import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../../history-persist.ts'
 import type { TuiApp } from '../../tui-app.ts'
 
 /** The narrow capabilities the history owner consumes. */
@@ -32,6 +37,22 @@ export interface InputHistoryDeps {
   readonly clientCwd: string
   /** The LIVE session's workspace (the status owner). */
   readonly sessionCwd: () => string
+  /** The runner's diagnostics channel (detached-write failures). */
+  readonly diag: Diag
+  /** Whether the surface is torn down (a late write failure never notifies). */
+  readonly isCleanedUp: () => boolean
+}
+
+/** The submission-time facts of one row the owner persists. */
+export interface InputHistoryPersistRequest {
+  /** The submitted draft text (trimmed by the owner). */
+  readonly text: string
+  /** The FINAL session identity at persist time (undefined = sessionless). */
+  readonly sessionId: string | undefined
+  /** Whether the submission carries staged attachments (never persisted). */
+  readonly hasAttachments: boolean
+  /** The USER's submission time (epoch-ms) — never the disk-write time. */
+  readonly timestamp: number
 }
 
 /** The client-local input-history owner. */
@@ -48,6 +69,11 @@ export interface InputHistory {
   records(cwd: string): readonly ParsedHistoryRecord[]
   /** Seed the editor recall from the LAUNCH cwd (deferred start / boot). */
   activateBootRecall(): void
+  /** Persist one submission row under the owner's write policy. */
+  persist(record: InputHistoryPersistRequest): void
+  /** The deferred-start ordering gate: resolve the session FIRST, then
+   *  persist through the caller's closure (plan M-gate). */
+  persistAfterSession(resolveSession: () => Promise<string | undefined>, persist: (sessionId: string | undefined) => void): Promise<void>
 }
 
 /** Create the client-local input-history owner (plan §A5b-2). */
@@ -110,5 +136,40 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
     deps.surface.app.resetInputHistory([...entries].reverse())
   }
 
-  return { rememberCwd: rememberHistoryCwd, knownCwds: knownHistoryCwds, lastContent, setLastContent, records, activateBootRecall }
+  /**
+   * Persist one submission row under the owner's write policy: trim the
+   * text, skip an empty / consecutive-repeat / attachment-bearing row,
+   * resolve the cwd + file at PERSIST time (the row's `cwd` field must
+   * agree with the file hash), append detached, then remember the new
+   * canonical last row. The caller supplies the submission-time facts
+   * (`timestamp`, `hasAttachments`) and the session identity the
+   * deferred-start gate resolved (undefined for a sessionless row).
+   */
+  const persist = (record: InputHistoryPersistRequest): void => {
+    const content = record.text.trim()
+    if (content === '' || content === lastHistoryContent || record.hasAttachments) return
+    const cwd = deps.sessionCwd()
+    const file = historyFilePath(dshHome(process.env), cwd)
+    runDetached('input history write', () => {
+      const written = persistHistoryRecord({
+        content,
+        cwd,
+        sessionId: historySessionIdFor('agent-facing', record.sessionId),
+        ts: record.timestamp,
+        lastContent: lastHistoryContent,
+        hasAttachments: record.hasAttachments,
+        file,
+      })
+      if (written) lastHistoryContent = content
+    }, {
+      diag: deps.diag,
+      notify: (message) => {
+        if (deps.isCleanedUp()) return
+        deps.surface.app.notify(message, 'error')
+      },
+      recoverable: () => true,
+    })
+  }
+
+  return { rememberCwd: rememberHistoryCwd, knownCwds: knownHistoryCwds, lastContent, setLastContent, records, activateBootRecall, persist, persistAfterSession }
 }
