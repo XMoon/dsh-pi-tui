@@ -342,6 +342,22 @@ test('A5b-2: the settings owner consumes narrow surface/config capabilities', ()
     'the settings owner must not depend on the whole backend port')
 })
 
+test('A5b-5: the persisted busy-Enter preference is read from the settings owner', () => {
+  // Review note: this is a persisted TUI input preference, not a lifecycle or
+  // identity fact, so it must not travel in the event adapter's lifecycle group.
+  const events = ownerFile('src/app/surface/application-events.ts')
+  const lifecycleAt = events.indexOf('export interface ApplicationEventsLifecycle')
+  assert.ok(lifecycleAt > 0, 'the application-events owner must declare its lifecycle group')
+  const lifecycleBody = events.slice(lifecycleAt, events.indexOf('\n}', lifecycleAt))
+  assert.doesNotMatch(lifecycleBody, /busyEnter/u,
+    'the lifecycle group must not carry the persisted busy-Enter preference')
+  assert.match(events, /deps\.settings\.busyEnter\(\)/u,
+    'the event adapter must read the preference from the settings owner')
+  const settings = ownerFile('src/app/surface/settings-runtime.ts')
+  assert.match(settings, /busyEnter\(\): string \| undefined/u,
+    'the settings owner must expose the persisted busy-Enter preference')
+})
+
 test('A5b-4: only the owner that is asked to consume the draft clears the editor', () => {
   // TuiApp's own Ctrl+S path clears + notifies the editor seat BEFORE calling
   // `onSteer`, so the controller must not clear a second time there (a duplicate

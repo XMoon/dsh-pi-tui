@@ -93,6 +93,9 @@ export interface SettingsRuntimeDeps {
 export interface SettingsRuntime {
   /** Apply the RESTORED display preferences before the first frame. */
   applyBootDisplay(): void
+  /** The persisted busy-Enter preference (a TUI input preference the settings
+   *  document owns; consumers read it here rather than through a lifecycle bag). */
+  busyEnter(): string | undefined
   /** Apply the persisted footer settings (mode/layout/custom items/commands);
    *  `doc` defaults to the CURRENT settings document. */
   applyFooterSettings(doc?: FooterSettingsDoc, savedCustomItems?: readonly FooterCustomItemSettings[]): void
@@ -221,6 +224,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     deps.surface.app.setFooterCommandRows(undefined)
   }
 
+  const busyEnter = (): string | undefined => deps.tuiSettings?.get().busyEnter
   const applyFooterSettings = (
     doc: { footer: string; footerLayout?: unknown; footerCustomItems?: unknown } | undefined,
     savedCustomItems?: readonly FooterCustomItemSettings[],
@@ -607,6 +611,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
 
   return {
     applyBootDisplay,
+    busyEnter,
     applyFooterSettings: (doc, savedCustomItems) => applyFooterSettings(doc ?? deps.tuiSettings?.get(), savedCustomItems),
     applyUserKeybindings,
     setDisplayPreset,

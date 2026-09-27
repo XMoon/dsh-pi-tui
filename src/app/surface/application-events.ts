@@ -143,8 +143,6 @@ export interface ApplicationEventsLifecycle {
   currentSessionId(): string | undefined
   /** The current navigation epoch (the rewind picker fence). */
   navigationEpoch(): number
-  /** The persisted busy-Enter preference (the viewer composer policy). */
-  busyEnter(): string | undefined
   /** The runner lifetime signal (viewer prompt cancellation). */
   signal(): AbortSignal
 }
@@ -511,7 +509,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             && deps.viewer.read()?.parentSessionId === submit.parentSessionId
             && deps.viewer.read()?.activity === 'running',
           submit.gesture,
-          deps.lifecycle.busyEnter(),
+          deps.settings.busyEnter(),
         )
       // Empty accelerated input is the child-scoped Ctrl+S steer-all gesture.
       // It must operate on the live child inbox, never call the ordinary human
