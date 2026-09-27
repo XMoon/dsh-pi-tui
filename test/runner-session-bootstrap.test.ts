@@ -3257,6 +3257,63 @@ test('an emitted skills/change reaches the runner catalog refresh for the curren
   )
 })
 
+test('a skills/change emitted after surface teardown performs no further catalog read', async (t) => {
+  // A5b-3 review P2: the Direct `skills/change` capability offers no
+  // unsubscribe, so a late invalidation can reach the coalescing gate after the
+  // surface is torn down. Disposal clears the refresh request slot, so the late
+  // event must become a NO-OP — no extra catalog read and no late error.
+  //
+  // Scope note: disposing the runner fiber also tears down the listener path in
+  // this harness, so this end-to-end test proves NO post-teardown read (it is a
+  // real teardown-path regression guard), while the late-LISTENER mechanism is
+  // pinned structurally by the A5b closure lock on `disposeCatalog`.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-skills-change-teardown-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const resumed: FakeSession = fakeSession({
+    id: 'skills-teardown-session',
+    header: { id: 'skills-teardown-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('skills teardown answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  let snapshots = 0
+  context.provide('skills', {
+    snapshot: async () => {
+      snapshots += 1
+      return { skills: [], complete: true }
+    },
+  } as never)
+  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  life.defer(() => fiber.dispose())
+  await settle()
+  const emitSkillsChange = (): void =>
+    (context as unknown as { emit(name: string, payload: unknown): void }).emit('skills/change', {})
+  // The live path must drive a read first: otherwise the teardown assertion
+  // could pass only because no listener ever existed.
+  const before = snapshots
+  emitSkillsChange()
+  const deadline = Date.now() + 3000
+  while (snapshots === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(snapshots > before,
+    'a live skills/change must drive a catalog read before the teardown assertion can mean anything')
+  await new Promise(resolve => setTimeout(resolve, 250))
+  const afterLive = snapshots
+  await fiber.dispose()
+  await settle()
+  emitSkillsChange()
+  emitSkillsChange()
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.equal(snapshots, afterLive,
+    'a post-teardown skills/change must not read the catalog again (the disposed coordinator must stay untouched)')
+})
+
 test('a fresh start with a FAILING preset resolution shows only the Loader barrier status', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fresh-preset-fail-')

@@ -298,9 +298,25 @@ test('A5b-3: the command runtime application binding is command-owned', () => {
     'the composition root must not bind the semantic command runtime itself')
   assert.match(root, /command\.attachRuntime\(\)/u,
     'the composition root must trigger the command-owned wiring step')
+  assert.equal(root.split('command.attachRuntime()').length - 1, 1,
+    'the composition root must trigger the command wiring step EXACTLY once')
+  assert.doesNotMatch(root, /command\.buildRunner\(/u,
+    'the composition root must not build the facade directly (attachRuntime owns it)')
   const owner = ownerFile('src/app/command/surface.ts')
   assert.match(owner, /bindCommandRuntime\(/u,
     'the command surface owner must own the runtime binding')
+  // A5b-3 review P2: disposal must clear BOTH the coordinator and the refresh
+  // request, so a late `skills/change` (the Direct capability cannot unsubscribe)
+  // cannot reach a disposed coordinator.
+  const disposeAt = owner.indexOf('const disposeCatalog = (): void => {')
+  assert.ok(disposeAt > 0, 'the command owner must expose disposeCatalog')
+  const disposeBody = owner.slice(disposeAt, owner.indexOf('\n  }', disposeAt))
+  assert.ok(disposeBody.includes('catalogCoordinator?.dispose()'),
+    'disposal must dispose the catalog coordinator')
+  assert.ok(disposeBody.includes('catalogCoordinator = undefined'),
+    'disposal must clear the coordinator reference')
+  assert.ok(disposeBody.includes('catalogRefreshRequest = undefined'),
+    'disposal must clear the refresh request so a late skills/change is a no-op')
 })
 
 test('A5b: the Direct-facing viewed-queue slot stays a composition connector', () => {
