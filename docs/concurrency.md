@@ -234,13 +234,18 @@ a generic command failure.
   retry — the caller restores its draft). Collapsing them would misreport a
   stale owner as a frozen transition.
 - The M3 `session/writer-held` caller/UI insertion point is
-  `src/app/submission/runtime.ts`: it owns the submission-facing APPLICATION
-  entrypoints (`submitPrompt`, `deliverBusy`, `steer`, `pullBackQueue`,
-  `executeHostCommandSubmission`, `submitShell`) and, for each, the
-  `WriteOutcome` classification plus the draft/queue/card settlement. Every
-  write they perform enters through `SessionRuntime.withWriter`, so the future
-  Remote writer-held recovery hangs off this ONE caller-side module rather than
-  every writer site.
+  `src/app/submission/runtime.ts` (the lower-level writer admission owner):
+  it owns the submission-facing APPLICATION entrypoints (`submitPrompt`,
+  `deliverBusy`, `steer`, `pullBackQueue`, `executeHostCommandSubmission`,
+  `submitShell`) and, for each, the `WriteOutcome` classification plus the
+  draft/queue/card settlement. Since A5b the caller-side WORKFLOW (the submit
+  FIFO/ack/local-echo state, the dispatch and the shell card lifecycle) lives in
+  `src/app/submission/controller.ts` + `src/app/submission/local-shell.ts`, and
+  the one scope-fenced section helper is
+  `SubmissionController.withWriterSection` — ownership moved, the contract did
+  not. Every write they perform enters through `SessionRuntime.withWriter`, so
+  the future Remote writer-held recovery hangs off this ONE caller-side module
+  rather than every writer site.
 
 ### D2.1 write settlement
 
