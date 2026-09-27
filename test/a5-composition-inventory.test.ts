@@ -366,34 +366,108 @@ test('A5: the composition-root construction calls occur only in the composition 
   }
 })
 
-test('A5: each Host subscription is registered exactly once across production src/**', () => {
-  // Plan §14/§16 ("no subscription/disposer duplication") and §39: one listener
-  // per Host event, with the surface owning the routing decision. The lock is
-  // PRODUCTION-WIDE (file set + count), not composition-surface-only: a second
-  // registration inside an extracted owner must fail even though the composition
-  // count stays at 1.
-  const subscriptions = [
-    "ctx.on('session/event'",
-    "ctx.on('subagent/start'",
-    "ctx.on('subagent/end'",
-    "ctx.on('agent/status'",
-    "ctx.on('llm/adapters-updated'",
-    "ctx.on('settings/document-updated'",
-  ]
-  const sources = productionSources()
-  const whole = productionSource()
-  for (const subscription of subscriptions) {
+/** The composition root's Host subscriptions: event name -> its ONE owner. */
+const HOST_SUBSCRIPTIONS: Readonly<Record<string, string>> = {
+  'session/event': 'src/app/bootstrap.ts',
+  'subagent/start': 'src/app/bootstrap.ts',
+  'subagent/end': 'src/app/bootstrap.ts',
+  'agent/status': 'src/app/bootstrap.ts',
+  'llm/adapters-updated': 'src/app/bootstrap.ts',
+  'settings/document-updated': 'src/app/bootstrap.ts',
+}
+
+/**
+ * Every OTHER production `ctx.on(<string literal>, …)` subscription and the
+ * module that owns it: the Direct adapters (they ARE the Host implementation) and
+ * the skill-catalog capability. Pinned explicitly so the guard can assert the
+ * COMPLETE subscription inventory — a new or duplicated event subscription fails
+ * instead of slipping in.
+ */
+const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
+  ['user-questions/request', 'src/runtime/direct/interaction-direct.ts'],
+  ['approval/request', 'src/runtime/direct/interaction-direct.ts'],
+  ['plugin-manager/install-state', 'src/runtime/direct/plugin-manager-direct.ts'],
+  ['plugin-manager/install-log', 'src/runtime/direct/plugin-manager-direct.ts'],
+  ['agent/assistant-stream', 'src/runtime/direct/assistant-stream-direct.ts'],
+  ['agent/disposed', 'src/runtime/direct/assistant-stream-direct.ts'],
+  ['skills/change', 'src/skill-catalog.ts'],
+  ['commands/change', 'src/commands.ts'],
+]
+
+/** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */
+const DYNAMIC_SUBSCRIPTION_SITES: readonly string[] = ['src/runtime/direct/config-direct.ts']
+
+/**
+ * Every `ctx.on(<literal>, …)` subscription in one production source, read from
+ * the AST — so quotes, whitespace, optional chaining (`ctx.on?.(…)`), a
+ * `this.ctx.on` receiver and a computed `ctx['on']` are all the SAME fact. A
+ * source-string match (`"ctx.on('session/event'"`) would miss all of them.
+ */
+function hostSubscriptions(source: string): { events: string[]; dynamic: boolean } {
+  const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  const events: string[] = []
+  let dynamic = false
+  const isCtxOn = (callee: ts.Expression): boolean => {
+    const target = unwrapExpression(callee)
+    if (ts.isPropertyAccessExpression(target) && target.name.text === 'on') {
+      const receiver = target.expression
+      return ts.isIdentifier(receiver) ? receiver.text === 'ctx' : receiver.getText(file).endsWith('.ctx')
+    }
+    if (ts.isElementAccessExpression(target) && ts.isStringLiteralLike(target.argumentExpression)) {
+      return target.argumentExpression.text === 'on'
+    }
+    return false
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && isCtxOn(node.expression)) {
+      const first = node.arguments[0]
+      if (first !== undefined && ts.isStringLiteralLike(first)) events.push(first.text)
+      else dynamic = true
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return { events, dynamic }
+}
+
+test('A5: the Host subscription inventory is unique and AST-complete across production src/**', () => {
+  // Plan §14/§16 ("no subscription/disposer duplication") and §39. Read from the
+  // AST so every legal spelling of a `ctx.on` subscription is counted, and assert
+  // the COMPLETE inventory (not just the composition-root six): a second
+  // registration of any event — inside an extracted owner or anywhere else —
+  // fails, and an untracked new subscription is visible here rather than silent.
+  const byEvent = new Map<string, string[]>()
+  const dynamicSites: string[] = []
+  for (const { rel, source } of productionSources()) {
+    const { events, dynamic } = hostSubscriptions(source)
+    if (dynamic) dynamicSites.push(rel)
+    for (const event of events) {
+      const sites = byEvent.get(event) ?? []
+      sites.push(rel)
+      byEvent.set(event, sites)
+    }
+  }
+  const expected = new Map<string, string>([
+    ...Object.entries(HOST_SUBSCRIPTIONS),
+    ...OTHER_HOST_SUBSCRIPTIONS.map(([event, rel]) => [event, rel] as const),
+  ])
+  assert.deepEqual(
+    [...byEvent.keys()].sort(),
+    [...expected.keys()].sort(),
+    'the production Host-subscription inventory changed: every ctx.on(event, …) must be listed with its owner',
+  )
+  for (const [event, owner] of expected) {
     assert.deepEqual(
-      sources.filter(({ source }) => source.includes(subscription)).map(({ rel }) => rel),
-      ['src/app/bootstrap.ts'],
-      `${subscription} must be registered only in src/app/bootstrap.ts across production src/**`,
-    )
-    assert.equal(
-      whole.split(subscription).length - 1,
-      1,
-      `${subscription} must be registered exactly once across production src/**`,
+      byEvent.get(event),
+      [owner],
+      `${event} must be subscribed exactly once, from ${owner}`,
     )
   }
+  assert.deepEqual(
+    dynamicSites,
+    [...DYNAMIC_SUBSCRIPTION_SITES].sort(),
+    'the dynamic (non-literal) ctx.on bridges must stay in the Direct config port',
+  )
 })
 
 test('A5: the composition surface keeps the documented surface release order', () => {
