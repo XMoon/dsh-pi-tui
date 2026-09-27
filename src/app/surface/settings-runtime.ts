@@ -80,6 +80,8 @@ export interface SettingsRuntimeDeps {
   /** Persistence-availability gate only (the Direct forms adapter stays in the
    *  composition root; the owner never calls it). */
   readonly settingsForms: unknown
+  /** True once the runner is disposing: a detached write's notify is skipped. */
+  readonly isCleanedUp: () => boolean
   /** The semantic config port slice the footer settings read. */
   readonly backend: SettingsConfigPort
   readonly diag: Diag
@@ -98,6 +100,17 @@ export interface SettingsRuntime {
   applyUserKeybindings(): void
   /** Switch the display preset (the /display | /focus mutation + persistence). */
   setDisplayPreset(preset: DisplayPreset): DisplayPresetApplyResult
+  /** Persist one fullscreen toggle (the `onFullscreenChange` write path; the
+   *  live UI transition itself is the app's). */
+  setFullscreen(fullscreen: boolean): void
+  /** Apply one advanced (plugin) theme by NAME: map the name to its
+   *  source-qualified selectable value, apply the palette and track the theme
+   *  health slot (Phase 4 host-state contract). */
+  applyAdvancedTheme(name: string): void
+  /** Record one extension callback health transition (editor/keybinding slots). */
+  recordExtensionError(slot: string, id: string, error: unknown): void
+  /** Clear one extension callback health transition. */
+  clearExtensionError(slot: string, id: string): void
   /** The USER-layer custom footer items the save path persists (the raw
    *  persistence projection of the config port). */
   userFooterItemsForSave(): unknown
@@ -427,6 +440,69 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   }
 
   /**
+   * Persist one fullscreen toggle (the `onFullscreenChange` event seam). The
+   * live UI transition already happened in the app; this is the best-effort
+   * durable write, detached with the runner diag and the same custom-item
+   * projection the display-preset write uses.
+   */
+  const setFullscreen = (fullscreen: boolean): void => {
+    const settings = deps.tuiSettings
+    if (deps.settingsForms !== undefined) {
+      runDetached('settings fullscreen write', () => serializeTuiSettingsMutation(
+        settings,
+        () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), fullscreen: fullscreen ? 'on' : 'off' }),
+      ), {
+        diag: deps.diag,
+        notify: (message) => {
+          if (deps.isCleanedUp()) return
+          deps.surface.app.notify(message, 'error')
+        },
+        recoverable: () => true,
+      })
+    }
+  }
+
+  /**
+   * Phase 4: apply one advanced host-state setTheme for a NON-built-in name
+   * (a registered plugin theme). The path is NAME-addressed (the documented
+   * Phase-4 contract), so the NAME maps to its SOURCE-QUALIFIED selectable
+   * value FIRST (the value is what gets applied and health-tracked — a bare
+   * name can never be a selection identity). Unknown names are a no-op.
+   */
+  const applyAdvancedTheme = (name: string): void => {
+    const registry = deps.extensions()?.themes
+    const selectable = registry?.selectableValueForName(name)
+    if (selectable === undefined) return
+    const palette = registry?.paletteForSelectable(selectable)
+    if (palette === undefined) return
+    // VALUE-addressed (the unified theme protocol).
+    const themeRef = deps.extensions()?._recordRegistryHealthRef('theme', selectable)
+    try {
+      deps.surface.app.applyPluginPalette(selectable, palette)
+      if (themeRef !== undefined) deps.extensions()?._clearRegistryError(themeRef)
+    } catch (error) {
+      if (themeRef !== undefined) deps.extensions()?._recordRegistryError(themeRef, error)
+      deps.surface.app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
+    }
+  }
+
+  /** Record one extension callback health transition (M11 editor/keybinding slots). */
+  const recordExtensionError = (slot: string, id: string, error: unknown): void => {
+    try {
+      const ref = deps.extensions()?._recordRegistryHealthRef(slot, id)
+      if (ref !== undefined) deps.extensions()?._recordRegistryError(ref, error)
+    } catch {}
+  }
+
+  /** Clear one extension callback health transition. */
+  const clearExtensionError = (slot: string, id: string): void => {
+    try {
+      const ref = deps.extensions()?._recordRegistryHealthRef(slot, id)
+      if (ref !== undefined) deps.extensions()?._clearRegistryError(ref)
+    } catch {}
+  }
+
+  /**
    * Apply the RESTORED display preferences before the first frame: the
    * Home/End navigation preset, the wheel step, the fullscreen state and the
    * persisted theme (including the auto-detect/track policy). This runs at its
@@ -534,6 +610,10 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     applyFooterSettings: (doc, savedCustomItems) => applyFooterSettings(doc ?? deps.tuiSettings?.get(), savedCustomItems),
     applyUserKeybindings,
     setDisplayPreset,
+    setFullscreen,
+    applyAdvancedTheme,
+    recordExtensionError,
+    clearExtensionError,
     userFooterItemsForSave,
     applySafeKeybindingsMode,
     requestFooterCommandRefresh,

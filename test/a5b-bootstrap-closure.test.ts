@@ -60,10 +60,7 @@ const FINAL_FORBIDDEN_HANDLERS: readonly string[] = [
 ]
 
 /** The transitional ledger: forbidden handlers still implemented in bootstrap. */
-const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = [
-  { name: 'surfaceEvents', slice: 'A5b-5', owner: 'app/surface/application-events' },
-  { name: 'openRewindPicker', slice: 'A5b-5', owner: 'app/surface/application-events' },
-]
+const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = []
 
 /** Does `source` declare `name` at any scope? */
 function declares(source: string, name: string): boolean {
@@ -220,6 +217,14 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     'src/app/submission/local-shell.ts',
     ['localShellController', 'interruptLiveAgent', 'shellTempFiles', 'runLocalShell'],
   ],
+  [
+    'src/app/surface/application-events.ts',
+    ['surfaceEvents', 'openRewindPicker'],
+  ],
+  [
+    'src/app/surface/client-actions.ts',
+    ['runClipboardCommand', 'clipboardEnv', 'runCopyCommand', 'copyEnv', 'openExternalEditor'],
+  ],
 ]
 
 test('A5b: every extracted declaration lives in its named owner, never in the composition root', () => {
@@ -249,6 +254,8 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
   ['src/app/submission/controller.ts', 'createSubmissionController', 'createSubmissionController<Agent>('],
   ['src/app/submission/local-shell.ts', 'createLocalShell', 'createLocalShell<Agent>('],
+  ['src/app/surface/application-events.ts', 'createApplicationEvents', 'createApplicationEvents('],
+  ['src/app/surface/client-actions.ts', 'createClientActions', 'createClientActions('],
 ]
 
 test('A5b: each extracted owner is constructed exactly once, from the composition root', () => {
@@ -315,10 +322,13 @@ test('A5b-4: only the owner that is asked to consume the draft clears the editor
     'the submission owner must CLEAR the editor in exactly ONE place')
   assert.match(owner, /if \(options\?\.consumeDraft === true\) deps\.app\(\)\.setDraft\(''\)/u,
     'the single clear must be guarded by the explicit consumeDraft request')
-  const root = compositionFile('src/app/bootstrap.ts')
-  assert.match(root, /submission\.steer\(app\.getDraft\(\), \{ consumeDraft: true \}\)/u,
+  // A5b-5 moved the event adapter (and its two steer seams) into its owner.
+  const events = ownerFile('src/app/surface/application-events.ts')
+  assert.equal(events.split('submission.steer(').length - 1, 2,
+    'exactly two production steer call sites must exist in the event owner (one consume-draft, one already-consumed)')
+  assert.match(events, /submission\.steer\(deps\.surface\.app\.getDraft\(\), \{ consumeDraft: true \}\)/u,
     'the steer-draft action must ask the owner to consume the still-present draft')
-  const onSteer = root.slice(root.indexOf('onSteer: (text) =>'), root.indexOf('onSteer: (text) =>') + 900)
+  const onSteer = events.slice(events.indexOf('onSteer: (text) =>'), events.indexOf('onSteer: (text) =>') + 900)
   assert.match(onSteer, /submission\.steer\(text\)/u,
     'the TuiApp onSteer seam must NOT ask for a second consume (the caller already cleared)')
   assert.doesNotMatch(onSteer, /consumeDraft/u,

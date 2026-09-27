@@ -415,8 +415,10 @@ test('P1-1 static: no production fence carries the transition gate into an admit
   assert.equal((runtime.match(/fence: \(\) => deps\.isDisposed\(\)/gu) ?? []).length, 2,
     'the main steer and the shell submit keep the surface-lifetime fence')
   // The child-viewer steer is a DIFFERENT ownership axis: the viewer
-  // generation, never the session transition gate.
-  assert.ok(index.includes('fence: () => cleanedUp || app.getViewerGeneration() !== childViewerGeneration,'),
+  // generation, never the session transition gate. A5b-5 moved the event
+  // adapter into its owner, so the positive anchor follows it there.
+  const eventsOwner = readFileSync(new URL('../src/app/surface/application-events.ts', import.meta.url), 'utf8')
+  assert.ok(eventsOwner.includes('fence: () => deps.lifecycle.isCleanedUp() || app.getViewerGeneration() !== childViewerGeneration,'),
     'the child-viewer steer keeps its own viewer-generation axis')
   // The pull-back's delayed-representation reconciliation still reads the
   // queued transition + the frozen barrier together. A5b-4 moved the pull-back

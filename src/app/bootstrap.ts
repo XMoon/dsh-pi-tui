@@ -18,10 +18,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { spawn } from 'node:child_process'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -58,6 +54,8 @@ import { createSessionPresentation } from './surface/session-presentation.ts'
 import { createStatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
+import { createApplicationEvents, type ApplicationEventsOwner } from './surface/application-events.ts'
+import { createClientActions } from './surface/client-actions.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
@@ -74,28 +72,25 @@ import { isAssistantTokenDelta } from '../token-usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
 import { color } from '../theme.ts'
-import { isEmptyAcceleratedViewerSubmit, type TuiApp, type TuiAppEvents } from '../tui-app.ts'
+import type { TuiApp } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
-import { resolveComposerDelivery, type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
+import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from '../detached.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
 import { DraftImageStore } from '../image/draft-store.ts'
 import { DraftFileStore } from '../attachment/file-draft.ts'
-import { commandOnPath, createClipboardRunner, readClipboardImage, readClipboardText, type ClipboardEnvironment } from '../image/clipboard.ts'
 import { openExternalUrl } from '../open-url.ts'
-import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from '../clipboard.ts'
 import { createStartupStatus } from '../startup-status.ts'
 import { iconStyleOf } from '../icons.ts'
 import { checkImageLimits } from '../image/intake.ts'
 import { ImageLoadError } from '../image/errors.ts'
-import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments, type PrepareInputDeps } from '../image/submit.ts'
+import { consumeDraftAttachments, type PrepareInputDeps } from '../image/submit.ts'
 import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
-import { mergeDraft, refuseByTransitionFence, steerAll, type SteerAgentLike } from '../steer.ts'
-import { viewerCanonicalizeScope, type SubagentViewerSubmitRequest } from '../subagent-viewer-submit.ts'
+import { mergeDraft, refuseByTransitionFence, type SteerAgentLike } from '../steer.ts'
 import { createDirectApplicationRuntime } from '../app/direct/runtime.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
@@ -107,14 +102,10 @@ import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
-import { parseShellWords } from '../shell-words.ts'
 import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
-import { collectRewindCandidates, rewindPickerItem } from '../rewind.ts'
-import { type RewindLiveIdentity } from '../session-fork.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { dangerCommand } from '../command-policy.ts'
-import { viewerActionCapability } from '../subagent-viewer.ts'
 import { resolveInitialCatalog } from '../surface-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
 import { queueTextOf } from '../pending-presentation.ts'
@@ -578,6 +569,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       settingsForms,
       backend,
       diag,
+      isCleanedUp: () => cleanedUp,
       status: { refresh: () => status.refresh() },
       extensions: () => extensionService,
     })
@@ -920,6 +912,15 @@ export function applyRunner(ctx: Context, config: Config): void {
     // Footer state: model label, cwd, git branch, turn/step counters, and
     // the stats line (LLM timing, tokens, context pressure).
     const cwd = process.cwd()
+    // A5b-5: the client-local platform policy (clipboard + external editor).
+    // Client-local by contract (no Host port); constructed before the command
+    // owner because that owner consumes the copy policy.
+    const clientActions = createClientActions()
+    // A5b-5: the TuiApp application-event owner. Declared here (before the
+    // command owner and the mount) so the command owner's `/rewind` seam can
+    // reach it late-bound and the mount below can hand its adapter over. It is
+    // ASSIGNED once every owner it depends on exists, before `surface.start`.
+    let applicationEvents: ApplicationEventsOwner
     // A5b-3b-2: the command authority/state machine + the TuiCommandRunner
     // facade owner. Constructed before the surface cleanup closure can run; the
     // runner facade is built later, after the semantic command runtime binds.
@@ -1014,8 +1015,8 @@ export function applyRunner(ctx: Context, config: Config): void {
         submenu: (done) => pluginManager.submenu(done),
       },
       client: {
-        get runCopyCommand() { return runCopyCommand },
-        get copyEnv() { return copyEnv },
+        get runCopyCommand() { return clientActions.runCopyCommand },
+        get copyEnv() { return clientActions.copyEnv },
       },
       submission: {
         prepareDeps: () => submission.prepareDeps(),
@@ -1026,7 +1027,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       displayState,
       get agents() { return lifecycleAgents },
       imageLimits: () => ctx.get('attachments')?.imageLimits as import('../image/intake.ts').ImageLimitsLike | undefined,
-      openRewindPicker: () => openRewindPicker(),
+      openRewindPicker: () => applicationEvents.openRewindPicker(),
       requestExit: () => requestExit(),
       exit,
       // A5b-3: the narrow Direct seams the (command-owned) runtime binding
@@ -1497,34 +1498,6 @@ export function applyRunner(ctx: Context, config: Config): void {
     // locator inside `app/surface`).
     extensionService = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
     if (extensionService !== undefined) surface.attachExtensionHost(extensionService)
-    /** The clipboard bridge (plan M3): a bounded execFile runner with a
-     * generous buffer (clipboard payloads can be multi-MB); `input` is
-     * piped to the child's stdin (issue #7 — the copy helpers read their
-     * payload from stdin). */
-    const runClipboardCommand = createClipboardRunner()
-    const clipboardEnv: ClipboardEnvironment = {
-      platform: process.platform,
-      env: process.env as Record<string, string | undefined>,
-      // PATH-aware helper detection — a bare existsSync only checks the
-      // CWD and would declare installed wl-paste/xclip "missing" (review
-      // finding).
-      exists: (command) => commandOnPath(command, process.env.PATH, process.platform),
-    }
-    /** Issue #7: the copy policy's executor — the same bounded execFile
-     * runner as the paste probe, with the text payload piped to stdin. */
-    const runCopyCommand: CopyExecutor = (command, args, input) =>
-      runClipboardCommand(command, args, { timeoutMs: 2000, input }).then(result => ({ code: result.code }))
-    /** Issue #7: the copy policy's platform facts — the paste probe's
-     * environment plus the OSC 52 best-effort sink (a TTY-gated write;
-     * inside tmux the sequence rides a DCS passthrough so the terminal
-     * behind tmux receives it — kimi-code convention). */
-    const copyEnv: CopyEnvironment = {
-      platform: clipboardEnv.platform,
-      env: clipboardEnv.env,
-      exists: clipboardEnv.exists,
-      isTTY: () => process.stdout.isTTY === true,
-      writeOsc52: (text) => process.stdout.write(buildOsc52Sequence(text, (process.env.TMUX ?? '').length > 0)),
-    }
     // The TUI is about to mount: the pre-mount status line must be gone
     // before the first frame (no stale scrollback line after mount).
     if (lifecycleController.signal.aborted) return
@@ -1540,491 +1513,59 @@ export function applyRunner(ctx: Context, config: Config): void {
     // command layers. The surface owner (`surface.start` below) owns the mount
     // and the surface-local option wiring; the runner hands this table in
     // unchanged.
-    const surfaceEvents: TuiAppEvents = {
-      // ONE submission entry: the request (the Enter gesture, the
-      // accelerated chord, or the explicit queue action) rides along — the
-      // boundary resolves its delivery mode.
-      onSubmit: (text, request) => submission.submit(text, request),
-      // The image-only submit gate (plan §11.1): an empty-text draft with
-      // staged images is a real submission.
-      isImageDraft: () => draftHasImages(app.getDraft(), draftImages),
-      // The in-process EDITOR history must never recall a multimodal line
-      // after its drafts were consumed — the placeholders would re-send as
-      // plain text (the persisted JSONL history has the same guard; review
-      // finding: the memory side was missing it).
-      shouldRememberInput: (text) => !draftHasAttachments(text, draftImages, draftFiles),
-      // Ctrl+V (plan M3): probe the clipboard ONCE per paste — an image
-      // lands as a draft placeholder, plain text as an editor insert,
-      // unsupported/empty silently (a text paste must never error).
-      onClipboardPaste: () => {
-        // The clipboard probe is ASYNC: capture the session identity and
-        // discard the result if the user switched sessions meanwhile — a
-        // late paste must never stage into the NEW session's draft
-        // (round-5 finding 2).
-        const pasteGeneration = ownership.generation()
-        runOwned('clipboard paste', () => readClipboardImage(runClipboardCommand, clipboardEnv).then((result) => {
-          if (cleanedUp || ownership.generation() !== pasteGeneration) return
-          if (result.kind === 'image') {
-            // Attach-time prune (review finding 2): placeholders deleted or
-            // Ctrl+C-cleared since the last attach must not hold their
-            // bytes until the store fills up.
-            pruneUnreferencedDraftAttachments(app.getDraft(), draftImages, draftFiles)
-            const limits = ctx.get('attachments')?.imageLimits
-            if (limits !== undefined) {
-              checkImageLimits(
-                { mediaType: result.mediaType, width: result.width, height: result.height },
-                result.bytes.byteLength,
-                limits as Parameters<typeof checkImageLimits>[2],
-              )
-            }
-            const draft = draftImages.add({
-              bytes: result.bytes,
-              mediaType: result.mediaType,
-              width: result.width,
-              height: result.height,
-              source: { type: 'clipboard' },
-            })
-            app.insertIntoEditor(`${draft.placeholder} `)
-            app.notify(`attached ${draft.placeholder} — Enter to send`)
-          } else if (result.kind === 'text' && result.text !== '') {
-            app.insertIntoEditor(result.text)
-          }
-        }), {
+    // A5b-5: the application-event owner (the COMPLETE TuiAppEvents adapter).
+    // Built from the A5b owner objects plus the narrow runner lifetime
+    // callbacks and the rewind/subagent Host-port groups that have no narrower
+    // owner today; the mount below receives the produced adapter.
+    applicationEvents = createApplicationEvents({
+      submission,
+      viewer,
+      surface,
+      status,
+      settings,
+      client: clientActions,
+      drafts: { get images() { return draftImages }, get files() { return draftFiles } },
+      imageLimits: () => ctx.get('attachments')?.imageLimits as Parameters<typeof checkImageLimits>[2] | undefined,
+      rewind: {
+        forkSession: (sourceSessionId, atSeq, onAdopted, pickerIdentity) =>
+          sessionRuntime.forkSession(sourceSessionId, atSeq, onAdopted, pickerIdentity),
+      },
+      // The subagent viewer's Host delivery ports (the viewer STATE stays in
+      // the A5b-1 viewer owner). These are the Direct parent resolution and
+      // the Backend prompt/writer/host-file ports; the composition root only
+      // forwards them.
+      subagentDelivery: {
+        queueAgentFor: (childId) => directRuntime.queueAgentFor(childId) as unknown as SteerAgentLike | undefined,
+        pendingInputReader: backend.pendingInputReader,
+        writer: backend.sessionWriter,
+        writerSection: submissionWriterSection,
+        subagent: backend.subagent,
+        hostFile: backend.hostFile,
+      },
+      // The few runner lifetime/identity callbacks (diag pre-attached once).
+      lifecycle: {
+        runOwned: (label, task, options) => runOwned(label, task, {
+          ...options,
           diag,
-          sessionId: () => agentNow()?.session.id,
-          onError: (error) => {
-            if (cleanedUp) return
-            app.notify(safeErrorMessage(error), 'error')
-          },
-        })
+          sessionId: options?.sessionId ?? (() => agentNow()?.session.id),
+        }),
+        isCleanedUp: () => cleanedUp,
+        requestExit,
+        liveAgent: () => agentNow(),
+        generation: () => ownership.generation(),
+        currentSessionId: () => ownership.currentSessionId(),
+        navigationEpoch: () => ownership.navigationEpoch(),
+        busyEnter: () => tuiSettings?.get().busyEnter,
+        signal: () => lifecycleController.signal,
       },
-      // The owned-task entry for UI-layer one-shot flows (the external
-      // editor): runOwned with the runner's diag pre-attached.
-      runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
-        runOwned(label, task, { ...options, diag, sessionId: () => agentNow()?.session.id })
-      },
-      onExit: () => {
-        // Keyboard exit requests route through the SAME exit orchestration as
-        // /exit and /quit (createExitController above): latch once, dispose
-        // the Client surface, resume hint, process exit — the Direct
-        // owned-session retirement runs inside the appExit disposal.
-        requestExit()
-      },
-      onCancel: () => {
-        // Esc cancel: abort a running `!` shell command, then interrupt the
-        // live agent (busy: one Esc fires this directly; idle: double-Esc).
-        // interruptAgent PRESERVES the pending queue (web Stop parity) — an
-        // interrupt stops the current thinking, never the queued input.
-        submission.abortLocalShell()
-      },
-      // Conversation rewind: the TuiApp fires this only when IDLE with an
-      // EMPTY editor and a fast second Esc (busy stays a cancel; overlays,
-      // autocomplete and replacement editors keep their own Esc). The SAME
-      // surface as `/rewind` — one implementation, two entries.
-      onRewind: () => openRewindPicker(),
-      // M6: execute a plugin keybinding's SEMANTIC action through the
-      // host's own paths (plan §2.2 — the host never lets a plugin bypass
-      // submission/session safety).
-      onExtensionAction: (action) => {
-        if (cleanedUp) return
-        // VIEWER CAPABILITY GATE: while a subagent viewer is open (either
-        // mode), semantic actions with PARENT-session side effects are
-        // blocked — the viewer's input must never interrupt/steer/queue/
-        // reconfigure the parent (a plugin keybinding reaching this runner
-        // is the ONLY path that could, since the raw-key viewer guard
-        // already consumes the parent chords). submit-draft/queue-draft
-        // route to the CHILD through the viewer-aware submitDraft (a
-        // one-shot viewer hard-rejects them), toggle-fullscreen is
-        // surface-local; every other action is consumed as a no-op.
-        if (viewer.isViewing() && !viewerActionCapability(action, { mode: viewer.read()!.mode })) {
-          return
-        }
-        switch (action) {
-          case 'submit-draft': {
-            // Host-owned submit path: history + notify clear + draft
-            // clear, exactly like a normal Enter (round-1 P2).
-            app.submitDraft('enter')
-            break
-          }
-          case 'queue-draft': {
-            // The PUBLIC queue action: an explicit delivery command, never a
-            // gesture — it queues regardless of the busy-Enter preference
-            // (the accelerated CHORD is the preference's opposite, see
-            // ComposerSubmitRequest).
-            app.submitDraft('explicit-queue')
-            break
-          }
-          case 'steer-draft': {
-            // The steered draft is an agent-facing submission: the OWNER
-            // snapshots the persist facts (ts + image check) BEFORE consuming
-            // the draft, and the row is written after the session exists (the
-            // deferred-start gate) with the FINAL session id. This action hands
-            // the still-present draft over, so the owner consumes it.
-            submission.steer(app.getDraft(), { consumeDraft: true })
-            break
-          }
-          case 'cancel-activity': {
-            submission.abortLocalShell()
-            break
-          }
-          case 'open-search': {
-            app.startTranscriptSearch()
-            break
-          }
-          case 'toggle-fullscreen': {
-            app.setFullscreen(!app.isFullscreen())
-            break
-          }
-          case 'cycle-permission': {
-            const agent = agentNow()
-            if (agent === undefined) break
-            const permission = ctx.get('permissionPresets')
-            if (permission === undefined) break
-            const names = permission.names
-            if (names.length === 0) break
-            const current = (permission as { current(session: unknown): string }).current(agent.session)
-            const index = names.indexOf(current)
-            const next = names[(index + 1) % names.length] ?? names[0]
-            if (next === undefined || next === current) break
-            permission.set(agent.session, next)
-            app.notify(next === 'danger-full-access'
-              ? `⚠ ${next} — no approvals`
-              : `permission: ${next}`,
-            next === 'danger-full-access' ? 'error' : 'info')
-            status.refresh()
-            break
-          }
-        }
-      },
-      onSteer: (text) => {
-        // Ctrl+S: the steered draft is an agent-facing submission — TuiApp has
-        // ALREADY cleared and notified the editor seat before this callback, so
-        // the owner must not consume (clear) the draft a second time; the
-        // snapshot happens now and the row is written inside steerNow AFTER the
-        // session exists (the deferred-start gate) with the FINAL session id.
-        submission.steer(text)
-      },
-      onExtensionError: ({ slot, id, error }) => {
-        try {
-          const ref = extensionService?._recordRegistryHealthRef(slot, id)
-          if (ref !== undefined) extensionService?._recordRegistryError(ref, error)
-        } catch {}
-      },
-      onExtensionRecovered: ({ slot, id }) => {
-        try {
-          const ref = extensionService?._recordRegistryHealthRef(slot, id)
-          if (ref !== undefined) extensionService?._clearRegistryError(ref)
-        } catch {}
-      },
-      // The session presentation title changed (advanced ui.host.setTitle,
-      // session/title events — the app fires it for EVERY setSessionTitle):
-      // the terminal window title policy follows, so a rename/regenerate
-      // refreshes the OSC title immediately.
-      onTitleChanged: () => {
-        if (cleanedUp) return
-        status.refreshTerminalTitle()
-      },
-      // Terminal focus reports (CSI ? 1004): the completion-notification
-      // focus tracker observes them. The report is consumed host-side in
-      // regular mode and passes through in fullscreen (the viewport
-      // listener owns FOCUS_OUT's selection cleanup), so the tracker
-      // only records state.
-      onTerminalFocus: (focused) => {
-        surface.handleTerminalFocus(focused)
-      },
-      // Any REAL input (not a focus report) proves the user is operating
-      // the terminal: restore the tracker to 'focused' (a missed FOCUS_IN
-      // must never leave an 'unfocused' tracker that would falsely notify
-      // while the user watches).
-      onUserInput: () => {
-        surface.noteUserInput()
-      },
-      // Phase 4: the advanced host-state setTheme for a NON-built-in name
-      // (a registered plugin theme). The runner resolves the palette
-      // through the theme registry; unknown names are a no-op; a throwing
-      // palette is recorded in the theme health slot. The path is
-      // NAME-addressed (the documented Phase-4 contract), so the runner
-      // maps the NAME to its SOURCE-QUALIFIED selectable value FIRST
-      // (the review's P2: the value is what gets applied, persisted and
-      // health-tracked — a bare name can never be a selection identity).
-      onAdvancedSetTheme: (name) => {
-        const selectable = extensionService?.themes.selectableValueForName(name)
-        if (selectable === undefined) return
-        const palette = extensionService?.themes.paletteForSelectable(selectable)
-        if (palette === undefined) return
-        // VALUE-addressed (the unified theme protocol).
-        const themeRef = extensionService?._recordRegistryHealthRef('theme', selectable)
-        try {
-          app.applyPluginPalette(selectable, palette)
-          if (themeRef !== undefined) extensionService?._clearRegistryError(themeRef)
-        } catch (error) {
-          if (themeRef !== undefined) extensionService?._recordRegistryError(themeRef, error)
-          app.notify(`theme ${name} failed: ${safeErrorMessage(error)}`, 'error')
-        }
-      },
-      openExternalEditor: async (draft) => {
-        // $VISUAL/$EDITOR may carry arguments (`code --wait`, `vim -f`):
-        // parse with a real shell-word parser, never a plain split.
-        const words = parseShellWords(process.env.VISUAL ?? process.env.EDITOR ?? 'vi')
-        const [editor, ...editorArgs] = words
-        if (editor === undefined) throw new Error('empty editor command')
-        const file = join(tmpdir(), `dsh-pi-tui-${process.pid}-${randomUUID()}.md`)
-        writeFileSync(file, draft, { mode: 0o600 })
-        try {
-          await new Promise<void>((resolve, reject) => {
-            const child = spawn(editor, [...editorArgs, file], { stdio: 'inherit' })
-            // A settled latch: `error` and `close` can both fire; the first
-            // outcome wins, exactly like the local-shell cards.
-            let settled = false
-            const finish = (error?: Error): void => {
-              if (settled) return
-              settled = true
-              if (error !== undefined) reject(error)
-              else resolve()
-            }
-            child.on('error', (error) => finish(error))
-            child.on('close', (code, childSignal) => {
-              // Only a successful editor run may produce the draft: a
-              // non-zero exit or a signal kill means the file is whatever
-              // the editor left behind, not a deliberate edit.
-              if (code === 0) {
-                finish()
-              } else if (childSignal !== null) {
-                finish(new Error(`${editor} was killed by signal ${childSignal}`))
-              } else {
-                finish(new Error(`${editor} exited with code ${code}`))
-              }
-            })
-          })
-          // Read ONLY after the editor finished successfully (close, code 0).
-          return readFileSync(file, 'utf8')
-        } finally {
-          // Cleanup runs on EVERY path, including a failed read.
-          rmSync(file, { force: true })
-        }
-      },
-      // The transcript navigation callbacks (MoveOlder/TurnOlder/TurnNewer/
-      // MoveNewer/JumpLatest) are surface-owned wiring (A4-8, plan §17); the
-      // surface overlays them in `SurfaceRuntime.start`.
-      onFullscreenChange: (fullscreen) => {
-        const settingsDoc = tuiSettings
-        if (settingsForms !== undefined) {
-          runDetached('settings fullscreen write', () => serializeTuiSettingsMutation(
-             settingsDoc,
-             () => settingsDoc.replace({ ...settingsDoc.get(), footerCustomItems: settings.userFooterItemsForSave(), fullscreen: fullscreen ? 'on' : 'off' }),
-            ), {
-            diag,
-            notify: (message) => {
-              if (cleanedUp) return
-              app.notify(message, 'error')
-            },
-            recoverable: () => true,
-          })
-        }
-      },
-      // The Ctrl+R search presentation callbacks (Open/Query/Next/Prev/Close)
-      // are surface-owned wiring (A4-8, plan §17); the surface overlays them
-      // in `SurfaceRuntime.start`. The matching/index algorithm stays in
-      // transcript.ts and the stepping policy in search-overlay.ts.
-      // P7d: a single Esc with no overlay up exits the subagent viewer
-      // instead of arming the double-Esc cancel.
-      onSingleEscape: () => viewer.exitView(),
-      // Shift+Tab: cycle the permission preset through the composed table
-      // (read-only → workspace-write → danger-full-access). The switch goes
-      // through the official service (sandbox + approval + preset log in one
-      // call, no transcript card), with a red warning only on the no-approval
-      // preset (plain switches notify in the dim info style) and an immediate
-      // footer refresh.
-      onCyclePermission: () => {
-        const agent = agentNow()
-        if (agent === undefined) return
-        const permission = ctx.get('permissionPresets')
-        if (permission === undefined) return
-        const names = permission.names
-        if (names.length === 0) return
-        const current = (permission as { current(session: unknown): string }).current(agent.session)
-        const index = names.indexOf(current)
-        const next = names[(index + 1) % names.length] ?? names[0]
-        if (next === undefined || next === current) return
-        permission.set(agent.session, next)
-        app.notify(next === 'danger-full-access'
-          ? `⚠ ${next} — no approvals`
-          : `permission: ${next}`,
-        next === 'danger-full-access' ? 'error' : 'info')
-        status.refresh()
-      },
-      // Alt+↑: on the main surface, run the TUI-only recall-all extension:
-      // remove every semantic `queued` occurrence and pull its content back
-      // into the editor draft. The gesture is disabled in every viewer so it
-      // cannot mutate a hidden main or child queue.
-      onDequeue: () => submission.dequeue(),
-      // ↓ with an empty editor: the Quick Tasks browser. Task Center
-      // merges the JobRegistry roster with the subagent descendant
-      // catalog. The JobRegistry may include provisional foreground shell
-      // work while it is running; if DSH removes that record after the
-      // foreground result is collected, the row leaves the Task Center
-      // with the registry (the Transcript tool card is the foreground
-      // history authority), while handed-out background jobs that remain
-      // in jobs.list() stay available in TRACKED after settlement. Job
-      // rows (shell + background one-shot subagent jobs) are status-only:
-      // the bash output read cursor belongs to the
-      // model's job_output and a subagent job record carries no child
-      // session id, so Enter opens the status viewer (never the output).
-      // Subagent rows (live children from the subagent registry) deliver no
-      // result to the parent, so Enter opens the child transcript directly:
-      // continuable children always, and one-shot children while RUNNING (a
-      // foreground delegation is the parent's pending tool call, so the
-      // trigger would otherwise look dead). A running BACKGROUND one-shot
-      // appears twice — its job row and its child row — because the two
-      // records have no cross-reference to dedup; the viewable child row is
-      // the more useful one. The children half enriches asynchronously:
-      // listChildren may read persistence for cold children, so the picker
-      // opens on the jobs half and setItems merges the rest in.
-      //
-      // The SAME browser is the `/tasks` surface (runner.openTasksBrowser):
-      // the merged list + search is the single command-side entry, with
-      // row-level `S` = confirmed Stop on capable rows (kimi's stop-on-row
-      // pattern; the old /subagents SettingsList-submenu panel is gone).
-      onOpenTasks: () => surface.openTasksBrowser('quick'),
-      // A submit gesture in an INTERACTIVE (continuable) subagent viewer:
-      // resolve queue/steer delivery, then deliver the human prompt through
-      // the OFFICIAL ctx.subagents.prompt control
-      // API — the child inbox (a distinct FIFO turn: enqueue while
-      // running, wake while waiting, cold resume when absent), with Host
-      // authority over the exact live parent and official user
-      // provenance/requestId. NEVER `subagents.sendMessage` (the
-      // Agent-authored Steer path) and never the parent's
-      // submit/steer/queue path. The app already cleared the child draft;
-      // a rejection restores it (merged) into the child's own draft slot.
-      onSubagentSubmit: (submit) => {
-        if (cleanedUp) return
-        const viewerGeneration = app.getViewerGeneration()
-        // The viewer editor's text becomes the prompt's content parts at
-        // the client boundary (text today; image parts join with the
-        // viewer's image intake). Resolve the Web composer policy against
-        // the CHILD's activity; the parent status is irrelevant while
-        // viewing.
-        const delivery = submit.gesture === 'explicit-queue'
-          ? 'queue'
-          : resolveComposerDelivery(
-            viewer.read()?.id === submit.childSessionId
-              && viewer.read()?.parentSessionId === submit.parentSessionId
-              && viewer.read()?.activity === 'running',
-            submit.gesture,
-            tuiSettings?.get().busyEnter,
-          )
-        // Empty accelerated input is the child-scoped Ctrl+S steer-all
-        // gesture. It must operate on the live child inbox, never call the
-        // ordinary human prompt API, and never manufacture an empty prompt.
-        const viewerTarget = viewer.read()
-        if (isEmptyAcceleratedViewerSubmit(submit.text, submit.gesture)) {
-          if (viewerTarget === undefined
-            || viewerTarget.id !== submit.childSessionId
-            || viewerTarget.parentSessionId !== submit.parentSessionId
-            || viewerTarget.mode !== 'continuable'
-            || viewerTarget.access !== 'interactive-direct-child') return
-          const childViewerGeneration = viewerGeneration
-          let childDraftRestored = false
-          const restoreChildDraft = (text: string): boolean => {
-            if (text === '' || childDraftRestored) return true
-            childDraftRestored = true
-            const current = viewer.read()
-            if (!cleanedUp
-              && app.getViewerGeneration() === childViewerGeneration
-              && current?.id === submit.childSessionId
-              && current.parentSessionId === submit.parentSessionId
-              && current.mode === 'continuable'
-              && current.access === 'interactive-direct-child'
-              && ownership.currentSessionId() === submit.parentSessionId) {
-              const merged = mergeDraft(app.getDraft(), text)
-              app.setEditorText(merged)
-              return merged === text
-            }
-            if (!cleanedUp) app.restoreSubagentDraft(submit.childSessionId, text)
-            return false
-          }
-          runOwned('subagent queue steer', () => steerAll({
-            currentAgent: () => {
-              const current = directRuntime.queueAgentFor(submit.childSessionId)
-              return current === undefined ? undefined : current as unknown as SteerAgentLike
-            },
-            currentGeneration: () => app.getViewerGeneration(),
-            notify: (message, kind) => {
-              if (cleanedUp || app.getViewerGeneration() !== childViewerGeneration) return
-              const read = viewer.read()
-              if (read?.id !== submit.childSessionId || read.parentSessionId !== submit.parentSessionId) return
-              app.notify(message, kind)
-            },
-            restoreDraft: restoreChildDraft,
-            createDraft: () => ({}),
-            staleNotice: () => 'the child viewer changed while steering — try again',
-            mergedNotice: () => 'the child viewer changed while steering — try again',
-            fence: () => cleanedUp || app.getViewerGeneration() !== childViewerGeneration,
-            fenceNotice: () => 'the child viewer changed while steering — try again',
-            pendingInputReader: backend.pendingInputReader,
-            writer: backend.sessionWriter,
-            writerSection: submissionWriterSection,
-          }, submit.text, { draftHasPayload: false }), {
-            diag,
-            sessionId: () => directRuntime.queueAgentFor(submit.childSessionId)?.session.id,
-            onError: (error) => {
-              restoreChildDraft(submit.text)
-              if (cleanedUp || app.getViewerGeneration() !== childViewerGeneration) return
-              app.notify(safeErrorMessage(error), 'error')
-            },
-          })
-          return
-        }
-        const request: SubagentViewerSubmitRequest = {
-          parentSessionId: submit.parentSessionId,
-          childSessionId: submit.childSessionId,
-          delivery,
-          content: [{ type: 'text', text: submit.text }],
-        }
-        const promptViewerAbort = viewer.followUpSignal()
-        const promptViewerCwd = viewer.read()?.cwd
-        runOwned('subagent prompt', () => backend.subagent.prompt(request, {
-          // The caller signal owns lookup/materialization/admission only
-          // until inbox acceptance (the official prompt contract): a TUI
-          // cleanup / exit, OR the viewer session ending (Esc / child
-          // switch / session swap — viewerSessionAbort) cancels a send
-          // that has NOT been accepted yet; once accepted the child owns
-          // the message and no restore happens. Never a dropped controller
-          // whose signal can never fire.
-          makeSignal: () => promptViewerAbort === undefined
-            ? lifecycleController.signal
-            : AbortSignal.any([lifecycleController.signal, promptViewerAbort]),
-          // Same `@`-file mention canonicalization as the main session's
-          // submissions (the editor keeps `@src/foo.ts`, the child model
-          // receives the absolute path). The scope is the VIEWED CHILD's
-          // workspace when the viewer knows it (the child may have been
-          // born in another directory — canonicalizing against the parent
-          // cwd would rewrite the child's mentions to the wrong tree);
-          // an unknown cold-child cwd falls back to the live parent.
-          canonicalizeText: (text) => backend.hostFile.canonicalizeMentions(
-            viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),
-            text,
-          ),
-        }), {
-          diag,
-          sessionId: () => agentNow()?.session.id,
-          onResult: (outcome) => viewer.settleSubmit(request, submit.text, outcome, viewerGeneration),
-          onError: (error) => viewer.settleSubmit(
-            request,
-            submit.text,
-            { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } },
-            viewerGeneration,
-          ),
-        })
-      },
-    }
+    })
     // A4: mount through the surface owner. The surface builds the surface-local
     // option wiring (image loader, history-search binding, clipboard/link
     // capabilities, extension registries + input routes, resize/workflow hooks)
     // from these narrow injected capabilities and owns the mounted TuiApp from
     // here on.
     surface.start({
-      events: surfaceEvents,
+      events: applicationEvents.events,
       workspaceRoot: cwd,
       // The structural icon palette: read ONCE at startup from the persisted
       // document; runtime switches go through app.setIconStyle (the /settings
@@ -2066,13 +1607,13 @@ export function applyRunner(ctx: Context, config: Config): void {
       // compatibility) and never lets a host helper success suppress the OSC 52
       // leg — otherwise a remote host helper would strand the copy in the
       // remote clipboard.
-      copySelection: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
+      copySelection: (text) => clientActions.copySelection(text),
       // Fullscreen OSC 8 link clicks + the Windows right-click paste: the alt
       // screen's mouse capture swallows both native behaviors, so the host
       // opens http/https links itself and reads the clipboard through the same
       // platform-aware policy as the image paste probe.
       openExternalUrl: (url) => openExternalUrl(url),
-      readClipboardText: () => readClipboardText(runClipboardCommand, clipboardEnv),
+      readClipboardText: () => clientActions.readClipboardText(),
     })
     // The mounted surface is now live; the runner borrows the reference (the
     // surface owner keeps the lifetime).
@@ -2346,91 +1887,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       isCleanedUp: () => cleanedUp,
     })
     surface.refreshPendingInput()
-    /**
-     * The conversation rewind picker (the ONE entry shared by the idle
-     * empty-editor double-Esc and `/rewind` — plan §22). Lists the completed
-     * user turns of the live session; a selection dispatches the semantic Host fork with the candidate's predecessor boundary
-     * as an OWNED task with
-     * the navigation identity gates. Sessionless (deferred start) it notifies
-     * and never creates a session.
-     */
-    function openRewindPicker(): void {
-      const source = agentNow()
-      if (source === undefined) {
-        app.notify('no conversation to rewind', 'info')
-        return
-      }
-      // Rewind only from an EMPTY editor: the restored prompt must be a
-      // deliberate, clean draft — never merged into (or over) the user's
-      // current draft. The `/rewind` command gets the same guard, so both
-      // entries can never drop staged input (plan §30).
-      if (app.getDraft().trim() !== '') {
-        app.notify('clear the current draft before rewinding', 'info')
-        return
-      }
-      const candidates = collectRewindCandidates(source.session.snapshotEvents())
-      if (candidates.length === 0) {
-        app.notify('no completed user turn to rewind', 'info')
-        return
-      }
-      // Capture the picker-open identity, not only the Session id. A switch
-      // away and back to the same id must still supersede the old candidate.
-      const sourceId = source.session.id
-      const pickerIdentity: RewindLiveIdentity = {
-        sessionId: sourceId,
-        generation: ownership.generation(),
-        navigationEpoch: ownership.navigationEpoch(),
-      }
-      app.openPicker(
-        candidates.map(rewindPickerItem),
-        (value) => {
-          const candidate = candidates.find(item => String(item.turnStartSeq) === value)
-          if (candidate === undefined) return
-          let adopted = false
-          runOwned('conversation rewind', () => sessionRuntime.forkSession(
-            sourceId,
-            candidate.forkAtSeq,
-            () => {
-              adopted = true
-              app.setDraft(candidate.editorText)
-            },
-            pickerIdentity,
-          ), {
-            diag,
-            sessionId: () => sourceId,
-            onResult: (outcome) => {
-              if (outcome.kind === 'success' && adopted) {
-                if (candidate.hasNonTextContent) {
-                  app.notify(`rewound to turn ${candidate.turn}; original non-text content was not re-staged — review it before sending`, 'error')
-                } else {
-                  app.notify(`rewound to turn ${candidate.turn}`, 'info')
-                }
-                return
-              }
-              if (outcome.kind === 'error') {
-                if (outcome.text === 'the session changed before fork dispatch') {
-                  app.notify('session changed — rewind cancelled', 'info')
-                } else {
-                  app.notify(outcome.text, 'error')
-                }
-              }
-            },
-            onError: (error) => {
-              app.notify(safeErrorMessage(error), 'error')
-            },
-          })
-        },
-        () => {},
-        {
-          header: 'Rewind conversation · workspace unchanged',
-          enableSearch: true,
-          noMatchText: 'No matching turn',
-          width: 72,
-          maxHeight: 24,
-          showHint: true,
-        },
-      )
-    }
     // A5b-3: the semantic command runtime binding AND the facade assembly are
     // command-owned; the composition root only triggers the wiring step.
     command.attachRuntime()

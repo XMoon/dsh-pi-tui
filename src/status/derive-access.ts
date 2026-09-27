@@ -21,6 +21,12 @@ import type { AccessStatus } from './types.ts'
 export interface PermissionPresetsLike {
   current(session: unknown): string
   optionOf(name: string): { name: string; label?: string }
+  /** The composed preset names in cycle order (the `app.permission.cycle`
+   *  action). Optional: a read-only derivation never needs them. */
+  readonly names?: readonly string[]
+  /** Apply one preset to the session (the `app.permission.cycle` action).
+   *  Optional for the same reason as {@link names}. */
+  set?(session: unknown, name: string): void
 }
 
 /** The official sandbox-policy service surface (structural). */
