@@ -389,6 +389,24 @@ read the DURABLE descendant catalog, not the live-child list:
   badge never hangs on the footer until the new session's first listing
   lands (the fence key = session generation + id; a failed listing never
   leaves a stale badge).
+- **Catalog invalidation is coalesced by the SURFACE owner, never the
+  coordinator.** Every production trigger (the mount seed, `subagent/start`
+  / `subagent/end`, the subagent tool-call fallback, Job membership events,
+  opening the browser, the Full Task Center `R`) funnels through one
+  surface-owned single-flight gate: at most ONE `refreshCatalog()` traversal
+  is in flight per session generation, an invalidation arriving mid-flight
+  only marks the gate `dirty`, and the traversal's settle starts at most ONE
+  trailing read that observes the latest membership. A session-generation
+  bump invalidates the old gate immediately — the new session's refresh
+  starts without waiting for the old session's slow traversal — and the old
+  traversal's late settle is generation-fenced, so it neither clears the new
+  gate nor schedules a trailing read. The coordinator's request/committed
+  epoch fence stays the OVERLAP-correctness authority (`refreshCatalog()`
+  remains re-entrant and correct for any direct or future caller); this gate
+  is only the performance (single-flight) authority. The opt-in
+  `DSH_TUI_TASK_REFRESH_PROFILE=1` logs one line per REAL traversal (elapsed,
+  absorbed invalidations, trailing, rows, outcome) so a live session can
+  prove the refresh storm is flattened.
 - **Jobs are a separate flat group**, sorted by their own registry
   ordering; the background one-shot duplication (job row + child row with
   no cross-reference) is contract, locked in by test.
@@ -415,7 +433,9 @@ read the DURABLE descendant catalog, not the live-child list:
   synchronously (no persistence), so the panel never flashes a
   jobs-only list that contradicts the badge, and a failed fresh listing
   cannot leave a panel/badge mismatch. The async membership refresh
-  then calibrates in the background.
+  then calibrates in the background through the SAME coalesced catalog
+  gate as every other invalidation — opening never races a second full
+  descendant traversal next to one already in flight.
 - **The interrupt verb is advertised AND fired only for a continuable
   row whose driver is running right now** — one predicate
   (`isSubagentRowInterruptible`) gates both the panel hint and the

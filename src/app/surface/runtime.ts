@@ -163,6 +163,15 @@ import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 /** Coalesced repaint interval for streaming events, in ms (A4-8, plan §17). */
 const REPAINT_FLUSH_MS = 50
 
+/**
+ * Whether the opt-in Task Center catalog refresh profiler is enabled for this
+ * process (`DSH_TUI_TASK_REFRESH_PROFILE=1`). Off by default: the coalescing
+ * gate then emits no diagnostics, so the TUI log stays clean.
+ */
+function taskCatalogRefreshProfilingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.DSH_TUI_TASK_REFRESH_PROFILE === '1'
+}
+
 /** One non-optional capability borrowed from the TuiApp option contract. */
 type OptionCapability<Key extends keyof TuiAppOptions> = NonNullable<TuiAppOptions[Key]>
 
@@ -834,6 +843,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let activeTaskBrowserToken: object | undefined
   let activeJobViewerClose: (() => void) | undefined
   let jobsEventsDispose: (() => void) | undefined
+  // The surface-owned CATALOG refresh GATE (coalescing): every production Task
+  // Center catalog invalidation funnels through `refreshAgents()`, which starts
+  // at most ONE coordinator catalog read at a time and records any
+  // invalidation arriving mid-flight as `dirty`. When the current traversal
+  // settles, a single trailing refresh re-reads the latest membership; a
+  // session-generation bump resets the whole gate. The runtime epoch/committed
+  // fence stays the OVERLAP-correctness authority; this gate is the performance
+  // (single-flight) authority.
+  let taskCatalogRefreshGeneration = 0
+  let taskCatalogRefreshInFlight = false
+  let taskCatalogRefreshDirty = false
+  let taskCatalogRefreshPendingInvalidations = 0
   // A4-7 presentation event routing (plan §16): the injected routing source and
   // the surface-owned compaction fold id. The `compactingId` is routing state
   // (which compaction bracket is live for the presentation), not Direct state.
@@ -1481,6 +1502,66 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     if (taskDeps === undefined) throw new Error('the task center is not attached')
     return taskDeps.diag
   }
+  /**
+   * Start exactly ONE Task Center catalog traversal. Ownership state is
+   * committed BEFORE `runOwned` invokes the factory: `refreshCatalog()` runs
+   * synchronously up to its first await (it emits the loading state
+   * immediately), so a re-entrant invalidation from there must already see
+   * `inFlight = true`. `trailing` records whether this read was scheduled by a
+   * settle (a coalesced trailing read) rather than by a direct invalidation.
+   */
+  const startTaskCatalogRefresh = (trailing: boolean): void => {
+    if (isCleanedUp()) return
+    const generation = taskCatalogRefreshGeneration
+    taskCatalogRefreshInFlight = true
+    taskCatalogRefreshDirty = false
+    const invalidations = Math.max(1, taskCatalogRefreshPendingInvalidations)
+    taskCatalogRefreshPendingInvalidations = 0
+    const startedAt = Date.now()
+    runOwned('task browser agents refresh', () => taskRuntime!.refreshCatalog(), {
+      diag: taskDiag(),
+      sessionId: () => taskCenter().sessionId(),
+      onResult: () => settleTaskCatalogRefresh(generation, invalidations, trailing, startedAt, 'ok'),
+      onCancel: () => settleTaskCatalogRefresh(generation, invalidations, trailing, startedAt, 'cancelled'),
+      onError: () => settleTaskCatalogRefresh(generation, invalidations, trailing, startedAt, 'error'),
+    })
+  }
+  /**
+   * Release the gate after ONE traversal settles. A settled refresh of a
+   * SUPERSEDED generation (a session switch happened mid-flight) is a no-op:
+   * the new generation owns the gate, and the old traversal must neither clear
+   * the new session's in-flight mark nor schedule a trailing read. Otherwise
+   * the gate is released and, when any invalidation arrived while the traversal
+   * was in flight, EXACTLY ONE trailing refresh starts.
+   */
+  const settleTaskCatalogRefresh = (
+    generation: number,
+    invalidations: number,
+    trailing: boolean,
+    startedAt: number,
+    outcome: 'ok' | 'cancelled' | 'error',
+  ): void => {
+    if (generation !== taskCatalogRefreshGeneration) return
+    taskCatalogRefreshInFlight = false
+    if (taskCatalogRefreshProfilingEnabled()) {
+      // Opt-in profile (default off): one line per REAL traversal, answering
+      // "how long does one recursive descendant read take, and how many
+      // invalidations did it absorb?". Never records session ids, prompts or
+      // child labels.
+      taskDiag().info('task catalog refresh profile', {
+        elapsedMs: Date.now() - startedAt,
+        invalidations,
+        rows: taskRuntime?.rows().length ?? 0,
+        trailing,
+        outcome,
+        generation,
+        dirtyAtSettle: taskCatalogRefreshDirty,
+      })
+    }
+    if (!taskCatalogRefreshDirty) return
+    taskCatalogRefreshDirty = false
+    startTaskCatalogRefresh(true)
+  }
   /** Reset the task-browser dataset scope to the global dataset (PR2 plan
    *  §10.8): every close path (Esc, row selection) clears the scope so the
    *  next ordinary `/tasks` / ↓ Task Center sees `all` again. */
@@ -1894,16 +1975,17 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             refreshTasks()
             return
           }
-          // Refresh state is SINGLE-OWNER: only the coordinator's
-          // commitRefreshState (fenced by session key + request epoch)
-          // may set loading/ready/stale on the presentation. The surface
-          // must never touch setRefreshState directly — an unfenced
-          // onError here could mark a NEW session's browser as failed
-          // when the OLD session's listing rejects (PR review P1).
-          runOwned('task browser descendants', () => runtime.refreshCatalog(), {
-            diag: taskDiag(),
-            sessionId: () => source.sessionId(),
-          })
+          // R routes through the coalesced catalog gate: an invalidation while
+          // a traversal is in flight marks the gate dirty, and the current read
+          // settles into ONE trailing refresh that reads the latest membership
+          // — instead of racing a second full descendant traversal. Refresh
+          // state stays SINGLE-OWNER: only the coordinator's
+          // commitRefreshState (fenced by session key + request epoch) may set
+          // loading/ready/stale on the presentation. The surface must never
+          // touch setRefreshState directly — an unfenced onError could mark a
+          // NEW session's browser as failed when the OLD session's listing
+          // rejects (PR review P1).
+          refreshAgents()
         },
         onViewFull: state => {
           if (isCleanedUp()) return
@@ -1924,22 +2006,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // rows the user can actually see lose their footer attention;
     // Quick's Active scope leaves terminal failures pending while live
     // work is present, so its badge stays useful.
-    // The open triggers a CATALOG refresh (membership may have drifted
-    // since the last listing): the coordinator fences it against a
-    // session switch and commits through the ACTIVE handle — a browser
-    // closed while the listing is in flight is never repainted. The
-    // body above is synchronous, so the `runtime` captured for the
-    // first-frame seed is still the current coordinator. Refresh state
-    // is single-owner: the coordinator's fenced commitRefreshState is
-    // the ONLY path that sets loading/ready/stale (an unfenced onError
-    // here could mark a new session's browser failed when an old
-    // session's listing rejects — PR review P1).
-    if (runtime !== undefined) {
-      runOwned('task browser descendants', () => runtime.refreshCatalog(), {
-        diag: taskDiag(),
-        sessionId: () => source.sessionId(),
-      })
-    }
+    // The open routes through the SAME coalesced catalog gate as every other
+    // invalidation (membership may have drifted since the last listing): a
+    // traversal already in flight is never duplicated — opening only marks the
+    // gate dirty and the current read settles into ONE trailing refresh. The
+    // coordinator fences that read against a session switch and commits through
+    // the ACTIVE handle, so a browser closed while it is in flight is never
+    // repainted; the first frame above already painted cached membership +
+    // fresh runtime status. Refresh state is single-owner: the coordinator's
+    // fenced commitRefreshState is the ONLY path that sets loading/ready/stale
+    // (an unfenced error path could mark a new session's browser failed when an
+    // old session's listing rejects — PR review P1).
+    refreshAgents()
   }
 
   /** The Workflow card action sink (PR2 plan §9/§10/§14.5): the TUI emits
@@ -2656,16 +2734,23 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // catalog listing lands; this prevents a terminal/jobs-only first
         // frame from claiming every record is still running.
         taskRuntime.refreshRuntime()
+        // The single production CATALOG invalidation entry: every trigger
+        // (attach seed, subagent lifecycle, tool fallback, Job membership,
+        // browser open, Full Task Center R) funnels here. An in-flight
+        // traversal absorbs any number of invalidations as `dirty`; its settle
+        // then starts exactly one trailing read.
         refreshAgents = (): void => {
           if (isCleanedUp()) return
           if (source.sessionId() === undefined) {
             mounted().setAgents([])
             return
           }
-          runOwned('task browser agents refresh', () => taskRuntime!.refreshCatalog(), {
-            diag: taskDiag(),
-            sessionId: () => source.sessionId(),
-          })
+          taskCatalogRefreshPendingInvalidations += 1
+          if (taskCatalogRefreshInFlight) {
+            taskCatalogRefreshDirty = true
+            return
+          }
+          startTaskCatalogRefresh(false)
         }
         refreshAgentRuntimeOnly = (): void => {
           if (isCleanedUp()) return
@@ -2691,6 +2776,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       return taskHasChild(childId)
     },
     resetTasks() {
+      // Invalidate the coalescing gate BEFORE any close/dispose that can
+      // synchronously run a callback: the old session's slow traversal must
+      // neither hold the new session's refresh back (`inFlight`) nor clear the
+      // new generation's gate when it settles (the generation fence). The
+      // runtime's own session/epoch fence remains the second protection for the
+      // catalog commit.
+      taskCatalogRefreshGeneration += 1
+      taskCatalogRefreshInFlight = false
+      taskCatalogRefreshDirty = false
+      taskCatalogRefreshPendingInvalidations = 0
       // A new session owns the surface: close the Job child overlay FIRST
       // (so closing the hidden parent cannot leave the child alive), then
       // the browser, then reset the coordinator + the synchronous
