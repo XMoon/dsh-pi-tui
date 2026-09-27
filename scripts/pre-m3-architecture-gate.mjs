@@ -48,7 +48,9 @@
  *      owner that reaches back into bootstrap would invert the graph.
  *   4. Nothing statically reachable from `src/startup.ts` may import
  *      experimental Remote composition (`src/runtime/remote/**`,
- *      `@deepseek-ai/dsh-client-*`, `@deepseek-ai/dsh-api-*`): §15.4 keeps the
+ *      `src/app/remote/**`, any `@deepseek-ai/dsh-<pkg>/client` or
+ *      `/remote` subpath entry, and the `@deepseek-ai/dsh-client-*` /
+ *      `@deepseek-ai/dsh-api-*` root entries): §15.4 keeps the
  *      startup compatibility island free of a Remote/Connection static
  *      dependency, including through an intermediate module.
  *   5. `src/app/surface/**` must not construct Direct semantic adapters
@@ -59,6 +61,11 @@
  *      a `new` construction) are exempt. Parenthesized / `as`-cast / non-null
  *      constructor references are unwrapped; alias or factory indirection
  *      cannot be resolved statically and is out of scope for this gate.
+ *   6. (M3-1) `app/remote/**` — the Remote composition — may be reached by a
+ *      VALUE dynamic `import()` only through the single sanctioned boundary
+ *      edge (`runtime/backend-loader.ts` -> `app/remote/runtime.ts`); any
+ *      other src module dynamically importing `app/remote/**` fails. Dynamic
+ *      imports outside the Remote composition boundary stay out of scope.
  *
  * Existing historical exceptions, when a phase proves one, are recorded in
  * {@link ARCHITECTURE_ALLOWLIST} (file + resolved target, TYPE-ONLY only); new
@@ -86,7 +93,17 @@ const SRC = join(ROOT, 'src')
 export const DIRECT_APPLICATION_EXCEPTIONS = new Set(['DirectModelSelectionOwner'])
 
 /** Import specifiers that count as experimental Remote composition. */
-export const REMOTE_COMPOSITION_SPECIFIER = /^@deepseek-ai\/dsh-(?:client-|api-)/u
+export const REMOTE_COMPOSITION_SPECIFIER =
+  /^@deepseek-ai\/dsh-(?:(?:client-|api-)[^/]*$|[^/]+\/(?:client|remote)$)/u
+
+/**
+ * The only sanctioned value dynamic-import edge into the Remote composition
+ * (M3-1): `runtime/backend-loader.ts` may dynamically import
+ * `app/remote/runtime.ts`; any other src module dynamically importing
+ * `app/remote/**` violates the boundary.
+ */
+export const REMOTE_DYNAMIC_IMPORT_OWNER = 'runtime/backend-loader.ts'
+export const REMOTE_DYNAMIC_IMPORT_TARGET = 'app/remote/runtime.ts'
 
 /**
  * Existing historical exceptions as `"<src-relative file>:<resolved target>"`.
@@ -121,7 +138,9 @@ export function isDirectCompositionFile(srcRel) {
 
 /** True when a resolved target / specifier is experimental Remote composition. */
 export function isRemoteComposition(resolved, specifier) {
-  return resolved.startsWith('runtime/remote/') || REMOTE_COMPOSITION_SPECIFIER.test(specifier)
+  return resolved.startsWith('runtime/remote/')
+    || resolved.startsWith('app/remote/')
+    || REMOTE_COMPOSITION_SPECIFIER.test(specifier)
 }
 
 /**
@@ -221,6 +240,63 @@ export function parseImportSpecifiers(source) {
   }
   visit(sf)
   return out
+}
+
+/**
+ * Extract every VALUE dynamic `import('...')` call with its 1-based line
+ * number (the form `parseImportSpecifiers` deliberately ignores). Static
+ * imports, export-from clauses, and `import('...')` TYPE queries are not
+ * reported here.
+ * @param {string} source file contents
+ * @returns {Array<{ specifier: string, line: number }>}
+ */
+export function parseValueDynamicImports(source) {
+  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS)
+  const out = []
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node)
+      && node.expression.kind === ts.SyntaxKind.ImportKeyword
+      && node.arguments.length > 0
+    ) {
+      const argument = node.arguments[0]
+      if (ts.isStringLiteral(argument)) {
+        out.push({ specifier: argument.text, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 })
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return out
+}
+
+/**
+ * Rule: `app/remote/**` may be reached by a VALUE dynamic import only through
+ * the sanctioned lazy boundary edge. The check is scoped to the Remote
+ * composition boundary — dynamic imports of anything else stay out of scope.
+ * @param {Array<{ rel: string, source: string }>} entries
+ * @returns {Array<{ file: string, line: number, rule: string, detail: string }>}
+ */
+export function findRemoteDynamicImportViolations(entries) {
+  const known = new Set(entries.map(entry => entry.rel))
+  const violations = []
+  for (const { rel, source } of entries) {
+    for (const { specifier, line } of parseValueDynamicImports(source)) {
+      const resolved = resolveRelativeImport(rel, specifier)
+      if (resolved === undefined) continue
+      const target = staticImportCandidates(resolved).find(candidate => known.has(candidate)) ?? resolved
+      if (!target.startsWith('app/remote/')) continue
+      if (rel === REMOTE_DYNAMIC_IMPORT_OWNER && target === REMOTE_DYNAMIC_IMPORT_TARGET) continue
+      violations.push({
+        file: rel,
+        line,
+        rule: 'remote-dynamic-import-owner',
+        detail: `only ${REMOTE_DYNAMIC_IMPORT_OWNER} may dynamically import ${REMOTE_DYNAMIC_IMPORT_TARGET} `
+          + `(found ${rel} -> ${specifier})`,
+      })
+    }
+  }
+  return violations
 }
 
 /**
@@ -360,7 +436,7 @@ function reachableFrom(root, edges) {
  */
 export function findViolations(entries, options = {}) {
   const allowlist = new Set(options.allowlist ?? ARCHITECTURE_ALLOWLIST)
-  const violations = []
+  const violations = [...findRemoteDynamicImportViolations(entries)]
   const imports = new Map()
   const sourceByRel = new Map()
   for (const { rel, source } of entries) {
@@ -434,6 +510,7 @@ function main() {
     console.log(`pre-m3-architecture-gate: scanned ${entries.length} src file(s)`)
     for (const rule of ARCHITECTURE_RULES) console.log(`  rule ${rule.id}`)
     console.log(`  rule ${STARTUP_REMOTE_COMPOSITION_RULE.id}`)
+    console.log('  rule remote-dynamic-import-owner')
     console.log('  rule surface-constructs-direct-adapter')
     return
   }

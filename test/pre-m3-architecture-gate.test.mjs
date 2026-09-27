@@ -20,9 +20,15 @@ import {
   buildStaticEdges,
   collectSourceEntries,
   findDirectAdapterConstructions,
+  findRemoteDynamicImportViolations,
   findViolations,
   isDirectCompositionFile,
+  isRemoteComposition,
   parseImportSpecifiers,
+  parseValueDynamicImports,
+  REMOTE_COMPOSITION_SPECIFIER,
+  REMOTE_DYNAMIC_IMPORT_OWNER,
+  REMOTE_DYNAMIC_IMPORT_TARGET,
   resolveRelativeImport,
   STARTUP_REMOTE_COMPOSITION_RULE,
   staticImportCandidates,
@@ -443,4 +449,147 @@ test('Direct adapter construction scan reports line + name for every new Direct<
     { name: 'DirectSessionWriter', line: 1 },
     { name: 'DirectModelSelectionOwner', line: 2 },
   ])
+})
+
+test('the widened Remote composition specifier rule recognizes every Remote face class (M3-1)', () => {
+  for (const specifier of [
+    // Root client-/api- packages (the pre-M3 rule).
+    '@deepseek-ai/dsh-client-connection',
+    '@deepseek-ai/dsh-api-gateway',
+    '@deepseek-ai/dsh-api-session-controller',
+    // Remote Client face subpaths of ANY dsh package.
+    '@deepseek-ai/dsh-api-session-controller/remote',
+    '@deepseek-ai/dsh-api-job-controller/remote',
+    '@deepseek-ai/dsh-commands/remote',
+    '@deepseek-ai/dsh-subagent/remote',
+    '@deepseek-ai/dsh-agent-preset-registry/remote',
+    '@deepseek-ai/dsh-plugin-manager/remote',
+    '@deepseek-ai/dsh-api-settings-controller/remote',
+    '@deepseek-ai/dsh-permission-presets/remote',
+    '@deepseek-ai/dsh-llm/remote',
+    '@deepseek-ai/dsh-client-file-upload/remote',
+    // Web module-loader Client bundles.
+    '@deepseek-ai/dsh-typert-registry/client',
+    '@deepseek-ai/dsh-api-session-controller/client',
+  ]) {
+    assert.ok(REMOTE_COMPOSITION_SPECIFIER.test(specifier), `${specifier} is Remote composition`)
+    assert.ok(isRemoteComposition('somewhere/unrelated.ts', specifier), `${specifier} must classify via specifier`)
+  }
+  for (const specifier of [
+    '@deepseek-ai/dsh-web-app',
+    '@deepseek-ai/dsh-commands',
+    '@deepseek-ai/dsh-session',
+    '@deepseek-ai/dsh-agent-preset-registry',
+    '@deepseek-ai/dsh-settings/types',
+    '@deepseek-ai/dsh-agent-loop-testkit',
+    '@deepseek-ai/cordis',
+  ]) {
+    assert.equal(REMOTE_COMPOSITION_SPECIFIER.test(specifier), false, `${specifier} is an ordinary Host import`)
+  }
+})
+
+test('app/remote/** is classified as experimental Remote composition by path (M3-1)', () => {
+  assert.ok(isRemoteComposition('app/remote/host-runtime.ts', './host-runtime.ts'))
+  assert.ok(isRemoteComposition('app/remote/client-runtime.ts', './client-runtime.ts'))
+  assert.ok(isRemoteComposition('app/remote/runtime.ts', './runtime.ts'))
+  assert.ok(isRemoteComposition('runtime/remote/session-reader-remote.ts', './session-reader-remote.ts'))
+  assert.equal(isRemoteComposition('app/session/runtime.ts', './runtime.ts'), false)
+  assert.equal(isRemoteComposition('runtime/backend-loader.ts', './backend-loader.ts'), false)
+})
+
+test('startup.ts statically reaching app/remote/** is rejected through an intermediate module (M3-1)', () => {
+  const entries = [
+    entry('startup.ts', "import { ready } from './startup-support.ts'\n"),
+    entry('startup-support.ts', "import { runtime } from './app/remote/runtime.ts'\n"),
+    entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
+  ]
+  const violations = findViolations(entries)
+  assert.equal(violations.length, 1)
+  assert.equal(violations[0].file, 'startup-support.ts')
+  assert.equal(violations[0].rule, STARTUP_REMOTE_COMPOSITION_RULE.id)
+  assert.match(violations[0].detail, /app\/remote\/runtime\.ts/)
+})
+
+test('startup.ts statically reaching dsh /client or /remote faces through a helper is rejected (M3-1)', () => {
+  for (const specifier of ['@deepseek-ai/dsh-typert-registry/client', '@deepseek-ai/dsh-commands/remote']) {
+    const entries = [
+      entry('startup.ts', "import { ready } from './startup-support.ts'\n"),
+      entry('startup-support.ts', `import { face } from '${specifier}'\n`),
+    ]
+    const violations = findViolations(entries)
+    assert.equal(violations.length, 1, specifier)
+    assert.equal(violations[0].file, 'startup-support.ts')
+    assert.equal(violations[0].rule, STARTUP_REMOTE_COMPOSITION_RULE.id)
+  }
+})
+
+test('startup importing the backend loader alone is fine; its value dynamic import is not a static edge (M3-1)', () => {
+  const entries = [
+    entry('startup.ts', "import { loadExperimentalRemoteRuntime } from './runtime/backend-loader.ts'\n"),
+    entry(
+      'runtime/backend-loader.ts',
+      `export function loadExperimentalRemoteRuntime() {\n  return import('../app/remote/runtime.js')\n}\n`,
+    ),
+    entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
+  ]
+  assert.deepEqual(findViolations(entries), [])
+})
+
+test('the sanctioned lazy boundary is the only value dynamic-import owner into app/remote/** (M3-1)', () => {
+  const allowed = findRemoteDynamicImportViolations([
+    entry(
+      REMOTE_DYNAMIC_IMPORT_OWNER,
+      `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
+    ),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
+  ])
+  assert.deepEqual(allowed, [])
+
+  // Another src module dynamically importing the composition fails.
+  const fromHelper = findRemoteDynamicImportViolations([
+    entry('app/bootstrap.ts', "export async function boot() {\n  return await import('./remote/runtime.js')\n}\n"),
+    entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
+  ])
+  assert.equal(fromHelper.length, 1)
+  assert.equal(fromHelper[0].file, 'app/bootstrap.ts')
+  assert.equal(fromHelper[0].rule, 'remote-dynamic-import-owner')
+  assert.equal(fromHelper[0].line, 2)
+
+  // Even the sanctioned owner cannot dynamically import another app/remote module.
+  const ownerOtherTarget = findRemoteDynamicImportViolations([
+    entry(
+      REMOTE_DYNAMIC_IMPORT_OWNER,
+      `export function load() {\n  return import('../app/remote/client-runtime.js')\n}\n`,
+    ),
+    entry('app/remote/client-runtime.ts', 'export const clientRuntime = 1\n'),
+  ])
+  assert.equal(ownerOtherTarget.length, 1)
+  assert.equal(ownerOtherTarget[0].rule, 'remote-dynamic-import-owner')
+
+  // Dynamic imports outside the Remote composition boundary stay out of scope.
+  assert.deepEqual(findRemoteDynamicImportViolations([
+    entry('app/direct/x.ts', "const m = await import('../../runtime/direct/backend-direct.js')\n"),
+    entry('runtime/direct/backend-direct.ts', 'export const backend = 1\n'),
+    entry('app/remote/client-runtime.ts', "const bundle = await import('@deepseek-ai/dsh-typert-registry/client')\n"),
+  ]), [])
+})
+
+test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
+  const specs = parseValueDynamicImports(
+    [
+      "const a = await import('./a.ts')",
+      'const b = await import(dynamic)',
+      "// const c = await import('./c.ts')",
+      "type T = import('./d.ts').T",
+      "import { e } from './e.ts'",
+    ].join('\n'),
+  )
+  assert.deepEqual(specs, [{ specifier: './a.ts', line: 1 }])
+})
+
+test('findViolations includes the Remote dynamic-import owner rule in the production tree scan', () => {
+  const tree = collectSourceEntries()
+  const dynamicOnly = findRemoteDynamicImportViolations(tree)
+  assert.deepEqual(dynamicOnly, [], 'the real production tree must satisfy the dynamic-import owner rule')
+  assert.deepEqual(findViolations(tree), [], 'the full production scan stays clean with the M3-1 rules')
 })
