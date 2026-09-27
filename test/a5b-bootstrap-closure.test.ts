@@ -571,3 +571,50 @@ test('A5b-6: the submission writer section is controller-owned and read late-bou
   assert.doesNotMatch(root, /writerSection: submission\.withWriterSection\b/u,
     'the consumers must read the owner at call time, never capture the method by value')
 })
+
+test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a root cache', () => {
+  // Finding (P2): the composition root held the retained jobs snapshot and the
+  // session/generation fence — a small state machine, not composition wiring.
+  // It belongs to the Task-Center owner (`SurfaceRuntime.attachTasks`, which
+  // already owns the task model); the root now supplies only the fence FACTS.
+  const root = compositionFile('src/app/bootstrap.ts')
+  const owner = ownerFile('src/app/surface/runtime.ts')
+  // The composition root must not name a jobs-snapshot/retained-rows slot.
+  assert.equal(declares(root, 'jobSnapshot'), false,
+    'the composition root must not declare the retained jobs snapshot')
+  assert.doesNotMatch(root, /\bjobSnapshot\b|\bretainedJobsSnapshot\b/u,
+    'the composition root must not name a jobs-snapshot/retained-rows slot')
+  // The injected subagent source group no longer receives `readJobs`; it supplies
+  // the fence facts instead, so the owner can derive the session id without
+  // importing the ownership core.
+  assert.doesNotMatch(root, /readJobs/u,
+    'the composition root must not provide the jobs-read retention policy')
+  const sourceGroup = owner.slice(
+    owner.indexOf('export interface TaskSurfaceAgents'),
+    owner.indexOf('export interface TaskSurfaceSource'),
+  )
+  assert.doesNotMatch(sourceGroup, /readJobs/u,
+    'the injected subagent source group must no longer carry readJobs')
+  assert.match(sourceGroup, /currentSessionId\(\): string \| undefined/u,
+    'the source group must supply the jobs-read session id for the owner')
+  // The owner owns the retained snapshot AND the same-session fence.
+  assert.match(owner, /let retainedJobsSnapshot: \{ key: string; rows: readonly TaskBrowserJobInput\[\] \} \| undefined/u,
+    'the Task-Center owner must declare the retained jobs snapshot slot')
+  assert.match(owner, /retainedJobsSnapshot\?\.key === key \? retainedJobsSnapshot\.rows : \[\]/u,
+    'the owner must keep the same-session retention fence on a transient read failure')
+  const readJobsAt = owner.indexOf('readJobs: () => {')
+  const readJobsEnd = owner.indexOf('agentStatusOf: agents.agentStatusOf', readJobsAt)
+  assert.ok(readJobsAt > 0 && readJobsEnd > readJobsAt,
+    'the owner must implement readJobs and wire agentStatusOf after it')
+  const readJobsBody = owner.slice(readJobsAt, readJobsEnd)
+  assert.match(readJobsBody, /const key = agents\.currentKey\(\)/u,
+    'the owner must resolve the fence key from the injected facts at call time')
+  assert.match(readJobsBody, /const sessionId = agents\.currentSessionId\(\)/u,
+    'the owner must resolve the session id from the injected facts at call time')
+  assert.match(readJobsBody, /jobs\.list\(sessionId\)/u,
+    'the owner must read the jobs through its own injected adapter')
+  assert.doesNotMatch(readJobsBody, /agentNow\(/u,
+    'the owner-side jobs read must not read the Direct attachment')
+  assert.doesNotMatch(owner, /readJobs: agents\.readJobs/u,
+    'the TaskBrowserRuntime must receive the owner-side readJobs, not a root-provided one')
+})

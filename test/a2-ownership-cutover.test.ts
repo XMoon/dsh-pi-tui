@@ -104,15 +104,19 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the switch no-op compares the CORE session id')
   assert.ok(!switchLocked.includes('agentNow('), 'the switch no-op must not read the Direct attachment')
 
-  // Task Browser jobs fence: source + key + Host read in ONE span
-  const readJobs = span('readJobs: () => {', '// The LIVE runtime fact')
-  assert.ok(readJobs.includes('const sessionId = ownership.currentSessionId()'),
-    'readJobs takes its session id from the core')
-  assert.ok(readJobs.includes('const key = `${ownership.generation()}:${sessionId}`'),
+  // Task Browser jobs fence: the composition root derives the key + injects the
+  // session id from the ownership core; the A5b-6 retention policy (the
+  // retained snapshot + the same-session fence) is Task-Center-owned and reads
+  // both at CALL time (locked in test/a5b-bootstrap-closure.test.ts).
+  const jobFence = spanOf(indexSource, 'currentKey: () => {', 'listDescendants:')
+  assert.ok(jobFence.includes('const sessionId = ownership.currentSessionId()'),
+    'the Job snapshot key takes its session id from the core')
+  assert.ok(jobFence.includes('`${ownership.generation()}:${sessionId}`'),
     'the Job snapshot identity key is built from the core generation + session id')
-  assert.ok(readJobs.includes('jobs.list(SessionId(sessionId))'),
-    'the Job listing reads the SAME core session id')
-  assert.ok(!readJobs.includes('agentNow('), 'readJobs must not read the Direct attachment')
+  assert.ok(jobFence.includes('currentSessionId: () => ownership.currentSessionId()'),
+    'the runner injects the SAME core session id for the owner-side jobs read')
+  assert.ok(!indexSource.includes('readJobs'),
+    'the root must not provide the jobs-read retention policy (moved to the surface owner)')
 
   // session/event main routing (A4-7): the gate moved into the surface owner;
   // the runner injects the core session id. Gate + injection in ONE assertion

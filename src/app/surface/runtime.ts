@@ -262,9 +262,10 @@ export interface SurfaceSeamDeps {
 /**
  * The jobs-registry capability the Task Center consumes (A4-6, plan §15).
  * Optional: a composition without the jobs service has no dock roster feed and
- * no Job viewer. The runner keeps the concrete `ctx.jobs` read, the
- * `JobId`/`SessionId` casts and the retained-snapshot fence; the surface never
- * imports the Host service.
+ * no Job viewer. The runner keeps the concrete `ctx.jobs` read and the
+ * `JobId`/`SessionId` casts; the surface never imports the Host service. The
+ * retained-snapshot fence for a transient read failure is owned here, in
+ * {@link SurfaceRuntime.attachTasks}.
  */
 export interface TaskSurfaceJobs {
   /** A FRESH registry read of the current root's roster (the public `list`
@@ -283,12 +284,14 @@ export interface TaskSurfaceJobs {
  * The subagent-registry half of {@link TaskSurfaceSource}, derived from the
  * EXISTING {@link TaskBrowserRuntimeHooks} reads (plan §15.2) — never a second
  * task model. The runner provides them because they need the Direct
- * Agent/Session identity it owns.
+ * Agent/Session identity it owns. The jobs-read RETENTION policy (the retained
+ * snapshot + the same-session fence) belongs to this surface owner, so the
+ * runner supplies the fence FACTS (`currentKey` + `currentSessionId`) instead.
  */
 export interface TaskSurfaceAgents {
   currentKey: TaskBrowserRuntimeHooks['currentKey']
+  currentSessionId(): string | undefined
   listDescendants: TaskBrowserRuntimeHooks['listDescendants']
-  readJobs: TaskBrowserRuntimeHooks['readJobs']
   agentStatusOf: TaskBrowserRuntimeHooks['agentStatusOf']
 }
 
@@ -2552,6 +2555,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     attachTasks(source, deps) {
       taskSource = source
       taskDeps = deps
+      // The last SUCCESSFUL jobs read, FENCED to the session identity: a
+      // transient registry failure must keep the retained Job rows, but a
+      // switched-in session must never inherit the old session's rows.
+      let retainedJobsSnapshot: { key: string; rows: readonly TaskBrowserJobInput[] } | undefined
       // The jobs half: the dock roster feed + the scope-owned event
       // subscription. Absent service = no jobs surface (the original two
       // conditional blocks are preserved).
@@ -2620,7 +2627,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         taskRuntime = new TaskBrowserRuntime({
           currentKey: agents.currentKey,
           listDescendants: agents.listDescendants,
-          readJobs: agents.readJobs,
+          // The merged rows re-read the CURRENT jobs snapshot at every commit,
+          // so a job settlement repaints an open browser too.
+          readJobs: () => {
+            const key = agents.currentKey()
+            const sessionId = agents.currentSessionId()
+            if (jobs === undefined || key === undefined || sessionId === undefined) return []
+            try {
+              const rows = jobs.list(sessionId)
+              retainedJobsSnapshot = { key, rows }
+              return rows
+            } catch {
+              // The registry read is best-effort: a failed read is NOT an
+              // authoritative empty catalog. Returning the last successful
+              // snapshot preserves the retained Job rows — but ONLY for the same
+              // session identity, so a switched-in session never inherits the
+              // old session's rows.
+              return retainedJobsSnapshot?.key === key ? retainedJobsSnapshot.rows : []
+            }
+          },
           agentStatusOf: agents.agentStatusOf,
           commitRows,
           commitBadge,
