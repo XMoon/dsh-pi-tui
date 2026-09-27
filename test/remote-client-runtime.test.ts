@@ -48,6 +48,7 @@ import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import {
   createRemoteClientRuntime,
+  disposeRemoteContributions,
   createScopedClientModuleLoader,
   installScopedModuleLoaderShim,
   loadOfficialClientModulesOnce,
@@ -687,9 +688,10 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
       'the readiness failure must surface')
 
     await waitFor('the failed client streams to drain to zero', () => activeStreams === 0)
+    const openedAtDrain = openedStreams
     await new Promise(resolve => setTimeout(resolve, 200))
-    assert.ok(activeStreams === 0 && openedStreams >= 1, 'the failed instance must show a quiet window: no revived streams and positive prior activity')
-    assert.ok(openedStreams >= 1, 'the drain assertion requires positive stream activity to have been observed')
+    assert.equal(activeStreams, 0, 'the failed instance must show a quiet window: no revived streams')
+    assert.equal(openedStreams, openedAtDrain, 'the failed instance must not open new streams after drain')
     assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
     const jobControllerAfter = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     assert.ok(
@@ -759,4 +761,23 @@ test('M2. the Client composition never crosses the Host legacy-settings boundary
     assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open \$DSH_HOME/settings.yaml(.imported)`)
     assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read \$DSH_HOME`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// M3 - disposeRemoteContributions: per-step isolation, non-truncating
+// ---------------------------------------------------------------------------
+
+test('M3. disposeRemoteContributions isolates failures and runs every disposer in reverse', async () => {
+  const executionOrder: string[] = []
+  const sentinel = new Error('contribution disposal failure')
+  const errors = await disposeRemoteContributions([
+    async () => { executionOrder.push('first') },
+    async () => { executionOrder.push('second'); throw sentinel },
+    async () => { executionOrder.push('third') },
+  ])
+  // Reverse order: third → second (rejects, collected) → first.
+  assert.deepEqual(executionOrder, ['third', 'second', 'first'],
+    'all disposers must run in reverse encounter order despite the failure')
+  assert.equal(errors.length, 1, 'exactly one disposal failure must be collected')
+  assert.equal(errors[0], sentinel)
 })
