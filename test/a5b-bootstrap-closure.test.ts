@@ -174,14 +174,32 @@ test('A5b-6: the composition root introduces no new context/bag type', () => {
   )
 })
 
-test('A5b: exactly one TuiAppEvents implementation exists across the owner surface', () => {
-  // The A5b-5 cut moves the whole TuiAppEvents literal into its owner; until
-  // then it is exactly one `const surfaceEvents: TuiAppEvents = {` site.
+test('A5b: exactly one TuiAppEvents SEMANTIC implementation, wrappers are pass-throughs', () => {
+  // The A5b-5 cut moved the whole TuiAppEvents implementation into
+  // `app/surface/application-events.ts` (the former `surfaceEvents` literal).
+  // The surface runtime legitimately overlays a SECOND literal over
+  // `deps.events` for the transcript-navigation/search callbacks it owns, so an
+  // aggregate "one literal" count would either be wrong or would hide a real
+  // second implementation. Split the two facts:
   const surface = ownerSource()
   assert.equal(
     surface.split('const surfaceEvents: TuiAppEvents = {').length - 1,
     1,
-    'exactly one TuiAppEvents implementation must exist across the owner surface',
+    'exactly one TuiAppEvents semantic implementation must exist across the owner surface',
+  )
+  assert.match(
+    ownerFile('src/app/surface/application-events.ts'),
+    /const surfaceEvents: TuiAppEvents = \{/u,
+    'the semantic implementation must live in the application-events owner',
+  )
+  const runtime = ownerFile('src/app/surface/runtime.ts')
+  const wrapperAt = runtime.indexOf('const events: TuiAppEvents = {')
+  assert.ok(wrapperAt > 0, 'the surface runtime legitimately overlays a wrapper literal')
+  const wrapper = runtime.slice(wrapperAt, runtime.indexOf('\n      }', wrapperAt))
+  assert.match(
+    wrapper,
+    /\.\.\.deps\.events,/u,
+    'every other TuiAppEvents literal must be a pass-through wrapper over deps.events, never a second implementation',
   )
 })
 
@@ -633,6 +651,8 @@ test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a 
   // The owner owns the retained snapshot AND the same-session fence.
   assert.match(owner, /let retainedJobsSnapshot: \{ key: string; rows: readonly TaskBrowserJobInput\[\] \} \| undefined/u,
     'the Task-Center owner must declare the retained jobs snapshot slot')
+  assert.match(owner, /const rows = jobs\.list\(sessionId\)\s*\n\s*retainedJobsSnapshot = \{ key, rows \}/u,
+    'a SUCCESSFUL jobs read must refresh the retained snapshot — otherwise the failure fallback has nothing to retain')
   assert.match(owner, /retainedJobsSnapshot\?\.key === key \? retainedJobsSnapshot\.rows : \[\]/u,
     'the owner must keep the same-session retention fence on a transient read failure')
   const readJobsAt = owner.indexOf('readJobs: () => {')
