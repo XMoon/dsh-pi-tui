@@ -14,7 +14,9 @@ M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.
 M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
 Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
 Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer ownership convergence, NO behavior change — A5a + A5b; see the Pre-M3 TS Architecture Convergence status section)
-M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
+M3-0 DONE          (entry contract frozen — the M3 architecture contract is docs/m3-entry-contract.md)
+M3-1 NEXT          (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
+M3 product composition NOT STARTED (Direct production/default behavior unchanged; Remote composition NOT active)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -1696,9 +1698,9 @@ None currently: the D2.3 same-Host integration lane is closed by
 
 | Blocker | Level | Mitigation |
 |---|---|---|
-| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M2 consumes the protocol directly; M3 validates runtime packaging |
-| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | Experimental host composition; redesign the Remote Adapter before M3; never replace the default patch |
-| Extension Cordis ownership across the split | High | Stable API untouched; ClientContext from M3 |
+| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + in-process rpc carrier (see `docs/m3-entry-contract.md` §4.2). No product redesign required |
+| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question: `dsh-base` mounts the Host gateway/typert rows only, so M3-1 inserts the Host remote-serving rows (`api-session-controller`, `api-settings-controller`, `api-remotes`) gated behind the experimental composition, and the Client mounts an explicit minimal `/remote` set. Never replace the default patch (see `docs/m3-entry-contract.md` §2.4, §11 M3-1) |
+| Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/m3-entry-contract.md` §8) |
 | Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
 | Shell execution on the wrong machine | Critical | Locality hard rule; remote `!` fails closed |
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
