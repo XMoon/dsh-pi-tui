@@ -172,7 +172,11 @@ test('A4-7: the four presentation routing bodies live in app/surface, not the ru
     'the opening-journal decision must live in the surface routing')
   assert.doesNotMatch(indexSource, /openingJournal\.record\(/u,
     'the opening-journal record must live in the surface routing')
-  assert.doesNotMatch(indexSource, /viewing\.folder\.apply\(/u,
+  // A5b-1 moved the viewer state (`viewing`) into the viewer owner, so the
+  // runner-side call spelling is now `viewer.folder.apply(`. The negative lock
+  // follows the owner's spelling — the old `viewing.folder.apply(` would never
+  // match a regression that moved the call back into the composition root.
+  assert.doesNotMatch(indexSource, /viewer\.folder\.apply\(/u,
     'the viewed-child transcript application must live in the surface routing')
   assert.match(surface, /const routeSessionEvent = /u,
     'the surface must own the session/event routing body')
