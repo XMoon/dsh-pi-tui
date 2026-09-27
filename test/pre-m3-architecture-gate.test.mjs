@@ -528,11 +528,20 @@ test('startup importing the backend loader alone is fine; its value dynamic impo
     entry('startup.ts', "import { loadExperimentalRemoteRuntime } from './runtime/backend-loader.ts'\n"),
     entry(
       'runtime/backend-loader.ts',
-      `export function loadExperimentalRemoteRuntime() {\n  return import('../app/remote/runtime.js')\n}\n`,
+      `export function loadExperimentalRemoteRuntime() {\n  return import('../app/remote/runtime.ts')\n}\n`,
     ),
     entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
   ]
   assert.deepEqual(findViolations(entries), [])
+  // The NodeNext emitted-extension spelling canonicalizes to the same target.
+  const jsSpelling = findRemoteDynamicImportViolations([
+    entry(
+      REMOTE_DYNAMIC_IMPORT_OWNER,
+      `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
+    ),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
+  ])
+  assert.deepEqual(jsSpelling, [])
 })
 
 test('the sanctioned lazy boundary is the only value dynamic-import owner into app/remote/** (M3-1)', () => {
