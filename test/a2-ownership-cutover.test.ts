@@ -20,6 +20,11 @@ const sessionRuntimeSource = readFileSync(new URL('../src/app/session/runtime.ts
 // currentness locks below are anchored to the surface routing bodies and the
 // runner's injected core read.
 const surfaceSource = readFileSync(new URL('../src/app/surface/runtime.ts', import.meta.url), 'utf8')
+// A5b-4: the submission admission fences + the param-agent interrupt fences
+// moved into the submission owners, so the currentness locks below read the
+// OWNER modules explicitly (never a glob).
+const submissionControllerSource = readFileSync(new URL('../src/app/submission/controller.ts', import.meta.url), 'utf8')
+const localShellSource = readFileSync(new URL('../src/app/submission/local-shell.ts', import.meta.url), 'utf8')
 
 test('the runner keeps NO local ownership authority (A2-2 cutover)', () => {
   assert.ok(!/\blet liveAgent\b/.test(indexSource), 'no local liveAgent declaration')
@@ -171,10 +176,12 @@ test('no sessionId→Agent lookup reconstructs currentness in the runner', () =>
 })
 
 test('the admission fences use the ownership subject; only the param-agent fences keep the exact-Agent compare', () => {
-  const subjectFences = indexSource.match(/captureMatches\(/g) ?? []
-  assert.ok(subjectFences.length >= 5, `expected the admission fences to be subject-based, saw ${subjectFences.length}`)
-  const legacyFences = indexSource.match(/sessionUnchanged\(/g) ?? []
-  assert.equal(legacyFences.length, 2,
+  const subjectFences = (indexSource.match(/captureMatches\(/g) ?? []).length
+    + (submissionControllerSource.match(/deps\.captureMatches\(/g) ?? []).length
+  assert.ok(subjectFences >= 5, `expected the admission fences to be subject-based, saw ${subjectFences}`)
+  const legacyFences = (indexSource.match(/sessionUnchanged\(/g) ?? []).length
+    + (localShellSource.match(/sessionUnchanged\(/g) ?? []).length
+  assert.equal(legacyFences, 2,
     'only the two param-agent interrupt fences may keep the exact-Agent sessionUnchanged compare')
 })
 

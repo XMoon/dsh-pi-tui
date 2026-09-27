@@ -48,6 +48,8 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   { rel: 'src/app/command/artifacts.ts', role: 'owner' },
   // A5b-3: command authority/registration/catalog.
   // A5b-4: submission/input + local shell.
+  { rel: 'src/app/submission/controller.ts', role: 'owner' },
+  { rel: 'src/app/submission/local-shell.ts', role: 'owner' },
   // A5b-5: TuiApp application events.
 ] as const
 

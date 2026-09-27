@@ -61,11 +61,6 @@ const FINAL_FORBIDDEN_HANDLERS: readonly string[] = [
 
 /** The transitional ledger: forbidden handlers still implemented in bootstrap. */
 const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = [
-  { name: 'runLocalShell', slice: 'A5b-4', owner: 'app/submission/local-shell' },
-  { name: 'dispatchViaSession', slice: 'A5b-4', owner: 'app/submission/controller' },
-  { name: 'runLocalCommand', slice: 'A5b-4', owner: 'app/submission/controller' },
-  { name: 'steerNow', slice: 'A5b-4', owner: 'app/submission/controller' },
-  { name: 'dispatchUserInput', slice: 'A5b-4', owner: 'app/submission/controller' },
   { name: 'surfaceEvents', slice: 'A5b-5', owner: 'app/surface/application-events' },
   { name: 'openRewindPicker', slice: 'A5b-5', owner: 'app/surface/application-events' },
 ]
@@ -206,6 +201,21 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
       'mergeSessionEventCut',
     ],
   ],
+  [
+    'src/app/submission/controller.ts',
+    [
+      'localEcho', 'failSubmission', 'restoreSubmissionDraft', 'localSubmitAck',
+      'submitLatencyTracker', 'pendingSubmissions', 'submissionPresentation',
+      'acceptLocalSubmitAck', 'settleLocalSubmitAck', 'beginLocalSubmission',
+      'settleLocalSubmission', 'notifySubmissionFailure', 'submitDeps',
+      'submitSerialTail', 'takeSubmitTurn', 'dispatchViaSession', 'runLocalCommand',
+      'steerNow', 'makeSteerPersist', 'dispatchUserInput', 'dequeue',
+    ],
+  ],
+  [
+    'src/app/submission/local-shell.ts',
+    ['localShellController', 'interruptLiveAgent', 'shellTempFiles', 'runLocalShell'],
+  ],
 ]
 
 test('A5b: every extracted declaration lives in its named owner, never in the composition root', () => {
@@ -233,6 +243,8 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/command/artifacts.ts', 'createArtifactSaveOwner', 'createArtifactSaveOwner<Agent>('],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
+  ['src/app/submission/controller.ts', 'createSubmissionController', 'createSubmissionController<Agent>('],
+  ['src/app/submission/local-shell.ts', 'createLocalShell', 'createLocalShell<Agent>('],
 ]
 
 test('A5b: each extracted owner is constructed exactly once, from the composition root', () => {

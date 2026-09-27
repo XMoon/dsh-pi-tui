@@ -18,7 +18,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -26,7 +25,6 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
@@ -39,8 +37,6 @@ import { rawSelectionFromRequestHeader } from '../model-selection.ts'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { parseCommand } from '@deepseek-ai/dsh-commands'
-import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-settings'
@@ -65,6 +61,8 @@ import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
+import { createLocalShell, type LocalShellCapability } from './submission/local-shell.ts'
+import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
@@ -81,17 +79,14 @@ import { color } from '../theme.ts'
 import { isEmptyAcceleratedViewerSubmit, type TuiApp, type TuiAppEvents } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
 import { type ViewerAccess } from '../tasks-browser.ts'
-import type { ComposerSubmitRequest } from '../tui-app.ts'
-import { isIndeterminateSkillWrite, resolveComposerDelivery, type CommandRegistryLike, type SubmitDelivery, type TuiCommandRunner } from '../commands.ts'
+import { resolveComposerDelivery, type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from '../detached.ts'
-import { historyFilePath } from '../history.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../history-persist.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
 import { DraftImageStore } from '../image/draft-store.ts'
 import { DraftFileStore } from '../attachment/file-draft.ts'
-import { ImageInputError } from '../image/errors.ts'
 import { commandOnPath, createClipboardRunner, readClipboardImage, readClipboardText, type ClipboardEnvironment } from '../image/clipboard.ts'
 import { openExternalUrl } from '../open-url.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from '../clipboard.ts'
@@ -99,28 +94,25 @@ import { createStartupStatus } from '../startup-status.ts'
 import { iconStyleOf } from '../icons.ts'
 import { checkImageLimits } from '../image/intake.ts'
 import { ImageLoadError } from '../image/errors.ts'
-import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments, prepareUserMessage, pruneUnreferencedDraftAttachments, type PrepareInputDeps } from '../image/submit.ts'
+import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments, type PrepareInputDeps } from '../image/submit.ts'
 import { expandImagePlaceholders } from '../image/placeholder.ts'
-import { expandAttachmentPlaceholders } from '../attachment/placeholder.ts'
 import { draftHasFiles } from '../attachment/placeholder.ts'
-import { runReservedSubmit } from '../image/submit-flow.ts'
 import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
-import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type SteerAgentLike } from '../steer.ts'
+import { mergeDraft, refuseByTransitionFence, steerAll, type SteerAgentLike } from '../steer.ts'
 import { resolveSubagentSettleTarget, subagentPromptDisposition, viewerCanonicalizeScope, type SubagentPromptOutcome, type SubagentPromptReject, type SubagentViewerSubmitRequest } from '../subagent-viewer-submit.ts'
 import { createDirectApplicationRuntime } from '../app/direct/runtime.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from '../app/session/scope.ts'
-import { bindSubmissionRuntime, deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, submitShell, type SteerSubmissionAgent, type SteerSubmissionDeps, type SubmissionRuntime } from '../app/submission/runtime.ts'
+import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
-import type { HostCommandOutcome } from '../runtime/host-command-port.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, type ShellSubmitAgentLike } from '../shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_DISK_CAP_BYTES } from '../bounded-output.ts'
 import { parseShellWords } from '../shell-words.ts'
@@ -129,16 +121,14 @@ import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import { collectRewindCandidates, rewindPickerItem } from '../rewind.ts'
 import { type RewindLiveIdentity } from '../session-fork.ts'
 import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from '../submit-ack.ts'
-import { PendingSubmissions, type PendingSubmissionPlacement } from '../pending-submission.ts'
+import { type PendingSubmissionPlacement } from '../pending-submission.ts'
 import { DirectSubmissionPresentation, type SubmissionPresentationSource } from '../submission-presentation.ts'
-import { SubmitLatencyTracker } from '../submit-latency.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
-import { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from '../command-policy.ts'
-import { interruptAgent } from '../interrupt.ts'
+import { dangerCommand } from '../command-policy.ts'
 import { viewerActionCapability } from '../subagent-viewer.ts'
 import { resolveInitialCatalog } from '../surface-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
-import { queueInboxMessageOf, queueTextOf } from '../pending-presentation.ts'
+import { queueTextOf } from '../pending-presentation.ts'
 import { bundleVersion, packageVersion } from '../dsh-version.ts'
 import { compactingFromLog, workingFromLog } from '../compaction-presentation.ts'
 import { hostRunningProfile, resumeCommand } from '../dsh-profile.ts'
@@ -151,11 +141,6 @@ import { composeDirectAgent, type DirectAgentComposition } from '../app/direct/c
 interface AppExit {
   (code: number): void
 }
-
-/** Throttle for re-chaining a RUNNING local shell card's result to the
- * bounded tail (plan §5.1): the running preview refreshes at most this
- * often, so a high-throughput log cannot rebuild the view per chunk. */
-const LOCAL_SHELL_TAIL_FLUSH_MS = 200
 
 /** Read the official `RemoteError` code off a refused preset switch. */
 function presetErrorCode(error: unknown): string | undefined {
@@ -530,8 +515,8 @@ export function applyRunner(ctx: Context, config: Config): void {
         beginOpening: (sessionId) => surface.openingJournal.begin(sessionId),
         clearOpening: (token) => surface.openingJournal.clear(token as object),
         settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
-        settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
-        resetSubmitLatency: () => submitLatencyTracker.reset(),
+        settleLocalSubmitAck: (reason) => submission.settleLocalSubmitAck(reason),
+        resetSubmitLatency: () => submission.resetSubmitLatency(),
         setCompletionOwner: (identity) => surface.setCompletionOwner(identity),
         initLiveSession: (owner) => {
           const agent = directAgentOfOwner(owner)
@@ -907,7 +892,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         setLastContent: (content) => history.setLastContent(content),
       },
       commands: { register: () => command.register({ snapshot: initialSnapshot, skills: initialSkills }) },
-      submission: { clearPending: () => pendingSubmissions.clear() },
+      submission: { clearPending: () => submission.clearPending() },
       viewer: {
         resetAutoPop: () => viewerRef?.resetAutoPop(),
         teardownForSessionSwap: () => viewerRef?.teardownForSessionSwap(),
@@ -1044,7 +1029,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         get copyEnv() { return copyEnv },
       },
       submission: {
-        prepareDeps: () => submitDeps,
+        prepareDeps: () => submission.prepareDeps(),
         settleQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
       },
       promptState: { progressUpdates: progressUpdatesState, responseStyle: responseStyleState },
@@ -1224,49 +1209,29 @@ export function applyRunner(ctx: Context, config: Config): void {
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
+    // A5b-4: the local shell owner (`!` / `!!` + the shared live-Agent
+    // interrupt). Constructed BEFORE the surface cleanup closure can run; its
+    // submission acknowledgement seams are late-bound (the controller is
+    // built below).
+    const localShell = createLocalShell<Agent>({
+      app: () => app,
+      diag,
+      isCleanedUp: () => cleanedUp,
+      liveAgent: () => agentNow(),
+      ownership: { generation: () => ownership.generation() },
+      session: { withWriter: (scope, task) => sessionRuntime.withWriter(scope, task) },
+      requireLiveScope,
+      writerSection: submissionWriterSection,
+      writer: backend.sessionWriter,
+      status: { sessionCwd: () => status.sessionCwd() },
+      tuiSettings,
+      resolveShell: () => ctx.get('shell') as unknown as LocalShellCapability | undefined,
+      submission: {
+        settleAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),
+        markDispatch: (sessionId) => submission.markDispatch(sessionId),
+      },
+    })
 
-
-    // Abort handle for the currently running `!` shell command.
-    let localShellController: AbortController | undefined
-    /** Stop the captured live Agent through the SessionWriter seam. The
-     * operation barrier keeps the async outcome inside the same session
-     * ownership window as other TUI writes. */
-    const interruptLiveAgent = (): void => {
-      if (cleanedUp) return
-      localShellController?.abort()
-      const agent = agentNow()
-      if (agent === undefined) return
-      const generation = ownership.generation()
-      // The scope-bound writer admission (A3-4): interrupt is NOT a submission
-      // write, so its business ownership stays here — only the admission moves
-      // through SessionRuntime.withWriter.
-      runOwned('agent interrupt', () => sessionRuntime.withWriter(
-        requireLiveScope(),
-        () => interruptAgent(agent, backend.sessionWriter),
-      ), {
-        diag,
-        sessionId: () => agentNow()?.session.id,
-        onResult: (outcome) => {
-          if (cleanedUp || !sessionUnchanged({ agent, generation }, agentNow(), ownership.generation())) return
-          if (outcome.kind === 'committed' || outcome.kind === 'cancelled') return
-          const message = outcome.kind === 'rejected'
-            ? outcome.error.message
-            : outcome.kind === 'unsupported'
-              ? outcome.reason
-              : outcome.kind === 'indeterminate'
-                ? 'session cancellation result is indeterminate — do not retry automatically'
-                : 'session cancellation was cancelled'
-          app.notify(message, 'error')
-        },
-        onError: (error) => {
-          if (cleanedUp || !sessionUnchanged({ agent, generation }, agentNow(), ownership.generation())) return
-          app.notify(safeErrorMessage(error), 'error')
-        },
-      })
-    }
-    // 0600 temp files holding FULL local-shell output (for truncated runs);
-    // removed at TUI exit (default), never on their own.
-    const shellTempFiles = new Set<string>()
     // Idempotent CLIENT-SURFACE teardown: abort lifecycle loads, stop the
     // TUI. Shared by /exit, the effect cleanup, and the startup-failure
     // path. The Direct owned-session retirement is a SEPARATE step
@@ -1310,15 +1275,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // dispose keeps the release symmetric with the arm path and also
       // covers the teardown-before-arm window (both idempotent).
       settings.disposeFooterCommand()
-      localShellController?.abort()
-      for (const file of shellTempFiles) {
-        try {
-          rmSync(file, { force: true })
-        } catch {
-          // Best effort.
-        }
-      }
-      shellTempFiles.clear()
+      localShell.dispose()
       // TuiApp.dispose() hides overlays without invoking their user cancel
       // callbacks. The Task Center / Job viewer resources are surface-owned
       // (A4-6) and released in their original order: the jobs-event
@@ -1404,357 +1361,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       })
     }
     registerRunnerDisposal()
-
-    /**
-     * Run a `!` shell command. `!` (context mode) runs the command and then
-     * submits the completed command+output to the session as an ordinary
-     * user message (kimi parity: the model sees both on the next
-     * turn; the result wakes a turn but is never steered into a running
-     * one); `!!` (local mode) runs purely off-session — the card is the
-     * only record (pi's excluded-from-context escape hatch).
-     */
-    const runLocalShell = (text: string, ackToken: number | undefined): void => {
-      if (cleanedUp) return
-      const includeInContext = shellModeOf(text) === 'context'
-      const command = shellCommandOf(text)
-      if (command === '') return
-      // NOTE: the context-mode submit ack is armed AT THE GESTURE in
-      // dispatchUserInput (before ensureSession) — NEVER here, or the T0
-      // baseline would rebase after the session create. `ackToken` scopes
-      // every terminal settle below to THIS gesture: a newer submission
-      // (bumped epoch) makes them no-ops.
-      const shellTerminalAck = (reason: string): void => {
-        if (ackToken === undefined) return
-        settleLocalSubmitAck(reason, { token: ackToken, terminal: true })
-      }
-      // The generation the run STARTED under: a session switch while the
-      // command runs must not post the output into the new session (the
-      // switch already cleared the card; the notify explains what happened).
-      // switch already cleared the card; the notify explains what happened).
-      const generationAtRun = ownership.generation()
-      localShellController?.abort()
-      localShellController = new AbortController()
-      const localSignal = localShellController.signal
-      // The card reference this run owns: settling by identity keeps a
-      // settled old run from overwriting a newer run's card (updateLastLocal
-      // Message would hit whatever card is newest at settle time). The
-      // reference is RE-CHAINED on every in-flight tail update (the array
-      // element is replaced, so the old reference would no longer index).
-      let card = app.pushLocalMessage({
-        kind: 'tool',
-        turn: Number.POSITIVE_INFINITY,
-        name: 'shell',
-        args: command,
-        result: '',
-        status: 'running',
-      })
-      /** Release the controller only when it still guards THIS run. */
-      const releaseController = (): void => {
-        if (localShellController?.signal === localSignal) localShellController = undefined
-      }
-      /**
-       * Submit the completed run to the session (context mode only):
-       * re-validate → followup. Accepted clears the settled card — the
-       * transcript's user row becomes the record. The submission runtime owns
-       * the ordered write, its outcome settlement and the card dismissal; the
-       * runner supplies the narrow TUI hooks.
-       */
-      const submitResult = (result: string): void => {
-        submitShell({
-          command,
-          result,
-          generationAtRun,
-          isDisposed: () => cleanedUp,
-          currentGeneration: () => ownership.generation(),
-          currentSessionId: () => agentNow()?.session.id,
-          currentAgent: () => agentNow() as unknown as ShellSubmitAgentLike | undefined,
-          terminalAck: shellTerminalAck,
-          clearSettledLocalMessages: () => app.clearSettledLocalMessages(),
-          notify: (message, kind) => {
-            if (cleanedUp) return
-            app.notify(message, kind)
-          },
-          markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
-          writerSection: submissionWriterSection,
-          writer: backend.sessionWriter,
-          createMessage: (text) => createUserMessage({
-            content: [{ type: 'text', text }],
-            source: { kind: 'user' },
-          }),
-          diag,
-        })
-      }
-      // A settled latch: `error` and `close` can both fire (a spawn failure
-      // usually closes with a non-zero code), and the card must settle
-      // EXACTLY once — the first event wins.
-      let settled = false
-      const settle = (result: string, status: 'ok' | 'error'): void => {
-        if (cleanedUp || settled) return
-        settled = true
-        app.updateLocalMessage(card, {
-          kind: 'tool',
-          turn: Number.POSITIVE_INFINITY,
-          name: 'shell',
-          args: command,
-          result,
-          status,
-        })
-        // Context mode submits every settled outcome except an abort (the
-        // run was cancelled; the partial output is noise). An aborted run
-        // is also TERMINAL for the submit acknowledgement (plan D exit
-        // enumeration): the aborted gate suppresses submitResult, so the
-        // pending row would otherwise outlive the gesture forever.
-        //
-        // EVERY settle caller funnels through HERE — including the
-        // synchronous `shell.resolve`/`spawn` catches and the child
-        // `error` handler — so no additional ack settle is needed at
-        // those sites: a non-abort failure continues into submitResult →
-        // submitShellResult, whose onResult/onError/onCancel sinks end
-        // the ack (or the authoritative event does), and an abort ends
-        // it through the gate below. Adding token settles at the catch
-        // sites instead would pre-clear the row and break the "ack
-        // survives until the authoritative event" contract.
-        if (includeInContext && localSignal.aborted) {
-          shellTerminalAck('shell run aborted')
-        }
-        if (includeInContext && !localSignal.aborted) submitResult(result)
-      }
-      const sandboxPreference = localShellSandboxPreferenceOf(tuiSettings?.get())
-      const shell = sandboxPreference === 'sandbox' ? ctx.get('shell') : undefined
-      if (shell === undefined && sandboxPreference === 'sandbox') {
-        // The user explicitly opted into the sandbox but the composition
-        // provides no shell capability: running unsandboxed SILENTLY would
-        // violate the preference, so the downgrade is surfaced every time.
-        app.notify('local shell sandbox unavailable in this composition — running unsandboxed', 'error')
-      }
-      if (shell !== undefined) {
-        // The dsh shell capability (sandbox policy + DSH env) when the
-        // composition provides it AND the local-shell sandbox preference
-        // opts in ('sandbox'); completion-based like the spawn fallback.
-        // The default ('bypass') runs user-typed commands through the plain
-        // spawn path below — pi/kimi parity: the sandbox guards the model's
-        // autonomous commands, not commands the user typed and chose to run.
-        // A synchronous resolve throw must not escape with the ack row
-        // armed: settle the card (and the terminal ack) exactly like a
-        // failed run (plan D exit enumeration).
-        let spec: ReturnType<typeof shell.resolve>
-        try {
-          spec = shell.resolve({ command, workdir: status.sessionCwd(), signal: localSignal })
-        } catch (error) {
-          releaseController()
-          settle(`failed: ${safeErrorMessage(error)}`, 'error')
-          return
-        }
-        // An owned workflow: the RESULT settles the UI card, so the settle
-        // logic stays in onResult and the cancellation/failure semantics
-        // stay per-task (runOwned — AGENTS.md); the classification
-        // diagnostics (cancellation → debug, failure → error) are recorded
-        // by runOwned itself. DSH 0.1.7 execute/result contract: execute()
-        // publishes the handle after preparation (throwing on preparation
-        // failure or caller cancellation before the process exists) and
-        // result() is the foreground projection — nonzero exits, timeout
-        // kills, and abort kills RESOLVE with a descriptive result, and
-        // only infrastructure failures reject. The dsh shell may still
-        // reject an abort with a plain Error, so the task-local classifier
-        // routes it to onCancel instead of a false ERROR line. Never a
-        // bare void.
-        runOwned('local shell', async () => {
-          const execution = await shell.execute(spec)
-          return execution.result()
-        }, {
-          diag,
-          sessionId: () => agentNow()?.session.id,
-          isCancellation: () => localSignal.aborted,
-          onResult: (result) => {
-            releaseController()
-            if (localSignal.aborted) {
-              settle('aborted', 'error')
-              return
-            }
-            const output = [result.stdout.text.trim(), result.stderr.text.trim()].filter(Boolean).join('\n')
-            const exit = result.exitCode !== null ? `exit ${result.exitCode}` : `signal ${result.signal ?? '?'}`
-            settle(output === '' ? exit : `${output}\n[${exit}]`, result.exitCode === 0 ? 'ok' : 'error')
-          },
-          onCancel: (error) => {
-            // An abort-triggered rejection is a cancellation: settle the
-            // card as aborted like the resolved path does. runOwned routes
-            // cancellations EXCLUSIVELY here — a cancellation-shaped
-            // rejection WITHOUT the signal aborted skips the aborted gate
-            // inside settle(), so the ack row must be settled terminally
-            // HERE too (idempotent with it).
-            releaseController()
-            settle('aborted', 'error')
-            if (includeInContext && !localSignal.aborted) {
-              shellTerminalAck('shell run cancelled')
-            }
-            void error
-          },
-          onError: (error) => {
-            releaseController()
-            const message = safeErrorMessage(error)
-            settle(`failed: ${message}`, 'error')
-            // A sandbox execution failure does NOT run submitResult (only
-            // onResult does), so this exit is terminal for the ack row:
-            // nothing will be written — the pending row must end here
-            // (plan D exit enumeration). An abort settles through the
-            // unified aborted gate above instead.
-            if (includeInContext && !localSignal.aborted) {
-              shellTerminalAck('shell sandbox run failed')
-            }
-          },
-        })
-        return
-      }
-      // A synchronous spawn throw must not escape with the ack row armed:
-      // settle the card (and the terminal ack) exactly like a failed run
-      // (plan D exit enumeration).
-      let child: ReturnType<typeof spawn>
-      try {
-        child = spawn(command, { cwd: status.sessionCwd(), stdio: ['ignore', 'pipe', 'pipe'], shell: true })
-      } catch (error) {
-        releaseController()
-        settle(`failed: ${safeErrorMessage(error)}`, 'error')
-        return
-      }
-      // Bounded capture: the card keeps only the TAIL (byte- and line-
-      // capped, unterminated output included); the FULL output is streamed
-      // to a 0600 temp file (disk-capped) so a truncated run still leaves
-      // the complete transcript available. Untruncated runs delete the file
-      // on close; the files that remain are removed at TUI exit (cleanup).
-      const bounded = createBoundedOutput()
-      const fullPath = join(tmpdir(), `dsh-pi-tui-shell-${process.pid}-${randomUUID()}.log`)
-      const full = createFileCapture(fullPath, SHELL_OUTPUT_DISK_CAP_BYTES)
-      if (full.active) shellTempFiles.add(fullPath)
-      // ONE StringDecoder PER stream: stdout and stderr are independent
-      // byte streams, so a character split across them would interleave
-      // and corrupt — each stream's decoder buffers only its own partial
-      // sequences and decodes across that stream's chunk boundaries.
-      const stdoutDecoder = new StringDecoder('utf8')
-      const stderrDecoder = new StringDecoder('utf8')
-      // In-flight tail refresh (plan §5.1): the running card's result is
-      // re-chained to the bounded TAIL on a throttle, so a streaming log
-      // previews its newest rows instead of an empty body. The throttle
-      // keeps high-throughput output from rebuilding the whole view per
-      // chunk; settle/close clears the timer (dispose contract).
-      let tailTimer: NodeJS.Timeout | undefined
-      const clearTailTimer = (): void => {
-        if (tailTimer !== undefined) {
-          clearTimeout(tailTimer)
-          tailTimer = undefined
-        }
-      }
-      const scheduleTailFlush = (): void => {
-        if (cleanedUp || tailTimer !== undefined) return
-        tailTimer = setTimeout(() => {
-          tailTimer = undefined
-          if (cleanedUp) return
-          card = app.updateLocalMessage(card, {
-            kind: 'tool',
-            turn: Number.POSITIVE_INFINITY,
-            name: 'shell',
-            args: command,
-            result: bounded.tail,
-            status: 'running',
-          })
-        }, LOCAL_SHELL_TAIL_FLUSH_MS)
-      }
-      const onData = (decoder: StringDecoder, chunk: Buffer): void => {
-        if (cleanedUp) return
-        // The wire byte count rides along: an incomplete multi-byte
-        // sequence buffered by the decoder produces no text yet, but its
-        // bytes are real and must count toward the totals.
-        bounded.append(decoder.write(chunk), chunk.length)
-        full.append(chunk)
-        scheduleTailFlush()
-      }
-      child.stdout?.on('data', (chunk) => onData(stdoutDecoder, chunk))
-      child.stderr?.on('data', (chunk) => onData(stderrDecoder, chunk))
-      localSignal.addEventListener('abort', () => child.kill(), { once: true })
-      child.on('error', (error) => {
-        releaseController()
-        clearTailTimer()
-        // A spawn failure leaves nothing worth keeping: drop the capture.
-        full.dispose()
-        shellTempFiles.delete(fullPath)
-        if (cleanedUp) return
-        settle(`failed: ${error.message}`, 'error')
-      })
-      child.on('close', (code, childSignal) => {
-        releaseController()
-        clearTailTimer()
-        if (cleanedUp) {
-          full.dispose()
-          shellTempFiles.delete(fullPath)
-          return
-        }
-        // Flush each decoder's remaining partial sequence. An incomplete
-        // trailing multi-byte character surfaces as U+FFFD from end() — it
-        // is shown as-is (the bytes were real); its wire bytes were already
-        // counted by append's wireBytes, so pass 0 to avoid double counting.
-        for (const decoder of [stdoutDecoder, stderrDecoder]) {
-          const tail = decoder.end()
-          if (tail !== '') bounded.append(tail, 0)
-        }
-        if (localSignal.aborted) {
-          // The run was cancelled: the partial capture is noise, delete it.
-          full.dispose()
-          shellTempFiles.delete(fullPath)
-          settle('aborted', 'error')
-          return
-        }
-        if (bounded.truncated) {
-          // Keep the full-output file for a truncated run — but only when
-          // the capture is actually alive (creation/write failures are
-          // never advertised, and a disk-capped file says so).
-          if (full.exists) {
-            full.close()
-          } else {
-            full.dispose()
-            shellTempFiles.delete(fullPath)
-          }
-          const output = bounded.tail.trim()
-          const lines: string[] = []
-          if (output !== '') lines.push(output)
-          lines.push(formatTruncation(bounded))
-          if (full.exists) {
-            lines.push(full.truncated
-              ? `full output (disk capture truncated at ${formatBytes(SHELL_OUTPUT_DISK_CAP_BYTES)}): ${fullPath}`
-              : `full output: ${fullPath}`)
-          }
-          const exit = code !== null ? `exit ${code}` : `signal ${childSignal ?? '?'}`
-          lines.push(`[${exit}]`)
-          settle(lines.join('\n'), code === 0 ? 'ok' : 'error')
-        } else {
-          // Untruncated output: no reason to keep a user-invisible temp
-          // file around until TUI exit.
-          full.dispose()
-          shellTempFiles.delete(fullPath)
-          const output = bounded.tail.trim()
-          const exit = code !== null ? `exit ${code}` : `signal ${childSignal ?? '?'}`
-          settle(output === '' ? exit : `${output}\n[${exit}]`, code === 0 ? 'ok' : 'error')
-        }
-      })
-    }
-    /** The display text of one client-local submission echo: the draft text
-     * with its attachment placeholders expanded to compact markers, so an
-     * attachment-only submission is never an empty pending row. The SAME
-     * expansion decides the foldability fact: a submission carrying any
-     * attachment marker is not text-only and must render in full. */
-    const localEcho = (text: string): { text: string; foldableText: boolean } => {
-      const parts: string[] = []
-      let foldableText = true
-      for (const segment of expandAttachmentPlaceholders(text, draftImages, draftFiles)) {
-        if (segment.type === 'text') parts.push(segment.text)
-        else if (segment.type === 'image') {
-          foldableText = false
-          parts.push(`🖼️ ${segment.image.name ?? 'image'}`)
-        } else {
-          foldableText = false
-          parts.push(`📄 ${segment.file.name} · ${formatBytes(segment.file.byteLength)}`)
-        }
-      }
-      return { text: parts.join(' '), foldableText }
-    }
     // The Direct stream adapter keeps active prefixes for Agents that were not
     // being displayed yet; enterView replays this exact-agent baseline before
     // mounting the child surface.
@@ -1780,34 +1386,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       restoreMainTranscriptAnchor: () => presentation.restoreMainTranscriptAnchor(),
     })
     viewerRef = viewer
-    /** Error sink for a failed session creation: restore the draft and
-     * surface the reason instead of silently dropping the submission. The
-     * classification diagnostics are owned by runOwned (label + session +
-     * error); this sink only restores the editor and notifies the user.
-     * (Cancellation never reaches here: runOwned routes it to onCancel.) */
-    const failSubmission = (draft: string) => (error: unknown): void => {
-      if (lifecycleController.signal.aborted) return
-      // Correctness side effect FIRST: restore the draft (the editor was
-      // cleared before submit) — the error text is best-effort afterwards,
-      // so a hostile value can never prevent the user's input from coming
-      // back. (The classification diagnostics are owned by runOwned.)
-      app.setEditorText(mergeDraft(app.getDraft(), draft))
-      const message = safeErrorMessage(error)
-      // Image intake/admission/capability failures are THEIR OWN actionable
-      // errors ("Current model ... does not support image input") — wrapping
-      // them in "could not start a session" misleads when a session already
-      // exists (review finding).
-      if (error instanceof ImageInputError) {
-        app.notify(message, 'error')
-        return
-      }
-      try {
-        ctx.logger.error(`tui-runner: session creation failed: ${message}`)
-      } catch {
-        // The cordis logger must not block the notice.
-      }
-      app.notify(`could not start a session: ${message}`, 'error')
-    }
     /**
      * Restore the submitted text into the editor after a failed submission
      * (review finding: the restore MUST run BEFORE the reservation pin
@@ -1883,182 +1461,112 @@ export function applyRunner(ctx: Context, config: Config): void {
         data: Buffer.from(image.bytes).toString('base64'),
         ...(image.name === undefined ? {} : { name: image.name }),
       }))
-    const restoreSubmissionDraft = (draft: string): void => {
-      if (lifecycleController.signal.aborted) return
-      app.setEditorText(mergeDraft(app.getDraft(), draft))
-    }
-    // ── Local submit acknowledgement + latency timeline (submit-ack.ts /
-    // submit-latency.ts) ── the immediate "Submitting…" / "Queued…" row
-    // between the editor clearing and the FIRST authoritative DSH event,
-    // and the T0-T5 phase timings for the diag channel. The window is real
-    // even without any per-submit persistence check: session create, image
-    // admission
-    // and the host pre-step all delay `user/message`.
-    const localSubmitAck: SubmitAckState = freshSubmitAckState()
-    const submitLatencyTracker = new SubmitLatencyTracker({ sink: diag })
-    /**
-     * Client-local submission echoes (D2.1 follow-up): the presentation-only
-     * bridge between the editor clearing and the authoritative inbox/durable
-     * occurrence. Keyed by the request id minted before the first async
-     * preparation await and persisted on the Direct user-message source as
-     * `rpcId`, so the handoff correlates by identity — never by text.
-     */
-    const pendingSubmissions = new PendingSubmissions()
-    /**
-     * The client-local presentation source the queue/transcript handoff reads.
-     * Production Direct wires the ledger above. D2.2 has NO production Remote
-     * backend, so this runner intentionally has no substitution point; the
-     * experimental Remote assembly (tests/smoke) composes
-     * `RemoteSubmissionPresentation` directly. A complete Remote backend (M3)
-     * is what would inject the official `SessionSnapshot.pendingSubmissions`
-     * source here instead of running two optimistic identities (D2.2 §21/§22).
-     */
-    const submissionPresentation: SubmissionPresentationSource = new DirectSubmissionPresentation(pendingSubmissions)
     /** The official `beginSubmission` placement for one local echo. */
     const submissionPlacement = (mode: 'queue' | 'steer', running: boolean): PendingSubmissionPlacement =>
       running ? (mode === 'steer' ? 'steering' : 'queued') : 'transcript'
-    /**
-     * Accept one submission: show the pending row NOW (Submit/Queued by
-     * the agent's live status) and start the latency timeline. Returns
-     * the gesture's EPOCH TOKEN: the enclosing workflow's terminal exits
-     * (failure / stale / fence / cancel / command routing) must settle
-     * with THIS token — the settle is ignored once a newer gesture has
-     * superseded it, so an older submission dying late can never clear
-     * the newer row (or reset its latency timeline).
-     */
-    const acceptLocalSubmitAck = (): number => {
-      const detail: SubmitPendingDetail = agentNow()?.status === 'running' ? 'queued' : 'submit'
-      const token = acceptSubmitAck(localSubmitAck, { detail, now: Date.now() })
-      submitLatencyTracker.accept(agentNow()?.session.id)
-      app.setSubmitPending(detail)
-      return token
-     }
-    /**
-     * Settle the pending row: clears it when something is pending and
-     * records the wait duration at debug level. Called from the
-     * authoritative event branches, the failure sinks and the refusal
-     * paths — idempotent everywhere.
-     *
-     * - TOKEN settles (`{ token }`): a submission's OWN terminal exit
-     *   (failure / stale / fence / cancel / no-agent / command routing).
-     *   Ignored when a newer gesture superseded the token — an older
-     *   submission dying late must never clear the newer row nor reset
-     *   its latency timeline.
-     * - TOKENLESS settles: authoritative session events (coalescing) and
-     *   the session-switch commit (the old row dies unconditionally).
-     *
-     * `terminal: true` additionally RESETS the latency timeline: a dead
-     * submission's baseline must not be populated by unrelated later
-     * events; the next real submission arms a fresh T0.
-     */
-    const settleLocalSubmitAck = (reason: string, options: { token?: number; terminal?: boolean } = {}): void => {
-      if (cleanedUp) return
-      if (options.token !== undefined && options.token !== localSubmitAck.epoch) {
-        diag.debug('submit ack terminal settle superseded', { reason, token: options.token, current: localSubmitAck.epoch })
-        return
-      }
-      const elapsed = settleSubmitAck(localSubmitAck, { now: Date.now() })
-      if (options.terminal === true) submitLatencyTracker.reset()
-      if (elapsed === undefined) return
-      diag.debug('submit ack settled', { reason, elapsed: `${elapsed}ms` })
-      app.setSubmitPending(undefined)
-    }
-    /**
-     * Register one local submission echo and publish it immediately, so an
-     * accepted submission is never visually silent between the editor clearing
-     * and its authoritative occurrence.
-     *
-     * A RUNNING placement (queued/steering) settles this gesture's generic
-     * working-row label: the echo now carries the accepted content, and the
-     * generic `Queued…` label would both duplicate the pending row and
-     * mislabel a running steer. An IDLE (transcript) placement keeps the
-     * generic `Submitting…` bridge — it is the pre-session/first-event
-     * feedback and the durable row replaces it.
-     */
-    const beginLocalSubmission = (
-      requestId: string,
-      text: string,
-      placement: PendingSubmissionPlacement,
-      sessionId: string | undefined,
-      generation: number,
-      ackToken: number,
-    ): void => {
-      const echo = localEcho(text)
-      pendingSubmissions.begin({
-        requestId,
-        placement,
-        text: echo.text,
-        foldableText: echo.foldableText,
-        createdAt: Date.now(),
-        ...(sessionId === undefined ? {} : { sessionId }),
-        generation,
-      })
-      surface.refreshPendingInput()
-      if (placement !== 'transcript') settleLocalSubmitAck('local pending echo', { token: ackToken })
-    }
-    /** Remove one local submission echo on a known terminal exit. */
-    const settleLocalSubmission = (requestId: string | undefined): void => {
-      if (requestId === undefined) return
-      pendingSubmissions.settle(requestId)
-      surface.refreshPendingInput()
-    }
-    /**
-     * Notify one submission failure WITHOUT restoring (the task's catch
-     * already restored; restoring twice would re-merge the draft). Image
-     * intake/admission/capability failures are THEIR OWN actionable errors
-     * ("Current model ... does not support image input") — wrapping them in
-     * "could not start a session" misleads when a session already exists.
-     * Diagnostics are owned by runOwned.
-     */
-    const notifySubmissionFailure = (error: unknown): void => {
-      if (lifecycleController.signal.aborted) return
-      // NOTE: the pending submit ack is settled by the CALLER with its own
-      // gesture token (an untokenized settle here would let one
-      // workflow's failure clear a newer gesture's row).
-      const message = safeErrorMessage(error)
-      if (error instanceof ImageInputError) {
-        app.notify(message, 'error')
-        return
-      }
-      try {
-        ctx.logger.error(`tui-runner: submission failed: ${message}`)
-      } catch {
-        // The cordis logger must not block the notice.
-      }
-      // A followup/steer against an EXISTING session is not a session
-      // creation failure — "could not start a session" would mislead
-      // (review finding).
-      const prefix = agentNow() === undefined ? 'could not start a session' : 'submission failed'
-      app.notify(`${prefix}: ${message}`, 'error')
-    }
-    /** The image submission surface (plan §13): the live attachment/llm
-     * services + the CURRENT provider/model, re-read at submit time (the
-     * TUI supports runtime model switching — never a startup snapshot). */
-    const submitDeps: PrepareInputDeps = {
-      attachments: ctx.get('attachments') as PrepareInputDeps['attachments'],
-      get fileStore() { return draftFiles },
+    // A5b-4: the submission/input controller — the submit FIFO turn, the local
+    // submit acknowledgement + latency timeline, the client-local echoes, the
+    // session/command dispatch and the Alt+Up pull-back. Writer authority stays
+    // in SubmissionRuntime + SessionRuntime.withWriter; this owner only
+    // supplies the semantic hooks.
+    const submission = createSubmissionController<Agent>({
+      app: () => app,
+      diag,
       signal,
-      llm: ctx.get('llm') as PrepareInputDeps['llm'],
-      // Send-time `@`-file canonicalization through the Host-file port
-      // (migration M1.10): the live session's workspace is the scope.
-      canonicalizeMentions: (text) => backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: agentNow()?.session.id ?? '' }, text),
-      sessionCwd: () => status.sessionCwd(),
-      currentModel: () => {
-        // The AUTHORITATIVE model for the next step is the mutable
-        // selection's `current` (/model writes it; prompt assembly reads
-        // it) — never `agentNow().options`, which holds the agent's launch
-        // configuration and does not move on /model (review finding 1).
-        const current = model.selected.current
-        if (current !== undefined) return { provider: current.provider, model: current.model }
-        // No selection assembled yet (pre-/model or a sessionless start):
-        // fall back to the agent's launch options as the best known pair.
-        const agent = agentNow()
-        if (agent === undefined) return undefined
-        // (Renamed local: `model` is the model-selection owner in this scope.)
-        const { provider, model: launchModel } = agent.options
-        return provider === undefined || launchModel === undefined ? undefined : { provider, model: launchModel }
+      isCleanedUp: () => cleanedUp,
+      logError: (message) => {
+        try {
+          ctx.logger.error(message)
+        } catch {
+          // The cordis logger must not block the notice.
+        }
       },
-    }
+      liveAgent: () => agentNow(),
+      ownership: {
+        generation: () => ownership.generation(),
+        captureSubject: () => ownership.captureSubject(),
+        transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
+      },
+      scope: {
+        captureLive: () => sessionScope.captureLive(),
+        isCurrent: (scope) => sessionScope.isCurrent(scope),
+        requireLive: requireLiveScope,
+      },
+      session: {
+        ensureSession: () => sessionRuntime.ensureSession(),
+        beginCommandSettlement: () => sessionRuntime.beginCommandSettlement(),
+        abortCommandSettlement: () => sessionRuntime.abortCommandSettlement(),
+        settleCommandSettlement: () => sessionRuntime.settleCommandSettlement(),
+        trackSettlementWork: (work) => sessionRuntime.trackSettlementWork(work),
+      },
+      submissionRuntime: {
+        withWriter: (scope, task) => submissionRuntime.withWriter(scope, task),
+        submitPrompt: (promptSubmission) => submissionRuntime.submitPrompt(promptSubmission),
+        deferQueueRecall: (recall) => submissionRuntime.deferQueueRecall(recall),
+      },
+      command,
+      commandPlane: {
+        available: () => ctx.get('commands') !== undefined,
+        execute: (agent, line, attachments, commandSignal) => {
+          const service = ctx.get('commands')
+          if (service === undefined) return Promise.resolve(undefined)
+          return service.execute(agent as Agent, line, attachments as Parameters<typeof service.execute>[2], commandSignal)
+        },
+        findHandler: (name) => {
+          const service = ctx.get('commands')
+          const definition = service?.find(undefined as unknown as Agent, name)
+          return definition?.handler as unknown as LocalCommandHandler | undefined
+        },
+      },
+      backend: {
+        hostFile: backend.hostFile,
+        pendingInputReader: backend.pendingInputReader,
+        sessionWriter: backend.sessionWriter,
+        hostCommand: backend.hostCommand,
+      },
+      drafts: {
+        get images() { return draftImages },
+        get files() { return draftFiles },
+      },
+      status: { sessionCwd: () => status.sessionCwd() },
+      surface: { refreshPendingInput: () => surface.refreshPendingInput() },
+      history: {
+        lastContent: () => history.lastContent(),
+        setLastContent: (content) => history.setLastContent(content),
+      },
+      viewer: { isViewing: () => viewer.isViewing() },
+      extensions: {
+        findContribution: (name) => extensionService?.commands.find(name),
+        handlerFor: (name) => extensionService?.commands.handlerFor(name),
+        commandIdFor: (name) => extensionService?.commands.idFor(name),
+        isLocal: (name, staticLocal) => extensionService?.commands.isLocal(name, staticLocal) ?? false,
+        recordHealthRef: (slot, id) => extensionService?._recordRegistryHealthRef(slot, id),
+        recordError: (ref, error) => extensionService?._recordRegistryError(ref as { slot: string; id: string; owner: string }, error),
+        clearError: (ref) => extensionService?._clearRegistryError(ref as { slot: string; id: string; owner: string }),
+      },
+      artifacts: { start: (name, agent) => artifacts.start(name, agent) },
+      shell: {
+        run: (text, ackToken) => localShell.run(text, ackToken),
+        interrupt: () => localShell.interrupt(),
+      },
+      model: { selected: { get current() { return model.selected.current } } },
+      image: {
+        attachments: () => ctx.get('attachments') as PrepareInputDeps['attachments'],
+        llm: () => ctx.get('llm') as PrepareInputDeps['llm'],
+      },
+      tuiSettings,
+      submissionWriterSection,
+      submissionPlacement,
+      attachmentRefusal,
+      commandSubmitAttachments,
+      captureMatches,
+      direct: {
+        withPromptAdmission: (agent, hasImages, task) => directRuntime.withPromptAdmission(agent as Agent, hasImages, task),
+      },
+      requestExit,
+      isPlanActive: (agent) => projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, (agent as Agent).session) === true,
+    })
+
     // A5b-3c: the client-local artifact-save workflow (`/export` +
     // `/transcript`), including its in-flight dedupe set and save-location
     // dialog. Consumed by the session dispatch below.
@@ -2070,1001 +1578,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       sessionArchive: backend.sessionArchive,
       clientCwd: cwd,
     })
-
-    // Every accepted user submission takes one FIFO turn before async
-    // preparation. The turn is released only after its semantic write settles,
-    // so a later gesture cannot overtake an earlier canonicalization.
-    let submitSerialTail: Promise<void> = Promise.resolve()
-    const takeSubmitTurn = (): { wait: Promise<void>; release: () => void } => {
-      const wait = submitSerialTail
-      let releaseTail!: () => void
-      const turn = new Promise<void>(resolve => { releaseTail = resolve })
-      submitSerialTail = turn
-      let released = false
-      return {
-        wait,
-        release: () => {
-          if (released) return
-          released = true
-          releaseTail()
-        },
-      }
-    }
-    /** The session-backed dispatch: create the session lazily (the first
-     * user input is the deferred trigger), then execute a registered slash
-     * command or follow up.
-     * @param delivery - the delivery mode the submit boundary resolved for
-     *   this submission; bound for the command execution so a TUI-owned
-     *   skill handler accepts it instead of re-deriving it. */
-    const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
-      // Admission identity is captured synchronously, before this gesture
-      // waits behind an earlier submit. A later session must never inherit
-      // an old submission merely because the FIFO turn became available.
-      const submittedAgent = agentNow()
-      const submittedGeneration = ownership.generation()
-      const submittedSubject = ownership.captureSubject()
-      let submitTurnTransferred = false
-      // Local submit acknowledgement (plan D): the row appears NOW —
-      // before any session create / admission / command work — because
-      // this gesture owns no user-visible feedback until the first
-      // authoritative event lands. The TOKEN arms every terminal exit of
-      // THIS workflow: a newer gesture supersedes them.
-      const submitAckToken = acceptLocalSubmitAck()
-      // The local submission echo's correlation identity, minted BEFORE the
-      // first asynchronous preparation/admission await. It is only persisted
-      // (as the Direct user-message `source.rpcId`) when this line becomes an
-      // ordinary human prompt — never for a Host command that consumes it.
-      const submitRequestId = randomUUID()
-      const parsedAtSubmit = parseCommand(text)
-      // The advertised NAME claim, captured BEFORE any session creation: a
-      // refresh may have revoked it since (the completion generation the user
-      // saw is the one that promised the command), and a probed command the
-      // real session then lacks must be consumed with an explicit error —
-      // never a plain model message. It is only consumed for a line the
-      // command plane actually OWNS at invocation time (`planeAdvertised`).
-      const wasAdvertisedAtSubmit = parsedAtSubmit !== undefined
-        && command.wasAdvertisedClaim(parsedAtSubmit.name) === true
-      // The host catalog's view of the line at SUBMIT time, captured before any
-      // session creation: a line it already knew to be a NON-invocation (an
-      // argued line of an execute-kind command) stays one — no later catalog
-      // change may turn it into an invocation except the final catalog
-      // actually CLAIMING it.
-      const submitView = parsedAtSubmit === undefined ? undefined : command.hostClaimOf(parsedAtSubmit)
-      // Whether this line is an ordinary agent-facing prompt (never a Host
-      // command, a TUI-local control, or a skill invocation) at submit time.
-      // Such a line installs its local echo SYNCHRONOUSLY, before the FIFO
-      // turn and any admission await: a second queued submission must not be
-      // textually invisible merely because an earlier one is still blocked in
-      // canonicalization. A line the FINAL catalog only later claims as a
-      // command is consumed through the command paths below, which settle the
-      // echo.
-      //
-      // Skill invocations (`/skill <name> ...` and per-skill wrappers) are
-      // EXCLUDED: their delivery is owned by the TUI skill handler, which
-      // prepares and writes the message WITHOUT the submit request identity
-      // (the correlation contract cannot be completed here), so a local echo
-      // would neither dedupe against nor retire on their authoritative
-      // occurrence. They keep their existing command feedback.
-      const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
-        || (submitView?.claimed !== true
-          && !LOCAL_COMMANDS.has(parsedAtSubmit.name)
-          && command.isSkillWrapperName(parsedAtSubmit.name) !== true)
-      // Install the echo NOW for a known ordinary prompt on an existing
-      // session — before the FIFO turn and the asynchronous admission. A
-      // deferred start installs after the session materializes, below.
-      let localEchoInstalled = false
-      if (ordinaryPromptAtSubmit && submittedAgent !== undefined && !cleanedUp) {
-        beginLocalSubmission(
-          submitRequestId,
-          text,
-          submissionPlacement('queue', submittedAgent.status === 'running'),
-          submittedAgent.session.id,
-          submittedGeneration,
-          submitAckToken,
-        )
-        localEchoInstalled = true
-      }
-      // The CLIENT-LOCAL eligibility of the submitted line, captured with the
-      // routing decision (before any session creation): only a line whose
-      // initial route was a LIVE client contribution keeps the client-local
-      // attachment classification under the final authority. A contribution
-      // claims the BARE token only (DSH `matchEnter`), and a contribution that
-      // appears LATER never turns a generic line into a UI control — this route
-      // never runs the new handler anyway, so the line is an ordinary
-      // submission.
-      const clientLocalAtSubmit = parsedAtSubmit !== undefined
-        && isBareCommandLine(parsedAtSubmit)
-        && extensionService?.commands.find(parsedAtSubmit.name) !== undefined
-      // Whether the command plane OWNS the submitted line, asked against the
-      // LIVE catalog at INVOCATION time (after ensureSession: a deferred start
-      // commits a session-scoped catalog the standing view could not see, and
-      // the descriptor of a resolved name may differ there — in either
-      // direction). The plane owns a TUI-owned route (a local command, or a
-      // live skill wrapper whose `/name args` line the plane's own handler
-      // turns into loadSkill) and every line the FINAL catalog CLAIMS. It does
-      // NOT own an argued line of an execute-kind host command: upstream
-      // `matchEnter` makes it an ordinary submission, and the host registry
-      // resolves by NAME, so asking it would run the command anyway.
-      const commandPlaneOwnsLine = (): boolean => {
-        if (parsedAtSubmit === undefined) return true
-        if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true
-        if (command.isSkillWrapperName(parsedAtSubmit.name) === true) return true
-        const finalView = command.hostClaimOf(parsedAtSubmit)
-        // A resolved final catalog answers for itself (claimed = the plane
-        // runs the command; unclaimed = an ordinary submission).
-        if (finalView !== undefined) return finalView.claimed
-        // The final catalog does not resolve the name at all: the plane decides
-        // (a session-scoped command the standing view cannot see) — UNLESS the
-        // line was ALREADY a known non-invocation when it was submitted, which
-        // no disappearance can turn into an invocation.
-        return submitView?.claimed !== false
-      }
-      // Assigned inside the runOwned factory (invocation-time capture).
-      let commandHealthRef: { slot: string; id: string; owner: string } | undefined
-      // The health ref is NOT captured here: the submit-time identity can
-      // be stale after the async ensureSession phase below (an HMR
-      // reload in between means the REAL invocation runs the NEW owner's
-      // command). It is re-captured inside the runOwned factory,
-      // immediately before execute() — see below (the review's P2).
-      // Whether the submission reached the plane AS AN ADVERTISED COMMAND
-      // INVOCATION: the submit-time advertised claim AND the plane's final
-      // ownership of the line (resolved in the factory below). The
-      // advertised-miss gate may consume only a line the plane actually
-      // owned — an argued line of an execute-kind command is an ordinary
-      // submission even when its name was advertised.
-      let planeAdvertised = false
-      // An owned workflow: the chain's outcome drives the editor draft, the
-      // notices and the queue — runOwned (AGENTS.md), never a bare void.
-      // Reserve the referenced drafts SYNCHRONOUSLY, in the SAME call stack
-      // that left the editor (review finding): sessionRuntime.ensureSession() on a
-      // deferred start is async (create/compose/resume), and the editor is
-      // already cleared — an attach-time prune during session creation must
-      // not delete the images this submission is about to admit. No await
-      // may precede the reservation.
-      // The submit-flow core owns the ordering contract (reserve →
-      // run → failure-restore-before-release → release), shared with the
-      // integration tests — never hand-rolled per path.
-      // The FIFO turn is taken HERE, after every synchronous admission step. A
-      // throw before this point must not strand the tail (no turn was taken),
-      // and no other submission can interleave during the synchronous setup
-      // above, so the ordering contract is unchanged.
-      const submitTurn = takeSubmitTurn()
-      runOwned('submit', () => runReservedSubmit({
-        reserve: (t) => {
-          try {
-            const releasePin = pinDraftAttachments(t, draftImages, draftFiles)
-            return () => {
-              try {
-                releasePin()
-              } finally {
-                if (!submitTurnTransferred) submitTurn.release()
-              }
-            }
-          } catch (error) {
-            submitTurn.release()
-            throw error
-          }
-        },
-        run: async () => {
-          await submitTurn.wait
-          if (cleanedUp) return
-          // The deferred-start gate (history-persist.ts): the history row
-          // is written AFTER the session exists, with the FINAL session
-          // id — the first prompt of a deferred start creates the session
-          // inside resolveSession, and a row written before creation would
-          // carry no sessionId and vanish from the Ctrl+R `Current
-          // session` scope. A resolution that REJECTS (session creation
-          // failed) persists nothing — the submission never reached a
-          // session; a resolution that resolves undefined (sessionless)
-          // persists a row without a sessionId.
-          await persistAfterSession(
-            async () => {
-              if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return undefined
-              await sessionRuntime.ensureSession()
-              if (cleanedUp) return undefined
-              return agentNow()?.session.id
-            },
-            (sessionId) => {
-              if (cleanedUp) return
-              if (submittedAgent !== undefined && !captureMatches(submittedSubject)) return
-              persistHistory(sessionId)
-            },
-          )
-          if (cleanedUp) return
-          const agent = agentNow()
-          if (agent === undefined) {
-            // Nothing can be written (degraded resolve after a successful
-            // creation): the wait ends here with NO write — the pending
-            // row must not outlive the submission.
-            settleLocalSubmission(submitRequestId)
-            settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
-            return
-          }
-          if (submittedAgent !== undefined && !captureMatches(submittedSubject)) {
-            const merged = mergeDraft(app.getDraft(), text)
-            app.setEditorText(merged)
-            settleLocalSubmission(submitRequestId)
-            settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-            app.notify(merged === text
-              ? 'the session changed while waiting for submission — try again'
-              : 'the draft changed while waiting for submission — review it before submitting again (the earlier text was preserved below)', 'error')
-            return
-          }
-        // Capture THIS agent's session identity so the write below can
-        // never target a session a switch already left behind (the async
-        // admission below yields). ONE atomic scope capture: the same record
-        // fences the write and admits it through `SessionRuntime.withWriter`.
-        const generation = ownership.generation()
-        const scope = sessionScope.captureLive()
-        if (scope === undefined) throw new Error('a resolved live submission must carry a live session scope')
-        // TOCTOU re-validation: the session must still be the exact one the
-        // identity was captured from, or the submission is aborted for a
-        // retry against the new session.
-        if (!sessionScope.isCurrent(scope)) {
-          const merged = mergeDraft(app.getDraft(), text)
-          app.setEditorText(merged)
-          settleLocalSubmission(submitRequestId)
-          settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-          app.notify(merged === text
-            ? 'the session changed while sending — try again'
-            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
-          return
-        }
-        // From here on the CAPTURED agent is used — never the mutable
-        // agentNow(): writing through a re-read closure variable could
-        // target a session the identity check did not see (a switch
-        // between the check and the write).
-        const commands = ctx.get('commands')
-        if (commands !== undefined) {
-          // Bare `/plan` toggles: when plan mode is already active it exits
-          // instead of re-entering (the official command needs `/plan off`).
-          const parsed = parseCommand(text)
-          const toggled = parsed?.name === 'plan' && parsed.rawInput.trim() === ''
-            && projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, agent.session) === true
-            ? '/plan off'
-            : text
-          // The HostCommandPort submission + the agent-facing fallback live in
-          // the submission runtime; the runner supplies the command-plane and
-          // TUI hooks.
-          executeHostCommandSubmission({
-            isDisposed: () => cleanedUp,
-            notify: (message, kind) => {
-              if (cleanedUp) return
-              app.notify(message, kind)
-            },
-            loggerError: (message) => {
-              try {
-                ctx.logger.error(message)
-              } catch {
-                // The cordis logger must not block the user notice.
-              }
-            },
-            readDraft: () => app.getDraft(),
-            mergeDraftIntoEditor: (value) => {
-              const merged = mergeDraft(app.getDraft(), value)
-              app.setEditorText(merged)
-              return merged === value
-            },
-            restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
-            consumeDraftAttachments: (value) => consumeDraftAttachments(value, draftImages, draftFiles),
-            draftHasAttachments: (value) => draftHasAttachments(value, draftImages, draftFiles),
-            pinDraftAttachments: (value) => pinDraftAttachments(value, draftImages, draftFiles),
-            settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
-            settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
-            notifySubmissionFailure: (error) => notifySubmissionFailure(error),
-            isScopeCurrent: (value) => sessionScope.isCurrent(value),
-            refuseByTransitionFence: (value) => refuseByTransitionFence(
-              value,
-              () => app.getDraft(),
-              (t) => app.setEditorText(t),
-              (m, k) => app.notify(m, k),
-            ),
-            // DEFERRED AUTHORITY: re-apply the attachment policy against the
-            // FINAL catalog BEFORE the command plane runs.
-            lateAttachmentRefusal: () => {
-              if (parsed === undefined) return undefined
-              return attachmentRefusal(
-                parsed,
-                text,
-                commandIsLocalForAttachments(
-                  parsed,
-                  command.isSkillWrapperName,
-                  // The dynamic (client contribution) term is STICKY to the
-                  // submit-time route.
-                  n => clientLocalAtSubmit && (extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false),
-                  // STICKY SUBMIT-TIME AUTHORITY: once the host catalog RESOLVED
-                  // this name, the name is host territory for the lifetime of the
-                  // submission.
-                  line => command.hostClaimOf(line) ?? submitView,
-                ),
-                command.isSkillInvocation(parsed, text),
-              )
-            },
-            commandSubmitAttachments: (value) => commandSubmitAttachments(value),
-            isTuiOwnedCommand: () => parsedAtSubmit !== undefined
-              && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || command.isSkillWrapperName(parsedAtSubmit.name) === true),
-            commandPlaneOwnsLine,
-            submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : command.hostClaimOf(parsedAtSubmit),
-            commandSignal: () => signal,
-            invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
-              command.withCommandDelivery(delivery, () => {
-                if (!commandPlaneLine || parsedAtSubmit === undefined) {
-                  return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
-                }
-                if (tuiOwnedCommand) {
-                  // TUI-local commands and skill wrappers retain their existing
-                  // in-process command service path; HostCommandPort is only
-                  // for a line already selected as Host-owned.
-                  return commands.execute(agent as Agent, commandLine, submittedAttachments as Parameters<typeof commands.execute>[2], commandSignal).then(execution => {
-                    return execution === undefined
-                      ? { kind: 'committed', matched: false } as const
-                      : { kind: 'committed', matched: true, execution } as const
-                  })
-                }
-                // The HostCommandPort submission enters the barrier through
-                // the submission runtime (the M3 insertion point).
-                return submissionRuntime.withWriter(scope, () => backend.hostCommand.execute({
-                  sessionId: agent.session.id,
-                  line: commandLine,
-                  attachments: submittedAttachments,
-                  signal: commandSignal,
-                }))
-              }),
-            beginCommandSettlement: () => sessionRuntime.beginCommandSettlement(),
-            abortCommandSettlement: () => sessionRuntime.abortCommandSettlement(),
-            settleCommandSettlement: () => sessionRuntime.settleCommandSettlement(),
-            trackSettlementWork: (work) => sessionRuntime.trackSettlementWork(work),
-            captureCommandHealthRef: () => {
-              // RE-CAPTURE at invocation time: the runOwned factory runs
-              // SYNCHRONOUSLY right before execute().
-              const liveCommandId = parsedAtSubmit === undefined || extensionService === undefined
-                ? undefined
-                : extensionService.commands.idFor(parsedAtSubmit.name)
-              return liveCommandId === undefined
-                ? undefined
-                : extensionService?._recordRegistryHealthRef('command', liveCommandId)
-            },
-            clearCommandHealthError: (ref) =>
-              extensionService?._clearRegistryError(ref as { slot: string; id: string; owner: string }),
-            recordCommandHealthError: (ref, error) =>
-              extensionService?._recordRegistryError(ref as { slot: string; id: string; owner: string }, error),
-            readCommandDraftDisposition: (commandId) => command.takeCommandDraftDisposition(commandId),
-            shouldConsumeAdvertisedMiss,
-            isIndeterminateSkillWrite: (error) => isIndeterminateSkillWrite(error),
-            startArtifactSave: (name) => artifacts.start(name, agent),
-            submitPrompt: (submission) => submissionRuntime.submitPrompt(submission),
-            commandSessionId: () => agent.session.id,
-            markTurnTransferred: () => { submitTurnTransferred = true },
-            diag,
-          }, {
-            text,
-            toggled,
-            scope,
-            submitRequestId,
-            submitAckToken,
-            generation,
-            localEchoInstalled,
-            wasAdvertisedAtSubmit,
-            parsedName: parsedAtSubmit?.name,
-            submitTurn,
-          })
-          return
-        }
-        // No commands service: direct follow-up on the CAPTURED agent (see
-        // the note above — never a re-read closure variable). Images ride
-        // the same prepared message as every other path (§13). The submission
-        // runtime owns the ordered writer admission (transition drain +
-        // per-Agent image window) and its terminal ack/echo settlement.
-        await submissionRuntime.submitPrompt({
-          text,
-          scope,
-          requestId: submitRequestId,
-          ackToken: submitAckToken,
-          generation,
-          echoInstalled: localEchoInstalled,
-        })
-        },
-        restore: (t) => restoreSubmissionDraft(t),
-      }, text), {
-        diag,
-        sessionId: () => agentNow()?.session.id,
-        // The flow restored the editor; this sink settles the gesture's
-        // ack (token-scoped) and only notifies.
-        onError: (error) => {
-          settleLocalSubmission(submitRequestId)
-          settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
-          notifySubmissionFailure(error)
-        },
-        // runOwned routes cancellations EXCLUSIVELY to onCancel: a
-        // cancelled deferred create / image admission / barrier write
-        // bypasses onError, so the ack row armed at the gesture must be
-        // terminated HERE (the flow already restored the draft — plan D
-        // exit enumeration).
-        onCancel: () => {
-          settleLocalSubmission(submitRequestId)
-          settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
-        },
-      })
-    }
-    /**
-     * Run a LOCAL slash command in-process, with or without a live session.
-     * The route is chosen by the caller: a sessionless command (no session
-     * is created, its history row stays sessionless — Current directory /
-     * All directories, never Current session) or a plugin-declared local
-     * command whose contribution owns a bridge handler (it runs locally even
-     * inside a live session, and its row follows the command's OWN
-     * sessionless classification via `historyKind`). The handler comes from
-     * the bridge FIRST (rawInput verbatim), then from the commands service's
-     * global layer (in-process lookup with no agent is safe: it reads the
-     * global layer only). A command with neither falls back to the session
-     * dispatch, which reports unknown commands as messages.
-     */
-    const runLocalCommand = (
-      parsed: { name: string; rawInput: string },
-      text: string,
-      persistHistory: (sessionId: string | undefined) => void,
-      delivery: SubmitDelivery,
-      // The history identity of THIS call site: a sessionless command writes
-      // an unscoped row (Current directory / All directories), while a local
-      // command submitted inside a live session scopes its row to that
-      // session like every other local command (/status).
-      historyKind: 'agent-facing' | 'sessionless',
-    ): void => {
-      // M5: a plugin-declared local command with a bridge handler routes
-      // to the bridge FIRST (its rawInput is passed verbatim — never
-      // re-parsed or rewritten, the skill rawInput regression gate); the
-      // commands service is the fallback for core commands.
-      const bridgeHandler = extensionService?.commands.handlerFor(parsed.name)
-      const bridgeCommandId = extensionService?.commands.idFor(parsed.name)
-      // Captured at INVOCATION START (same generation fence as the
-      // session command path).
-      const bridgeCommandRef = bridgeCommandId === undefined || extensionService === undefined
-        ? undefined
-        : extensionService._recordRegistryHealthRef('command', bridgeCommandId)
-      const commands = ctx.get('commands')
-      const definition = commands?.find(undefined as unknown as Agent, parsed.name)
-      if (bridgeHandler === undefined && (commands === undefined || definition === undefined)) {
-        // The "sessionless" command is actually unknown: it falls back to
-        // a session dispatch — the history row goes through the
-        // deferred-start gate (persist AFTER the session exists, with the
-        // final session id), never a sessionless write here.
-        dispatchViaSession(text, persistHistory, delivery)
-        return
-      }
-      const invocation = {
-        commandId: `cmd-local-${randomUUID()}`,
-        agent: undefined as unknown as Agent,
-        rawInput: parsed.rawInput,
-        signal,
-      } as CommandInvocation
-      const handler = bridgeHandler ?? definition?.handler
-      if (handler === undefined) {
-        dispatchViaSession(text, persistHistory, delivery)
-        return
-      }
-      // A truly local command: the handler runs in-process, so no session is
-      // needed for the EXECUTION. The row follows the call site's identity
-      // (sessionless commands write an unscoped row; a local command inside
-      // a live session carries that session id).
-      persistHistory(historySessionIdFor(historyKind, agentNow()?.session.id))
-      // An owned workflow: the result decides the notify, the failure lands
-      // in diagnostics — runOwned (AGENTS.md), never a bare void. The
-      // handler may be a SYNC implementation, so the factory must run inside
-      // runOwned (a sync throw would otherwise escape before the entry).
-      runOwned('local command', () => handler(invocation), {
-        diag,
-        sessionId: () => agentNow()?.session.id,
-        onResult: (result) => {
-          if (cleanedUp) return
-          if (result !== undefined && result.kind === 'error') {
-            if (bridgeCommandRef !== undefined) extensionService?._recordRegistryError(bridgeCommandRef, new Error(result.text))
-            app.notify(result.text)
-          } else if (bridgeCommandRef !== undefined) {
-            extensionService?._clearRegistryError(bridgeCommandRef)
-          }
-        },
-        onError: (error) => {
-          if (cleanedUp) return
-          if (bridgeCommandRef !== undefined) extensionService?._recordRegistryError(bridgeCommandRef, error)
-          const message = safeErrorMessage(error)
-          try {
-            ctx.logger.error(`tui-runner: local command failed: ${message}`)
-          } catch {
-            // The cordis logger must not block the user notice.
-          }
-          app.notify(message, 'error')
-        },
-      })
-    }
-    /**
-     * Steer into the running turn with re-validation. Shared by
-     * Ctrl+S's empty-draft queue sweep and the separate draft prompt, and the
-     * busy-Enter preference — Enter while the agent is running with
-     * busyEnter=steer steers the DRAFT ONLY (web busyEnter parity): explicitly
-     * queued messages stay queued until an empty-draft Ctrl+S sweep, because
-     * already-steered input cannot be pulled back.
-     * @param text - the submitted draft ('' allowed for Ctrl+S).
-     * @param onlyDraft - busy-Enter mode: never read or remove the queue.
-     * @param persistHistory - the call site's persist closure (with its
-     * submission-time snapshot). Invoked AFTER the session exists with the
-     * FINAL session id — the deferred-start gate: Ctrl+S on a deferred
-     * start creates the session inside this flow, and a row written
-     * before creation would carry no sessionId and vanish from the Ctrl+R
-     * `Current session` scope. Absent, the steer persists nothing.
-     */
-    // Preparation is asynchronous (mention canonicalization can await), so
-    // admission must take the shared FIFO turn rather than letting a later
-    // gesture deliver first.
-    const steerNow = (text: string, onlyDraft = false, persistHistory?: (sessionId: string | undefined) => void): void => {
-      // The submission runtime owns the gesture's pre-flight gate, FIFO turn,
-      // deferred-start persist, admission window and terminal ack/echo/consume
-      // settlement; the runner supplies the narrow TUI hooks.
-      const deps: SteerSubmissionDeps = {
-        isDisposed: () => cleanedUp,
-        isViewing: () => viewer.isViewing(),
-        currentAgent: () => agentNow() as unknown as SteerSubmissionAgent | undefined,
-        currentGeneration: () => ownership.generation(),
-        captureOwnerToken: () => ownership.captureSubject(),
-        isOwnerTokenCurrent: (token) => captureMatches(token as SessionSubject | undefined),
-        readPendingInput: (sessionId) => backend.pendingInputReader.snapshot(sessionId),
-        draftHasAttachments: (value) => draftHasAttachments(value, draftImages, draftFiles),
-        draftHasImages: (value) => draftHasImages(value, draftImages),
-        clearSettledLocalMessages: () => app.clearSettledLocalMessages(),
-        mergeDraftIntoEditor: (value) => {
-          const merged = mergeDraft(app.getDraft(), value)
-          app.setEditorText(merged)
-          return merged === value
-        },
-        notify: (message, kind) => {
-          if (cleanedUp) return
-          app.notify(message, kind)
-        },
-        acceptSubmitAck: () => acceptLocalSubmitAck(),
-        settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
-        settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
-        beginLocalSteerEcho: ({ requestId, text: echoText, running, sessionId, generation, ackToken }) => {
-          beginLocalSubmission(
-            requestId,
-            echoText,
-            submissionPlacement(running ? 'steer' : 'queue', running),
-            sessionId,
-            generation,
-            ackToken,
-          )
-        },
-        takeSubmitTurn,
-        pinDraftAttachments: (value) => pinDraftAttachments(value, draftImages, draftFiles),
-        persistAfterSession,
-        ensureSession: () => sessionRuntime.ensureSession(),
-        withPromptAdmission: (agent, hasImages, task) =>
-          directRuntime.withPromptAdmission(agent as unknown as Agent, hasImages, task),
-        prepareMessage: (value, requestId) => prepareUserMessage(value, draftImages, submitDeps, { requestId }),
-        markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
-        restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
-        notifySubmissionFailure: (error) => notifySubmissionFailure(error),
-        consumeDraftAttachments: (value) => consumeDraftAttachments(value, draftImages, draftFiles),
-        writerSection: submissionWriterSection,
-        pendingInputReader: backend.pendingInputReader,
-        writer: backend.sessionWriter,
-        diag,
-      }
-      if (onlyDraft) deliverBusy(deps, { text, persistHistory })
-      else steer(deps, { text, persistHistory })
-    }
-    /**
-     * Build the steer-persist closure for a draft (Ctrl+S, the
-     * steer-draft extension action, busy-Enter steer): the submission-time
-     * facts — the ts (the row must record the USER's steer time, not the
-     * post-creation write time) and the image check (the editor is
-     * cleared right after and the steer flow consumes the staged images
-     * on success, so a late check would wrongly persist the placeholder
-     * text) — are snapshotted NOW. The returned closure writes the row
-     * under the session id the steer gate resolved (the FINAL id after
-     * session creation on a deferred start). An empty draft (Ctrl+S with
-     * only a queue) persists nothing — the queued messages were already
-     * persisted when originally submitted.
-     */
-    const makeSteerPersist = (text: string): ((sessionId: string | undefined) => void) => {
-      const trimmed = text.trim()
-      const historyTs = Date.now()
-      const historyHasAttachments = draftHasAttachments(text, draftImages, draftFiles)
-      return (sessionId: string | undefined): void => {
-        if (trimmed === '' || trimmed === history.lastContent() || historyHasAttachments) return
-        const historyCwd = status.sessionCwd()
-        const file = historyFilePath(dshHome(process.env), historyCwd)
-        runDetached('input history write', () => {
-          const written = persistHistoryRecord({
-            content: trimmed,
-            cwd: historyCwd,
-            sessionId: historySessionIdFor('agent-facing', sessionId),
-            ts: historyTs,
-            lastContent: history.lastContent(),
-            hasAttachments: historyHasAttachments,
-            file,
-          })
-          if (written) history.setLastContent(trimmed)
-        }, {
-          diag,
-          notify: (message) => {
-              if (cleanedUp) return
-              app.notify(message, 'error')
-            },
-          recoverable: () => true,
-        })
-      }
-    }
-    /**
-     * Dispatch one user submission end to end: the viewer guard, the input-
-     * history persistence, `!` local shells, sessionless commands, the
-     * busy-Enter policy, and the session dispatch. The delivery mode is
-     * resolved ONCE below (web ComposerSubmissionPolicy parity — the
-     * accelerated chord is the OPPOSITE of the preference, and the explicit
-     * queue action is a fixed queue).
-     * @param text - the submitted draft.
-     * @param request - the request the submission was raised by.
-     */
-    const dispatchUserInput = (text: string, request: ComposerSubmitRequest = 'enter'): void => {
-      // P0 (empty-submission semantics): an EMPTY serialized wire form is
-      // a silent no-op — no history write, no session creation, no
-      // followup/steer, no attachment admission, no queue mutation. Judged on
-      // the wire form ONCE here: the editor onSubmit path already
-      // swallowed `''`, but plugin-extension submissions (submitDraft via
-      // the semantic action) and any future caller must not bypass it.
-      // A bare `!` / `!!` shell mode serializes to a non-empty wire form
-      // (handle below at the shell branches), and an attachment-bearing draft
-      // is non-empty too (the placeholder markers are part of the text —
-      // draftHasAttachments).
-      if (text.trim() === '' && !draftHasAttachments(text, draftImages, draftFiles)) return
-      // Plain `exit` quits (shell muscle memory): the exact trimmed word
-      // intercepts BEFORE any session creation or submission, so typing
-      // `exit` with a deferred start never births a session. `/exit` remains
-      // the command form; any other prompt still goes to the model.
-      if (isPlainExitPrompt(text)) {
-        requestExit()
-        return
-      }
-      // The subagent viewer is READ-ONLY: submitting while viewing would
-      // silently send to the PARENT session. Refuse with a notice instead.
-      if (viewer.isViewing()) {
-        app.setEditorText(mergeDraft(app.getDraft(), text))
-        app.notify('viewing a subagent — Esc returns before submitting', 'info')
-        return
-      }
-      // A fresh submission dismisses settled local cards (completed `!`/`!!`
-      // runs): the card is a live view, not a record — the transcript row
-      // (context runs) or the next input takes over. Running cards survive
-      // so a live stream is never dismissed by a concurrent submit.
-      app.clearSettledLocalMessages()
-      // Persist the submitted line to the LIVE session's cwd input-history
-      // file (kimi-style JSONL under $DSH_HOME/user-history — never the
-      // settings document). Consecutive repeats are skipped like shell
-      // history; a failed write is user-recoverable: notify instead of
-      // dropping it. `!` shell lines persist verbatim so ↑ recall re-runs
-      // the shell branch.
-      const trimmed = text.trim()
-      // Submission-time facts snapshotted BEFORE any async work: the
-      // timestamp (the row must record the USER's submission time, not the
-      // disk-write time — an agent-facing write lands after session
-      // creation) and the attachment check (an attachment-bearing submission is NOT
-      // persisted to the plain-text history: the placeholder dies with its
-      // draft on consumeDraftAttachments, so an ↑ recall would re-send the
-      // placeholder as ORDINARY TEXT — the attachment would silently vanish
-      // from the model input (review finding 3). A late check would miss
-      // the already-consumed attachment. Structured attachment history (text +
-      // refs, recalled on recall) is a post-v1 extension.)
-      const historyTs = Date.now()
-      const historyHasAttachments = draftHasAttachments(text, draftImages, draftFiles)
-      /**
-       * Persist the submitted line under the given session identity. The
-       * sessionId is a PARAMETER, resolved at the CALL SITE — the
-       * deferred-start gate (history-persist.ts): an agent-facing
-       * submission passes the FINAL session id AFTER the session exists
-       * (the first prompt of a deferred start creates the session; a row
-       * written before creation would carry no sessionId and vanish from
-       * the Ctrl+R `Current session` scope). Sessionless submissions pass
-       * undefined and stay visible in `Current directory` / `All
-       * directories`. The cwd is resolved at PERSIST time so the row
-       * lands in the session's cwd file with a `cwd` field that agrees
-       * with the file hash.
-       */
-      const persistHistory = (sessionId: string | undefined): void => {
-        const historyCwd = status.sessionCwd()
-        const file = historyFilePath(dshHome(process.env), historyCwd)
-        runDetached('input history write', () => {
-          const written = persistHistoryRecord({
-            content: trimmed,
-            cwd: historyCwd,
-            sessionId,
-            ts: historyTs,
-            lastContent: history.lastContent(),
-            hasAttachments: historyHasAttachments,
-            file,
-          })
-          if (written) history.setLastContent(trimmed)
-        }, {
-          diag,
-          notify: (message) => {
-              if (cleanedUp) return
-              app.notify(message, 'error')
-            },
-          recoverable: () => true,
-        })
-      }
-      // `!` runs the command and submits the completed command+output to
-      // the session (kimi parity); `!!` runs purely locally with no session
-      // write (pi's excluded-from-context escape hatch). A local `!!` needs
-      // no session at all; the contextual `!` creates the session first
-      // (the FIRST user message is the deferred trigger).
-      if (text.startsWith('!')) {
-        // A local shell line is a UI control with NO attachment delivery path
-        // (`runLocalShell` neither admits nor consumes drafts): a staged
-        // attachment must never become shell arguments, and the success path
-        // must never consume it. Refuse and hand the draft (placeholder
-        // intact) back, exactly like a local command.
-        if (draftHasAttachments(text, draftImages, draftFiles)) {
-          app.setEditorText(mergeDraft(app.getDraft(), text))
-          app.notify('Attachments cannot be included in a local command.', 'error')
-          return
-        }
-        if (text.startsWith('!!')) {
-          // `!!` runs purely locally with NO session write (pi's
-          // excluded-from-context escape hatch) — the row is sessionless
-          // (Current directory / All directories, never Current session).
-          persistHistory(historySessionIdFor('sessionless', agentNow()?.session.id))
-          runLocalShell(text, undefined)
-        } else if (shellCommandOf(text) !== '') {
-          // Local submit acknowledgement (plan D), armed AT THE GESTURE —
-          // BEFORE ensureSession: a deferred/slow session create is part
-          // of the no-feedback window this row exists to cover. The
-          // runLocalShell-side accept was moved here so the T0 baseline
-          // is never rebased by the shell wiring. The TOKEN rides into
-          // the shell flow: its terminal exits settle only while THIS
-          // gesture is still the newest one.
-          const shellAckToken = acceptLocalSubmitAck()
-          // An owned workflow: the session creation failure restores the
-          // draft (failSubmission) — runOwned (AGENTS.md), never a bare
-          // void. The history row is written AFTER the session exists
-          // (the deferred-start gate), so a `!` line that creates the
-          // session carries its id.
-          runOwned('contextual shell', () => sessionRuntime.ensureSession().then(() => {
-            persistHistory(historySessionIdFor('agent-facing', agentNow()?.session.id))
-            runLocalShell(text, shellAckToken)
-          }), {
-            diag,
-            sessionId: () => agentNow()?.session.id,
-            onError: (error) => {
-              // The session create failed: nothing will be written — the
-              // ack row armed at the gesture is TERMINAL here (plan D).
-              settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
-              failSubmission(text)(error)
-            },
-            onCancel: () => {
-              if (cleanedUp) return
-              // NOT wrapped in runReservedSubmit: nothing restores the
-              // draft here, so a cancelled ensureSession would silently
-              // lose the submitted text — merge it back first (no error
-              // notice: a cancellation is not a failure), then end the
-              // ack row terminally.
-              app.setEditorText(mergeDraft(app.getDraft(), text))
-              settleLocalSubmitAck('contextual shell cancelled', { token: shellAckToken, terminal: true })
-            },
-          })
-        } else {
-          // A bare `!` (no command) is a no-op — sessionless.
-          persistHistory(historySessionIdFor('sessionless', agentNow()?.session.id))
-        }
-        return
-      }
-      // A sessionless slash command runs locally BEFORE any session exists:
-      // typing /exit, /settings, /help, ... must not create one (deferred
-      // start). Everything else — session-backed commands, core commands
-      // like /plan, and plain prompts — creates the session lazily. M5: a
-      // plugin-declared sessionless command (CommandBridge) joins the set.
-      const parsed = parseCommand(text)
-      // The CURRENT host catalog's view of THIS LINE, asked ONCE for the
-      // synchronous routing decisions below (the deferred resolution asks
-      // again, against the catalog the session committed). A name the
-      // catalog RESOLVES is host territory even when it does not claim this
-      // line: `/compact extra` is an ordinary submission, never a same-named
-      // client contribution's.
-      const hostView = parsed === undefined ? undefined : command.hostClaimOf(parsed)
-      // Command semantics matrix (plan §19.3): slash commands are not LLM
-      // prompts — an image-bearing command line is REJECTED explicitly
-      // (never a silent drop, never a stray placeholder sent to the model).
-      // The draft comes back so the user can re-attach after choosing a
-      // plain prompt. LOCAL commands only: agent-facing invocations —
-      // plain prompts AND per-skill slash lines, including `/skill <name>
-      // [image #N ...]` (`skill` is local only as the bare picker; with
-      // arguments it is a loadSkill agent prompt — review finding).
-      // The line's attachment classification against the CURRENT catalog.
-      // Every local classification refuses NOW: a contribution claims the BARE
-      // token only (DSH `matchEnter`), and a bare line can never reference a
-      // draft, so there is no attachment to carry across a deferred window —
-      // an argued line of a contribution name is an ordinary submission, with
-      // its attachments.
-      if (parsed !== undefined) {
-        const refusal = attachmentRefusal(
-          parsed,
-          text,
-          commandIsLocalForAttachments(
-            parsed,
-            command.isSkillWrapperName,
-            n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
-            command.hostClaimOf,
-          ),
-          command.isSkillInvocation(parsed, text),
-        )
-        if (refusal !== undefined) {
-          app.setEditorText(mergeDraft(app.getDraft(), text))
-          app.notify(refusal, 'error')
-          return
-        }
-      }
-      const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
-      // The submission's effective delivery mode — resolved ONCE, here at
-      // the boundary (web ComposerSubmissionPolicy parity, DSH
-      // 0.1.6): an idle agent queues, plain Enter takes the
-      // preference, the accelerated chord takes its OPPOSITE, and the
-      // explicit queue action always queues. The resolved mode rides into
-      // the command plane (dispatchViaSession → withDelivery → the TUI skill
-      // delivery), which never re-derives it from the persisted preference —
-      // a one-shot gesture does not survive in settings. Commands that own
-      // their own busy semantics (Host commands, client commands) ignore it.
-      const delivery: SubmitDelivery = request === 'explicit-queue'
-        ? 'queue'
-        : resolveSubmitDelivery(parsed, agentNow()?.status === 'running', request, tuiSettings?.get().busyEnter)
-      // NAMESPACE ORDER (DSH client command contribution parity):
-      //   1. host command claim (the closed host catalog always wins);
-      //   2. client command contribution (client-owned behavior);
-      //   3. TUI-owned sessionless command;
-      //   4. agent-facing input (steer / prompt).
-      //
-      // 1. HOST AUTHORITY: a line the CURRENT effective host catalog CLAIMS
-      // is a host command — a client contribution can never shadow it
-      // (upstream: candidate synthesis fails loud, never shadows; the host
-      // handler decides the busy outcome). The claim belongs to the LINE, not
-      // to the name: a `leadingInput` descriptor claims its argued line
-      // (`/goal ship`), an execute-kind one claims the bare token only, so
-      // `/compact extra` is an ordinary submission (upstream `matchEnter`
-      // parity). TUI-owned LOCAL_COMMANDS execute through their own surface
-      // and are excluded here; a TUI skill wrapper is agent-facing input
-      // (also excluded from the claim). A claimed command the real session
-      // then lacks is consumed by the advertised-miss gate inside
-      // dispatchViaSession — never a plain model message.
-      if (parsed !== undefined
-        && !LOCAL_COMMANDS.has(parsed.name)
-        && hostView?.claimed === true) {
-        dispatchViaSession(text, persistHistory, delivery)
-        return
-      }
-      // 2. CLIENT-OWNED command contribution: its behavior lives entirely on
-      // the client, so it executes locally and never steers — the namespace
-      // decision is NOT the generic sessionless branch's to make. A
-      // contribution is a slash-MENU entry, so it claims the BARE `/name`
-      // token only (DSH `matchEnter`: `if (!bare) return undefined`): an argued
-      // line (`/deploy explain`) is an ordinary submission, and the handler
-      // never runs for it. A name the host catalog RESOLVES is host territory
-      // in both states, so a contribution never runs for such a line either.
-      // `sessionless` decides whether it may run before a session exists:
-      // true runs immediately (no session is created); false (default)
-      // resolves/creates the session FIRST — the host command surface is
-      // session-keyed — and then runs the handler. A LIVE skill wrapper is
-      // TUI-owned agent-facing input and outranks a contribution of the same
-      // name (the contribution may have been registered before the skill
-      // catalog loaded).
-      const contribution = parsed === undefined
-        || !isBareCommandLine(parsed)
-        || command.isSkillWrapperName(parsed.name) === true
-        // A name the host catalog RESOLVES is host territory even when it does
-        // not claim THIS line: the line is an ordinary submission, so a
-        // same-named contribution — reachable only in the failed-source
-        // collision state — never runs for it.
-        || hostView !== undefined
-        ? undefined
-        : extensionService?.commands.find(parsed.name)
-      if (parsed !== undefined && contribution !== undefined) {
-        if (contribution.sessionless) {
-          runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
-          return
-        }
-        if (agentNow() !== undefined) {
-          runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
-          return
-        }
-        // The captured contribution is a PROVISIONAL authority: it is bound
-        // here so the post-await resolution can never run a generation the
-        // user did not submit (see the fence inside).
-        const submitted = contribution
-        runOwned('client command session', () => runReservedSubmit({
-          // The submit-flow core's ordering contract. A contribution is only
-          // ever invoked by its BARE token, so the line references no drafts
-          // and this reservation pins nothing — it stays because the failure
-          // path (restore the draft when the session cannot be created) is the
-          // shared one. No await may precede it.
-          reserve: (draft) => pinDraftAttachments(draft, draftImages, draftFiles),
-          run: async () => {
-            await sessionRuntime.ensureSession()
-            if (cleanedUp || agentNow() === undefined) return
-            // AUTHORITY RE-CHECK after the session exists: the deferred start
-            // commits a session whose scoped catalog the standing view could
-            // not see, and the skill catalog may load with it. A live HOST
-            // claim FOR THIS LINE or a TUI skill wrapper outranks the
-            // contribution that was decided before the session existed. (A host
-            // name can only CLAIM this bare line: the argued lines a catalog
-            // resolves without claiming are ordinary submissions and never
-            // reach this branch.) The delivery resolved before the session
-            // existed, so it is a queue-mode submission: `dispatchViaSession`
-            // delivers the line itself.
-            if (command.hostClaimOf(parsed) !== undefined || command.isSkillWrapperName(parsed.name) === true) {
-              dispatchViaSession(text, persistHistory, delivery)
-              return
-            }
-            // IDENTITY + GENERATION FENCE: the client handler runs only while
-            // the EXACT registration the user submitted is still live. A
-            // dispose + reload (HMR) is a NEW bridge record — possibly under
-            // the same owner/id — and a vanished name must never fall through
-            // `runLocalCommand`'s name-only lookup (which would either run
-            // the new generation's handler or deliver the line to the MODEL).
-            if (extensionService?.commands.find(parsed.name) !== submitted) {
-              app.notify(`/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
-              restoreSubmissionDraft(text)
-              return
-            }
-            runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
-          },
-          restore: (draft) => restoreSubmissionDraft(draft),
-        }, text), {
-          diag,
-          sessionId: () => agentNow()?.session.id,
-          onError: (error) => {
-            if (cleanedUp) return
-            // The flow restored the editor BEFORE the reservation released;
-            // this sink only notifies (never a second restore).
-            app.notify(safeErrorMessage(error), 'error')
-          },
-        })
-        return
-      }
-      // 3. A recognized TUI-owned sessionless command: its history row is
-      // sessionless — it must NEVER appear in Current session, whether or not
-      // a session exists. Without a live agent it runs locally (and creates
-      // none); with a live agent it dispatches through the session's command
-      // service, but the persist closure still supplies undefined.
-      if (parsed !== undefined && isSessionless) {
-        if (agentNow() === undefined) {
-          runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
-        } else {
-          dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', agentNow()?.session.id)), delivery)
-        }
-        return
-      }
-      // Busy-Enter policy (web parity): agent-facing input steers into the
-      // running turn under the resolved 'steer' mode — plain prompts AND
-      // non-local commands. The per-skill slash commands steer as the
-      // `/name` line the host's pre-step listener (dsh-tool-skill)
-      // recognizes — exactly like the web's `session.prompt`, which has no
-      // command-execution wire for skills. TUI-owned LOCAL commands
-      // (/status, /settings, ...) always execute directly; plugin-declared
-      // local commands (M5 CommandBridge) join the same set; `!` shells and
-      // sessionless commands returned before this gate.
-      if (delivery === 'steer') {
-        // Skill delivery belongs to loadSkill in BOTH modes: it builds the
-        // NORMALIZED `/<name> <args>` line (the harness gesture recognizes
-        // the skill's own slash name — the raw `/skill <name>` form would
-        // never match, review finding 2), steers it with this delivery, and
-        // injects the body when the host's pre-step listener does not.
-        // Image placeholders ride the line untouched; the history row is
-        // written by the dispatch AFTER the session exists (the
-        // deferred-start gate), with the FINAL session id.
-        if (command.isSkillInvocation(parsed, text)) {
-          dispatchViaSession(text, persistHistory, delivery)
-          return
-        }
-        steerNow(text, true, persistHistory)
-        return
-      }
-      dispatchViaSession(text, persistHistory, delivery)
-    }
     // M3 runner wiring (F-1): when the extension host service is mounted,
     // the TUI surface attaches a SurfaceHost over its ledger — extensions
     // (including the first-party builtins) render into the chrome. Without
@@ -3121,7 +1634,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // ONE submission entry: the request (the Enter gesture, the
       // accelerated chord, or the explicit queue action) rides along — the
       // boundary resolves its delivery mode.
-      onSubmit: (text, request) => dispatchUserInput(text, request),
+      onSubmit: (text, request) => submission.submit(text, request),
       // The image-only submit gate (plan §11.1): an empty-text draft with
       // staged images is a real submission.
       isImageDraft: () => draftHasImages(app.getDraft(), draftImages),
@@ -3192,7 +1705,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         // live agent (busy: one Esc fires this directly; idle: double-Esc).
         // interruptAgent PRESERVES the pending queue (web Stop parity) — an
         // interrupt stops the current thinking, never the queued input.
-        interruptLiveAgent()
+        submission.abortLocalShell()
       },
       // Conversation rewind: the TuiApp fires this only when IDLE with an
       // EMPTY editor and a fast second Esc (busy stays a cancel; overlays,
@@ -3238,13 +1751,12 @@ export function applyRunner(ctx: Context, config: Config): void {
             // cleared, and the row is written inside steerNow AFTER the
             // session exists (the deferred-start gate) with the FINAL
             // session id.
-            const persist = makeSteerPersist(text)
             app.setDraft('')
-            steerNow(text, false, persist)
+            submission.steer(text)
             break
           }
           case 'cancel-activity': {
-            interruptLiveAgent()
+            submission.abortLocalShell()
             break
           }
           case 'open-search': {
@@ -3281,7 +1793,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         // snapshot happens now, and the row is written inside steerNow
         // AFTER the session exists (the deferred-start gate) with the
         // FINAL session id.
-        steerNow(text, false, makeSteerPersist(text))
+        submission.steer(text)
       },
       onExtensionError: ({ slot, id, error }) => {
         try {
@@ -3436,65 +1948,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // remove every semantic `queued` occurrence and pull its content back
       // into the editor draft. The gesture is disabled in every viewer so it
       // cannot mutate a hidden main or child queue.
-      onDequeue: () => {
-        // Alt+↑: on the main surface, run the TUI-only recall-all extension:
-        // remove every semantic `queued` occurrence and pull its content back
-        // into the editor draft. The gesture is disabled in every viewer so it
-        // cannot mutate a hidden main or child queue. The submission runtime
-        // owns the ordered removal + recalled-draft settlement; the runner
-        // supplies the narrow queue/TUI hooks.
-        pullBackQueue({
-          isDisposed: () => cleanedUp,
-          isViewing: () => viewer.isViewing(),
-          currentAgent: () => agentNow(),
-          captureOwnerToken: () => ownership.captureSubject(),
-          isOwnerTokenCurrent: (token) => captureMatches(token as SessionSubject | undefined),
-          requireLiveScope,
-          readPullableQueue: (sessionId) => {
-            const pending = backend.pendingInputReader.snapshot(sessionId)
-            if (pending === undefined) return undefined
-            return pending.items
-              .filter(item => item.placement === 'queued')
-              .map(queueInboxMessageOf)
-          },
-          isTransitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
-          withWriter: (scope, task) => submissionRuntime.withWriter(scope, task),
-          updateQueue: (sessionId, messageId, operation) =>
-            backend.sessionWriter.updateQueue(sessionId, messageId, operation),
-          deferQueueRecall: (recall) => submissionRuntime.deferQueueRecall(recall),
-          stageRecalledImage: (attachment) => {
-            const ref = attachment as import('../image/admission.ts').ImageAttachmentRefLike
-            const draft = draftImages.add({
-              mediaType: ref.mediaType,
-              width: ref.width,
-              height: ref.height,
-              ...(ref.name !== undefined ? { name: ref.name } : {}),
-              source: { type: 'recalled' },
-              recalledRef: ref,
-            })
-            return { id: draft.id, placeholder: draft.placeholder }
-          },
-          stageRecalledFile: (attachment) => {
-            const ref = attachment as import('../attachment/file-admission.ts').FileAttachmentRefLike
-            const draft = draftFiles.add({
-              name: ref.name,
-              byteLength: ref.bytes,
-              source: { type: 'recalled', ref },
-            })
-            return { id: draft.id, placeholder: draft.placeholder }
-          },
-          discardStagedDraft: (kind, id) => {
-            if (kind === 'image') draftImages.remove(id)
-            else draftFiles.remove(id)
-          },
-          pinRecalledDrafts: (text) => pinDraftAttachments(text, draftImages, draftFiles),
-          readDraft: () => app.getDraft(),
-          writeDraft: (text) => app.setDraft(text),
-          notify: (message, kind) => app.notify(message, kind),
-          refreshPendingInput: () => surface.refreshPendingInput(),
-          diag,
-        })
-      },
+      onDequeue: () => submission.dequeue(),
       // ↓ with an empty editor: the Quick Tasks browser. Task Center
       // merges the JobRegistry roster with the subagent descendant
       // catalog. The JobRegistry may include provisional foreground shell
@@ -3864,7 +2318,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // presentation join/own-input/viewport policy is surface-owned.
       pendingSubjectId: () => viewer.pendingSubjectId(),
       pendingSnapshot: (sessionId) => backend.pendingInputReader.snapshot(sessionId),
-      submissionEchoes: (sessionId) => submissionPresentation.snapshot(sessionId),
+      submissionEchoes: (sessionId) => submission.snapshotEchoes(sessionId),
       queueTextOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
       exitView: () => { viewer.exitView() },
       refreshStatusCheap: () => status.refresh(),
@@ -3874,9 +2328,9 @@ export function applyRunner(ctx: Context, config: Config): void {
       },
       applyGoalChange: (event) => status.applyGoalChange(event),
       sessionTitleOf: (event) => foldSessionTitle([event])?.title,
-      settleLocalSubmitAck: (reason) => settleLocalSubmitAck(reason),
-      markSubmitLatency: (sessionId, phase) => { submitLatencyTracker.mark(sessionId, phase) },
-      observeDurableSubmission: (rpcId) => pendingSubmissions.observeDurable(rpcId),
+      settleLocalSubmitAck: (reason) => submission.settleLocalSubmitAck(reason),
+      markSubmitLatency: (sessionId, phase) => { submission.markLatency(sessionId, phase) },
+      observeDurableSubmission: (rpcId) => submission.observeDurable(rpcId),
       markContextDirty: () => status.markContextDirty(),
       refreshContextMeasurement: (reason) => status.refreshContextMeasurement(reason),
       // Bound late: these helpers are declared AFTER the startup calls that
@@ -3895,7 +2349,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       applyMainAssistantInput: (input, sessionId) => {
         presentation.applyAssistantInput(input)
         if (input.kind === 'chunk' && isAssistantTokenDelta(input.chunk)) {
-          submitLatencyTracker.mark(sessionId, 'assistant.first')
+          submission.markLatency(sessionId, 'assistant.first')
         }
       },
     })
@@ -4091,10 +2545,10 @@ export function applyRunner(ctx: Context, config: Config): void {
           return merged === text
         },
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
-        markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
+        markDispatch: (sessionId) => submission.markDispatch(sessionId),
         beginLocalSubmission: ({ requestId, text, scope, generation, ackToken }) => {
           const agent = command.agentForLiveScope(scope)
-          beginLocalSubmission(
+          submission.beginLocalSubmission(
             requestId,
             text,
             submissionPlacement('queue', agent.status === 'running'),
@@ -4103,8 +2557,8 @@ export function applyRunner(ctx: Context, config: Config): void {
             ackToken,
           )
         },
-        settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
-        settleSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
+        settleLocalSubmission: (requestId) => submission.settleLocalSubmission(requestId),
+        settleSubmitAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),
         notify: (message, kind) => app.notify(message, kind),
         refuseByTransitionFence: (text) => refuseByTransitionFence(
           text,
@@ -4112,7 +2566,7 @@ export function applyRunner(ctx: Context, config: Config): void {
           (t) => app.setEditorText(t),
           (m, k) => app.notify(m, k),
         ),
-        prepareMessage: (text, requestId) => prepareUserMessage(text, draftImages, submitDeps, { requestId }),
+        prepareMessage: (text, requestId) => submission.prepareMessage(text, requestId),
         prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
       },
     })

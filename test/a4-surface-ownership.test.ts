@@ -285,7 +285,9 @@ test('A4-4: the status commit and the pending-input presentation are surface-own
     'the runner must not derive the active pending subject')
   assert.match(indexSource, /pendingSnapshot: \(sessionId\) => backend\.pendingInputReader\.snapshot\(sessionId\)/u,
     'the runner must inject the semantic pending snapshot only')
-  assert.match(indexSource, /submissionEchoes: \(sessionId\) => submissionPresentation\.snapshot\(sessionId\)/u,
+  // A5b-4 moved the submission-presentation source into the submission
+  // controller owner; the routing source reads it through that narrow seam.
+  assert.match(indexSource, /submissionEchoes: \(sessionId\) => submission\.snapshotEchoes\(sessionId\)/u,
     'the runner must inject the submission-presentation echoes only')
   assert.match(indexSource, /queueTextOf: content => queueTextOf\(/u,
     'the runner must inject the text projection only')
