@@ -163,16 +163,26 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
   // EXACT attachment (`attachmentForSession`) in the same synchronous step the
   // fence proved current — only the display scoped-command read may consult the
   // raw current attachment.
-  const surfaceAt = indexSource.indexOf('const commandRuntime = bindCommandRuntime({')
-  assert.ok(surfaceAt > 0, 'the command runtime binding was not found')
-  // A5b-3b-2: the runner facade moved to its owner, so the binding span now ends
-  // at the owner-side facade build call the composition root keeps.
-  const surfaceEnd = indexSource.indexOf('\n    command.buildRunner(commandRuntime)', surfaceAt)
+  // A5b-3: the binding itself is command-owned, so this span reads the owner;
+  // only the Host-session seams it needs stayed in the composition root.
+  const surfaceAt = commandSurfaceSource.indexOf('const attachRuntime = (): void => {')
+  assert.ok(surfaceAt > 0, 'the command-owned runtime binding was not found')
+  const surfaceEnd = commandSurfaceSource.indexOf('buildRunner(runtime)', surfaceAt)
   assert.ok(surfaceEnd > surfaceAt, 'the command runtime surface span was not found')
-  const surfaceBody = indexSource.slice(surfaceAt, surfaceEnd)
-  assert.equal(count(surfaceBody, 'attachmentForSession('), 7,
+  const surfaceBody = commandSurfaceSource.slice(surfaceAt, surfaceEnd)
+  assert.equal(count(surfaceBody, 'attachmentForSession('), 4,
     'every Direct-fact surface hook must resolve the exact fenced attachment')
-  assert.equal(count(surfaceBody, 'agentNow()'), 1,
+  assert.equal(count(surfaceBody, 'deps.liveAgent()'), 0,
+    'the binding must never resolve the raw current attachment (it goes through the fenced helper)')
+  // The ONE raw current-attachment read stays the display scoped-command list,
+  // now among the injected composition-root seams.
+  const seamsAt = indexSource.indexOf('      // A5b-3: the narrow Direct seams')
+  assert.ok(seamsAt > 0, 'the injected Direct seams were not found')
+  const seamsEnd = indexSource.indexOf('\n      surfaceCatalogContext:', seamsAt)
+  const seamsBody = indexSource.slice(seamsAt, seamsEnd)
+  assert.equal(count(seamsBody, 'command.attachmentForSession('), 2,
+    'the Host-session seams must resolve the exact fenced attachment')
+  assert.equal(count(seamsBody, 'commands.list(agentNow())'), 1,
     'only listScopedCommands may read the raw current attachment (a display read)')
 })
 

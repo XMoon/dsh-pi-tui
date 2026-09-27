@@ -289,6 +289,20 @@ test('A5b-2: the settings owner consumes narrow surface/config capabilities', ()
     'the settings owner must not depend on the whole backend port')
 })
 
+test('A5b-3: the command runtime application binding is command-owned', () => {
+  // Plan §A5b-3 "Move together" lists `commandRuntime = bindCommandRuntime(...)`:
+  // the binding must not stay in the composition root, and the root must reach
+  // it only through the owner's single wiring step.
+  const root = compositionFile('src/app/bootstrap.ts')
+  assert.doesNotMatch(root, /bindCommandRuntime\(/u,
+    'the composition root must not bind the semantic command runtime itself')
+  assert.match(root, /command\.attachRuntime\(\)/u,
+    'the composition root must trigger the command-owned wiring step')
+  const owner = ownerFile('src/app/command/surface.ts')
+  assert.match(owner, /bindCommandRuntime\(/u,
+    'the command surface owner must own the runtime binding')
+})
+
 test('A5b: the Direct-facing viewed-queue slot stays a composition connector', () => {
   // `viewedQueueAgent` is deliberately NOT extracted: the Direct runtime reads
   // it through `getViewedQueueAgent`, so the composition root keeps the single

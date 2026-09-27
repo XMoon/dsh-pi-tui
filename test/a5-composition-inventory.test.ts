@@ -35,7 +35,7 @@ const COMPOSITION_INVENTORY: ReadonlyArray<readonly [string, string]> = [
   ['Direct application runtime', 'createDirectApplicationRuntime({'],
   ['session runtime binding', 'bindSessionRuntime('],
   ['submission runtime binding', 'bindSubmissionRuntime({'],
-  ['command runtime binding', 'bindCommandRuntime({'],
+  ['command runtime binding', 'command.attachRuntime()'],
   ['surface owner', 'createSurfaceRuntime<SessionEvent>({'],
   ['surface mount', 'surface.start({'],
   ['Plugin Manager attach', 'surface.attachPluginManager('],
