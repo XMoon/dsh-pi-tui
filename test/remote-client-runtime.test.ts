@@ -20,8 +20,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -131,6 +132,11 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
       },
       admitPromptContent: async (content: unknown) => content,
     } as never)
+    // `attachments` is a base-layer business dependency of the real
+    // fileUploads row, not an M3-1 target service; no concrete
+    // AttachmentStore plugin ships in the pinned packages (the real
+    // composition belongs to the dsh base layer), so the proven M2
+    // peripheral shape is the fixture here. Every §2.4.1 row itself is real.
     ctx.provide('webServer', { registerUpgrade: () => () => {} })
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
@@ -569,5 +575,27 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
     assert.equal(host.ctx.reflect.get('connection'), undefined, 'the Host runtime disposal removes its rows')
   } finally {
     await host.dispose()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// M. legacy settings migration boundary (plan §23, static assertions)
+// ---------------------------------------------------------------------------
+
+test('M. the Client composition never crosses the Host legacy-settings boundary', () => {
+  // Only Host bootstrap owns the legacy settings migration (plan §23): the
+  // Client composition must not import the migration, read `profileContext`,
+  // or open `$DSH_HOME/settings.yaml(.imported)`. The scan is deliberately
+  // textual (the temp-hygiene-gate convention): it cannot be evaded by
+  // aliasing or re-export because the token itself is banned. The runtime
+  // half of the proof is the whole suite above, which composes, connects,
+  // lists and disposes under the runner's contained temp DSH_HOME.
+  const clientRuntimeDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'remote')
+  for (const file of ['client-runtime.ts', 'host-runtime.ts', 'runtime.ts']) {
+    const source = readFileSync(join(clientRuntimeDir, file), 'utf8')
+    assert.doesNotMatch(source, /legacy-settings-migration/, `${file} must not import the legacy settings migration`)
+    assert.doesNotMatch(source, /profileContext/, `${file} must not read profileContext`)
+    assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open \$DSH_HOME/settings.yaml(.imported)`)
+    assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read \$DSH_HOME`)
   }
 })
