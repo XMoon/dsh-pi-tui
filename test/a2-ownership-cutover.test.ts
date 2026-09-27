@@ -180,9 +180,46 @@ test('no sessionId→Agent lookup reconstructs currentness in the runner', () =>
 })
 
 test('the admission fences use the ownership subject; only the param-agent fences keep the exact-Agent compare', () => {
-  const subjectFences = (indexSource.match(/captureMatches\(/g) ?? []).length
-    + (submissionControllerSource.match(/deps\.captureMatches\(/g) ?? []).length
-  assert.ok(subjectFences >= 5, `expected the admission fences to be subject-based, saw ${subjectFences}`)
+  // Plan A2-2: every asynchronous admission re-checks the ownership SUBJECT,
+  // never an exact captured Agent. Each named site is asserted individually at
+  // its real location: the previous aggregate `>= 5` merged the bootstrap
+  // injection, the three admission checks and the two token-currentness
+  // callbacks into one count, so deleting any ONE of them still passed (A5b
+  // review finding). Aggregate counts must never be the only lock on a set.
+  const lineCount = (source: string, expectedLine: string): number =>
+    source.split('\n').filter(line => line.trim() === expectedLine).length
+
+  // 1. The composition root injects the ownership-subject compare exactly once,
+  //    as the Task-Center source's `subjectMatches`.
+  assert.equal(
+    lineCount(indexSource, 'subjectMatches: (subject) => captureMatches(subject),'),
+    1,
+    'the composition root must inject the ownership-subject compare exactly once',
+  )
+  // 2. The three submission admission checks — the deferred-start resolve, the
+  //    deferred-start persist, and the stale-after-wait branch — each re-check
+  //    the subject.
+  for (const check of [
+    'if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return undefined',
+    'if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return',
+    'if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) {',
+  ]) {
+    assert.equal(
+      lineCount(submissionControllerSource, check),
+      1,
+      `the submission admission must re-check the ownership subject exactly once at its real location: ${check}`,
+    )
+  }
+  // 3. The two owner-token callbacks — the busy/steer delivery and the queue
+  //    pull-back recall — resolve the captured token through the subject compare.
+  assert.equal(
+    lineCount(
+      submissionControllerSource,
+      'isOwnerTokenCurrent: (token) => deps.captureMatches(token as SessionSubject | undefined),',
+    ),
+    2,
+    'the two owner-token callbacks must resolve the captured token through the subject compare',
+  )
   const legacyFences = (indexSource.match(/sessionUnchanged\(/g) ?? []).length
     + (localShellSource.match(/sessionUnchanged\(/g) ?? []).length
   assert.equal(legacyFences, 2,
