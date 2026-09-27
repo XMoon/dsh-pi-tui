@@ -3,7 +3,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
-import { ownerFile, ownerOccurrences, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { aliasAwareConstructionSites, ownerFile, ownerOccurrences, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -248,6 +248,59 @@ test('A5: no production file outside the pinned owners holds a single-owner cons
  * `(surface.start as ...)(...)`, ...) so a parenthesized / cast / non-null call
  * cannot hide a composition-root construction from the guard below.
  */
+/**
+ * Legitimate construction sites OUTSIDE the owner rows above. The detached
+ * Direct/Remote presentation parity oracle builds its own transcript window (it
+ * must not import the surface owner), so it is pinned explicitly here — the
+ * alias-aware guard stays an EXACT whole-tree match rather than a subset.
+ */
+const WHOLE_TREE_EXTRA_SITES: Readonly<Record<string, readonly string[]>> = {
+  TranscriptWindowController: ['src/runtime/remote/presentation-read-shadow.ts'],
+}
+
+/** The identifier a single-owner site calls or constructs. */
+function siteName(site: string): string {
+  return site.replace(/^new /u, '').replace(/[(<{].*$/u, '')
+}
+
+/**
+ * The alias-aware whole-tree companion of the WHOLE single-owner inventory —
+ * including the A5 TOP-LEVEL composition factories
+ * (`createSessionOwnershipCore`, `createSessionScopeAuthority`,
+ * `createDirectApplicationRuntime`, `bindSessionRuntime`,
+ * `bindSubmissionRuntime`, `bindCommandRuntime`, `createSurfaceRuntime`).
+ *
+ * The table above pins the LOCATION with exact strings, and those strings cannot
+ * see an inferred-generic call (`createSurfaceRuntime(deps)`), a parenthesized
+ * callee, `new X()` without type arguments, or an alias
+ * (`const F = bindSessionRuntime; F(…)`,
+ * `import { createSurfaceRuntime as makeSurface } from '…'`). This guard reads
+ * the AST callee identity over production `src/**` through the shared
+ * alias-aware helper and asserts each name is reached ONLY from the file(s) the
+ * table pins, so a second construction anywhere, in ANY spelling, fails.
+ */
+test('A5: every single-owner construction is alias-aware unique across production src/**', () => {
+  const expected = new Map<string, string[]>()
+  for (const [site, , ownerRel] of SINGLE_OWNER_SITES) {
+    const name = siteName(site)
+    const owners = expected.get(name) ?? []
+    if (!owners.includes(ownerRel)) owners.push(ownerRel)
+    expected.set(name, owners)
+  }
+  for (const [name, extra] of Object.entries(WHOLE_TREE_EXTRA_SITES)) {
+    const owners = expected.get(name) ?? []
+    for (const rel of extra) if (!owners.includes(rel)) owners.push(rel)
+    expected.set(name, owners)
+  }
+  for (const [name, owners] of expected) {
+    assert.deepEqual(
+      aliasAwareConstructionSites(name),
+      [...owners].sort(),
+      `${name} must be called/constructed ONLY from ${owners.join(', ')} across production src/** (alias-aware AST sites, never spellings)`,
+    )
+  }
+})
+
 function calledCallees(source: string): string[] {
   const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
   const out: string[] = []
@@ -292,8 +345,10 @@ test('A5: the composition-root construction calls occur only in the composition 
   const rootOnlyCalls = [
     'createSessionOwnershipCore',
     'createSessionScopeAuthority',
+    'createDirectApplicationRuntime',
     'bindSessionRuntime',
     'bindSubmissionRuntime',
+    'createSurfaceRuntime',
     'surface.start',
   ]
   const byCall = new Map<string, string[]>(rootOnlyCalls.map(name => [name, []]))
@@ -311,9 +366,12 @@ test('A5: the composition-root construction calls occur only in the composition 
   }
 })
 
-test('A5: the composition surface registers each Host subscription exactly once', () => {
-  // Plan §39: no duplicate event subscription. The runner registers one
-  // listener per Host event; the surface owns the routing decision.
+test('A5: each Host subscription is registered exactly once across production src/**', () => {
+  // Plan §14/§16 ("no subscription/disposer duplication") and §39: one listener
+  // per Host event, with the surface owning the routing decision. The lock is
+  // PRODUCTION-WIDE (file set + count), not composition-surface-only: a second
+  // registration inside an extracted owner must fail even though the composition
+  // count stays at 1.
   const subscriptions = [
     "ctx.on('session/event'",
     "ctx.on('subagent/start'",
@@ -322,8 +380,19 @@ test('A5: the composition surface registers each Host subscription exactly once'
     "ctx.on('llm/adapters-updated'",
     "ctx.on('settings/document-updated'",
   ]
+  const sources = productionSources()
+  const whole = productionSource()
   for (const subscription of subscriptions) {
-    assert.equal(compositionOccurrences(subscription), 1, `${subscription} must be registered exactly once`)
+    assert.deepEqual(
+      sources.filter(({ source }) => source.includes(subscription)).map(({ rel }) => rel),
+      ['src/app/bootstrap.ts'],
+      `${subscription} must be registered only in src/app/bootstrap.ts across production src/**`,
+    )
+    assert.equal(
+      whole.split(subscription).length - 1,
+      1,
+      `${subscription} must be registered exactly once across production src/**`,
+    )
   }
 })
 

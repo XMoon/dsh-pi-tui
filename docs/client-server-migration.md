@@ -1591,7 +1591,11 @@ TypeScript restructure. It is structural only:
   `app/session/**` (ownership/scope/navigation) and `app/direct/**` (Direct
   composition) are unchanged. All extracted owners consume narrow injected
   capabilities and the semantic ports: no owner imports `app/direct/**` /
-  `runtime/direct/**`, and every write still enters through
+  `runtime/direct/**` (the protocol/DTO packages a few owners use —
+  `dsh-commands` in the submission controller, `dsh-llm` in the local shell and
+  the type-only `dsh-user-approval/types` in the surface runtime — carry no
+  Host-ownership coupling and are not tracked by the boundary gate), and every
+  write still enters through
   `SubmissionRuntime` → `SessionRuntime.withWriter`.
 - **§23 composition-only / giant-root criterion: COMPLETE.** `src/app/bootstrap.ts`
   no longer implements any application handler group. The plan's forbidden
