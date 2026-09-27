@@ -1536,7 +1536,6 @@ export function applyRunner(ctx: Context, config: Config): void {
         generation: () => ownership.generation(),
         currentSessionId: () => ownership.currentSessionId(),
         navigationEpoch: () => ownership.navigationEpoch(),
-        busyEnter: () => tuiSettings?.get().busyEnter,
         signal: () => lifecycleController.signal,
       },
     })
