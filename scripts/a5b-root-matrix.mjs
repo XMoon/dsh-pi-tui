@@ -75,7 +75,10 @@ for (const stmt of startRunner.body.statements) {
 // Which test files mention each declaration (lock re-anchoring candidates).
 // The matrix's own guard file is not a lock candidate: including it would make
 // the artifact self-referential (its own text mentions declaration names).
-const testFiles = readdirSync(join(ROOT, 'test')).filter((f) => f.endsWith('.ts') && f !== 'a5b-root-matrix.test.ts')
+// SORTED before slicing: directory enumeration order is filesystem-dependent and
+// `--check` compares the `tests` array, so an unsorted slice would make the gate
+// non-deterministic across checkouts.
+const testFiles = readdirSync(join(ROOT, 'test')).filter((f) => f.endsWith('.ts') && f !== 'a5b-root-matrix.test.ts').sort()
 const testText = new Map(testFiles.map((f) => [f, readFileSync(join(ROOT, 'test', f), 'utf8')]))
 for (const row of rows) {
   const re = new RegExp(`\\b${row.name.replace(/[$]/g, '\\$')}\\b`)
