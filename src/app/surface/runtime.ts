@@ -1562,10 +1562,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         superseded,
       }
       if (!superseded) {
-        // The durable descendant count this read committed (GLOBAL, never the
-        // open browser's scope-filtered presentation rows).
-        fields.descendants = taskCatalogDescendants
         fields.dirtyAtSettle = taskCatalogRefreshDirty
+        // Only an `ok` read COMMITTED a catalog: a failed/cancelled read leaves
+        // the previous membership in place, so the last committed count must
+        // not be reported as this traversal's descendant scale.
+        if (outcome === 'ok') fields.descendants = taskCatalogDescendants
       }
       taskDiag().info('task catalog refresh profile', fields)
     }
