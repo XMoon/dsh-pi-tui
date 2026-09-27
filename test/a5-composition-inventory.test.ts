@@ -403,10 +403,10 @@ const DYNAMIC_SUBSCRIPTION_SITES: readonly string[] = ['src/runtime/direct/confi
  * `this.ctx.on` receiver and a computed `ctx['on']` are all the SAME fact. A
  * source-string match (`"ctx.on('session/event'"`) would miss all of them.
  */
-function hostSubscriptions(source: string): { events: string[]; dynamic: boolean } {
+function hostSubscriptions(source: string): { events: string[]; dynamicCount: number } {
   const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
   const events: string[] = []
-  let dynamic = false
+  let dynamicCount = 0
   const isCtxOn = (callee: ts.Expression): boolean => {
     const target = unwrapExpression(callee)
     if (ts.isPropertyAccessExpression(target) && target.name.text === 'on') {
@@ -422,12 +422,12 @@ function hostSubscriptions(source: string): { events: string[]; dynamic: boolean
     if (ts.isCallExpression(node) && isCtxOn(node.expression)) {
       const first = node.arguments[0]
       if (first !== undefined && ts.isStringLiteralLike(first)) events.push(first.text)
-      else dynamic = true
+      else dynamicCount += 1
     }
     ts.forEachChild(node, visit)
   }
   visit(file)
-  return { events, dynamic }
+  return { events, dynamicCount }
 }
 
 test('A5: the Host subscription inventory is unique and AST-complete across production src/**', () => {
@@ -439,8 +439,8 @@ test('A5: the Host subscription inventory is unique and AST-complete across prod
   const byEvent = new Map<string, string[]>()
   const dynamicSites: string[] = []
   for (const { rel, source } of productionSources()) {
-    const { events, dynamic } = hostSubscriptions(source)
-    if (dynamic) dynamicSites.push(rel)
+    const { events, dynamicCount } = hostSubscriptions(source)
+    for (let index = 0; index < dynamicCount; index += 1) dynamicSites.push(rel)
     for (const event of events) {
       const sites = byEvent.get(event) ?? []
       sites.push(rel)
@@ -466,7 +466,7 @@ test('A5: the Host subscription inventory is unique and AST-complete across prod
   assert.deepEqual(
     dynamicSites,
     [...DYNAMIC_SUBSCRIPTION_SITES].sort(),
-    'the dynamic (non-literal) ctx.on bridges must stay in the Direct config port',
+    'the dynamic (non-literal) ctx.on bridges must stay in the Direct config port — one call site each, so a SECOND bridge in the same file also fails',
   )
 })
 
