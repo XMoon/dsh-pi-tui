@@ -1636,6 +1636,54 @@ Every implementation move re-exports any existing package-root export from
 `src/index.ts` (guarded by `test/public-entrypoint-compat.test.ts`); removing a
 root export is a separate API PR, never a side effect of this stage.
 
+## M3 test-layer contract (T0 handoff)
+
+M3 adds production composition (Client Context, Connection/Gateway lifetime,
+backend selection, Remote main-surface ownership, the retain → commit → release
+transition). A regression test for such a fact belongs at the lowest layer that
+can actually prove it. The layer vocabulary is:
+
+```text
+L1 semantic-port contract    the src/runtime/*-port.ts contract and its pure mapping
+L2 Direct adapter contract   the Direct implementation of a semantic port
+L3 Remote adapter contract   a Remote adapter against the official Client/Remote face
+L4 Direct ↔ Remote parity    parity/shadow comparison of semantic outcomes
+L5 in-process integration    real Client Context → Gateway → Host, no TUI runner
+L6 application composition   the real runner/application owner wiring and settlement
+```
+
+Rules:
+
+- Prove behavior at the lowest sufficient layer.
+- Do not add runner (L6) tests for adapter-local (L2/L3) facts.
+- Add L5 when Connection/Client lifetime is the fact under test.
+- Add L6 when application owner wiring/settlement is the fact under test.
+- Parity tests compare semantic outcomes, not internal implementation shape.
+- Lifecycle tests assert intermediate ownership/cleanup where required
+  (creation, handoff, retirement), not only the final state.
+
+T0 (Pre-M3 Test Prep) landed the flat runner integration surface this vocabulary
+needs:
+
+- `test/runner-session-bootstrap.test.ts` — main-Session bootstrap/hydration;
+- `test/runner-session-navigation.test.ts` — `/fork`, `/rewind`, `/new`
+  navigation adoption and supersession (M3-3);
+- `test/runner-startup-lifecycle.test.ts` — Loader barrier and startup
+  process-lifecycle (M3-1);
+- `test/runner-session-retirement.test.ts` — cancel → idle → drain → flush →
+  dispose retirement ordering (M3-1 / M3-3);
+- `test/runner-viewer-task-integration.test.ts` — child viewer and Task/Job
+  surfaces bound to a Session owner (M3-5);
+- `test/support/runner-session-fixtures.ts` — shared live-stream frame builders,
+  the production-runner observer probe, and the durable model/selection event
+  builder; and `test/support/remote-generation.ts` — the observable and
+  snapshot-only Connection-generation harnesses shared by the Remote
+  adapter/parity suites.
+
+The split suites stay directly under `test/` so `test:product`
+(`test/*.test.ts`) keeps discovering them; post-M3 may move them into
+directories once the test runner is deliberately made recursive.
+
 ## Known coverage follow-ups
 
 Non-blocking coverage gaps with a named owner lane. These are not current
