@@ -13,7 +13,7 @@ M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, bas
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
 Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
-Pre-M3 TS Architecture Convergence  IN PROGRESS   (M3-oriented application-layer ownership convergence, NO behavior change — see the Pre-M3 TS Architecture Convergence status section)
+Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer ownership convergence, NO behavior change — A5a + A5b; see the Pre-M3 TS Architecture Convergence status section)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -1533,7 +1533,7 @@ Host domain services
 It is explicitly NOT a private giant RPC and NOT a re-implemented
 Session/Job/Plugin Manager reducer.
 
-## Pre-M3 TS Architecture Convergence status (IN PROGRESS, no behavior change)
+## Pre-M3 TS Architecture Convergence status (DONE, no behavior change)
 
 This stage extracts the runner/composition/session/submission/surface
 ownership that M3 must touch out of the ~10.8k-line `src/index.ts`, so M3 is
@@ -1560,31 +1560,56 @@ TypeScript restructure. It is structural only:
   composition root (A5a): it resolves the Host services the owners are built
   from and connects them (plan §23/§26), while every Direct-only fact stays
   behind `app/direct`. No second current-session truth exists.
-- **A5 status — A5a COMPLETE / A5b REQUIRED (approved plan split).** A5a (this
-  PR) is the bootstrap/facade cutover: `src/app/bootstrap.ts` owns the runner
-  composition (`applyRunner` → the named coordinator `startRunner()` → the
-  terminal `handleStartupFailure`; `registerRunnerDisposal` for the fiber
-  disposal), `src/index.ts` is a thin package facade (Cordis contract,
-  `Config` re-export, public root re-exports, the frozen `composeAgent` /
-  `recordedPreset` declarations delegating to `app/direct/composition.ts`, and
-  `apply`), every root helper implementation lives in its natural top-level
-  module, and the Direct Host lookups live behind `app/direct`'s own seam. The
-  entry's Host coupling is now only the `@deepseek-ai/dsh-agent` types its frozen
-  public `composeAgent` overloads declare.
-- **§23 composition-only / giant-root criterion: PARTIAL — BLOCKING STAGE
-  COMPLETION.** `startRunner()` still holds the linear composition body together
-  with the application handler groups (`runLocalShell`, `enterView`,
-  `dispatchViaSession`, `runLocalCommand`, `steerNow`, `dispatchUserInput`,
-  `surfaceEvents`, `applyFooterSettings`, `initLiveSession`, `registerCommands`,
-  …). The empirical dependency map measured ~140 declarations shared across that
-  body with every candidate phase boundary crossing 30–45 of them, so a
-  phase-function split would require lifting essentially all of them (the §24
-  forbidden "everything bag" in declaration form, and a TDZ→`undefined`
-  regression risk). A5b closes §23 by extracting real application handler
-  OWNERSHIP — dependency-cut first, preferring the existing `app/submission` /
-  `app/command` / `app/surface` seams over a new directory. This is BLOCKING: it
-  is **not** in "Known non-blocking follow-ups", and the stage is not complete
-  until A5b merges (the plan's original DONE conditions are unchanged).
+- **A5 status — A5 COMPLETE.** A5a landed the bootstrap/facade cutover:
+  `src/app/bootstrap.ts` owns the runner composition (`applyRunner` → the named
+  coordinator `startRunner()` → the terminal `handleStartupFailure`;
+  `registerRunnerDisposal` for the fiber disposal), `src/index.ts` is a thin
+  package facade (Cordis contract, `Config` re-export, public root re-exports,
+  the frozen `composeAgent` / `recordedPreset` declarations delegating to
+  `app/direct/composition.ts`, and `apply`), every root helper implementation
+  lives in its natural top-level module, and the Direct Host lookups live behind
+  `app/direct`'s own seam. The entry's Host coupling is now only the
+  `@deepseek-ai/dsh-agent` types its frozen `composeAgent` overloads declare.
+  A5b then extracted every application handler group into a real owner, so
+  `src/app/bootstrap.ts` (6186 → 2153 lines) is a composition root in the strict
+  sense: resolve Host services → construct owners → bind/connect → start →
+  dispose/fatal cleanup. Final owner locations: `app/surface/viewer-runtime.ts`
+  (child viewer state/lifecycle), `app/surface/session-presentation.ts`
+  (live-session presentation, compaction/resume/task projections),
+  `app/surface/status-runtime.ts` (status derivation + context measurement),
+  `app/surface/input-history.ts` (client-local history state AND persistence
+  policy), `app/surface/settings-runtime.ts` (footer/display settings + boot
+  display), `app/surface/application-events.ts` (the `TuiAppEvents` adapter) and
+  `app/surface/client-actions.ts` (Client-local clipboard/editor actions);
+  `app/command/surface.ts` (command authority, registration, catalog
+  coordination, the `TuiCommandRunner` facade and the runtime binding),
+  `app/command/model-selection.ts` (sessionless `/model` intent + selection
+  facade) and `app/command/artifacts.ts` (`/export` + `/transcript`);
+  `app/submission/controller.ts` (the input workflow with its FIFO/ack/
+  local-echo state, dispatch, history integration and the writer-section seam)
+  and `app/submission/local-shell.ts` (the `!`/`!!` shell + card lifecycle);
+  `app/session/**` (ownership/scope/navigation) and `app/direct/**` (Direct
+  composition) are unchanged. All extracted owners consume narrow injected
+  capabilities and the semantic ports: no owner imports `app/direct/**` /
+  `runtime/direct/**`, and every write still enters through
+  `SubmissionRuntime` → `SessionRuntime.withWriter`.
+- **§23 composition-only / giant-root criterion: COMPLETE.** `src/app/bootstrap.ts`
+  no longer implements any application handler group. The plan's forbidden
+  residuals (`runLocalShell`, `dispatchViaSession`, `runLocalCommand`, `steerNow`,
+  `dispatchUserInput`, `enterView`, `exitView`, `surfaceEvents`,
+  `applyFooterSettings`, `initLiveSession`, `registerCommands`,
+  `openRewindPicker`, `refreshStatusCheap`) are absent, there is no
+  `TuiAppEvents` / `TuiCommandRunner` implementation literal, and no client-local
+  history state/policy, command claim/catalog slot, submission FIFO/ack/
+  local-echo state, viewer mutable state or footer/display state machine remains
+  in the root. `test/a5b-bootstrap-closure.test.ts` locks those categories and
+  the single-authority/construction facts; the ownership matrix
+  (`test/a5b-root-declaration-matrix.json`, regenerated by the committed
+  `scripts/a5b-root-matrix.mjs`, gated by `test/a5b-root-matrix.test.ts` and its
+  deep `--check`) classifies every remaining root declaration by the plan §7.6.1
+  categories with a per-row sweep verdict and an EMPTY `MUST_MOVE` residual.
+  The §23 criterion is therefore complete without qualification; the plan's DONE
+  conditions are unchanged.
 - **Ownership targets** (`src/app/**`): `bootstrap` (composition root),
   `direct` (Direct application-side Host coupling + Direct-only facades),
   `session` (session navigation/lifetime + opaque `SessionSubject` authority),
