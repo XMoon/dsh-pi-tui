@@ -167,24 +167,26 @@ async function createHostFixture(
     poison?.(ctx)
   } catch (error) {
     disposed = true
-    // Error-isolated teardown: both steps run even when the second fails,
-    // and the ORIGINAL setup error is rethrown (a disposal failure rides
-    // its cause chain via mergeCause, never overwriting an existing cause).
-    let persistenceError: unknown
+    // Error-isolated teardown: both steps run even when one fails, and the
+    // ORIGINAL setup error is rethrown as primary (cleanup failures ride its
+    // cause chain via mergeCause, never masking it).
+    const cleanupErrors: unknown[] = []
     try {
       await persistenceFiber?.dispose()
     } catch (disposeError) {
-      persistenceError = disposeError
+      cleanupErrors.push(disposeError)
     }
     try {
       await ctx.fiber.dispose()
     } catch (ctxError) {
-      if (persistenceError !== undefined) {
-        mergeCause(ctxError instanceof Error ? ctxError : new Error(String(ctxError)), persistenceError)
-      }
-      throw ctxError
+      cleanupErrors.push(ctxError)
     }
-    if (persistenceError !== undefined) throw persistenceError
+    if (cleanupErrors.length > 0) {
+      const secondary = cleanupErrors.length === 1
+        ? cleanupErrors[0]
+        : new AggregateError(cleanupErrors, 'fixture: teardown disposal failures')
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
+    }
     throw error
   }
   const dispose = async (): Promise<void> => {
