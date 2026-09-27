@@ -11,9 +11,13 @@
 > classification is READY only when every method of the semantic port has a proven
 > Remote/public source; a nearby namespace with a similar name is never enough.
 >
-> Review correction: this revision closes the M3-0 review gaps in Host/Client
-> dependency closure, CommandRuntimeSurface migration, Session handoff ordering and
-> settings-mirror reconnect/race semantics. Those are frozen decisions, not TODOs.
+> Review correction: this revision closes both M3-0 review passes. The first
+> closed Host/Client dependency closure, CommandRuntimeSurface migration, Session
+> handoff ordering and settings-mirror reconnect/race semantics. The final
+> reverse-coupling pass additionally freezes Client-owned slash-command execution,
+> tool-card presentation, image submit/read ownership, whole-log `/rewind`
+> navigation, and the rc.2 skill-invalidation limitation. Those are frozen
+> decisions, not TODOs.
 
 ## 1. Baseline
 
@@ -71,8 +75,9 @@ assembly that advertises exactly the capabilities it serves
 | `PresetCatalog` | `available`, `roster`, `defaultId`, `resolve`, `selectSessionPreset` | `agentPresets/list\|read\|select` (`dsh-agent-preset-registry/lib/typert.remote-client.d.ts:16-18`); `agentPreset` projection (`lib/types/types.d.ts:57-60`) | READY (adapter exists; verify `resolve` coverage) | — |
 | `SkillCatalogCapability` | `listHumanSkills` | `skills/list({sessionId}, signal)` (`dsh-api-session-controller/lib/typert.remote-client.d.ts:37,60`; `lib/types/types.d.ts:245-258`) | NEEDS_ADAPTER | one mapping; `RemoteSurfaceAuthorityReader` already proves the shape |
 | `SkillCatalogCapability` | `standing(presetId, cwd)` (sessionless) | **not found** — every skills endpoint is Session-addressed | INTENTIONAL_UNSUPPORTED_IN_M3 | deferred-start skill completion only; owner M3-3A, fail closed |
-| `SkillCatalogCapability` | `resolveSkill(name)` (skill body) | **not found** — `skills/list` has no body; there is no `skills/read` | INTENTIONAL_UNSUPPORTED_IN_M3 | the Host pre-step owns body injection (`hostLoadsSkillBody` can report the Host-owned loader); owner M3-3A |
-| `SkillCatalogCapability` | `hostLoadsSkillBody`, `onSkillsChange` | `hostLoadsSkillBody` = capability fact; changes = the `skills` read re-run (no dedicated event) | NEEDS_ADAPTER | adapter-local rule; owner M3-3A |
+| `SkillCatalogCapability` | `resolveSkill(name)` (skill body) | **not found** — `skills/list` has no body; there is no `skills/read` | INTENTIONAL_UNSUPPORTED_IN_M3 | the Remote branch never loads/injects a skill body client-side. Human skill gestures stay literal and Host-owned; the `dsh-tool-skill` pre-step performs the body injection for the supported pi-tui composition. Owner M3-3A/M3-4 |
+| `SkillCatalogCapability` | `hostLoadsSkillBody(sessionId)` | no rc.2 wire capability bit. For M3's supported in-process pi-tui Host, the generated official preset compositions are a **composition invariant** and mount `@deepseek-ai/dsh-tool-skill` | RESOLVED_COMPOSITION_CONTRACT | M3-1 proves the supported preset compositions carry `tool-skill`; the Remote adapter consumes a composition-owned fact, never probes a hidden Host service. M5/external attach MUST NOT reuse this in-process assumption and fails closed unless a public capability exists |
+| `SkillCatalogCapability` | `onSkillsChange(listener)` | Host `skills/change` exists, but rc.2 deliberately does **not** include it in the forwarded Remote-event allowlist; `$on('skills/change')` is not a legal Client event | INTENTIONAL_UNSUPPORTED_IN_M3 | no private forwarding RPC/event. Remote skill catalogs are strongly re-read on Session/binding entry, explicit `/reload`, and `connection/reset`; a live provider-only change between those boundaries may leave autocomplete stale, but execution never injects a stale Client-side body and Host authority decides the gesture. Owner M3-3A/M3-4 |
 
 ### 2.3 `ConfigPort` decomposition
 
@@ -121,10 +126,11 @@ not mount a second job controller. The additive closure is:
 | 1 | `@deepseek-ai/dsh-client-connection` | provides Host `connection`; its Host entry injects `credentials`; no WebServer is required for the in-process RPC carrier |
 | 2 | `@deepseek-ai/dsh-client-file-upload` | provides Host `fileUploads`; injects `agents`, `attachments`, `commands`, `connection`; required by the Session controller even though generic TUI attachment UX remains fail-closed until D4 |
 | 3 | `@deepseek-ai/dsh-session-stats` | registers the durable whole-log `sessionStats` projection used by the Remote command/status metrics facade; the base bundle supplies `sessionProjections` but does **not** mount this Web-owned projection unit |
-| 4 | `@deepseek-ai/dsh-api-session-controller` | provides Session/skills/file-reference Remotes and the Session Client's Host authority; its Host injection includes `fileUploads`; it exposes the projection registered in the preceding row through normal Session snapshots/updates |
-| 5 | `@deepseek-ai/dsh-api-settings-controller` | provides settings/credentials Remotes used by `ConfigPort` |
-| 6 | `@deepseek-ai/dsh-api-remotes` | registers the forwarded-event allowlist used by approval/questions/settings/credentials/etc.; reuses the base `typertGateway` |
-| 7 | `@deepseek-ai/dsh-session-log-export` | registers `SESSION_LOG_EXPORT_PATH = /api/session.export` on Host `connection.fetch`; without this row `SessionArchivePort` has a client carrier but no Host route |
+| 4 | `@deepseek-ai/dsh-session-turn-outline` | registers the whole-log `turnOutline` projection used by `/rewind` and explicit deep-history navigation; it keeps every turn addressable without hydrating the complete event log |
+| 5 | `@deepseek-ai/dsh-api-session-controller` | provides Session/skills/file-reference Remotes and the Session Client's Host authority; its Host injection includes `fileUploads`; it exposes the projections registered in the preceding rows through normal Session snapshots/updates |
+| 6 | `@deepseek-ai/dsh-api-settings-controller` | provides settings/credentials Remotes used by `ConfigPort` |
+| 7 | `@deepseek-ai/dsh-api-remotes` | registers the forwarded-event allowlist used by approval/questions/settings/credentials/etc.; reuses the base `typertGateway` |
+| 8 | `@deepseek-ai/dsh-session-log-export` | registers `SESSION_LOG_EXPORT_PATH = /api/session.export` on Host `connection.fetch`; without this row `SessionArchivePort` has a client carrier but no Host route |
 
 `@deepseek-ai/dsh-api-job-controller` is part of the required Host capability
 set but is **reused** from the already-mounted TUI row (`jobController`); the
@@ -210,7 +216,8 @@ exact dev/test dependency where the repository's compatibility policy requires
 it). M3-1 therefore makes the runtime composition closure explicit in
 `package.json`: `dsh-client-connection`, `dsh-client-file-upload`,
 `dsh-api-gateway`, `dsh-api-job-controller`, `dsh-api-settings-controller`,
-`dsh-api-remotes`, `dsh-session-stats`, and `dsh-typert-registry` are peers at
+`dsh-api-remotes`, `dsh-session-stats`, `dsh-session-turn-outline`, and
+`dsh-typert-registry` are peers at
 the supported DSH floor and exact rc.2 dev/test dependencies, unless already
 declared in the appropriate section. The root must never rely on one of these
 only as a transitive dependency of `dsh-api-remotes` or another DSH package.
@@ -222,7 +229,9 @@ Forwarded Host events consumed by the TUI come from the mounted
 `permission-presets/catalog-changed`, `llm/adapters-updated`,
 `agent-preset/selected`, `plugin-manager/changed|install-log|install-state`,
 `goal/activation-changed`, `api-session/activity|added|error|removed|status`, and
-`commands/change`.
+`commands/change`. `skills/change` is intentionally **not** in that allowlist in
+rc.2; §2.2 freezes the resulting M3 behavior rather than inventing a private
+forwarder.
 
 ## 3. Non-Backend application seams
 
@@ -238,6 +247,10 @@ left implicit merely because it is not a `Backend` property.
 | Seam | Consumer | Existing Remote adapter | Required Remote/public source | Status | M3 stage |
 |---|---|---|---|---|---|
 | `PresentationReader` | `src/app/surface/session-presentation.ts:74-82` (injected Direct facts) | `runtime/remote/presentation-read-remote.ts` (READY) | `SessionBinding.eventSource` + `SessionFace` snapshot + `loadOlder()` | NEEDS_APPLICATION_SEAM | M3-4 |
+| rewind candidate / deep-history source | `openRewindPicker` → `collectRewindCandidates(session.snapshotEvents())` today | none | whole-log `turnOutline` projection for candidate identity/preview + `SessionFace.loadThrough(seq)` only when the selected/visible turn needs its loaded events; exact binding-generation fence around the operation | NEEDS_APPLICATION_SEAM | M3-4 |
+| tool-card presentation | `bootstrap.ts` resolves `ctx.tools.get(name, liveAgent)` and calls Host `ToolDefinition.presentCall/presentResult` | none | Client derives cards from raw durable/transient `tool/call` + `tool/result` fields and persisted metadata/content; Host presenter callbacks never cross the Client contract. TUI/extension renderers stay Client-owned; unknown/custom tools use the existing bounded generic/raw fallback | NEEDS_APPLICATION_SEAM | M3-4 |
+| image draft / prompt preparation | `bootstrap.ts` reads `ctx.attachments.imageLimits`, `ctx.attachments.saveImages`, `ctx.llm.resolveModelInfo` during Direct preparation | none | Client-local draft bytes + safety caps; after a Session exists, validate against the Session `imageLimits` projection when available and serialize official `PromptContentPart {type:'image', mediaType, data, name?}`. Host `session/prompt` owns durable admission and model-modality refusal | NEEDS_APPLICATION_SEAM | M3-4 |
+| durable Session image read | `surface.start(...readImage)` calls Host `ctx.attachments.readImage(ref)` | none | official `session/attachment({sessionId, attachmentId})`, addressed by the exact main/child Session and fenced by binding generation. Recalled images that need re-send bytes use the same authorized read before prompt serialization | NEEDS_APPLICATION_SEAM | M3-4 main / M3-5 child viewer |
 | `TaskReader` | `src/task-browser-runtime.ts`, `src/app/surface/runtime.ts:279-305` | `runtime/remote/task-read-remote.ts` (READY) | `projectionsBySession.subagentCatalog` + `IJobs.watchRows`; full descendant tree stays an upstream gap | NEEDS_APPLICATION_SEAM | M3-5 |
 | `SurfaceAuthorityReader` | shadow only today | `runtime/remote/surface-authority-remote.ts` (READY) | `commands/list` + `skills/list` | NEEDS_APPLICATION_SEAM | M3-4 |
 | `SubmissionPresentation` | `src/app/submission/controller.ts:431` (hardwired Direct) | `RemoteSubmissionPresentation` (`src/submission-presentation.ts:129-161`) | official `SessionSnapshot.pendingSubmissions` (`.../client/contract/snapshot.d.ts:58-61`) | NEEDS_APPLICATION_SEAM (only hardwired non-Backend source) | M3-4 |
@@ -288,6 +301,42 @@ Remote-specific risk: the Direct path reads the same Host projection registry, s
 the Remote read has the identical availability contract. `session.projections` is
 the wire read (`dsh-api-session-controller/lib/typert.remote-client.d.ts:28`).
 
+### 3.3 Client command execution plane
+
+The command *catalog/claim* and command *callback execution* are different
+ownership planes. M3-0 freezes that split because the current Direct implementation
+registers TUI callbacks into Host `ctx.commands`, which cannot survive M4 without
+moving a UI callback across the process boundary.
+
+| Command class | Authority / discovery | Execution owner under wire mode |
+|---|---|---|
+| Host command | `commands/list` / `RemoteSurfaceAuthorityReader`; Host claim semantics remain authoritative | `HostCommandPort` → official `commands/execute` |
+| TUI built-in command | Client-local static registration | Client Context / TUI runner; never registered into Host `ctx.commands` |
+| TUI skill wrapper | Client-local command surface; live skill metadata from §2.2 | Client Context validates/claims the advertised skill name, then converges the Remote execution to the official literal `/name [instructions]` user gesture; Host `dsh-tool-skill` pre-step resolves the current definition and injects the body. The Remote branch never calls Client `skills/read` because rc.2 exposes none |
+| Extension command contribution | Client extension registry | the contribution callback executes in the Client Context that owns it |
+
+M3-4 therefore extracts the existing TUI command handlers from the Host command
+service into one Client-local execution registry/normalizer. It may reuse the
+current parser/result vocabulary, but **no handler function, component or callback
+is registered into or invoked through Host `ctx.commands` on the Remote branch**.
+The catalog shown to the user is still the Client-side merge of Host descriptors,
+TUI built-ins and extension contributions. Host claim/collision precedence stays
+unchanged: a Host descriptor can claim a name/line; a Client contribution can
+never erase that Host authority.
+
+`RemoteSurfaceAuthorityReader` remains metadata-only and `HostCommandPort` remains
+Host-execution-only. Neither is widened to carry Client callbacks. The current
+Direct per-skill wrapper (`loadSkill` + TUI-owned `renderSkillInvocation`) remains
+a Direct compatibility implementation; the Remote branch deliberately converges
+that command onto rc.2's official explicit-user-skill gesture so the Host performs
+the authoritative `get`/`isUserInvocable` recheck at pre-step time. The visible
+slash-command claim and trailing-instructions UX are preserved; the private
+Direct skill-body renderer is **not** promoted into a cross-process contract.
+L6 must prove a TUI built-in and an extension command execute without
+`ctx.commands.execute`, a skill wrapper submits exactly one literal user gesture
+without a Client-side body load, and an advertised Host command still runs
+exactly once through `HostCommandPort`.
+
 ## 4. Client / Host / Connection lifetime
 
 ### 4.1 Ownership graph (one owner per resource)
@@ -299,6 +348,7 @@ Existing DSH Host Context (base + normal pi-tui patch)
   '- RemoteHostRuntime (M3-1; dynamic, experimental owner)
        |- Host ConnectionService
        |- Host fileUploads
+       |- sessionStats + turnOutline projection units
        |- api-session-controller
        |- api-settings-controller
        |- api-remotes (forwarded events)
@@ -344,7 +394,7 @@ Frozen disposal order:
 ```text
 adapter subscriptions / in-flight ops / exact Session refs
   -> Client Context (Jobs -> Sessions -> fileUpload -> contributions -> Gateway -> Connection -> typert)
-  -> RemoteHostRuntime (session-log-export -> api-remotes -> settings -> session -> fileUploads -> Host connection)
+  -> RemoteHostRuntime (session-log-export -> api-remotes -> settings -> session -> turnOutline -> sessionStats -> fileUploads -> Host connection)
   -> existing Host persistence / Host Context lifecycle
   -> restore scoped process globals (module-loader shim must already be gone)
 ```
@@ -523,6 +573,9 @@ or the parked-owner drain.
 |---|---|---|---|---|
 | `LiveSessionAgent` (`session-presentation.ts:52-58`) | opaque live-session identity (id/header/log) | Client binding generation + `ISessions.binding(id)` | `app/session` | M3-4 |
 | `session.snapshotEvents()` (`:305-308`) | cold hydration of transcript/stats/todo/compaction | `SessionBinding.eventSource` window + `loadOlder()` | presentation | M3-4 |
+| full-log `snapshotEvents()` for `/rewind` | enumerate every completed human turn without changing normal transcript retention | `turnOutline` whole-log projection; `loadThrough(seq)` only for a turn whose event detail must be materialized | command/application | M3-4 |
+| `ctx.tools.get(...).presentCall/presentResult` | specialized tool cards during live output and replay | Client-only card derivation from raw event args/result/content/meta; extension renderers remain Client-owned; unknown tool falls back generically | presentation | M3-4 |
+| `ctx.attachments.saveImages/readImage` + `ctx.llm.resolveModelInfo` | draft image admission, durable image replay/recall, model capability preflight | official image prompt parts + Host `session/prompt` admission; `session/attachment` for authorized durable reads; Session `imageLimits` projection for post-create preflight | submission/presentation | M3-4 main / M3-5 viewer |
 | `session.header.cwd` (`:304`) | per-session workspace for history recall/shell | Client list/binding `cwd` | status/session | M3-4 |
 | `installModelSelection(agent)` (`bootstrap.ts:838`) | Agent-scoped model selection install | `modelSelection` projection | catalog/app | M3-4 |
 | `planActive(agent)` (`bootstrap.ts:840-843`) | plan badge + Esc gating | `plan` projection | status | M3-4 |
@@ -537,8 +590,12 @@ or the parked-owner drain.
 | command runtime `sessionStats` / `lastAssistantText` | `/status`, `/copy`/read facades need owner-scoped historical facts | §3.2 Remote metrics + paged last-assistant readers over exact binding/projections | command/application | M3-4 |
 | command runtime exact-Agent catalog target | live `/reload`/catalog refresh must not retarget after switch | exact `SessionScope` + binding generation; `RemoteSurfaceAuthorityReader` + `SkillCatalogCapability` | command/application | M3-4 |
 | command runtime `promptAdmission(agent, ...)` | Direct per-Agent prompt/image admission | writer/scope admission + Client-local preflight + official Session write; unsupported attachment class fails before dispatch | submission/command | M3-4 |
+| TUI/extension command callback via `ctx.commands.execute` | normalize/execute Client-owned slash-command callbacks | Client-local execution plane from §3.3; Host commands alone cross `HostCommandPort` | command/application | M3-4 |
 
 No fake `Agent` wrapper is introduced anywhere, including inside the command runtime.
+No Host callback is moved into the Client: tool presentation and TUI command
+callbacks become Client-owned behavior, while Host tool/command semantics remain
+Host-owned.
 
 ## 7. Locality matrix
 
@@ -556,7 +613,10 @@ in-process wire, M4/M5 change placement only.
 | `@file` existence/canonicalization | | ✓ | **no callable rc.2 expression** (the Host canonicalizes internally when promoting prompt file parts) | fail closed; relative mentions keep their literal text |
 | Session persistence/log, history window | | ✓ | Client Session binding / `session.list\|page\|projections\|search` | remote Host |
 | Session archive generation | | ✓ | HTTP `GET /api/session.export` via the composition-owned fetch | remote Host |
-| attachment byte storage | | ✓ | `fileUploads/upload` (needs the D4 receipt path) | D4 (post-M3) |
+| `/image` / clipboard image file read + draft bytes | ✓ | | local filesystem / memory only | Client-local staging; before a Session exists only TUI safety/RAM caps apply |
+| image prompt admission + durable image storage | draft bytes originate Client-side | ✓ | official `Session.prompt(PromptContentPart[])`; Session `imageLimits` projection; Host returns authoritative attachment/model refusal | supported in M3 after Session creation; no `fileUploads` receipt is required for image parts |
+| durable Session image display / recall | | ✓ | `session/attachment({sessionId, attachmentId})` | remote Host read, exact Session/binding fenced |
+| generic file attachment byte storage | Client-local file source | ✓ | `fileUploads/upload` receipt transaction | D4 (post-M3); remains unsupported in M3 |
 | Plugin Manager truth | | ✓ | `pluginManager/*` + forwarded events | remote Host |
 | settings / credentials / permissions / preset default | | ✓ | `settings/*`, `credentials/*`, `permissionPresets/*`, `agentPresets/*` | remote Host |
 | provider authorization sign-in | | ✓ | **no rc.2 expression** | fail closed (INTENTIONAL_UNSUPPORTED_IN_M3) |
@@ -573,11 +633,19 @@ M3 is an in-process wire on one machine, so the "explicitly split" operations ke
 their current Client-local behavior unchanged under M3: `!`/`!!` (spawns in the TUI
 process with the TUI cwd), `/image` and `/attach` local reads, the external editor,
 `/export`/`/transcript` file writes (Save Location), and `/open`-style working
-directory changes. What M3 must NOT do is let a Host-owned semantic run on the
-Client filesystem: `@file` already goes through `HostFilePort`, and the fail-closed
-rows above apply. M5 (external attach) is where `!`/`!!`, the external editor and
-local file reads must fail closed until a Host seam exists; that is a placement
-change, not a semantic rewrite, because the ownership above is already correct.
+directory changes. A local `/image` read is only **staging**: before a Session
+exists the TUI can enforce only its own memory/safety cap; after creation/retain,
+the exact Session's `imageLimits` projection is re-applied before serialization,
+and Host `session/prompt` remains the final image/model admission authority. A
+recalled durable image is never re-sent by citing a Host-private reference: the
+Client first reads its authorized bytes through `session/attachment` and submits
+ordinary official image data.
+
+What M3 must NOT do is let a Host-owned semantic run on the Client filesystem:
+`@file` already goes through `HostFilePort`, and the fail-closed rows above apply.
+M5 (external attach) is where `!`/`!!`, the external editor and local file reads
+must fail closed until a Host seam exists; that is a placement change, not a
+semantic rewrite, because the ownership above is already correct.
 
 ## 8. Extension ownership
 
@@ -650,7 +718,8 @@ stay `indeterminate` (`src/runtime/remote/write-failure.ts:131-153`).
 | `@file` existence-based canonicalization | INTENTIONAL_UNSUPPORTED_IN_M3 | no callable canonicalization remote; prompt file parts carry only an upload `receiptId`; the Host canonicalizes internally | M3-3A | L3 test: relative mentions stay literal; no local-fs probe |
 | provider authorization sign-in (`/login` device/OAuth path) | INTENTIONAL_UNSUPPORTED_IN_M3 | `dsh-authorization` publishes no client/remote face; no `authorization` namespace and no authorization event in the 27-entry forwarded allowlist | M3-3B | fail-closed notice; API-key `/login` still works via `credentials/set` |
 | `credentials.listRecords` / `deleteRecord` (only `/logout` record cleanup) | INTENTIONAL_UNSUPPORTED_IN_M3 | no `credentials/list` or record-delete endpoint; key grammars are disjoint | M3-3B | fail-closed notice; reference unset still works |
-| sessionless standing skill catalog + skill body read | INTENTIONAL_UNSUPPORTED_IN_M3 | `skills/list` is Session-addressed and list-only; no `skills/read` | M3-3A | fail-closed; the Host pre-step owns body injection |
+| sessionless standing skill catalog + Client-side skill body read | INTENTIONAL_UNSUPPORTED_IN_M3 | `skills/list` is Session-addressed and list-only; no `skills/read` | M3-3A/M3-4 | fail-closed for standing reads; live human gesture stays literal and Host pre-step owns body injection |
+| live `SkillCatalogCapability.onSkillsChange` hot invalidation | INTENTIONAL_UNSUPPORTED_IN_M3 | Host `skills/change` is not in rc.2's forwarded Remote-event allowlist; no legal Client `$on` key exists | M3-3A/M3-4 | no private event seam; strong re-read on binding entry, `/reload`, and `connection/reset`; invocation never uses a stale Client-side body |
 | `refreshTitle` on Remote | INTENTIONAL_UNSUPPORTED_IN_M3 | no official Client verb | M3-3A | existing explicit `unsupported` outcome |
 | generic client-local file attachment on the wire | INTENTIONAL_UNSUPPORTED_IN_M3 (D4) | needs the upload receipt transaction; `fileUploads/upload` exists as the D4 relief | D4 | D2.2 serializer already fails closed before dispatch |
 | full descendant subagent tree | POST_M3_NON_BLOCKING | no exact official equivalent (D1 skip) | post-M3 / upstream | direct-child catalog parity only |
@@ -659,13 +728,19 @@ stay `indeterminate` (`src/runtime/remote/write-failure.ts:131-153`).
 | `interaction.setApprovalPolicy` carrier; `permissions.setDefaultPreset` | DECISION_GATE_WITH_FAIL_CLOSED_DEFAULT | no dedicated rc.2 approval-policy endpoint. M3-3B first probes `commands/execute` using the official permission command line (the same public carrier already used by permission-preset apply); if that does not preserve the required session-scoped semantics, the affected `/settings` row is explicitly unsupported. There is no hidden Host fallback | M3-3B | L5 proves the command carrier **or** L3/L6 prove the disabled row and notice; either outcome closes the gate |
 | synchronous `TuiSettingsConfig.get()` over async settings Remote | RESOLVED_ADAPTER_CONTRACT | §2.3 freezes listener-before-read, serialized describe, `settings/document-updated` + `connection/reset` invalidation, in-flight invalidation rerun and post-write authoritative refresh | M3-3B | race tests: event-during-read, disconnect-change-reconnect, write/read round trip |
 | Client runtime uses Web module-loader bundles | RESOLVED_PACKAGING_ADAPTATION | exact six-entry shim allowlist and lifecycle are frozen in §2.4.3/§4.2; `/remote` contributions stay native ESM | M3-1 | L5 connect/list/reconnect/dispose + allowed/forbidden bundle-loader tests; no browser fallback reached |
-| Host composition dependency closure | RESOLVED_COMPOSITION_CONTRACT | §2.4.1 includes Host connection → fileUploads → session-controller, settings, forwarded events and session-log-export; existing jobController is reused, not duplicated | M3-1 | L5 real composition (no `fileUploads`/`fileUpload` test doubles) + archive route registration probe |
+| Host composition dependency closure | RESOLVED_COMPOSITION_CONTRACT | §2.4.1 includes Host connection → fileUploads → sessionStats/turnOutline → session-controller, settings, forwarded events and session-log-export; existing jobController is reused, not duplicated | M3-1 | L5 real composition (no `fileUploads`/`fileUpload` test doubles) + `sessionStats`/`turnOutline` projection + archive route probes |
 | `CommandRuntimeSurface` Direct facts | RESOLVED_APPLICATION_CONTRACT | §3.2 classifies all nine hooks; no Remote path may call `attachmentForSession`/resolve an Agent | M3-4 | L6 command runtime on wire + static/runtime no-Direct-Agent assertion |
+| TUI/extension slash-command callback execution | RESOLVED_APPLICATION_CONTRACT | §3.3 separates Host descriptor/execution authority from Client callback execution; no Client callback enters Host `ctx.commands` | M3-4 | L6 TUI built-in + extension callback execute locally; Host command still executes once through `HostCommandPort` |
+| tool-card presenter callbacks | RESOLVED_APPLICATION_CONTRACT | rc.2 Client cards derive from raw event fields; Host `presentCall/presentResult` values are not a Client transport. §3.1/§6 freeze Client-side derivation + generic fallback | M3-4 | live + replay parity for representative shell/edit/read/web/image cards; static no-`ctx.tools` Remote assertion |
+| Remote image submit/read | RESOLVED_APPLICATION_CONTRACT | official image prompt parts + Host `session/prompt` admission, Session `imageLimits` projection, and `session/attachment` durable reads cover images without the D4 generic-file receipt path | M3-4/M3-5 | sessionless staging, first-create recheck, model refusal, recalled-image resend, main/child durable read |
+| `/rewind` full-history candidate source | RESOLVED_APPLICATION_CONTRACT | `turnOutline` is the whole-log turn index; `loadThrough(seq)` materializes only selected/needed old turns without changing normal bounded transcript retention | M3-1/M3-4 | candidate beyond initial window is visible; generation replacement/abort discards stale picker work |
 
 **No pinned rc.2 M3_BLOCKER remains after these decisions.** The approval-policy
 row is a bounded implementation decision with an already-frozen fail-closed
 outcome; every other formerly open item now has an exact owner, dependency
-closure and acceptance proof. M3-1 may start only from this revised contract.
+closure and acceptance proof. The intentionally unsupported skill hot-refresh
+behavior is explicit and does not authorize a private Remote event. M3-1 may
+start only from this revised contract.
 
 ## 11. Final M3 PR train
 
@@ -683,7 +758,8 @@ Each stage declares its L1–L6 test layer
   specifier rule. `cordis.patch.yml` does **not** gain experimental Remote rows.
 - **Host composition**: dynamically mount the exact §2.4.1 official closure on
   the existing Host Context; reuse the existing `jobController`; no test-double
-  `fileUploads`; prove `/api/session.export` is registered.
+  `fileUploads`; register both `sessionStats` and `turnOutline`; prove
+  `/api/session.export` is registered.
 - **Client composition**: exact §2.4.3 order, including official Client
   `fileUpload` before Sessions and the explicit `fileUploads` `/remote`
   contribution. The six-entry scoped loader shim is the only Node adaptation.
@@ -691,8 +767,8 @@ Each stage declares its L1–L6 test layer
   Clients, readiness, generation/reset observation and reverse disposal. No TUI
   product cutover.
 - **Tests**: L5 `test/remote-client-runtime.test.ts`: real connect/list,
-  fileUpload dependency present, `sessionStats` projection present, Job roster,
-  reconnect, same-binding probe, archive-route registration, dispose; zero leaked
+  fileUpload dependency present, `sessionStats` + `turnOutline` projections
+  present, Job roster, reconnect, same-binding probe, archive-route registration, dispose; zero leaked
   subscriptions/fibers/refs; loader allowlist test; architecture-gate tests.
 - **Must not change**: `src/startup.ts` zero-dependency/static graph;
   `cordis.patch.yml` Direct composition; public CLI/entry exports; production
@@ -727,7 +803,8 @@ Each stage declares its L1–L6 test layer
   `src/runtime/remote/skill-catalog-remote.ts`, new
   `src/runtime/remote/host-file-remote.ts` (session scope),
   `session-reader-remote.ts` `measureContext` via the `contextPressure`
-  projection.
+  projection. `SkillCatalogCapability.onSkillsChange` remains the explicit rc.2
+  unsupported class from §2.2/§10; no private forwarded event is added.
 - **Behavior axis**: the capabilities the main interaction needs.
 - **Tests**: L3 per adapter + selected L4/L5 parity; the published-contract gate.
 - **Must not change**: semantic port shapes; Direct adapters.
@@ -763,17 +840,25 @@ Each stage declares its L1–L6 test layer
   prompt/steer/queue; model/preset; transcript hydration + live output;
   assistant-stream ingress from `eventSource`; **all §3.2 command-runtime
   facts** (commands/running/routing/approval/stats/last-assistant/catalog
-  refresh/prompt admission).
+  refresh/prompt admission); the §3.3 Client command execution plane; whole-log
+  `/rewind` over `turnOutline`; Client-derived tool cards; main-Session image
+  staging/prompt admission and durable image reads.
 - **Behavior axis**: the first complete main TUI on the in-process wire. The
   command layer keeps its scope/currentness semantics but has no Direct
-  Agent/Session resolver on this branch.
+  Agent/Session resolver on this branch; no TUI/extension callback is executed
+  by Host `ctx.commands`, and no tool card calls Host `ctx.tools`.
 - **Tests**: L6 application composition; transcript/status/presentation parity;
-  command catalog/claim parity; cold paged last-assistant; Remote `SessionStats`
-  parity; catalog-refresh stale fence; busy/queue/image prompt-admission parity;
-  static/runtime assertion that `attachmentForSession` is not reachable from the
+  command catalog/claim parity plus local TUI/extension execution; cold paged
+  last-assistant; Remote `SessionStats` parity; catalog-refresh stale fence;
+  `/rewind` candidate outside the initial event window; representative tool-card
+  live/replay parity; sessionless image staging → first-create limit recheck →
+  Host model/admission refusal; recalled durable-image resend; busy/queue/image
+  prompt-admission parity; static/runtime assertions that `attachmentForSession`,
+  Host `ctx.commands.execute` for Client-owned commands, `ctx.tools.get`, and
+  Direct `ctx.attachments`/`ctx.llm` image admission are not reachable from the
   Remote branch.
 - **Must not change**: Direct default; transition gate/commit order; no fake
-  Agent; unsupported standing-skill/attachment classes stay fail-closed.
+  Agent; unsupported standing-skill/generic-file classes stay fail-closed.
 - **Entry**: M3-3B. **Exit**: the main TUI **including slash-command runtime**
   runs on the wire with Direct default intact. **Rollback**: remove the
   selection seam's Remote branch.
@@ -784,10 +869,13 @@ Each stage declares its L1–L6 test layer
   (`RemoteJobObservationPort`, already at the Backend seam), subagent viewer
   (child binding identity + `RemotePresentationReader` + `RemoteSubagentPort`),
   Plugin Manager (`RemotePluginManagerPort`), Remote surface authority, writer-held
-  UI recovery, remaining secondary presentation.
+  UI recovery, child-viewer durable image reads through `session/attachment`,
+  remaining secondary presentation.
 - **Behavior axis**: every non-main surface has no `ctx.jobs`/`ctx.subagents`
   dependence on the Remote path.
-- **Tests**: L6 viewer/task integration; child/viewer stale-generation fences.
+- **Tests**: L6 viewer/task integration; child/viewer stale-generation fences;
+  child durable-image read is addressed by the child Session and cannot repaint
+  after viewer replacement.
 - **Must not change**: Direct Task/Job/viewer behavior.
 - **Entry**: M3-4. **Exit**: no `ctx.jobs`/`ctx.subagents` dependence on the Remote
   path; stale-generation fences proven. **Rollback**: keep the Direct surfaces.
@@ -811,10 +899,10 @@ Each stage declares its L1–L6 test layer
 [x] every Backend property classified
 [x] Catalog sub-domains individually classified
 [x] ConfigPort method families individually classified
-[x] all non-Backend M3 seams classified, including every CommandRuntimeSurface hook
+[x] all non-Backend M3 seams classified, including every CommandRuntimeSurface hook, Client command execution, tool-card presentation, rewind history and image submit/read
 [x] every READY row cites an exact rc.2 public Client/Remote source
 [x] no Remote row relies on Direct Host service fallback
-[x] Host + Client composition dependency closure and disposal owners frozen
+[x] Host + Client composition dependency closure and disposal owners frozen, including sessionStats + turnOutline projection units
 [x] dynamic import/static startup boundary frozen
 [x] official aggregate-vs-minimal Client assembly decision made (minimal), including fileUpload closure
 [x] Remote exact-generation owner identity frozen
@@ -823,13 +911,13 @@ Each stage declares its L1–L6 test layer
 [x] all lifecycle/supersession/fatal/HMR reference paths accounted for
 [x] Direct assumptions in presentation/viewer/status/tasks inventoried
 [x] assistant transient-stream replacement identified
-[x] locality matrix complete
-[x] extension Client/Host Context ownership decided
+[x] locality matrix complete, including sessionless image staging vs Host image admission and generic-file D4
+[x] extension Client/Host Context ownership decided; Client command callbacks never cross into Host ctx.commands
 [x] generation replacement/reconnect semantics frozen, including settings mirror invalidation
 [x] writer-held recovery stage/behavior frozen (M3-5)
 [x] M3-1..M3-6 boundaries finalized
 [x] each stage has entry/exit/test/rollback scope
-[x] zero unowned UNKNOWN/TBD items
+[x] zero unowned UNKNOWN/TBD items; rc.2 skills/change hot invalidation is explicitly unsupported rather than silently assumed
 [x] blocker verdict explicit: M3 ENTRY GREEN
 [x] docs updated
 [x] normal gates green (recorded in the M3-0 PR)
@@ -864,13 +952,13 @@ Run at this baseline (documentation-only diff):
 |---|---|---|
 | 1 | Can rc.2 satisfy every `Backend` property without Direct fallback? | §2.1 — 7 of 13 are READY today; the other 6 are Remote-adapter work with a named rc.2 source and named fail-closed classes (no property needs a Direct Host fallback) |
 | 2 | Which exact Remote adapter files are missing today? | §2.1 `interaction`, `config`; §2.2 `skills`; §2.3 all; `hostFile`, `sessionArchive`; plus the owner spine (M3-2) |
-| 3 | Is `Catalog` fully composable remotely, including Skills? | §2.2 — models/presets yes (provider discovery is adapter work); skills list yes, skill body and sessionless standing no |
+| 3 | Is `Catalog` fully composable remotely, including Skills? | §2.2 — models/presets yes (provider discovery is adapter work); live skills list yes; Client skill-body read, sessionless standing catalog and live `skills/change` subscription are explicit M3 unsupported classes |
 | 4 | Is `ConfigPort` fully expressible on rc.2? | §2.3 — all but authorization and credential-record enumeration/deletion |
 | 5 | Is `InteractionPort` fully expressible on rc.2? | §2.1 + §10 — approval/question yes via forwarded waterfalls; `setApprovalPolicy` is an owned M3-3B gate |
 | 6 | Can all `HostFilePort` semantics be expressed remotely? | §2.1 + §7 — session scope yes; sessionless scope and existence-based canonicalization no |
 | 7 | Can `SessionArchivePort` map to a public rc.2 carrier without private APIs? | §2.1 — yes, HTTP `/api/session.export` via the composition-owned fetch; cancellation is adapter-owned |
 | 8 | Which module owns Host/Client Remote composition? | §2.4/§4.1 — `src/app/remote/host-runtime.ts` + `src/app/remote/client-runtime.ts` (M3-1) |
-| 9 | Which official Host plugins, Client plugins and generated contributions are mounted? | §2.4 — exact dependency-closed lists and order |
+| 9 | Which official Host plugins, Client plugins and generated contributions are mounted? | §2.4 — exact dependency-closed lists and order, including `sessionStats` + whole-log `turnOutline` |
 | 10 | Aggregate or minimal mount — which and why? | §2.4 — minimal |
 | 11 | What is readiness? | §4.1 — Host closure mounted; Client connection generation defined; Session list `ready`; settings adds its own first-mirror readiness in M3-3B |
 | 12 | What is disposed, in what order? | §4.1 |
@@ -885,13 +973,13 @@ Run at this baseline (documentation-only diff):
 | 21 | What replaces child exact-Agent identity in viewer mode? | §3 + §6 — child binding generation + Session identity |
 | 22 | What replaces Direct assistant-stream install/baseline? | §3 + §6 — `eventSource` transient entries through a subscription ingress |
 | 23 | What replaces `ctx.jobs` / `ctx.subagents` on the Remote path? | §3 + §11 M3-5 — `RemoteTaskReader`, `RemoteJobObservationPort`, Client projections |
-| 24 | Where do status/command facts come from remotely? | §3 — Client Session projections/event source plus the §3.2 command-runtime mapping; no Direct Agent fallback |
+| 24 | Where do status/command facts come from remotely? | §3 — Client Session projections/event source plus the §3.2 fact mapping and §3.3 Client command execution plane; no Direct Agent/Host-callback fallback |
 | 25 | Which secondary surfaces are deferred to M3-5? | §11 M3-5 |
-| 26 | Which commands/actions remain Client-local? | §7 |
+| 26 | Which commands/actions remain Client-local? | §3.3 + §7 — TUI built-ins/extension callbacks, terminal/editor/local shell, local draft/file reads and Client artifact saves; Host commands still execute through `HostCommandPort` |
 | 27 | Which path/file operations are Host-owned? | §7 |
 | 28 | Where do extension UI callbacks live? | §8 — Client Context |
 | 29 | How do Host extension facts cross without callbacks? | §8 — as serializable public Remote facts |
-| 30 | Is M3 entry GREEN or BLOCKED? | §10/§12 — GREEN after the revised composition, command-runtime, handoff-order and settings-lifecycle decisions |
+| 30 | Is M3 entry GREEN or BLOCKED? | §10/§12 — GREEN after both closure passes: composition/lifetime/settings plus Client command execution, tool presentation, image ownership, rewind history and explicit skill-invalidation limitation |
 | 31 | What are the final M3-1..M3-6 PR boundaries? | §11 |
 | 32 | Which stage first produces a complete experimental wire TUI? | M3-4, including the command runtime (not only transcript/submission) |
 | 33 | Which stage handles writer-held UI recovery? | M3-5 |
