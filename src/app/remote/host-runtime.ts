@@ -127,12 +127,14 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
   const jobControllerBefore = hostContext.reflect.get('jobController') as { typertRemote?: unknown }
 
   const fibers: Fiber[] = []
+  let carrier: InProcessHostCarrier | undefined
   let disposed = false
   const unwind = async (): Promise<void> => {
     disposed = true
     for (let index = fibers.length - 1; index >= 0; index -= 1) {
       await fibers[index].dispose()
     }
+    fibers.length = 0
   }
 
   try {
@@ -158,34 +160,38 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     fibers.push(await hostContext.plugin({ inject: apiRemotesInject, apply: applyApiRemotes }))
     // 8. Archive route — registers `/api/session.export` on Host `connection.fetch`.
     fibers.push(await hostContext.plugin(sessionLogExport))
+
+    // The Cordis reflect read wraps services in a per-call traceable proxy, so
+    // the same-instance check compares the service's stable Typert binding
+    // (never re-mounted, never replaced) instead of proxy identity.
+    const jobControllerAfter = hostContext.reflect.get('jobController') as
+      { typertRemote?: unknown } | undefined
+    if (
+      jobControllerAfter === undefined
+      || jobControllerAfter.typertRemote === undefined
+      || jobControllerAfter.typertRemote !== jobControllerBefore.typertRemote
+    ) {
+      throw new Error('remote host runtime: the existing jobController service was replaced by the M3 composition')
+    }
+
+    // The carrier is part of construction: a failure here must unwind the
+    // mounted fibers exactly like a failed mount.
+    carrier = createInProcessCarrier(hostContext)
   } catch (error) {
     await unwind()
     throw error
   }
 
-  // The Cordis reflect read wraps services in a per-call traceable proxy, so
-  // the same-instance check compares the service's stable Typert binding
-  // (never re-mounted, never replaced) instead of proxy identity.
-  const jobControllerAfter = hostContext.reflect.get('jobController') as
-    { typertRemote?: unknown } | undefined
-  if (
-    jobControllerAfter === undefined
-    || jobControllerAfter.typertRemote === undefined
-    || jobControllerAfter.typertRemote !== jobControllerBefore.typertRemote
-  ) {
-    await unwind()
-    throw new Error('remote host runtime: the existing jobController service was replaced by the M3 composition')
-  }
-
   return {
     hostContext,
-    carrier: createInProcessCarrier(hostContext),
+    carrier,
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
       for (let index = fibers.length - 1; index >= 0; index -= 1) {
         await fibers[index].dispose()
       }
+      fibers.length = 0
     },
   }
 }
