@@ -129,12 +129,24 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
   const fibers: Fiber[] = []
   let carrier: InProcessHostCarrier | undefined
   let disposed = false
-  const unwind = async (): Promise<void> => {
-    disposed = true
+  /**
+   * Reverse-dispose every mounted fiber. Per-step error isolation: one
+   * rejecting disposer cannot truncate the remaining cleanup. Returns the
+   * collected disposal errors instead of throwing, so the construction
+   * failure path can rethrow the ORIGINAL error with the cleanup failures
+   * attached as its `cause`.
+   */
+  const collectUnwind = async (): Promise<unknown[]> => {
+    const errors: unknown[] = []
     for (let index = fibers.length - 1; index >= 0; index -= 1) {
-      await fibers[index].dispose()
+      try {
+        await fibers[index].dispose()
+      } catch (error) {
+        errors.push(error)
+      }
     }
     fibers.length = 0
+    return errors
   }
 
   try {
@@ -178,7 +190,16 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     // mounted fibers exactly like a failed mount.
     carrier = createInProcessCarrier(hostContext)
   } catch (error) {
-    await unwind()
+    // §17.3: rethrow the ORIGINAL construction error; any disposal failures
+    // ride its `cause` chain instead of masking it.
+    const disposeErrors = await collectUnwind()
+    if (disposeErrors.length > 0) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      failure.cause = disposeErrors.length === 1
+        ? disposeErrors[0]
+        : new AggregateError(disposeErrors, 'remote host runtime: unwind disposal failures')
+      throw failure
+    }
     throw error
   }
 
@@ -188,10 +209,16 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
-      for (let index = fibers.length - 1; index >= 0; index -= 1) {
-        await fibers[index].dispose()
+      const disposeErrors = await collectUnwind()
+      if (disposeErrors.length > 0) {
+        const failure = disposeErrors[0] instanceof Error
+          ? disposeErrors[0]
+          : new Error(String(disposeErrors[0]))
+        if (disposeErrors.length > 1) {
+          failure.cause = new AggregateError(disposeErrors.slice(1), 'remote host runtime: remaining disposal failures')
+        }
+        throw failure
       }
-      fibers.length = 0
     },
   }
 }

@@ -22,6 +22,20 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from './host-runtime.ts'
 
+/**
+ * Run one disposal step with per-step error isolation: the step's failures
+ * are collected (never thrown here) so the remaining cleanup steps always
+ * run. Returns every collected error.
+ */
+async function collectDisposeErrors(dispose: () => Promise<void> | void): Promise<unknown[]> {
+  try {
+    await dispose()
+  } catch (error) {
+    return [error]
+  }
+  return []
+}
+
 /** Start input for the experimental Remote runtime. */
 export interface ExperimentalRemoteRuntimeOptions {
   /** The already-running ordinary pi-tui Host Context (never disposed here). */
@@ -62,7 +76,16 @@ export async function createExperimentalRemoteRuntime(
   try {
     client = await createRemoteClientRuntime({ carrier: host.carrier, signal: options.signal })
   } catch (error) {
-    await host.dispose()
+    // §17.3: rethrow the original Client failure. A Host disposal failure
+    // must not mask it — it rides the cause chain instead.
+    const disposeErrors = await collectDisposeErrors(() => host.dispose())
+    if (disposeErrors.length > 0) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      failure.cause = disposeErrors.length === 1
+        ? disposeErrors[0]
+        : new AggregateError(disposeErrors, 'remote runtime: host disposal failures during client-failure unwind')
+      throw failure
+    }
     throw error
   }
 
@@ -73,8 +96,19 @@ export async function createExperimentalRemoteRuntime(
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
-      await client.dispose()
-      await host.dispose()
+      // Client first, then Host — both run even if the first throws; the
+      // first collected error surfaces with the second attached as cause.
+      const errors = [
+        ...await collectDisposeErrors(() => client.dispose()),
+        ...await collectDisposeErrors(() => host.dispose()),
+      ]
+      if (errors.length > 0) {
+        const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+        if (errors.length > 1) {
+          failure.cause = new AggregateError(errors.slice(1), 'remote runtime: remaining disposal failures')
+        }
+        throw failure
+      }
     },
   }
 }
