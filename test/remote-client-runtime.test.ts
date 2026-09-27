@@ -174,8 +174,15 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
   const dispose = async (): Promise<void> => {
     if (disposed) return
     disposed = true
-    await persistenceFiber?.dispose()
+    // Both steps run even if the first fails (error-isolated teardown).
+    let persistenceError: unknown
+    try {
+      await persistenceFiber?.dispose()
+    } catch (error) {
+      persistenceError = error
+    }
     await ctx.fiber.dispose()
+    if (persistenceError !== undefined) throw persistenceError
   }
   // The owning lifecycle also disposes the fixture (idempotent) before its
   // temp roots are removed.
@@ -590,12 +597,32 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
   try {
     const jobControllerBefore = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     const hostRuntime = await createRemoteHostRuntime(host.ctx)
+    // The failing client instance is observed DIRECTLY: the wrapped carrier
+    // tracks every open Remote stream, so the unwind must drain them back to
+    // zero — no orphan context may keep wire activity alive.
+    let activeStreams = 0
+    const countingCarrier = {
+      ownsHost: true as const,
+      fetch: hostRuntime.carrier.fetch,
+      openStream: (endpoint: string, payload: unknown, signal: AbortSignal, uplink?: AsyncIterable<unknown>) => {
+        activeStreams += 1
+        const inner = hostRuntime.carrier.openStream(endpoint, payload, signal, uplink)
+        return (async function* () {
+          try {
+            yield* inner
+          } finally {
+            activeStreams -= 1
+          }
+        })()
+      },
+    }
     const signal = AbortSignal.abort(new Error('induced client readiness failure'))
     await assert.rejects(
-      createRemoteClientRuntime({ carrier: hostRuntime.carrier, signal }),
+      createRemoteClientRuntime({ carrier: countingCarrier, signal }),
       /aborted/,
       'an aborted lifecycle signal must fail the Client composition',
     )
+    await waitFor('the failed client streams to drain to zero', () => activeStreams === 0)
     assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
     const jobControllerAfter = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     assert.ok(
