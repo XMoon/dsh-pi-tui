@@ -167,21 +167,39 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     })
   } catch (error) {
     disposed = true
-    await persistenceFiber?.dispose()
+    // Error-isolated teardown: both steps run, and the ORIGINAL setup error
+    // is rethrown (a disposal failure rides its cause chain).
+    let persistenceError: unknown
+    try {
+      await persistenceFiber?.dispose()
+    } catch (disposeError) {
+      persistenceError = disposeError
+    }
     await ctx.fiber.dispose()
+    if (persistenceError !== undefined) {
+      ;(error as { cause?: unknown }).cause ??= persistenceError
+    }
     throw error
   }
   const dispose = async (): Promise<void> => {
     if (disposed) return
     disposed = true
-    // Both steps run even if the first fails (error-isolated teardown).
+    // Both steps run even if the first fails (error-isolated teardown); the
+    // first failure surfaces with the second attached as its cause.
     let persistenceError: unknown
     try {
       await persistenceFiber?.dispose()
     } catch (error) {
       persistenceError = error
     }
-    await ctx.fiber.dispose()
+    try {
+      await ctx.fiber.dispose()
+    } catch (error) {
+      if (persistenceError !== undefined) {
+        ;(error as { cause?: unknown }).cause ??= persistenceError
+      }
+      throw error
+    }
     if (persistenceError !== undefined) throw persistenceError
   }
   // The owning lifecycle also disposes the fixture (idempotent) before its
@@ -598,14 +616,21 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
     const jobControllerBefore = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     const hostRuntime = await createRemoteHostRuntime(host.ctx)
     // The failing client instance is observed DIRECTLY: the wrapped carrier
-    // tracks every open Remote stream, so the unwind must drain them back to
-    // zero — no orphan context may keep wire activity alive.
+    // counts every opened Remote stream, and the FIRST open fires the abort
+    // synchronously - so positive wire activity is guaranteed to be observed
+    // before the readiness failure, and the unwind must drain it back to
+    // zero (no orphan context may keep wire activity alive).
+    let openedStreams = 0
     let activeStreams = 0
+    const inducedReason = new Error('induced client readiness failure')
+    const controller = new AbortController()
     const countingCarrier = {
       ownsHost: true as const,
       fetch: hostRuntime.carrier.fetch,
       openStream: (endpoint: string, payload: unknown, signal: AbortSignal, uplink?: AsyncIterable<unknown>) => {
+        openedStreams += 1
         activeStreams += 1
+        if (openedStreams === 1) controller.abort(inducedReason)
         const inner = hostRuntime.carrier.openStream(endpoint, payload, signal, uplink)
         return (async function* () {
           try {
@@ -616,11 +641,16 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
         })()
       },
     }
-    const signal = AbortSignal.abort(new Error('induced client readiness failure'))
     await assert.rejects(
-      createRemoteClientRuntime({ carrier: countingCarrier, signal }),
-      /aborted/,
-      'an aborted lifecycle signal must fail the Client composition',
+      createRemoteClientRuntime({ carrier: countingCarrier, signal: controller.signal }),
+      (error: Error) => {
+        assert.match(error.message, /aborted/, 'the readiness failure must surface')
+        // The readiness error's own cause (the abort reason) must survive
+        // the unwind - cause chains are merged, never overwritten.
+        assert.equal(error.cause, inducedReason)
+        return true
+      },
+      'the induced readiness failure must fail the Client composition',
     )
     await waitFor('the failed client streams to drain to zero', () => activeStreams === 0)
     assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
