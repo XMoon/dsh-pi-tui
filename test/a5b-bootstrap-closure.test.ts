@@ -3,7 +3,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources } from './support/composition-surface.ts'
-import { ownerFile, ownerSource, productionSources } from './support/owner-modules.ts'
+import { ownerFile, ownerSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -184,9 +184,10 @@ interface TuiAppEventsLiteral {
 
 /**
  * Every `TuiAppEvents` object-literal construction in `source`, via the
- * TypeScript parser: a variable declaration whose type annotation is the
- * `TuiAppEvents` type reference and whose initializer is an object literal
- * (also covering `satisfies TuiAppEvents` / `as TuiAppEvents` forms).
+ * TypeScript parser: a variable declaration whose type annotation — on the
+ * declaration OR on any `as` / `satisfies` / `<T>` wrapper — is the
+ * `TuiAppEvents` type reference and whose initializer, once fully unwrapped, is
+ * an object literal.
  *
  * A plain substring count cannot tell the semantic implementation from a NEW
  * rogue literal in an unlisted module, and the old test only checked one
@@ -201,12 +202,10 @@ function tuiAppEventsLiterals(rel: string, source: string): TuiAppEventsLiteral[
     && ts.isIdentifier(node.typeName)
     && node.typeName.text === 'TuiAppEvents'
   const record = (name: string, initializer: ts.Expression, annotation: ts.TypeNode | undefined): void => {
-    let expr = initializer
     let typed = isTuiAppEventsType(annotation)
-    while (ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr)) {
-      if (isTuiAppEventsType(expr.type)) typed = true
-      expr = expr.expression
-    }
+    const expr = unwrapExpression(initializer, (type) => {
+      if (isTuiAppEventsType(type)) typed = true
+    })
     if (!typed || !ts.isObjectLiteralExpression(expr)) return
     const passesThroughDepsEvents = expr.properties.some(
       property => ts.isSpreadAssignment(property) && property.expression.getText(sf) === 'deps.events',
@@ -222,6 +221,38 @@ function tuiAppEventsLiterals(rel: string, source: string): TuiAppEventsLiteral[
   visit(sf)
   return out
 }
+
+test('A5b: tuiAppEventsLiterals detects every TuiAppEvents wrapper spelling', () => {
+  // A rogue implementation must not be able to hide behind an ordinary
+  // expression wrapper or move its type annotation onto the wrapper.
+  const positive: ReadonlyArray<readonly [string, string]> = [
+    ['const rogue: TuiAppEvents = { onSubmit: () => {} }\n', 'rogue'],
+    ['const rogue: TuiAppEvents = ({ onSubmit: () => {} })\n', 'rogue'],
+    ['const rogue = ({ onSubmit: () => {} } satisfies TuiAppEvents)\n', 'rogue'],
+    ['const rogue = ({ onSubmit: () => {} } as TuiAppEvents)\n', 'rogue'],
+    ['const rogue = ({ onSubmit: () => {} } as TuiAppEvents)!\n', 'rogue'],
+    ['const rogue = <TuiAppEvents>{ onSubmit: () => {} }\n', 'rogue'],
+  ]
+  for (const [source, name] of positive) {
+    assert.deepEqual(
+      tuiAppEventsLiterals('synthetic.ts', source).map(literal => literal.name),
+      [name],
+      `${source.trim()} must be detected as a TuiAppEvents literal`,
+    )
+  }
+  const negative: ReadonlyArray<string> = [
+    'const ok = ({ onSubmit: () => {} } satisfies TuiCommandRunner)\n',
+    'const ok: TuiCommandRunner = { onSubmit: () => {} }\n',
+    'const ok = ({ onSubmit: () => {} })\n',
+  ]
+  for (const source of negative) {
+    assert.deepEqual(
+      tuiAppEventsLiterals('synthetic.ts', source),
+      [],
+      `${source.trim()} is not a TuiAppEvents literal`,
+    )
+  }
+})
 
 test('A5b: exactly one TuiAppEvents SEMANTIC implementation, wrappers are pass-throughs', () => {
   // The A5b-5 cut moved the whole TuiAppEvents implementation into
