@@ -40,7 +40,7 @@ import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
-import type { InProcessHostCarrier } from './host-runtime.ts'
+import { mergeCause, type InProcessHostCarrier } from './host-runtime.ts'
 
 type TypertClientModule = typeof typertRegistryClient
 type ConnectionClientModule = typeof import('@deepseek-ai/dsh-client-connection/client')
@@ -387,14 +387,14 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     await waitForInitialReadiness(services.connection, services.sessions, options.signal)
   } catch (error) {
     // §17.3: rethrow the ORIGINAL construction/readiness error; any cleanup
-    // failures ride its `cause` chain instead of masking it.
+    // failures ride its `cause` chain instead of masking it (a pre-existing
+    // cause — e.g. the abort's signal.reason — is preserved).
     const cleanupErrors = await unwind()
     if (cleanupErrors.length > 0) {
-      const failure = error instanceof Error ? error : new Error(String(error))
-      failure.cause = cleanupErrors.length === 1
+      const secondary = cleanupErrors.length === 1
         ? cleanupErrors[0]
         : new AggregateError(cleanupErrors, 'remote client runtime: unwind disposal failures')
-      throw failure
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
     }
     throw error
   }
@@ -420,7 +420,7 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
           ? cleanupErrors[0]
           : new Error(String(cleanupErrors[0]))
         if (cleanupErrors.length > 1) {
-          failure.cause = new AggregateError(cleanupErrors.slice(1), 'remote client runtime: remaining disposal failures')
+          mergeCause(failure, new AggregateError(cleanupErrors.slice(1), 'remote client runtime: remaining disposal failures'))
         }
         throw failure
       }

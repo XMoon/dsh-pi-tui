@@ -20,7 +20,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
-import { createRemoteHostRuntime, type RemoteHostRuntime } from './host-runtime.ts'
+import { createRemoteHostRuntime, mergeCause, type RemoteHostRuntime } from './host-runtime.ts'
 
 /**
  * Run one disposal step with per-step error isolation: the step's failures
@@ -77,14 +77,13 @@ export async function createExperimentalRemoteRuntime(
     client = await createRemoteClientRuntime({ carrier: host.carrier, signal: options.signal })
   } catch (error) {
     // §17.3: rethrow the original Client failure. A Host disposal failure
-    // must not mask it — it rides the cause chain instead.
+    // must not mask it — the causes aggregate instead.
     const disposeErrors = await collectDisposeErrors(() => host.dispose())
     if (disposeErrors.length > 0) {
-      const failure = error instanceof Error ? error : new Error(String(error))
-      failure.cause = disposeErrors.length === 1
+      const secondary = disposeErrors.length === 1
         ? disposeErrors[0]
         : new AggregateError(disposeErrors, 'remote runtime: host disposal failures during client-failure unwind')
-      throw failure
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
     }
     throw error
   }
@@ -105,7 +104,7 @@ export async function createExperimentalRemoteRuntime(
       if (errors.length > 0) {
         const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
         if (errors.length > 1) {
-          failure.cause = new AggregateError(errors.slice(1), 'remote runtime: remaining disposal failures')
+          mergeCause(failure, new AggregateError(errors.slice(1), 'remote runtime: remaining disposal failures'))
         }
         throw failure
       }

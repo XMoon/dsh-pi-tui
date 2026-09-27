@@ -82,6 +82,26 @@ export interface RemoteHostRuntime {
 async function* emptyUplink(): AsyncIterable<unknown> {}
 
 /**
+ * Attach one secondary failure to `failure`'s cause chain without losing an
+ * existing cause: when the failure already carries a cause, both aggregate
+ * into a single `AggregateError`. Shared by the three composition owners so
+ * cleanup failures never mask the original construction/readiness error.
+ * A `undefined` secondary is a no-op (nothing to attach).
+ */
+export function mergeCause(failure: Error, secondary: unknown): Error {
+  if (secondary === undefined) return failure
+  const existingCause = (failure as { cause?: unknown }).cause
+  ;(failure as { cause?: unknown }).cause = existingCause === undefined
+    ? secondary
+    : new AggregateError([existingCause, secondary], 'remote composition: aggregated failure causes')
+  return failure
+}
+
+function firstError(errors: readonly unknown[]): Error {
+  return errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+}
+
+/**
  * Fail fast when the ordinary Host lacks one of the required base services.
  * Reads via the reflect store so the diagnostic can name the missing key
  * without depending on any one service's shape.
@@ -194,11 +214,10 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     // ride its `cause` chain instead of masking it.
     const disposeErrors = await collectUnwind()
     if (disposeErrors.length > 0) {
-      const failure = error instanceof Error ? error : new Error(String(error))
-      failure.cause = disposeErrors.length === 1
+      const secondary = disposeErrors.length === 1
         ? disposeErrors[0]
         : new AggregateError(disposeErrors, 'remote host runtime: unwind disposal failures')
-      throw failure
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
     }
     throw error
   }
@@ -215,7 +234,7 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
           ? disposeErrors[0]
           : new Error(String(disposeErrors[0]))
         if (disposeErrors.length > 1) {
-          failure.cause = new AggregateError(disposeErrors.slice(1), 'remote host runtime: remaining disposal failures')
+          mergeCause(failure, new AggregateError(disposeErrors.slice(1), 'remote host runtime: remaining disposal failures'))
         }
         throw failure
       }
