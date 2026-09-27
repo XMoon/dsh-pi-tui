@@ -367,15 +367,25 @@ export function findViolations(entries, options = {}) {
     imports.set(rel, parseImportSpecifiers(source))
     sourceByRel.set(rel, source)
   }
+  const known = new Set(entries.map(entry => entry.rel))
 
   for (const { rel } of entries) {
     for (const { specifier, line, typeOnly } of imports.get(rel)) {
-      const resolved = resolveRelativeImport(rel, specifier)
+      // Canonicalize to the REAL on-disk source target from the scanned set, so
+      // every legal NodeNext spelling of the same module (`../bootstrap.ts`,
+      // `../bootstrap.js`, `../bootstrap`) is evaluated identically by
+      // ARCHITECTURE_RULES and cannot bypass a rule through its emitted
+      // extension. A non-relative specifier keeps its bare text; a relative
+      // specifier with no on-disk candidate keeps its resolved src-relative path.
+      const relative = resolveRelativeImport(rel, specifier)
+      const target = relative === undefined
+        ? specifier
+        : staticImportCandidates(relative).find(candidate => known.has(candidate)) ?? relative
       for (const rule of ARCHITECTURE_RULES) {
         if (!rule.applies(rel)) continue
-        if (!rule.forbids(resolved ?? specifier, specifier)) continue
+        if (!rule.forbids(target, specifier)) continue
         // An allowlist entry excuses ONLY a type-only import of that target.
-        if (typeOnly && allowlist.has(`${rel}:${resolved ?? specifier}`)) continue
+        if (typeOnly && allowlist.has(`${rel}:${target}`)) continue
         violations.push({ file: rel, line, rule: rule.id, detail: `${rule.message} (${specifier})` })
       }
     }

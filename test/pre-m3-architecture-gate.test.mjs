@@ -121,6 +121,11 @@ test('only the composition owners may import Direct wiring', () => {
 })
 
 test('application owners importing app/bootstrap are rejected (index -> bootstrap -> owners)', () => {
+  // Canonicalization resolves every legal NodeNext spelling against the scanned
+  // target, so the emitted-extension (`.js`) and extensionless spellings cannot
+  // bypass the rule. The target must be in the scanned set for that to work.
+  const bootstrapTarget = entry('app/bootstrap.ts', 'export const bootstrap = 1\n')
+  const spellings = ['.ts', '.js', '']
   for (const file of [
     'app/surface/runtime.ts',
     'app/command/surface.ts',
@@ -130,28 +135,38 @@ test('application owners importing app/bootstrap are rejected (index -> bootstra
     'transcript.ts',
   ]) {
     const depth = file.split('/').length - 1
-    const up = '../'.repeat(depth)
-    const violations = findViolations([entry(file, `import { bootstrap } from '${up}app/bootstrap.ts'\n`)])
-    assert.equal(violations.length, 1, `${file} -> app/bootstrap.ts must be rejected`)
-    assert.equal(violations[0].rule, 'owner-imports-bootstrap')
+    // A root-level file needs a real `./` prefix: a bare `app/bootstrap.js` is a
+    // package specifier, not a relative import, and would pass for the wrong
+    // reason (the old test used exactly that bare form for `tui-app.ts`).
+    const prefix = depth === 0 ? './' : '../'.repeat(depth)
+    for (const ext of spellings) {
+      const specifier = `${prefix}app/bootstrap${ext}`
+      const violations = findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), bootstrapTarget])
+      assert.equal(violations.length, 1, `${file} -> ${specifier} must be rejected`)
+      assert.equal(violations[0].rule, 'owner-imports-bootstrap')
+    }
   }
   // The composition direction itself is the ONE allowed exception: the entry
   // imports bootstrap, and bootstrap may name its own module.
   for (const file of ['index.ts', 'app/bootstrap.ts']) {
-    const depth = file.split('/').length - 1
-    const up = '../'.repeat(depth)
-    assert.deepEqual(
-      findViolations([entry(file, `import { bootstrap } from '${up}app/bootstrap.ts'\n`)]),
-      [],
-      `${file} must stay allowed to import app/bootstrap.ts`,
-    )
+    const target = file === 'index.ts' ? 'app/bootstrap' : 'bootstrap'
+    for (const ext of spellings) {
+      const specifier = `./${target}${ext}`
+      assert.deepEqual(
+        findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), bootstrapTarget]),
+        [],
+        `${file} must stay allowed to import ${specifier}`,
+      )
+    }
   }
   // A type-only import is still an inverted dependency.
-  assert.equal(
-    findViolations([entry('app/surface/runtime.ts', "import type { B } from '../bootstrap.ts'\n")]).length,
-    1,
-    'a type-only owner -> bootstrap import must be rejected',
-  )
+  for (const ext of spellings) {
+    assert.equal(
+      findViolations([entry('app/surface/runtime.ts', `import type { B } from '../bootstrap${ext}'\n`), bootstrapTarget]).length,
+      1,
+      `a type-only owner -> bootstrap${ext} import must be rejected`,
+    )
+  }
 })
 
 test('the only non-composition Direct import is the allowlisted legacy settings TYPE import', () => {

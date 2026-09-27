@@ -1,12 +1,20 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
  * The A5b owner surface: the composition surface (plan A5 §22) PLUS the
- * application owner modules the A5b slices extract bootstrap responsibilities
- * into (`app/surface`, `app/command`, `app/submission`, `app/session`,
- * `app/direct`).
+ * application modules the A5b slices extract bootstrap responsibilities into
+ * (`app/surface`, `app/command`, `app/submission`).
+ *
+ * This list is NOT the whole owner inventory: the A2/A4 owners under
+ * `app/session` (ownership core, scope, commit order, subject, owner access) and
+ * `app/direct` keep their own locks. They are deliberately absent here because
+ * `ownerSource()`/`ownerOccurrences()` are the A5b *single-owner* aggregate, and
+ * folding the earlier owners in would count their factory DECLARATIONS
+ * (`export function bindSessionRuntime(`) as competing constructions. A
+ * duplicate of an A5b single-owner site in one of those modules is still caught:
+ * {@link productionSources} scans the whole production tree for it.
  *
  * A5b locks care about two different facts and must not conflate them:
  *
@@ -17,7 +25,9 @@ import { fileURLToPath } from 'node:url'
  *
  * The list is deliberately EXPLICIT rather than a `src/app/**` glob (A5b plan
  * §8.3): a source lock must follow the authority to a named owner, and a glob
- * would let an old string search pass by scanning the whole tree.
+ * would let an old string search pass by scanning the whole tree. The
+ * whole-tree scan below exists only to detect a SECOND copy outside this
+ * surface; it never replaces a per-owner location pin.
  *
  * The list grows as slices land. Entries that do not exist yet are not listed,
  * so `ownerSources()` never silently covers a missing module: every listed
@@ -87,4 +97,37 @@ export function ownerFile(rel: string): string {
   const entry = ownerSources().find((m) => m.rel === rel)
   if (!entry) throw new Error(`${rel} is not part of the A5b owner surface`)
   return entry.source
+}
+
+/**
+ * EVERY production TypeScript source under `src/` (recursive, `src/`-relative
+ * paths), for the whole-tree duplicate detectors.
+ *
+ * This is deliberately NOT `OWNER_MODULES`: the explicit list above is the
+ * authority pin, while this walk is the DETECTOR that can see a second
+ * construction in a file nobody listed (plan A5b §8.1/§8.3 — "authority pinned
+ * to the owner, the whole-tree scan only detects a second copy"). `test/`,
+ * `packages/` and `dist/` are never reached because the walk starts at `src/`;
+ * `node_modules`/`dist` are skipped defensively.
+ */
+export function productionSources(): Array<{ rel: string; source: string }> {
+  const out: Array<{ rel: string; source: string }> = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === 'dist') continue
+        walk(path)
+      } else if (entry.name.endsWith('.ts')) {
+        out.push({ rel: relative(ROOT, path).split('\\').join('/'), source: readFileSync(path, 'utf8') })
+      }
+    }
+  }
+  walk(join(ROOT, 'src'))
+  return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+}
+
+/** The whole production `src/` tree joined with file banners, for count/scan locks. */
+export function productionSource(): string {
+  return productionSources().map(({ rel, source }) => `// >>> ${rel}\n${source}`).join('\n')
 }
