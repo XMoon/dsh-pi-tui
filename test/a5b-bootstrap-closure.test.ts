@@ -212,31 +212,32 @@ interface TypedObjectLiteral {
  */
 function typedObjectLiterals(rel: string, source: string, typeName: string): TypedObjectLiteral[] {
   const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
-  // Local type aliases (`type Events = TuiAppEvents`, incl. chains) are
-  // resolved so an aliased annotation is not a blind spot; a CONTEXTUALLY typed
-  // literal (an argument whose parameter is declared elsewhere as this type) has
-  // no syntactic annotation here and is outside this guard's stated scope.
+  // Local type aliases (`type Events = TuiAppEvents`, incl. chains, resolved to
+  // convergence in source order) are followed; a CONTEXTUALLY typed literal (an
+  // argument whose parameter is declared elsewhere as this type) has no syntactic
+  // annotation here and is outside this guard's stated scope.
   const aliasNames = new Set<string>([typeName])
-  for (let pass = 0; pass < 4; pass += 1) {
-    let changed = false
+  let aliasesChanged = true
+  while (aliasesChanged) {
+    aliasesChanged = false
     const scanAliases = (node: ts.Node): void => {
       if (ts.isTypeAliasDeclaration(node) && ts.isTypeReferenceNode(node.type) && ts.isIdentifier(node.type.typeName)) {
         if (aliasNames.has(node.type.typeName.text) && !aliasNames.has(node.name.text)) {
           aliasNames.add(node.name.text)
-          changed = true
+          aliasesChanged = true
         }
       }
       ts.forEachChild(node, scanAliases)
     }
     scanAliases(sf)
-    if (!changed) break
   }
   const isType = (node: ts.TypeNode | undefined): boolean =>
     node !== undefined
     && ts.isTypeReferenceNode(node)
     && ts.isIdentifier(node.typeName)
     && aliasNames.has(node.typeName.text)
-  /** The return-type annotation of the function-like node enclosing `from`. */
+  /** The return-type annotation of the function-like node enclosing `from`
+   *  (functions, arrows, methods and get accessors). */
   const returnAnnotationOf = (from: ts.Node): ts.TypeNode | undefined => {
     let node: ts.Node | undefined = from
     while (node !== undefined) {
@@ -245,6 +246,7 @@ function typedObjectLiterals(rel: string, source: string, typeName: string): Typ
         || ts.isFunctionExpression(node)
         || ts.isArrowFunction(node)
         || ts.isMethodDeclaration(node)
+        || ts.isGetAccessorDeclaration(node)
       ) return node.type
       node = node.parent
     }
@@ -607,14 +609,18 @@ const OWNER_FACTORY_NAMES: readonly string[] = [
 
 /**
  * Every production call site of one factory identifier (callee identity),
- * following simple identifier ALIASES (`const make = createViewerRuntime`, and
- * alias-of-alias) so `make(deps)` counts as a `createViewerRuntime` call.
+ * following the aliases it can resolve SYNTACTICALLY and to convergence:
+ * `const make = createViewerRuntime` (any depth, source order irrelevant) and
+ * `import { createViewerRuntime as makeViewer }`.
  *
- * Stated scope: this is a SYNTACTIC guard over direct calls, wrapper
- * expressions (`(f)(x)`, `f as T`) and identifier aliases. Computed indirection
- * (`obj[key](x)`, a factory re-exported through an object, a `Proxy`, …) is
- * outside it — the architecture gate, the per-owner location locks and review
- * cover those layers.
+ * Stated scope (deliberately narrower than "aliases in general"): resolution is
+ * TEXT-based over identifiers, not binding-based, and only these two forms are
+ * followed. Two consequences are accepted: a same-named unrelated local can make
+ * the guard fail LOUDLY (a false positive, never a silent pass), and computed
+ * indirection (`obj[key](x)`, a re-export object, a `Proxy`, a re-assigned
+ * binding) is outside the guard. The architecture gate locks the dependency
+ * direction only — it performs no type analysis — so the remaining layers are the
+ * per-owner location locks and review.
  */
 function factoryCallSites(name: string): string[] {
   const sources = productionSources().map(({ rel, source }) => ({
@@ -622,10 +628,12 @@ function factoryCallSites(name: string): string[] {
     file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
   }))
   const aliases = new Set<string>()
-  for (let pass = 0; pass < 4; pass += 1) {
-    let changed = false
+  let changed = true
+  while (changed) {
+    changed = false
     for (const { file } of sources) {
       const scan = (node: ts.Node): void => {
+        // `const make = createViewerRuntime` (or an alias of an alias).
         if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
           const inner = unwrapExpression(node.initializer)
           if (ts.isIdentifier(inner) && (inner.text === name || aliases.has(inner.text)) && !aliases.has(node.name.text)) {
@@ -633,11 +641,20 @@ function factoryCallSites(name: string): string[] {
             changed = true
           }
         }
+        // `import { createViewerRuntime as makeViewer } from '…'`.
+        if (
+          ts.isImportSpecifier(node)
+          && node.propertyName !== undefined
+          && node.propertyName.text === name
+          && !aliases.has(node.name.text)
+        ) {
+          aliases.add(node.name.text)
+          changed = true
+        }
         ts.forEachChild(node, scan)
       }
       scan(file)
     }
-    if (!changed) break
   }
   const sites: string[] = []
   for (const { rel, file } of sources) {
