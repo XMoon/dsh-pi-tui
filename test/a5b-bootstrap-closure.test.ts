@@ -3,7 +3,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources } from './support/composition-surface.ts'
-import { ownerFile, ownerSource } from './support/owner-modules.ts'
+import { ownerFile, ownerSource, productionSources } from './support/owner-modules.ts'
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -174,32 +174,85 @@ test('A5b-6: the composition root introduces no new context/bag type', () => {
   )
 })
 
+interface TuiAppEventsLiteral {
+  readonly rel: string
+  readonly name: string
+  readonly line: number
+  /** the initializer object literal spreads `...deps.events` (a pass-through) */
+  readonly passesThroughDepsEvents: boolean
+}
+
+/**
+ * Every `TuiAppEvents` object-literal construction in `source`, via the
+ * TypeScript parser: a variable declaration whose type annotation is the
+ * `TuiAppEvents` type reference and whose initializer is an object literal
+ * (also covering `satisfies TuiAppEvents` / `as TuiAppEvents` forms).
+ *
+ * A plain substring count cannot tell the semantic implementation from a NEW
+ * rogue literal in an unlisted module, and the old test only checked one
+ * hand-named wrapper by name (plan §8.2(4)).
+ */
+function tuiAppEventsLiterals(rel: string, source: string): TuiAppEventsLiteral[] {
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  const out: TuiAppEventsLiteral[] = []
+  const isTuiAppEventsType = (node: ts.TypeNode | undefined): boolean =>
+    node !== undefined
+    && ts.isTypeReferenceNode(node)
+    && ts.isIdentifier(node.typeName)
+    && node.typeName.text === 'TuiAppEvents'
+  const record = (name: string, initializer: ts.Expression, annotation: ts.TypeNode | undefined): void => {
+    let expr = initializer
+    let typed = isTuiAppEventsType(annotation)
+    while (ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr)) {
+      if (isTuiAppEventsType(expr.type)) typed = true
+      expr = expr.expression
+    }
+    if (!typed || !ts.isObjectLiteralExpression(expr)) return
+    const passesThroughDepsEvents = expr.properties.some(
+      property => ts.isSpreadAssignment(property) && property.expression.getText(sf) === 'deps.events',
+    )
+    out.push({ rel, name, line: sf.getLineAndCharacterOfPosition(expr.getStart(sf)).line + 1, passesThroughDepsEvents })
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      record(node.name.text, node.initializer, node.type)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return out
+}
+
 test('A5b: exactly one TuiAppEvents SEMANTIC implementation, wrappers are pass-throughs', () => {
   // The A5b-5 cut moved the whole TuiAppEvents implementation into
   // `app/surface/application-events.ts` (the former `surfaceEvents` literal).
   // The surface runtime legitimately overlays a SECOND literal over
-  // `deps.events` for the transcript-navigation/search callbacks it owns, so an
-  // aggregate "one literal" count would either be wrong or would hide a real
-  // second implementation. Split the two facts:
-  const surface = ownerSource()
+  // `deps.events` for the transcript-navigation/search callbacks it owns. This
+  // is an AST scan over ALL production `src/**/*.ts` (not just the owner
+  // surface): a NEW `const rogue: TuiAppEvents = { onSubmit: ... }` in any
+  // module must fail, naming the file and variable (plan §8.2(4)/§7.6.2).
+  const literals = productionSources().flatMap(({ rel, source }) => tuiAppEventsLiterals(rel, source))
+  const semantic = literals.filter(
+    literal => literal.rel === 'src/app/surface/application-events.ts' && literal.name === 'surfaceEvents',
+  )
   assert.equal(
-    surface.split('const surfaceEvents: TuiAppEvents = {').length - 1,
+    semantic.length,
     1,
-    'exactly one TuiAppEvents semantic implementation must exist across the owner surface',
+    'the TuiAppEvents semantic implementation must be `surfaceEvents` in src/app/surface/application-events.ts',
   )
-  assert.match(
-    ownerFile('src/app/surface/application-events.ts'),
-    /const surfaceEvents: TuiAppEvents = \{/u,
-    'the semantic implementation must live in the application-events owner',
+  const wrappers = literals.filter(
+    literal => literal.rel === 'src/app/surface/runtime.ts' && literal.name === 'events',
   )
-  const runtime = ownerFile('src/app/surface/runtime.ts')
-  const wrapperAt = runtime.indexOf('const events: TuiAppEvents = {')
-  assert.ok(wrapperAt > 0, 'the surface runtime legitimately overlays a wrapper literal')
-  const wrapper = runtime.slice(wrapperAt, runtime.indexOf('\n      }', wrapperAt))
-  assert.match(
-    wrapper,
-    /\.\.\.deps\.events,/u,
-    'every other TuiAppEvents literal must be a pass-through wrapper over deps.events, never a second implementation',
+  assert.equal(wrappers.length, 1, 'the surface runtime must overlay exactly one TuiAppEvents wrapper literal')
+  assert.ok(
+    wrappers[0]!.passesThroughDepsEvents,
+    'the surface runtime literal must spread `...deps.events` (a pass-through wrapper, never a second implementation)',
+  )
+  const others = literals.filter(literal => literal !== semantic[0] && literal !== wrappers[0])
+  assert.deepEqual(
+    others.map(literal => `${literal.rel}:${literal.line} ${literal.name}`),
+    [],
+    'every other TuiAppEvents object literal is a second implementation (plan §8.2(4))',
   )
 })
 

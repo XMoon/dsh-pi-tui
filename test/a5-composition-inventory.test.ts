@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import ts from 'typescript'
 
 import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
-import { ownerFile, ownerOccurrences } from './support/owner-modules.ts'
+import { ownerFile, ownerOccurrences, productionSources } from './support/owner-modules.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -175,6 +176,117 @@ test('A5: every single-owner construction has exactly its expected count across 
   for (const [site, expected] of expectedBySite) {
     assert.equal(ownerOccurrences(site), expected,
       `${site} must have exactly ${expected} construction site(s) in the A5b owner surface`)
+  }
+})
+
+/**
+ * Literals that legitimately occur once OUTSIDE the A5b single-owner rows, each
+ * pinned to its exact production file. These are two documented facts, not
+ * escapes:
+ *
+ * - `app/session/runtime.ts` DECLARES the `bindSessionRuntime(` factory that the
+ *   composition root calls — the declaration is not a second construction;
+ * - `runtime/remote/presentation-read-shadow.ts` folds a throwaway transcript
+ *   window for the Direct/Remote parity oracle — a detached observation, not a
+ *   live transcript owner.
+ *
+ * The whole-tree guard pins each to that exact file, so a construction added
+ * anywhere (including inside these files) still fails the count.
+ */
+const WHOLE_TREE_NON_OWNER_SITES: Readonly<Record<string, readonly string[]>> = {
+  'bindSessionRuntime(': ['src/app/session/runtime.ts'],
+  'new TranscriptWindowController(': ['src/runtime/remote/presentation-read-shadow.ts'],
+}
+
+test('A5: no production file outside the pinned owners holds a single-owner construction', () => {
+  // The per-module location lock above is the authority pin, but it reads only
+  // the hand-listed `OWNER_MODULES`. A NEW file (or an unlisted module) that
+  // constructs a second `new PendingSubmissions(` is invisible to it. This guard
+  // scans ALL production `src/**/*.ts` and pins BOTH the exact file set and the
+  // total count per site, so a second copy anywhere fails even while each
+  // per-owner count stays green (plan A5b §8.1/§8.3).
+  const expectedFiles = new Map<string, Set<string>>()
+  const expectedCounts = new Map<string, number>()
+  for (const [site, count, owner] of SINGLE_OWNER_SITES) {
+    if (!expectedFiles.has(site)) {
+      expectedFiles.set(site, new Set())
+      expectedCounts.set(site, 0)
+    }
+    expectedFiles.get(site)!.add(owner)
+    expectedCounts.set(site, expectedCounts.get(site)! + count)
+  }
+  for (const [site, extras] of Object.entries(WHOLE_TREE_NON_OWNER_SITES)) {
+    const files = expectedFiles.get(site)
+    assert.ok(files !== undefined, `${site} is not a SINGLE_OWNER_SITES literal`)
+    for (const extra of extras) {
+      assert.equal(files.has(extra), false, `${extra} is listed as both an owner and a non-owner site for ${site}`)
+      files.add(extra)
+      expectedCounts.set(site, expectedCounts.get(site)! + 1)
+    }
+  }
+
+  const sources = productionSources()
+  const whole = sources.map(({ rel, source }) => `// >>> ${rel}\n${source}`).join('\n')
+  for (const [site, files] of expectedFiles) {
+    const actualFiles = sources.filter(({ source }) => source.includes(site)).map(({ rel }) => rel)
+    assert.deepEqual(
+      actualFiles,
+      [...files].sort(),
+      `${site} must occur only in its pinned owner/non-owner file(s) across production src/**`,
+    )
+    assert.equal(
+      whole.split(site).length - 1,
+      expectedCounts.get(site),
+      `${site} must occur exactly ${expectedCounts.get(site)} time(s) across production src/**`,
+    )
+  }
+})
+
+/** Every call callee in `source`: an identifier name or a dotted property path. */
+function calledCallees(source: string): string[] {
+  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  const out: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression
+      if (ts.isIdentifier(callee)) out.push(callee.text)
+      else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+        out.push(`${callee.expression.text}.${callee.name.text}`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return out
+}
+
+test('A5: the composition-root construction calls occur only in the composition root', () => {
+  // Plan §8.1/§8.4: a THIRD composition root would be a second
+  // `createSessionOwnershipCore({` / `surface.start({` somewhere in production
+  // src. The per-owner `SINGLE_OWNER_SITES` row pins the count in bootstrap but
+  // cannot see a copy in a file nobody listed; this guard scans every production
+  // source. Callees are read from the AST so the owners' own factory
+  // DECLARATIONS (`export function bindSessionRuntime(`) are not miscounted as a
+  // second composition.
+  const rootOnlyCalls = [
+    'createSessionOwnershipCore',
+    'createSessionScopeAuthority',
+    'bindSessionRuntime',
+    'bindSubmissionRuntime',
+    'surface.start',
+  ]
+  const byCall = new Map<string, string[]>(rootOnlyCalls.map(name => [name, []]))
+  for (const { rel, source } of productionSources()) {
+    for (const callee of calledCallees(source)) {
+      byCall.get(callee)?.push(rel)
+    }
+  }
+  for (const name of rootOnlyCalls) {
+    assert.deepEqual(
+      byCall.get(name),
+      ['src/app/bootstrap.ts'],
+      `${name} must be called only in src/app/bootstrap.ts (plan §8.1/§8.4)`,
+    )
   }
 })
 

@@ -1571,7 +1571,7 @@ TypeScript restructure. It is structural only:
   `app/direct`'s own seam. The entry's Host coupling is now only the
   `@deepseek-ai/dsh-agent` types its frozen `composeAgent` overloads declare.
   A5b then extracted every application handler group into a real owner, so
-  `src/app/bootstrap.ts` (6186 → 2153 lines) is a composition root in the strict
+  `src/app/bootstrap.ts` (6186 → ~2.1k lines) is a composition root in the strict
   sense: resolve Host services → construct owners → bind/connect → start →
   dispose/fatal cleanup. Final owner locations: `app/surface/viewer-runtime.ts`
   (child viewer state/lifecycle), `app/surface/session-presentation.ts`
