@@ -36,6 +36,12 @@
     "sessions",
     "subagents"
   ],
+  "app/remote/client-runtime.ts": [
+    "import:dsh-agent"
+  ],
+  "app/remote/host-runtime.ts": [
+    "import:dsh-session"
+  ],
   "commands.ts": [
     "import:dsh-agent",
     "import:dsh-session"
