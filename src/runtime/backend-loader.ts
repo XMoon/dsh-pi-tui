@@ -16,5 +16,5 @@
 
 /** Load the experimental Remote composition module (dynamic, non-static edge). */
 export function loadExperimentalRemoteRuntime() {
-  return import('../app/remote/runtime.js')
+  return import('../app/remote/runtime.ts')
 }
