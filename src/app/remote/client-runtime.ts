@@ -309,16 +309,24 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
    * then the Client root. Unwinding a partial composition runs the SAME
    * order over whatever subset exists (unset fibers are skipped).
    *
-   * Cordis contains unload-disposer failures inside `fiber.dispose()` (they
-   * are logged there, never propagated), so these steps cannot reject and
-   * the sequence needs no per-step error handling.
+   * Contribution-disposer failures are isolated (collected, never allowed to
+   * truncate the remaining cleanup). Cordis contains unload-disposer failures
+   * inside `fiber.dispose()` (they are logged there, never propagated), so
+   * the fiber steps cannot reject.
+   *
+   * @returns the collected contribution-disposer cleanup errors.
    */
-  const shutdown = async (): Promise<void> => {
+  const shutdown = async (): Promise<unknown[]> => {
     for (const fiber of [jobsFiber, sessionFiber, fileUploadFiber]) {
       await fiber?.dispose()
     }
+    const contributionErrors: unknown[] = []
     for (let index = contributionDisposers.length - 1; index >= 0; index -= 1) {
-      await contributionDisposers[index]()
+      try {
+        await contributionDisposers[index]()
+      } catch (error) {
+        contributionErrors.push(error)
+      }
     }
     contributionDisposers.length = 0
     for (const fiber of [gatewayFiber, connectionFiber, typertFiber]) {
@@ -326,11 +334,12 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     }
     mountedFibers.length = 0
     await context.fiber.dispose()
+    return contributionErrors
   }
 
-  const unwind = async (): Promise<void> => {
+  const unwind = async (): Promise<unknown[]> => {
     disposed = true
-    await shutdown()
+    return shutdown()
   }
 
   const mount = async (fiber: Fiber & PromiseLike<Fiber>): Promise<Fiber> => {
@@ -377,8 +386,17 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     // lifecycle signal included) must unwind the whole partial composition.
     await waitForInitialReadiness(services.connection, services.sessions, options.signal)
   } catch (error) {
-    await unwind()
-    throw error
+    // The original construction/readiness error stays the primary failure;
+    // any cleanup failures ride its cause chain instead of masking it.
+    const cleanupErrors = await unwind()
+    const failure = error instanceof Error ? error : new Error(String(error))
+    if (cleanupErrors.length > 0) {
+      const secondary = cleanupErrors.length === 1
+        ? cleanupErrors[0]
+        : new AggregateError(cleanupErrors, 'remote client runtime: unwind disposal failures')
+      mergeCause(failure, secondary)
+    }
+    throw failure
   }
   // The catch above always rethrows, so reaching here means construction
   // (including initial readiness) completed.
@@ -393,8 +411,19 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
-      // Exactly the frozen §16 sequence (shared with the failure unwind).
-      await shutdown()
+      // Exactly the frozen §16 sequence (shared with the failure unwind);
+      // the first cleanup failure surfaces to the caller, with any remaining
+      // failures attached as its cause.
+      const cleanupErrors = await shutdown()
+      if (cleanupErrors.length > 0) {
+        const failure = cleanupErrors[0] instanceof Error
+          ? cleanupErrors[0]
+          : new Error(String(cleanupErrors[0]))
+        if (cleanupErrors.length > 1) {
+          mergeCause(failure, new AggregateError(cleanupErrors.slice(1), 'remote client runtime: remaining disposal failures'))
+        }
+        throw failure
+      }
     },
   }
   return runtime
