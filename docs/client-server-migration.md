@@ -597,32 +597,150 @@ is the official jump loader: it pages backwards until the window covers the
 requested seq, with a shared low-water target for retargeting callers and a
 no-progress guard.
 
+M3 applies the same pair to `/rewind`. The current Direct picker derives
+candidates from a complete `Session.snapshotEvents()`; the Remote path must not
+silently shrink that product behavior to the bounded opening window. Candidate
+identity/order/preview comes from the whole-log `turnOutline` projection.
+`loadThrough(seq)` is paid only when the selected/visible candidate needs event
+detail. The operation pins the exact Session binding generation; a Session
+switch, binding replacement, reconnect-invalidated generation, close, or caller
+abort drops late candidate/detail work instead of repainting a newer picker.
+Normal transcript startup still keeps its bounded window and never prefetches the
+whole log just to support `/rewind`.
+
+The normal pi-tui Host composition does not otherwise need this Web-owned
+projection unit, so M3-1's dynamic `RemoteHostRuntime` mounts
+`@deepseek-ai/dsh-session-turn-outline` beside `dsh-session-stats`; the ordinary
+`cordis.patch.yml` remains unchanged.
+
 `transcript-window` remains only Client presentation/window state. It owns
 none of: history authority, paging cursor, reconnect, gap repair, or session
 projection folding.
 
-### Remote image submission
+### Remote image submission and durable reads
 
-A future Remote Adapter should submit images through the official
-`PromptContentPart[]` path (the same part vocabulary alpha.4's subagent
-prompt accepts):
+The Remote Adapter submits images through the official `PromptContentPart[]`
+path (the same upload-shaped vocabulary used by Session/subagent prompts):
 
 ```text
-PromptContentPart[]
+Client-local draft bytes
+→ PromptContentPart { type: 'image', mediaType, data(base64), name? }
 → Session.prompt(...)
-→ Host-side image admission
+→ Host-side image/model admission
+→ durable ImageAttachmentRef in the Session log
 ```
 
-The Client owns temporary/staged image bytes only. The Host owns:
+Ownership is deliberately split:
 
-- attachment admission (`admitPromptContent` promotes image parts to durable
-  `ImageAttachmentRef`s before any message is created),
-- durable attachment refs,
-- the final `UserMessage`.
+- `/image`, clipboard paste and image-file IO are Client-local staging. Before a
+  Session exists, only the TUI's own bounded RAM/pre-read safety caps are
+  available; the Client must not invent the Host deployment's image policy.
+- Once the first Session is created/retained, the Client re-applies the exact
+  Session's `imageLimits` projection before serialization when that projection
+  is available. This is a UX/preflight check, not the authority.
+- `session/prompt` remains authoritative. The Host serializes image admission
+  with model selection, resolves the current model metadata, refuses
+  `MODEL_DOES_NOT_SUPPORT_IMAGES` through `session/attachment-invalid`, calls
+  `admitPromptContent`, and persists the durable image references. The Remote
+  TUI therefore does **not** call Host `ctx.llm.resolveModelInfo()` or
+  `ctx.attachments.saveImages()`.
+- A durable image already referenced by Session history is read through the
+  official authorized `session/attachment({ sessionId, attachmentId })` Remote.
+  Main transcript reads use the main binding identity; a child viewer uses the
+  child Session/binding. Late bytes are fenced by that exact binding generation.
+- Recalling/re-sending an old image does not put a Host-private attachment ref
+  into a new wire prompt. When bytes are required, the Client obtains them via
+  `session/attachment` and submits ordinary image data again.
+
+This image path is separate from D4 generic files. Generic Client-local
+`/attach` content still needs the `fileUploads/upload` receipt transaction and
+remains intentionally unsupported on the M3 wire. The presence of the
+`fileUpload` composition dependency in M3-1 does not silently enable that UX.
 
 Do not treat a Direct-mode generated DSH `UserMessage` as the future
 cross-process protocol: the wire caller must never cite an attachment it did
-not upload.
+not upload/read through an authorized public carrier.
+
+### Client command execution ownership
+
+The wire split keeps two command planes distinct:
+
+```text
+Host-owned command
+  commands/list descriptor/claim
+  → TUI Client decides the route
+  → HostCommandPort
+  → commands/execute
+
+TUI built-in / TUI skill-wrapper / Extension command
+  Client-local registration
+  → Client-local handler/callback
+  → semantic ports / ordinary prompt as needed
+```
+
+The current Direct runner registers TUI handlers in Host `ctx.commands` and uses
+`ctx.commands.execute(...)` as a convenient normalizer. That is an in-process
+implementation detail, not the M3 contract. M3-4 moves those callbacks into the
+Client Context: no TUI/extension handler function is registered into or invoked
+through Host `ctx.commands`, and no callback crosses the wire. Host command
+descriptors still own Host claim/collision precedence, and an advertised Host
+command still executes exactly once through `HostCommandPort`.
+
+Skill wrappers follow the same rule, with one deliberate Direct→wire
+convergence. Direct today re-gets the live skill body and formats the TUI-owned
+`renderSkillInvocation`; rc.2 exposes no `skills/read` Remote, but it **does**
+ship the official explicit-user `/name` gesture in `dsh-tool-skill`. Remote M3
+therefore keeps the same advertised slash-command claim/trailing instructions,
+validates against the current `skills/list`, and submits the literal `/name
+[instructions]` as one ordinary user prompt. The Host pre-step performs the
+authoritative current `ctx.skills.get` + `isUserInvocable` check and body
+injection. The Direct private body renderer stays a compatibility implementation
+and is never promoted into a Client/Host protocol.
+
+### Tool-card presentation ownership
+
+The Direct TUI currently asks the Host tool registry for a scoped
+`ToolDefinition` and executes `presentCall` / `presentResult`. Those are callback
+functions and cannot be a wire contract.
+
+rc.2's Client tool UI establishes the migration direction: Client cards derive
+from raw `tool/call` / `tool/result` event fields plus persisted structured
+content/metadata; Host `presentCall` / `presentResult` values do not enter the
+Client. M3-4 follows that ownership rule:
+
+- known first-party TUI cards are derived Client-side from replay-deterministic
+  event data;
+- public TUI extension tool renderers stay in the Client Context;
+- an unknown/custom tool keeps the bounded generic/raw card rather than causing
+  a Host registry lookup;
+- the Remote branch has no `ctx.tools.get(...)`, Agent-scoped tool-definition
+  lookup, or presenter callback transport.
+
+This is presentation only. It never authorizes Client-side tool execution; all
+tool business execution remains Host-owned.
+
+### Skill catalog invalidation under rc.2
+
+`skills/list({ sessionId })` is a valid Remote read, but the Host
+`skills/change` invalidation event is **not** in rc.2's forwarded Remote-event
+allowlist. A Client `$on('skills/change')` is therefore not an available
+carrier, and M3 must not create a private forwarding event just to preserve the
+Direct hot-refresh callback.
+
+M3 classifies `SkillCatalogCapability.onSkillsChange()` as intentionally
+unsupported on the wire. The Client strongly re-reads the live skill catalog on
+binding/session entry, explicit `/reload`, and `connection/reset`. A provider
+filesystem/runtime mutation between those boundaries may temporarily leave
+autocomplete stale; execution remains safe because the Remote branch never
+injects a cached Client-side skill body and Host authority handles the actual
+gesture. A future upstream forwarded capability can remove this limitation
+without changing the semantic ownership.
+
+For M3's in-process pi-tui Host, `hostLoadsSkillBody` is a composition fact:
+M3-1 proves the generated supported presets mount `@deepseek-ai/dsh-tool-skill`.
+It is not inferred from a hidden Host service. M5/external attach must fail
+closed rather than reuse that local composition assumption when the remote Host
+cannot prove the capability.
 
 ### Connection lifecycle
 
@@ -1512,9 +1630,11 @@ Still deferred to M3 (adapter-ready, not wired): Remote backend production
 assembly; Connection ownership in the TUI process; Client Context lifetime;
 backend selection/loading; Remote main-surface owner install; the
 `retain new -> commit -> release old` transition; writer-held caller/UI
-recovery; Remote submission-presentation composition; Remote Task/Presentation
-production consumption; Remote Plugin Manager panel wiring; Remote Job viewer
-wiring.
+recovery; Remote submission-presentation composition; Client-owned TUI/extension
+command execution; tool-card presentation without Host presenter callbacks;
+whole-log `/rewind` over `turnOutline`; image prompt/read wiring; Remote
+Task/Presentation production consumption; Remote Plugin Manager panel wiring;
+Remote Job viewer wiring.
 
 The M3 entry architecture is:
 
@@ -1691,15 +1811,18 @@ directories once the test runner is deliberately made recursive.
 Non-blocking coverage gaps with a named owner lane. These are not current
 merge blockers; each records what is absent and the follow-up shape.
 
-None currently: the D2.3 same-Host integration lane is closed by
-`smoke:remote-session-lifecycle-parity` (see the Pre-M3 status section).
+None currently for **Pre-M3**: the D2.3 same-Host integration lane is closed by
+`smoke:remote-session-lifecycle-parity` (see the Pre-M3 status section). The
+M3-only L5/L6 proofs frozen in `docs/m3-entry-contract.md` (Client command
+execution, tool presentation, image submit/read, `turnOutline` rewind and skill
+invalidation behavior) are stage acceptance tests, not missing Pre-M3 coverage.
 
 ## Known blockers
 
 | Blocker | Level | Mitigation |
 |---|---|---|
 | Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + in-process rpc carrier (see `docs/m3-entry-contract.md` §4.2). No product redesign required |
-| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question: `dsh-base` mounts the Host gateway/typert rows only, so M3-1 inserts the Host remote-serving rows (`api-session-controller`, `api-settings-controller`, `api-remotes`) gated behind the experimental composition, and the Client mounts an explicit minimal `/remote` set. Never replace the default patch (see `docs/m3-entry-contract.md` §2.4, §11 M3-1) |
+| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see `docs/m3-entry-contract.md` §2.4, §11 M3-1) |
 | Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/m3-entry-contract.md` §8) |
 | Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
 | Shell execution on the wrong machine | Critical | Locality hard rule; remote `!` fails closed |
@@ -1732,3 +1855,4 @@ confirmed break.
 - Every coupling relocation: update `docs/client-server-coupling.md` and
   the gate baseline in the same PR.
 - Every new blocker or removed blocker: update the table.
+
