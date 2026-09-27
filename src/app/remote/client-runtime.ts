@@ -59,8 +59,11 @@ export interface OfficialClientModules {
   readonly jobs: JobClientModule
 }
 
-/** Import specifier paired with its expected `__ModuleLoader__` registration id. */
-const CLIENT_BUNDLES = [
+/**
+ * The exact allowlist: dynamic import specifier paired with its expected
+ * `__ModuleLoader__` registration id (§9.1). Kept distinct by design.
+ */
+export const OFFICIAL_CLIENT_BUNDLES = [
   { specifier: '@deepseek-ai/dsh-typert-registry/client', id: '@deepseek-ai/dsh-typert-registry' },
   { specifier: '@deepseek-ai/dsh-client-connection/client', id: '@deepseek-ai/dsh-client-connection' },
   { specifier: '@deepseek-ai/dsh-api-gateway/client', id: '@deepseek-ai/dsh-api-gateway' },
@@ -69,13 +72,13 @@ const CLIENT_BUNDLES = [
   { specifier: '@deepseek-ai/dsh-api-job-controller/client', id: '@deepseek-ai/dsh-api-job-controller' },
 ] as const
 
-type ClientBundleId = (typeof CLIENT_BUNDLES)[number]['id']
+type ClientBundleId = (typeof OFFICIAL_CLIENT_BUNDLES)[number]['id']
 
 type ModuleFactory = (requireModule: (specifier: string) => unknown) => unknown
 type ModuleLoader = (registration: { id: string; factory: ModuleFactory }) => void
 
 /** Expected registration ids, in dependency order. */
-const EXPECTED_REGISTRATION_IDS: readonly ClientBundleId[] = CLIENT_BUNDLES.map(bundle => bundle.id)
+const EXPECTED_REGISTRATION_IDS: readonly ClientBundleId[] = OFFICIAL_CLIENT_BUNDLES.map(bundle => bundle.id)
 
 /** Process-wide single-flight capture; module code evaluates once per process. */
 let officialClientModulesPromise: Promise<OfficialClientModules> | undefined
@@ -151,39 +154,70 @@ export function createScopedClientModuleLoader(expectedIds: readonly string[]): 
   }
 }
 
-async function captureOfficialClientModules(): Promise<OfficialClientModules> {
-  const loader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
-  const { load } = loader
-
-  const globalScope = globalThis as { window?: unknown }
-  const previousWindow = globalScope.window
+/**
+ * Install the temporary `window.__ModuleLoader__` shim around exactly the six
+ * bundle imports, preserving the exact previous process state: when
+ * `globalThis.window` is absent, only the minimal temporary object is created
+ * and deleted again; when a `window` own property already exists (including a
+ * property whose value is `undefined`/`null`, and accessor descriptors), its
+ * exact property descriptor is restored, and any pre-existing
+ * `__ModuleLoader__` property descriptor on an existing window object is
+ * preserved and restored verbatim.
+ * @returns the restore function; it must run before any Client plugin executes
+ * (and on every failure path).
+ */
+export function installScopedModuleLoaderShim(load: ModuleLoader): () => void {
+  const globalScope = globalThis as Record<string, unknown>
+  const previousWindowDescriptor = Object.getOwnPropertyDescriptor(globalScope, 'window')
+  const previousWindowValue = previousWindowDescriptor?.value
+  const usableExistingWindow = (typeof previousWindowValue === 'object' && previousWindowValue !== null)
+    || typeof previousWindowValue === 'function'
   let previousLoaderDescriptor: PropertyDescriptor | undefined
-  const windowExisted = previousWindow !== undefined
-  try {
-    if (windowExisted) {
-      const existingWindow = previousWindow as Record<string, unknown>
+
+  const install = (): void => {
+    if (usableExistingWindow) {
+      const existingWindow = previousWindowValue as Record<string, unknown>
       previousLoaderDescriptor = Object.getOwnPropertyDescriptor(existingWindow, '__ModuleLoader__')
       existingWindow.__ModuleLoader__ = { load }
     } else {
-      globalScope.window = { __ModuleLoader__: { load } }
+      Object.defineProperty(globalScope, 'window', {
+        configurable: true,
+        writable: true,
+        value: { __ModuleLoader__: { load } },
+      })
     }
-
-    for (const bundle of CLIENT_BUNDLES) {
-      await import(bundle.specifier)
+  }
+  const restore = (): void => {
+    if (previousWindowDescriptor === undefined) {
+      delete globalScope.window
+      return
     }
-
-    loader.assertComplete()
-  } finally {
-    if (windowExisted) {
-      const existingWindow = previousWindow as Record<string, unknown>
+    Object.defineProperty(globalScope, 'window', previousWindowDescriptor)
+    if (usableExistingWindow) {
+      const existingWindow = previousWindowValue as Record<string, unknown>
       if (previousLoaderDescriptor === undefined) {
         delete existingWindow.__ModuleLoader__
       } else {
         Object.defineProperty(existingWindow, '__ModuleLoader__', previousLoaderDescriptor)
       }
-    } else {
-      delete globalScope.window
     }
+  }
+
+  install()
+  return restore
+}
+
+async function captureOfficialClientModules(): Promise<OfficialClientModules> {
+  const loader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
+
+  const restoreShim = installScopedModuleLoaderShim(loader.load)
+  try {
+    for (const bundle of OFFICIAL_CLIENT_BUNDLES) {
+      await import(bundle.specifier)
+    }
+    loader.assertComplete()
+  } finally {
+    restoreShim()
   }
 
   const captured = new Map<string, unknown>()
@@ -264,17 +298,41 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
   const contributionDisposers: Array<() => Promise<void> | void> = []
   let disposed = false
 
+  /**
+   * The frozen §16 shutdown sequence: domain Clients (reverse), the explicit
+   * `/remote` contributions (reverse), Gateway/Connection/Typert (reverse),
+   * then the Client root. Unwinding a partial composition runs the SAME
+   * order over whatever subset exists (unset fibers are skipped). Each step
+   * is isolated so one failure cannot truncate the remaining cleanup; the
+   * first collected error rethrows afterwards.
+   */
+  const shutdown = async (): Promise<void> => {
+    const steps: Array<() => unknown> = [
+      () => jobsFiber?.dispose(),
+      () => sessionFiber?.dispose(),
+      () => fileUploadFiber?.dispose(),
+      ...contributionDisposers.slice().reverse().map(disposer => (): unknown => disposer()),
+      () => gatewayFiber?.dispose(),
+      () => connectionFiber?.dispose(),
+      () => typertFiber?.dispose(),
+      () => context.fiber.dispose(),
+    ]
+    contributionDisposers.length = 0
+    mountedFibers.length = 0
+    const errors: unknown[] = []
+    for (const step of steps) {
+      try {
+        await step()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    if (errors.length > 0) throw errors[0]
+  }
+
   const unwind = async (): Promise<void> => {
     disposed = true
-    for (let index = contributionDisposers.length - 1; index >= 0; index -= 1) {
-      await contributionDisposers[index]()
-    }
-    contributionDisposers.length = 0
-    for (let index = mountedFibers.length - 1; index >= 0; index -= 1) {
-      await mountedFibers[index].dispose()
-    }
-    mountedFibers.length = 0
-    await context.fiber.dispose()
+    await shutdown()
   }
 
   const mount = async (fiber: Fiber & PromiseLike<Fiber>): Promise<Fiber> => {
@@ -337,19 +395,8 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
-      // Domain Clients first, then contributions, then the wire, then the root.
-      for (const fiber of [jobsFiber, sessionFiber, fileUploadFiber]) {
-        await fiber?.dispose()
-      }
-      for (let index = contributionDisposers.length - 1; index >= 0; index -= 1) {
-        await contributionDisposers[index]()
-      }
-      contributionDisposers.length = 0
-      for (const fiber of [gatewayFiber, connectionFiber, typertFiber]) {
-        await fiber?.dispose()
-      }
-      mountedFibers.length = 0
-      await context.fiber.dispose()
+      // Exactly the frozen §16 sequence (shared with the failure unwind).
+      await shutdown()
     },
   }
   return runtime

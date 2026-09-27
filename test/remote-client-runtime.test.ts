@@ -49,7 +49,9 @@ import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import {
   createRemoteClientRuntime,
   createScopedClientModuleLoader,
+  installScopedModuleLoaderShim,
   loadOfficialClientModulesOnce,
+  OFFICIAL_CLIENT_BUNDLES,
   type RemoteClientRuntime,
 } from '../src/app/remote/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../src/app/remote/host-runtime.ts'
@@ -467,6 +469,44 @@ test('B. the scoped loader capture is exact, single-flight, and restores the pro
   assert.deepEqual(completeLoader.registeredIds(), EXPECTED_REGISTRATION_IDS)
   assert.doesNotThrow(() => completeLoader.assertComplete(), 'the exact six ids must pass the completeness check')
 
+  // The exact specifier ↔ registration-id pairing (§22.B).
+  assert.deepEqual(OFFICIAL_CLIENT_BUNDLES.map(bundle => `${bundle.id}/client`),
+    OFFICIAL_CLIENT_BUNDLES.map(bundle => bundle.specifier))
+  assert.deepEqual(OFFICIAL_CLIENT_BUNDLES.map(bundle => bundle.id), EXPECTED_REGISTRATION_IDS)
+
+  // Exact process-state restoration across all three pre-states.
+  const scope = globalThis as Record<string, unknown>
+  const noopLoader = () => {}
+  // (1) window absent → absent again, shim present while installed.
+  {
+    const restore = installScopedModuleLoaderShim(noopLoader)
+    assert.equal(typeof (scope.window as { __ModuleLoader__: unknown }).__ModuleLoader__, 'object')
+    restore()
+    assert.equal('window' in scope, false, 'an absent window must stay absent')
+  }
+  // (2) pre-existing window object with its own loader → restored verbatim.
+  {
+    const sentinel = { __sentinel__: true }
+    scope.window = { __ModuleLoader__: sentinel }
+    const restore = installScopedModuleLoaderShim(noopLoader)
+    assert.notEqual((scope.window as { __ModuleLoader__: unknown }).__ModuleLoader__, sentinel,
+      'the shim must be installed over a pre-existing loader')
+    restore()
+    assert.equal((scope.window as { __ModuleLoader__: unknown }).__ModuleLoader__, sentinel,
+      'the pre-existing loader descriptor must be restored verbatim')
+    delete scope.window
+  }
+  // (3) own window property whose value is undefined → preserved exactly.
+  {
+    scope.window = undefined
+    const restore = installScopedModuleLoaderShim(noopLoader)
+    restore()
+    const descriptor = Object.getOwnPropertyDescriptor(scope, 'window')
+    assert.ok(descriptor !== undefined && !('get' in descriptor) && descriptor.value === undefined,
+      'a pre-existing window property with value undefined must be restored exactly')
+    delete scope.window
+  }
+
   // The capture shim is gone after the capture.
   assert.equal('window' in globalThis, false, 'the temporary window global must be restored')
   assert.equal('__ModuleLoader__' in globalThis, false)
@@ -570,7 +610,16 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
     const client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
     await waitFor('the retry client to become ready', () =>
       client.sessions.list.getSnapshot().phase === 'ready')
+    // No orphan loop: after the retry client's disposal, a live
+    // connection/reset listener must stay quiet through a settle window.
+    let resetsAfterDispose = 0
+    const unsubscribe = client.context.on('connection/reset', () => { resetsAfterDispose += 1 })
     await client.dispose()
+    await new Promise(resolve => setTimeout(resolve, 150))
+    resetsAfterDispose = 0
+    await new Promise(resolve => setTimeout(resolve, 250))
+    unsubscribe()
+    assert.equal(resetsAfterDispose, 0, 'a disposed Client may not keep a live loop')
     await hostRuntime.dispose()
     assert.equal(host.ctx.reflect.get('connection'), undefined, 'the Host runtime disposal removes its rows')
   } finally {
