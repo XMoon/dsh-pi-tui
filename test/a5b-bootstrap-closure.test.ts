@@ -305,6 +305,26 @@ test('A5b-2: the settings owner consumes narrow surface/config capabilities', ()
     'the settings owner must not depend on the whole backend port')
 })
 
+test('A5b-4: only the owner that is asked to consume the draft clears the editor', () => {
+  // TuiApp's own Ctrl+S path clears + notifies the editor seat BEFORE calling
+  // `onSteer`, so the controller must not clear a second time there (a duplicate
+  // synchronous notify/revision). The surface `steer-draft` action instead hands
+  // the still-present draft over and asks the owner to consume it.
+  const owner = ownerFile('src/app/submission/controller.ts')
+  assert.equal(owner.split("deps.app().setDraft('')").length - 1, 1,
+    'the submission owner must CLEAR the editor in exactly ONE place')
+  assert.match(owner, /if \(options\?\.consumeDraft === true\) deps\.app\(\)\.setDraft\(''\)/u,
+    'the single clear must be guarded by the explicit consumeDraft request')
+  const root = compositionFile('src/app/bootstrap.ts')
+  assert.match(root, /submission\.steer\(app\.getDraft\(\), \{ consumeDraft: true \}\)/u,
+    'the steer-draft action must ask the owner to consume the still-present draft')
+  const onSteer = root.slice(root.indexOf('onSteer: (text) =>'), root.indexOf('onSteer: (text) =>') + 900)
+  assert.match(onSteer, /submission\.steer\(text\)/u,
+    'the TuiApp onSteer seam must NOT ask for a second consume (the caller already cleared)')
+  assert.doesNotMatch(onSteer, /consumeDraft/u,
+    'the TuiApp onSteer seam must not pass consumeDraft')
+})
+
 test('A5b-3: the command runtime application binding is command-owned', () => {
   // Plan §A5b-3 "Move together" lists `commandRuntime = bindCommandRuntime(...)`:
   // the binding must not stay in the composition root, and the root must reach

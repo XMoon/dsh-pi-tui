@@ -39,7 +39,8 @@ const matrix = JSON.parse(
   }>
 }
 
-/** The residual ledger as of the A5b-0..4 closure. It is SHRINK-ONLY. */
+/** The residual ledger as of the A5b-0..4 closure. It is EXACT: shrinking it is
+ *  a deliberate, reviewed edit in the slice that lands the move. */
 const RESIDUAL_LEDGER = new Set([
   // A5b-5 owns the application-event adapter + client actions.
   'surfaceEvents',
@@ -122,12 +123,11 @@ test('A5b-0 matrix: every root declaration of startRunner() is classified', () =
   }
 })
 
-test('A5b-0 matrix: the residual ownership ledger only shrinks', () => {
-  const residual = matrix.rows.filter((r) => r.classification.startsWith('MUST_MOVE:')).map((r) => r.name)
-  for (const name of residual) {
-    assert.ok(
-      RESIDUAL_LEDGER.has(name),
-      `${name} is a NEW unowned root declaration: classify it as KEEP_BOOTSTRAP with a §7.6.1 reason, or move it to its owner (the ledger may not grow)`,
-    )
-  }
+test('A5b-0 matrix: the residual ownership ledger is exact', () => {
+  const residual = matrix.rows.filter((r) => r.classification.startsWith('MUST_MOVE:')).map((r) => r.name).sort()
+  assert.deepEqual(
+    residual,
+    [...RESIDUAL_LEDGER].sort(),
+    'the MUST_MOVE residual is an exact, reviewed set: a NEW unowned declaration must be classified (KEEP_BOOTSTRAP with a §7.6.1 reason) or moved, and a landed move must update this ledger in the same slice',
+  )
 })
