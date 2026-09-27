@@ -24,7 +24,6 @@
  * @module @xmoon76/dsh-pi-tui/app/command/surface
  */
 
-import type { Context } from '@deepseek-ai/cordis'
 import type { Diag } from '../../diag.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import { runOwned } from '../../detached.ts'
@@ -32,11 +31,13 @@ import { safeErrorMessage } from '../../error-boundary.ts'
 import { normalizeSkillInvocation } from '../../command-policy.ts'
 import { readSurfaceCatalog, type SurfaceCatalogContext } from '../../surface-catalog.ts'
 import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
+import type { SessionScopeAuthority } from '../session/scope.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from '../../skill-catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
+import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
 import { copyToClipboard } from '../../clipboard.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../display-preset.ts'
-import { prepareUserMessage } from '../../image/submit.ts'
+import { draftHasImages, prepareUserMessage } from '../../image/submit.ts'
 import type { ModelSelectionValue } from '../../model-selection.ts'
 import type { SessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'
@@ -45,9 +46,7 @@ import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 
 /** The catalog capability slice the command surface subscribes to. */
 export interface CommandCatalogCapability {
-  readonly skills: Pick<SkillCatalogCapability, 'standing'> & {
-    onSkillsChange(listener: () => void): void
-  }
+  readonly skills: SkillCatalogCapability
 }
 
 /** One catalog refresh target (the semantic target, no Host type). */
@@ -88,11 +87,28 @@ type RunnerFacade<Selection extends ModelSelectionValue, Id extends string> =
     ): Promise<void>
   }
 
+/** The structural minimum of the exact live Agent this owner reads (the
+ *  session identity/header, the launch routing and the live status). */
+export interface CommandAgentShape {
+  readonly session: {
+    readonly id: string
+    readonly header: { readonly cwd?: string }
+  }
+  readonly options: { readonly provider?: string; readonly model?: string }
+  readonly status: string
+}
+
 /** The narrow capabilities the command surface consumes. */
-export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, ExactAgent extends { readonly session: { readonly id: string } }> {
-  /** The Cordis context: part of the frozen TuiCommandRunner contract (and the
-   *  surface-catalog context); never used for Host service lookups here. */
-  readonly ctx: Context
+export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, ExactAgent extends CommandAgentShape> {
+  /** The Cordis context: carried ONLY as the frozen `TuiCommandRunner.ctx`
+   *  member (the composition root also uses it for service lookups on its own
+   *  side of the seam). */
+  readonly ctx: TuiCommandRunner['ctx']
+  /** The surface-catalog read context (a narrow view of the Cordis context,
+   *  cast once by the composition root). */
+  readonly surfaceCatalogContext: SurfaceCatalogContext
+  /** The diagnostic sink for command registration failures. */
+  readonly logError: (message: string) => void
   readonly diag: Diag
   /** The runner lifetime signal (the catalog coordinator). */
   readonly signal: AbortSignal
@@ -100,8 +116,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly app: () => TuiApp
   /** The exact live Agent of the current owner, or undefined. */
   readonly liveAgent: () => ExactAgent | undefined
-  /** The scope authority (the ONLY currentness source). */
-  readonly sessionScope: { isCurrent(scope: SessionScope): boolean }
+  /** The session scope authority (the ONLY currentness source). */
+  readonly sessionScope: SessionScopeAuthority
   /** The ownership core (generation fence + session id). */
   readonly ownership: {
     readonly generation: () => number
@@ -115,6 +131,15 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The command registry lookup (the Host commands service), or undefined. */
   readonly commandsRegistry: () => CommandRegistryLike | undefined
+  /** The narrow Direct seams the command runtime binding needs. These stay in
+   *  the composition root: they read the in-process Host session log and the
+   *  Host command registry. */
+  readonly direct: {
+    listScopedCommands: CommandRuntimeSurface['listScopedCommands']
+    sessionStats: CommandRuntimeSurface['sessionStats']
+    lastAssistantText: CommandRuntimeSurface['lastAssistantText']
+    promptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T> | T): Promise<T>
+  }
   /** The semantic catalog capability (skills/change + standing read). */
   readonly catalog: CommandCatalogCapability
   /** Map one exact Agent onto the semantic catalog port's agent field. The
@@ -150,6 +175,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   /** The bound session runtime entries the runner drives. */
   readonly session: {
     ensureSession(): Promise<void>
+    withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string): Promise<string | undefined>
     forkSession: NonNullable<TuiCommandRunner['forkSession']>
     transitionTo: TuiCommandRunner['transitionTo']
@@ -227,7 +253,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
 }
 
 /** The command authority as the rest of the application consumes it. */
-export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgent extends { readonly session: { readonly id: string } }> {
+export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgent extends CommandAgentShape> {
   /** Register the TUI command surface once. */
   register(initial?: InitialCommandCatalog): void
   /** Refresh the live owner's scoped catalog through the coordinator. */
@@ -256,14 +282,17 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   attachmentForSession(sessionId: string): ExactAgent
   /** Release the catalog coordinator (disposal orchestration). */
   disposeCatalog(): void
-  /** Build + store the TuiCommandRunner facade (late-bound submission deps). */
+  /** Bind the semantic command runtime AND build the facade: the composition
+   *  root's single command-wiring step (plan §A5b-3, "Move together"). */
+  attachRuntime(): void
+  /** Build + store the TuiCommandRunner facade from a bound runtime. */
   buildRunner(runtime: CommandRuntime): TuiCommandRunner
   /** The stored TuiCommandRunner facade. */
   runner(): TuiCommandRunner
 }
 
 /** Create the command authority owner (plan §A5b-3). */
-export function createCommandSurface<Selection extends ModelSelectionValue, Id extends string, ExactAgent extends { readonly session: { readonly id: string } }>(
+export function createCommandSurface<Selection extends ModelSelectionValue, Id extends string, ExactAgent extends CommandAgentShape>(
   deps: CommandSurfaceDeps<Selection, ExactAgent>,
 ): CommandSurface<Selection, ExactAgent> {
   let runnerFacade: TuiCommandRunner | undefined
@@ -485,7 +514,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the command runtime's refresh facades (and the switch/first-session
       // path) route every post-mount refresh through `catalogRefreshRequest`.
       catalogCoordinator = new CatalogRefreshCoordinator({
-        readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, deps.ctx as unknown as SurfaceCatalogContext),
+        readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, deps.surfaceCatalogContext),
         // The sessionless (preset) target reads the STANDING skill catalog
         // through the catalog capability (migration M1.8) — the
         // capability-gated cold path (standing key → global → degraded
@@ -506,7 +535,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // failure visibly instead of swallowing it.
       commandsRegistered = false
       const message = safeErrorMessage(error)
-      deps.ctx.logger.error(`tui-runner: command registration failed: ${message}`)
+      deps.logError(`tui-runner: command registration failed: ${message}`)
       deps.diag.error('command registration failed', { error: message })
       deps.app().notify(`command registration failed: ${message}`, 'error')
     }
@@ -521,6 +550,59 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * that registration rebinds (`withCommandDelivery`) is read through the
    * local accessor at call time, never captured by value.
    */
+  /** The BOUND semantic command runtime (A3-5): it owns the scope/currentness
+   *  fence and the facade shapes; every Direct fact is injected here as a
+   *  narrow surface hook, and the Host skill catalog reads go through the
+   *  semantic capability. The binding is command-owned; only the Host-session
+   *  reads it needs stay in the composition root (`deps.direct`). */
+  const attachRuntime = (): void => {
+    const runtime = bindCommandRuntime({
+      scope: deps.sessionScope,
+      session: {
+        ensureSession: () => deps.session.ensureSession(),
+        withWriter: (scope, task) => deps.session.withWriter(scope, task),
+      },
+      skills: deps.catalog.skills,
+      surface: {
+        listScopedCommands: () => deps.direct.listScopedCommands(),
+        sessionRunning: (sessionId) => attachmentForSession(sessionId).status === 'running',
+        sessionRouting: (sessionId) => {
+          const agent = attachmentForSession(sessionId)
+          // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
+          // the Direct composition may leave them unset: their absence is real
+          // semantic optionality, never an invariant break.
+          return {
+            provider: agent.options.provider,
+            model: agent.options.model,
+            cwd: agent.session.header.cwd ?? deps.clientCwd,
+          }
+        },
+        approvalOverride: (sessionId) =>
+          deps.backend.config.permissions.approvalOverrideOf(sessionId),
+        sessionStats: (sessionId) => deps.direct.sessionStats(sessionId),
+        lastAssistantText: (sessionId) => deps.direct.lastAssistantText(sessionId),
+        refreshLiveCatalog: async (sessionId, source) => {
+          // SYNC admission: the exact Direct owner is captured HERE, before the
+          // read awaits (§10.2).
+          const agent = attachmentForSession(sessionId)
+          if (!catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
+          return requestCatalogRefresh({
+            source,
+            target: { kind: 'agent', key: deps.ownership.generation() },
+            agent: deps.toCatalogAgent(agent),
+          })
+        },
+        refreshStandingCatalog: (presetId, source) =>
+          catalogRefreshAvailable()
+            ? requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
+            : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' }),
+        promptAdmission: (sessionId, line, task) =>
+          deps.direct.promptAdmission(attachmentForSession(sessionId), draftHasImages(line, deps.drafts.images), async () => task()),
+      },
+    })
+    buildRunner(runtime)
+  }
+
   const buildRunner = (runtime: CommandRuntime): TuiCommandRunner => {
     const facade: RunnerFacade<Selection, Id> = {
       ctx: deps.ctx,
@@ -712,9 +794,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const disposeCatalog = (): void => {
     catalogCoordinator?.dispose()
     catalogCoordinator = undefined
+    // The Direct `skills/change` capability offers no unsubscribe, so a late
+    // event can still reach the coalescing gate after teardown. Clearing the
+    // request slot makes both refresh paths no-ops (they guard on undefined)
+    // instead of touching the disposed coordinator.
+    catalogRefreshRequest = undefined
   }
 
   return {
+    attachRuntime,
     register: registerCommands,
     refreshLiveCatalog,
     wasAdvertisedClaim: (name) => wasAdvertisedClaim?.(name) === true,

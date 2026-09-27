@@ -63,7 +63,7 @@ import { createStatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
-import { createCommandSurface } from './command/surface.ts'
+import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
@@ -109,7 +109,6 @@ import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, steerAll, sessionUnchanged, type SteerAgentLike } from '../steer.ts'
 import { resolveSubagentSettleTarget, subagentPromptDisposition, viewerCanonicalizeScope, type SubagentPromptOutcome, type SubagentPromptReject, type SubagentViewerSubmitRequest } from '../subagent-viewer-submit.ts'
-import { bindCommandRuntime } from '../app/command/runtime.ts'
 import { createDirectApplicationRuntime } from '../app/direct/runtime.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
@@ -952,7 +951,9 @@ export function applyRunner(ctx: Context, config: Config): void {
     // runner facade is built later, after the semantic command runtime binds.
     // Every owner below is read live (getter/closure), so this site's order is
     // irrelevant and no capability can go stale.
-    const command = createCommandSurface<ModelSelection, SessionId, Agent>({
+    // Explicit annotation: the Direct seams below read the owner back
+    // (late-bound through `command`), so the initializer cannot drive inference.
+    const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({
       ctx,
       diag,
       signal: lifecycleController.signal,
@@ -992,6 +993,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       },
       session: {
         ensureSession: () => sessionRuntime.ensureSession(),
+        withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
         switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
         forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
         transitionTo: (steps) => sessionRuntime.transitionTo(steps),
@@ -1053,6 +1055,34 @@ export function applyRunner(ctx: Context, config: Config): void {
       openRewindPicker: () => openRewindPicker(),
       requestExit: () => requestExit(),
       exit,
+      // A5b-3: the narrow Direct seams the (command-owned) runtime binding
+      // needs. They stay here because they read the in-process Host session log
+      // and the Host command registry.
+      direct: {
+        listScopedCommands: () => {
+          const commands = ctx.get('commands') as CommandRegistryLike | undefined
+          if (commands === undefined) throw new Error('commands service unavailable')
+          return commands.list(agentNow()).map(commandSummaryOf)
+        },
+        sessionStats: (sessionId) => computeStats(command.attachmentForSession(sessionId).session.snapshotEvents()),
+        lastAssistantText: (sessionId) => {
+          const session = command.attachmentForSession(sessionId).session
+          // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
+          // materialize the whole log for one message.
+          for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
+            const event = session.eventAt(SessionSeq(seq))
+            if (event?.type !== 'assistant/message') continue
+            return event.data.message.content
+              .filter(block => block.type === 'text')
+              .map(block => block.text)
+              .join('')
+          }
+          return undefined
+        },
+        promptAdmission: (agent, hasImages, task) => directRuntime.withPromptAdmission(agent, hasImages, async () => task()),
+      },
+      surfaceCatalogContext: ctx as unknown as SurfaceCatalogContext,
+      logError: (message) => ctx.logger.error(message),
     })
     // A5b-2: the surface status owner (footer/status derivation, the context
     // measurement cache and its deferred initial measure). The Direct facts and
@@ -4038,82 +4068,9 @@ export function applyRunner(ctx: Context, config: Config): void {
         },
       )
     }
-    /**
-     * The BOUND semantic command runtime (A3-5): it owns the scope/currentness
-     * fence and the facade shapes; every Direct fact is injected here as a
-     * narrow surface hook, and the Host skill catalog reads go through the
-     * semantic capability. The runner keeps the Direct composition and the
-     * presentation dependency bag.
-     */
-    const commandRuntime = bindCommandRuntime({
-      scope: sessionScope,
-      session: {
-        ensureSession: () => sessionRuntime.ensureSession(),
-        withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
-      },
-      skills: backend.catalog.skills,
-      surface: {
-        listScopedCommands: () => {
-          const commands = ctx.get('commands') as CommandRegistryLike | undefined
-          if (commands === undefined) throw new Error('commands service unavailable')
-          return commands.list(agentNow()).map(commandSummaryOf)
-        },
-        sessionRunning: (sessionId) => command.attachmentForSession(sessionId).status === 'running',
-        sessionRouting: (sessionId) => {
-          const agent = command.attachmentForSession(sessionId)
-          // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
-          // the Direct composition may leave them unset: their absence is real
-          // semantic optionality, never an invariant break.
-          return {
-            provider: agent.options.provider,
-            model: agent.options.model,
-            cwd: agent.session.header.cwd ?? cwd,
-          }
-        },
-        approvalOverride: (sessionId) => {
-          command.attachmentForSession(sessionId)
-          return backend.config.permissions.approvalOverrideOf(sessionId)
-        },
-        sessionStats: (sessionId) => computeStats(command.attachmentForSession(sessionId).session.snapshotEvents()),
-        lastAssistantText: (sessionId) => {
-          const session = command.attachmentForSession(sessionId).session
-          // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
-          // materialize the whole log for one message.
-          for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
-            const event = session.eventAt(SessionSeq(seq))
-            if (event?.type !== 'assistant/message') continue
-            return event.data.message.content
-              .filter(block => block.type === 'text')
-              .map(block => block.text)
-              .join('')
-          }
-          return undefined
-        },
-        refreshLiveCatalog: async (sessionId, source) => {
-          // SYNC admission: the exact Direct owner is captured HERE, before the
-          // read awaits (§10.2).
-          const agent = command.attachmentForSession(sessionId)
-          if (!command.catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
-          return command.requestCatalogRefresh({ source, target: { kind: 'agent', key: ownership.generation() }, agent })
-        },
-        refreshStandingCatalog: (presetId, source) => {
-          return command.catalogRefreshAvailable()
-            ? command.requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
-            : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
-        },
-        promptAdmission: (sessionId, line, task) => {
-          // The caller already holds this scope's writer section, so this
-          // synchronous read of the CURRENT Direct attachment IS the scope's
-          // exact Agent (§10.1); a transition cannot swap it here.
-          const agent = command.attachmentForSession(sessionId)
-          return directRuntime.withPromptAdmission(agent, draftHasImages(line, draftImages), async () => task())
-        },
-      },
-    })
-    // A5b-3b-2: build the TuiCommandRunner facade owner-side. It is built here
-    // (after the bound semantic runtime, before registration), so every
-    // late-rebound slot resolves through the owner's accessor at call time.
-    command.buildRunner(commandRuntime)
+    // A5b-3: the semantic command runtime binding AND the facade assembly are
+    // command-owned; the composition root only triggers the wiring step.
+    command.attachRuntime()
     /**
      * Bind the submission runtime (A3-3). Its surface is the runner's narrow
      * hooks; every write it performs enters through `SessionRuntime.withWriter`
