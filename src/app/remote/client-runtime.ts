@@ -25,6 +25,7 @@
 
 import { createRequire } from 'node:module'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
+import type * as typertRegistryClient from '@deepseek-ai/dsh-typert-registry/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { IJobs } from '@deepseek-ai/dsh-api-job-controller/client'
 import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
@@ -41,7 +42,7 @@ import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import type { InProcessHostCarrier } from './host-runtime.ts'
 
-type TypertClientModule = typeof import('@deepseek-ai/dsh-typert-registry/client')
+type TypertClientModule = typeof typertRegistryClient
 type ConnectionClientModule = typeof import('@deepseek-ai/dsh-client-connection/client')
 type GatewayClientModule = typeof import('@deepseek-ai/dsh-api-gateway/client')
 type FileUploadClientModule = typeof import('@deepseek-ai/dsh-client-file-upload/client')
