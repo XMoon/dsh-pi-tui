@@ -45,7 +45,7 @@ import { SubmitLatencyTracker, type SubmitLatencyPhase } from '../../submit-late
 import { DirectSubmissionPresentation, type SubmissionPresentationSource } from '../../submission-presentation.ts'
 import { mergeDraft, refuseByTransitionFence } from '../../steer.ts'
 import type { ComposerSubmitRequest, TuiApp } from '../../tui-app.ts'
-import type { LiveSessionScope } from '../session/scope.ts'
+import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptSubmission, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
 
@@ -180,8 +180,6 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   }
   /** The Direct TUI-settings facade (read live). */
   readonly tuiSettings: { get(): TuiSettingsDoc } | undefined
-  /** The submission writer section (captures a fresh live scope). */
-  readonly submissionWriterSection: <T>(task: () => Promise<T>) => Promise<T>
   /** The exact owner-subject currentness fence. */
   readonly captureMatches: (subject: SessionSubject | undefined) => boolean
   /** The owner-resolved per-Agent prompt admission window. */
@@ -208,6 +206,14 @@ export interface SubmissionController {
   dequeue(): void
   /** Abort the local shell and interrupt the live Agent (Esc / cancel). */
   abortLocalShell(): void
+  /**
+   * The owner's writer SECTION for an external owner that already knows its
+   * exact owner (the local shell / the subagent-delivery adapter): capture the
+   * live scope at the SAME synchronous admission point and enter through the
+   * submission runtime's writer, so the operation barrier keeps exactly ONE
+   * admission owner. A stale capture refuses with `SessionScopeSupersededError`.
+   */
+  withWriterSection<T>(task: () => Promise<T>): Promise<T>
   /** Settle the local submit-ack row (token-scoped when given). */
   settleLocalSubmitAck(reason: string, options?: { token?: number; terminal?: boolean }): void
   /** Reset the submission latency timeline (a dead submission's baseline). */
@@ -245,6 +251,20 @@ export interface SubmissionController {
 export function createSubmissionController<ExactAgent extends SubmissionAgentLike>(
   deps: SubmissionControllerDeps<ExactAgent>,
 ): SubmissionController {
+  /**
+   * The busy/steer and shell-submit writer admission (A3-4, A5b-6): external
+   * owners receive a writer SECTION, not the raw barrier. It captures the live
+   * scope at the SAME synchronous admission point and enters through
+   * `SubmissionRuntime.withWriter`, so the operation barrier has exactly ONE
+   * admission owner and a stale capture refuses with
+   * `SessionScopeSupersededError`.
+   */
+  const withWriterSection = <T>(task: () => Promise<T>): Promise<T> => {
+    const scope = deps.scope.captureLive()
+    if (scope === undefined) return Promise.reject(new SessionScopeSupersededError())
+    return deps.submissionRuntime.withWriter(scope, task)
+  }
+
   /** The display text of one client-local submission echo: the draft text
    * with its attachment placeholders expanded to compact markers, so an
    * attachment-only submission is never an empty pending row. The SAME
@@ -1142,7 +1162,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
       notifySubmissionFailure: (error) => notifySubmissionFailure(error),
       consumeDraftAttachments: (value) => consumeDraftAttachments(value, deps.drafts.images, deps.drafts.files),
-      writerSection: deps.submissionWriterSection,
+      writerSection: withWriterSection,
       pendingInputReader: deps.backend.pendingInputReader,
       writer: deps.backend.sessionWriter,
       diag: deps.diag,
@@ -1613,6 +1633,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     steer: steerDraft,
     dequeue,
     abortLocalShell,
+    withWriterSection,
     settleLocalSubmitAck: (reason, options) => settleLocalSubmitAck(reason, options),
     resetSubmitLatency: () => submitLatencyTracker.reset(),
     clearPending: () => pendingSubmissions.clear(),

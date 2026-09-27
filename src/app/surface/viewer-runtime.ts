@@ -118,8 +118,6 @@ export interface ViewerRuntimeDeps<Event extends SessionPresentationEvent, Child
   readonly childAgent: (childId: string) => ChildAgent | undefined
   /** The live assistant-stream baseline of one exact Agent (official stream). */
   readonly assistantStreamBaselineFor: (agent: ChildAgent) => readonly AssistantLiveInput[]
-  /** Publish (or clear) the interactive continuable child's queue authority. */
-  readonly publishQueueAuthority: (authority: ViewerQueueAuthority<ChildAgent> | undefined) => void
   /** Re-derive the footer/status projections after a viewer transition. */
   readonly refreshStatus: () => void
   /** Restore the main transcript's semantic latest/history anchor. */
@@ -155,6 +153,9 @@ export interface ViewerRuntime<Event extends SessionPresentationEvent, ChildAgen
   resetAutoPop(): void
   /** Recompute the queue authority from the current viewer + exact Agent. */
   setViewedQueueAgent(agent: ChildAgent | undefined): void
+  /** The currently published interactive-child queue authority (A5b-6): the
+   *  composition root reads this late-bound for the Direct queue resolver. */
+  viewedQueueAuthority(): ViewerQueueAuthority<ChildAgent> | undefined
   /** The abort fence of the CURRENT viewer session's follow-up (if any). */
   followUpSignal(): AbortSignal | undefined
   /** The semantic pending-input subject (queue pane), viewer-aware. */
@@ -215,6 +216,11 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     viewAgent?: ChildAgent
   } | undefined
 
+  /** The interactive continuable child's queue authority (A5b-6): the viewer
+   *  owns the published slot; the composition root reads it late-bound to
+   *  connect the Direct queue resolver to this owner. */
+  let queueAuthority: ViewerQueueAuthority<ChildAgent> | undefined
+
   const setViewedQueueAgent = (agent: ChildAgent | undefined): void => {
     const current = viewing
     if (agent !== undefined
@@ -224,10 +230,10 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
       && current.parentSessionId === deps.currentSessionId()
       && agent.session.id === current.id
       && agent.session.header.parentSession === current.parentSessionId) {
-      deps.publishQueueAuthority({ parentSessionId: current.parentSessionId, childSessionId: current.id, agent })
+      queueAuthority = { parentSessionId: current.parentSessionId, childSessionId: current.id, agent }
       return
     }
-    deps.publishQueueAuthority(undefined)
+    queueAuthority = undefined
   }
 
   // The queue pane consumes the same active semantic pending-input subject as
@@ -466,7 +472,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     const previousViewing = viewing
     previousViewing.previews.clear()
     viewing = undefined
-    deps.publishQueueAuthority(undefined)
+    queueAuthority = undefined
     viewerSessionAbort?.abort() // cancel an in-flight, not-yet-accepted follow-up
     viewerSessionAbort = undefined
     deps.surface.app.clearLocalMessages()
@@ -673,7 +679,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
       openingViewer = undefined
       viewing = undefined
-      deps.publishQueueAuthority(undefined)
+      queueAuthority = undefined
       viewerSessionAbort?.abort()
       viewerSessionAbort = undefined
       deps.surface.app.clearLocalMessages()
@@ -706,6 +712,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     setViewedChildAgent: (agent) => { if (viewing !== undefined) viewing.viewAgent = agent },
     resetAutoPop,
     setViewedQueueAgent,
+    viewedQueueAuthority: () => queueAuthority,
     followUpSignal,
     pendingSubjectId,
     noteSubagentCall,

@@ -40,15 +40,17 @@ const matrix = JSON.parse(
     readonly mutable: boolean
     readonly lines: string
     readonly hostDependency: boolean
+    readonly sweep: string
+    readonly sweepNote: string
   }>
 }
 
-/** The residual ledger after A5b-5. It is EXACT: shrinking it is
- *  a deliberate, reviewed edit in the slice that lands the move. */
-const RESIDUAL_LEDGER = new Set([
-  // A5b-6 closure.
-  'submissionWriterSection',
-])
+/** The residual ledger after A5b-6. It is EXACT: any new MUST_MOVE row is an
+ *  unclassified business handler and fails immediately. */
+const RESIDUAL_LEDGER = new Set<string>()
+
+/** The A5b-6 zero-assumption sweep verdict every remaining row must carry. */
+const SWEEP_VERDICT = 'verified@a5b6'
 
 const ALLOWED = new Set([
   'KEEP_BOOTSTRAP:process-cordis-prerequisite',
@@ -117,6 +119,12 @@ test('A5b-0 matrix: every root declaration of startRunner() is classified', () =
       assert.ok(row.lifecycle !== '' && !row.lifecycle.startsWith('n/a'),
         `${row.name} (${row.classification}) must record its lifecycle ownership`)
     }
+    // A5b-6 zero-assumption sweep: the audit is a DURABLE per-row artifact, not
+    // a report sentence. Every remaining declaration must carry the verdict and
+    // a concrete §7.6.1 justification, so a silent keep cannot pass.
+    assert.equal(row.sweep, SWEEP_VERDICT, `${row.name} must carry the A5b-6 sweep verdict (${SWEEP_VERDICT})`)
+    assert.ok(row.sweepNote.length >= 20, `${row.name} must carry a concrete A5b-6 sweep justification`)
+    assert.equal(row.sweepNote.startsWith('n/a'), false, `${row.name} sweep note must justify the keep, not defer to the category`)
   }
 })
 

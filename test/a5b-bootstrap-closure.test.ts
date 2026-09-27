@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import ts from 'typescript'
 
 import { compositionFile } from './support/composition-surface.ts'
 import { ownerFile, ownerSource } from './support/owner-modules.ts'
@@ -105,13 +106,39 @@ test('A5b: no universal application/runtime dependency bag exists', () => {
   // cross-domain state. It must not appear in the composition surface or in any
   // extracted owner.
   const source = ownerSource()
-  for (const bag of ['BootstrapContext', 'AppContext', 'GlobalRuntime', 'EverythingBag', 'RunnerContext', 'SurfaceContext']) {
+  for (const bag of ['BootstrapContext', 'AppContext', 'GlobalRuntime', 'EverythingBag', 'RunnerContext', 'SurfaceContext', 'CompositionContext', 'RuntimeContext', 'ApplicationContext']) {
     assert.equal(
       new RegExp(`\\b(?:interface|type|class)\\s+${bag}\\b`).test(source),
       false,
       `${bag} would be a universal dependency bag (plan A5b §6.3)`,
     )
   }
+})
+
+/** Every top-level `interface`/`type alias`/`class` name a module declares. */
+function declaredTypeNames(source: string): string[] {
+  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  const names: string[] = []
+  const walk = (node: ts.Node): void => {
+    if ((ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+      names.push(node.name.text)
+    }
+    ts.forEachChild(node, walk)
+  }
+  walk(sf)
+  return names
+}
+
+test('A5b-6: the composition root introduces no new context/bag type', () => {
+  // Plan §7.6.2: no new broad context/bag type carrying cross-domain state. The
+  // only type the composition root has ever declared is the small pre-existing
+  // `AppExit`; a new `type`/`interface`/`class` there is a bag by construction.
+  const root = compositionFile('src/app/bootstrap.ts')
+  assert.deepEqual(
+    declaredTypeNames(root),
+    ['AppExit'],
+    'src/app/bootstrap.ts must declare no type/interface/class besides the pre-existing AppExit (plan §7.6.2: no new broad bag)',
+  )
 })
 
 test('A5b: exactly one TuiAppEvents implementation exists across the owner surface', () => {
@@ -207,6 +234,9 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
       'settleLocalSubmission', 'notifySubmissionFailure', 'submitDeps',
       'submitSerialTail', 'takeSubmitTurn', 'dispatchViaSession', 'runLocalCommand',
       'steerNow', 'makeSteerPersist', 'dispatchUserInput', 'dequeue',
+      // A5b-6: the writer SECTION moved from the composition root into the
+      // submission owner (the sole writer/admission authority).
+      'withWriterSection',
       // A5b-4 review fix: the submission-presentation policy the composition
       // root used to define (attachment refusal, command-submit attachment
       // expansion, local-echo placement) is controller-owned.
@@ -365,14 +395,83 @@ test('A5b-3: the command runtime application binding is command-owned', () => {
     'disposal must clear the refresh request so a late skills/change is a no-op')
 })
 
-test('A5b: the Direct-facing viewed-queue slot stays a composition connector', () => {
-  // `viewedQueueAgent` is deliberately NOT extracted: the Direct runtime reads
-  // it through `getViewedQueueAgent`, so the composition root keeps the single
-  // mutable slot and the viewer owner publishes into it (narrow seam).
+test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read late-bound', () => {
+  // The A5b-6 zero-assumption sweep judged the `viewedQueueAgent` slot VIEWER
+  // mutable state (plan §7.6.2) and moved it into the viewer owner. The
+  // composition root keeps only the narrow late-bound CONNECTOR for the Direct
+  // queue resolver — the invariant (ONE published authority, published by the
+  // viewer, read by the Direct runtime) is unchanged.
   const root = compositionFile('src/app/bootstrap.ts')
-  assert.ok(declares(root, 'viewedQueueAgent'), 'the composition root keeps the Direct viewed-queue slot')
-  assert.match(root, /publishQueueAuthority: \(authority\) => \{ viewedQueueAgent = authority \}/u,
-    'the viewer owner publishes the queue authority through the narrow composition callback')
+  const viewer = ownerFile('src/app/surface/viewer-runtime.ts')
+  assert.equal(declares(root, 'viewedQueueAgent'), false,
+    'the composition root must not hold the viewed-queue viewer state (plan §7.6.2)')
+  assert.ok(declares(viewer, 'queueAuthority'),
+    'the viewer owner must hold the published queue authority slot')
+  assert.match(viewer, /viewedQueueAuthority: \(\) => queueAuthority/u,
+    'the viewer owner must expose a getter for the published authority')
+  assert.match(root, /getViewedQueueAgent: \(\) => viewerRef\?\.viewedQueueAuthority\(\)/u,
+    'the composition connector must read the viewer-owned authority late-bound (never capture by value)')
+  assert.doesNotMatch(root, /publishQueueAuthority/u,
+    'the composition root must no longer receive the viewer publication callback')
+})
+
+test('A5b-6: the composition root implements no TuiAppEvents/TuiCommandRunner literal', () => {
+  // Plan §7.6.2, second list. A literal is detected by its type annotation
+  // (`: TuiAppEvents = {` / `: TuiCommandRunner = {`); the type-only references
+  // the composition still needs (e.g. `TuiCommandRunner['agents']`) are fine.
+  const root = compositionFile('src/app/bootstrap.ts')
+  for (const type of ['TuiAppEvents', 'TuiCommandRunner']) {
+    assert.equal(
+      new RegExp(`:\\s*${type}\\s*=\\s*\\{`).test(root),
+      false,
+      `src/app/bootstrap.ts must not implement ${type} as an object literal`,
+    )
+  }
+  assert.equal(declares(root, 'surfaceEvents'), false,
+    'the TuiAppEvents implementation must live in its owner, not the composition root')
+})
+
+test('A5b-6: no application-owner mutable state category remains in the composition root', () => {
+  // Plan §7.6.2 categories: client-local history state, command claim/catalog
+  // mutable slots, submission FIFO/ack/local-echo state, viewer mutable state
+  // and the footer/display state machine. Each name below is a real declaration
+  // of its named owner (pinned in EXTRACTED_DECLARATIONS above); this lock keeps
+  // the CATEGORY explicit and mutation-sensitive.
+  const root = compositionFile('src/app/bootstrap.ts')
+  const categories: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ['client-local history state', ['knownHistoryCwdSet', 'lastHistoryContent', 'bootHistoryEntries']],
+    ['command claim/catalog mutable slots', [
+      'wasAdvertisedClaim', 'hostClaimOf', 'isSkillWrapperName', 'withCommandDelivery',
+      'takeCommandDraftDisposition', 'catalogRefreshRequest', 'commandsRegistered',
+      'skillsChangeGate', 'catalogCoordinator',
+    ]],
+    ['submission FIFO/ack/local-echo mutable state', [
+      'pendingSubmissions', 'localSubmitAck', 'localEcho', 'submitSerialTail',
+      'takeSubmitTurn', 'submissionPresentation',
+    ]],
+    ['viewer mutable state', ['viewerOpen', 'openingViewer', 'pendingSubagentCalls', 'viewerSessionAbort']],
+    ['footer/display mutable state machine', [
+      'footerCommandRunner', 'footerCommandUnsubscribe', 'footerDynamicItemRuntime',
+      'userFooterCustomItemsForSave', 'applyFooterSettings', 'footerWarningShown',
+    ]],
+  ]
+  for (const [category, names] of categories) {
+    for (const name of names) {
+      assert.equal(declares(root, name), false,
+        `src/app/bootstrap.ts must not declare ${name} (${category}, plan §7.6.2)`)
+    }
+  }
+})
+
+test('A5b-6: the composition root holds exactly one ownership and scope authority', () => {
+  // Plan §7.6.2: no second submission/session/command/viewer/surface authority.
+  // The A2 authority factories are constructed exactly once in the composition
+  // root; a second construction would be a second authority.
+  const root = compositionFile('src/app/bootstrap.ts')
+  assert.equal(root.split('createSessionOwnershipCore(').length - 1, 1,
+    'the composition root must construct the ownership authority exactly once')
+  assert.equal(root.split('createSessionScopeAuthority(').length - 1, 1,
+    'the composition root must construct the live-scope authority exactly once')
 })
 
 test('A5b: the Task Center viewer adapter forwards the nested depth to the viewer owner', () => {
@@ -431,4 +530,28 @@ test('A5b-4: the input-history owner owns the submission persistence policy', ()
   // Exactly ONE last-content state: the submission deps no longer expose it.
   assert.doesNotMatch(controller, /deps\.history\.(?:lastContent|setLastContent)\b/u,
     'the controller must not keep a second last-content state')
+})
+
+test('A5b-6: the submission writer section is controller-owned and read late-bound', () => {
+  // Plan §A5b-6: the last residual moves into the submission owner (the scope
+  // authority + submission runtime already live there), and every external
+  // consumer reads it through the controller at CALL time (the shell is built
+  // before the controller, the event adapter after it).
+  const root = compositionFile('src/app/bootstrap.ts')
+  const controller = ownerFile('src/app/submission/controller.ts')
+  assert.equal(declares(root, 'submissionWriterSection'), false,
+    'the composition root must not declare the submission writer section')
+  assert.ok(declares(controller, 'withWriterSection'),
+    'the submission owner must own withWriterSection')
+  // The exact semantics: captureLive → reject with SessionScopeSupersededError
+  // → submissionRuntime.withWriter(scope, task).
+  assert.match(
+    controller,
+    /const withWriterSection = <T>\(task: \(\) => Promise<T>\): Promise<T> => \{\n\s*const scope = deps\.scope\.captureLive\(\)\n\s*if \(scope === undefined\) return Promise\.reject\(new SessionScopeSupersededError\(\)\)\n\s*return deps\.submissionRuntime\.withWriter\(scope, task\)\n\s*\}/u,
+    'the owner must keep the exact captureLive → reject → withWriter semantics',
+  )
+  assert.equal(root.split('submission.withWriterSection(task)').length - 1, 2,
+    'the local shell and the subagent-delivery adapter must both reach the owner')
+  assert.doesNotMatch(root, /writerSection: submission\.withWriterSection\b/u,
+    'the consumers must read the owner at call time, never capture the method by value')
 })
