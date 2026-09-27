@@ -2,6 +2,8 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import ts from 'typescript'
+
 /**
  * The A5b owner surface: the composition surface (plan A5 §22) PLUS the
  * application modules the A5b slices extract bootstrap responsibilities into
@@ -100,6 +102,40 @@ export function ownerFile(rel: string): string {
 }
 
 /**
+ * Fully unwrap the expression wrappers the TypeScript AST can hide a callee or
+ * an object-literal initializer behind — `(...)`, `x as T`, `<T>x`, `x!`,
+ * `x satisfies T` — looping until the expression stops changing.
+ *
+ * This mirrors the unwrap in `scripts/pre-m3-architecture-gate.mjs`
+ * (`findDirectAdapterConstructions`). It lives here, next to the production
+ * walkers it guards, because BOTH A5b AST guards
+ * (`test/a5-composition-inventory.test.ts` and
+ * `test/a5b-bootstrap-closure.test.ts`) share it: keeping one definition means
+ * a wrapper the architecture gate unwraps can never silently bypass an A5b
+ * scan.
+ *
+ * `onWrapperType` is invoked with the type annotation of every `as` /
+ * `satisfies` / `<T>` wrapper, so a caller can recognize a type that travels on
+ * the wrapper rather than on the variable declaration.
+ */
+export function unwrapExpression(
+  expr: ts.Expression,
+  onWrapperType?: (type: ts.TypeNode) => void,
+): ts.Expression {
+  let current = expr
+  while (true) {
+    if (ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current)) {
+      current = current.expression
+    } else if (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current) || ts.isSatisfiesExpression(current)) {
+      onWrapperType?.(current.type)
+      current = current.expression
+    } else {
+      return current
+    }
+  }
+}
+
+/**
  * EVERY production TypeScript source under `src/` (recursive, `src/`-relative
  * paths), for the whole-tree duplicate detectors.
  *
@@ -109,6 +145,11 @@ export function ownerFile(rel: string): string {
  * to the owner, the whole-tree scan only detects a second copy"). `test/`,
  * `packages/` and `dist/` are never reached because the walk starts at `src/`;
  * `node_modules`/`dist` are skipped defensively.
+ *
+ * The extension filter mirrors `scripts/pre-m3-architecture-gate.mjs`'s
+ * `collectSourceEntries()` — `.ts`, `.mts` and `.cts` (which also cover the
+ * `.d.ts` / `.d.mts` / `.d.cts` declaration spellings) — so no production
+ * TypeScript source is skipped silently.
  */
 export function productionSources(): Array<{ rel: string; source: string }> {
   const out: Array<{ rel: string; source: string }> = []
@@ -118,7 +159,7 @@ export function productionSources(): Array<{ rel: string; source: string }> {
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === 'dist') continue
         walk(path)
-      } else if (entry.name.endsWith('.ts')) {
+      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.mts') || entry.name.endsWith('.cts')) {
         out.push({ rel: relative(ROOT, path).split('\\').join('/'), source: readFileSync(path, 'utf8') })
       }
     }

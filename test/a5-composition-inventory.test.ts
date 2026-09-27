@@ -3,7 +3,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
-import { ownerFile, ownerOccurrences, productionSources } from './support/owner-modules.ts'
+import { ownerFile, ownerOccurrences, productionSources, unwrapExpression } from './support/owner-modules.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -242,13 +242,18 @@ test('A5: no production file outside the pinned owners holds a single-owner cons
   }
 })
 
-/** Every call callee in `source`: an identifier name or a dotted property path. */
+/**
+ * Every call callee in `source`: an identifier name or a dotted property path.
+ * The callee is unwrapped first (`(createSessionOwnershipCore)(...)`,
+ * `(surface.start as ...)(...)`, ...) so a parenthesized / cast / non-null call
+ * cannot hide a composition-root construction from the guard below.
+ */
 function calledCallees(source: string): string[] {
   const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
   const out: string[] = []
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
-      const callee = node.expression
+      const callee = unwrapExpression(node.expression)
       if (ts.isIdentifier(callee)) out.push(callee.text)
       else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
         out.push(`${callee.expression.text}.${callee.name.text}`)
@@ -259,6 +264,22 @@ function calledCallees(source: string): string[] {
   visit(sf)
   return out
 }
+
+test('A5: calledCallees resolves the callee through every expression wrapper', () => {
+  // The composition-root guard is only as strong as its callee resolution: each
+  // wrapper form below must still be attributed to the unwrapped call.
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ['(createSessionOwnershipCore)({})', 'createSessionOwnershipCore'],
+    ['(createSessionOwnershipCore as typeof createSessionOwnershipCore)({})', 'createSessionOwnershipCore'],
+    ['(createSessionScopeAuthority as unknown as (d: unknown) => void)({})', 'createSessionScopeAuthority'],
+    ['(bindSessionRuntime)!({}, {})', 'bindSessionRuntime'],
+    ['(surface.start)({})', 'surface.start'],
+    ['(surface.start as (deps: unknown) => void)({})', 'surface.start'],
+  ]
+  for (const [source, callee] of cases) {
+    assert.ok(calledCallees(source).includes(callee), `${source} must resolve to ${callee}`)
+  }
+})
 
 test('A5: the composition-root construction calls occur only in the composition root', () => {
   // Plan §8.1/§8.4: a THIRD composition root would be a second
