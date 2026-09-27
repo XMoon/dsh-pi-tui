@@ -1791,10 +1791,6 @@ export function applyRunner(ctx: Context, config: Config): void {
     // row-disposition helpers. No new Backend port and no second task model.
     const jobs = ctx.get('jobs')
     const subagents = ctx.get('subagents')
-    // The last SUCCESSFUL jobs read, FENCED to the session identity: a
-    // transient registry failure must keep the retained Job rows, but a
-    // switched-in session must never inherit the old session's rows.
-    let jobSnapshot: { key: string; rows: ReturnType<NonNullable<typeof jobs>['list']> } | undefined
     surface.attachTasks({
       sessionId: () => agentNow()?.session.id,
       captureSubject: () => ownership.captureSubject(),
@@ -1835,28 +1831,12 @@ export function applyRunner(ctx: Context, config: Config): void {
           const sessionId = ownership.currentSessionId()
           return cleanedUp || sessionId === undefined ? undefined : `${ownership.generation()}:${sessionId}`
         },
+        // The Task-Center owner derives the jobs-read session id from this
+        // injected core read; the retention fence itself is owner-side.
+        currentSessionId: () => ownership.currentSessionId(),
         listDescendants: () => {
           const sessionId = agentNow()?.session.id
           return sessionId === undefined ? Promise.resolve([]) : subagents.listDescendants(sessionId)
-        },
-        // The merged rows re-read the CURRENT jobs snapshot at every commit,
-        // so a job settlement repaints an open browser too.
-        readJobs: () => {
-          const sessionId = ownership.currentSessionId()
-          if (jobs === undefined || sessionId === undefined) return []
-          const key = `${ownership.generation()}:${sessionId}`
-          try {
-            const rows = jobs.list(SessionId(sessionId))
-            jobSnapshot = { key, rows }
-            return rows
-          } catch {
-            // The registry read is best-effort: a failed read is NOT an
-            // authoritative empty catalog. Returning the last successful
-            // snapshot preserves the retained Job rows — but ONLY for the same
-            // session identity, so a switched-in session never inherits the
-            // old session's rows.
-            return jobSnapshot?.key === key ? jobSnapshot.rows : []
-          }
         },
         // The LIVE runtime fact, read at COMMIT time: the Agent registry,
         // never the catalog's store-presence activity.

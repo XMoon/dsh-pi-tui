@@ -35,6 +35,10 @@ export interface OwnerModule {
 export const OWNER_MODULES: readonly OwnerModule[] = [
   { rel: 'src/index.ts', role: 'composition' },
   { rel: 'src/app/bootstrap.ts', role: 'composition' },
+  // A4-6 / A5b-6: the mounted-surface owner; the A5b-6 closure moved the
+  // Task-Center jobs-read retention policy into it (plan §7.6.2), so its
+  // ownership location is now locked from the A5b owner surface.
+  { rel: 'src/app/surface/runtime.ts', role: 'owner' },
   // A5b-1: viewer + live-session presentation.
   { rel: 'src/app/surface/session-presentation.ts', role: 'owner' },
   { rel: 'src/app/surface/viewer-runtime.ts', role: 'owner' },
