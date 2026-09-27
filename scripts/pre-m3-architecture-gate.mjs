@@ -41,12 +41,17 @@
  *      is required. This is the enumeration-free form of the presentation rule;
  *      one proven historical exception is recorded in
  *      {@link ARCHITECTURE_ALLOWLIST} and is restricted to TYPE-ONLY imports.
- *   3. Nothing statically reachable from `src/startup.ts` may import
+ *   3. No application owner or presentation module may import
+ *      `src/app/bootstrap.ts`: the dependency direction is
+ *      `index -> bootstrap -> owners`, never `owner -> bootstrap` (§8.4). The
+ *      composition root connects owners through narrow injected callbacks; an
+ *      owner that reaches back into bootstrap would invert the graph.
+ *   4. Nothing statically reachable from `src/startup.ts` may import
  *      experimental Remote composition (`src/runtime/remote/**`,
  *      `@deepseek-ai/dsh-client-*`, `@deepseek-ai/dsh-api-*`): §15.4 keeps the
  *      startup compatibility island free of a Remote/Connection static
  *      dependency, including through an intermediate module.
- *   4. `src/app/surface/**` must not construct Direct semantic adapters
+ *   5. `src/app/surface/**` must not construct Direct semantic adapters
  *      (`new Direct<...>(...)`); those belong to
  *      `src/runtime/direct/backend-direct.ts`. The deliberate non-Backend
  *      Direct application owners ({@link DIRECT_APPLICATION_EXCEPTIONS}:
@@ -138,6 +143,12 @@ export const ARCHITECTURE_RULES = [
       + 'src/app/direct/** or src/runtime/direct/** (non-Direct app owners and presentation consume ports/Backend/callbacks)',
     applies: (srcRel) => !isDirectCompositionFile(srcRel),
     forbids: (resolved) => resolved.startsWith('app/direct/') || resolved.startsWith('runtime/direct/'),
+  },
+  {
+    id: 'owner-imports-bootstrap',
+    message: 'application owners must not import src/app/bootstrap.ts (index -> bootstrap -> owners)',
+    applies: (srcRel) => srcRel !== 'index.ts' && srcRel !== 'app/bootstrap.ts',
+    forbids: (resolved) => resolved === 'app/bootstrap.ts',
   },
 ]
 

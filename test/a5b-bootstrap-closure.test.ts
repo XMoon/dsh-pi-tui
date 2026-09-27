@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import ts from 'typescript'
 
-import { compositionFile } from './support/composition-surface.ts'
+import { compositionFile, compositionSources } from './support/composition-surface.ts'
 import { ownerFile, ownerSource } from './support/owner-modules.ts'
 
 /**
@@ -27,6 +27,27 @@ import { ownerFile, ownerSource } from './support/owner-modules.ts'
  * - the package entry never defines any of them.
  *
  * A5b-6 flips the ledger to empty; from then on the lock is final.
+ *
+ * Plan §8.2's minimum closure list and where each clause is locked:
+ *   1. bootstrap exists and is the sole composition root —
+ *      "src/app/bootstrap.ts is the sole application composition root" below;
+ *   2. `src/index.ts` remains a facade —
+ *      "the package entry is a facade and defines no application handler";
+ *   3. forbidden handler definitions absent — the two ledger tests below;
+ *   4. no `TuiAppEvents` implementation literal —
+ *      "the composition root implements no TuiAppEvents/TuiCommandRunner
+ *      literal" (root) + "exactly one TuiAppEvents implementation" (owner);
+ *   5. no `TuiCommandRunner` implementation literal — the same two locks;
+ *   6. no universal carrier/bag —
+ *      "no universal application/runtime dependency bag exists" +
+ *      "the composition root introduces no new context/bag type";
+ *   7. each extracted owner constructed/bound once — the
+ *      `OWNER_CONSTRUCTIONS` lock here plus the inventory test's
+ *      `SINGLE_OWNER_SITES` authority/binding rows.
+ *
+ * No LOC threshold: A5b is complete when every remaining statement is
+ * composition/startup/disposal, not when bootstrap falls below a line count
+ * (plan §7.6.5).
  */
 
 interface PendingHandler {
@@ -67,6 +88,18 @@ const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = []
 function declares(source: string, name: string): boolean {
   return new RegExp(`\\b(?:const|let|var|function|class)\\s+${name}\\b`).test(source)
 }
+
+test('A5b: src/app/bootstrap.ts is the sole application composition root', () => {
+  // Plan §8.2(1). `compositionSources()` throws when either file is missing, so
+  // this also locks the EXISTENCE of the composition root; the pair is the
+  // whole composition surface, so no second application composition root may
+  // appear (the owners consume narrow injected callbacks instead).
+  assert.deepEqual(
+    compositionSources().map(({ rel }) => rel),
+    ['src/index.ts', 'src/app/bootstrap.ts'],
+    'the composition surface must be exactly the package entry plus src/app/bootstrap.ts',
+  )
+})
 
 test('A5b: a forbidden handler is absent from bootstrap or explicitly on the slice ledger', () => {
   const root = compositionFile('src/app/bootstrap.ts')

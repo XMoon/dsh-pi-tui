@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
-import { ownerOccurrences, ownerSource } from './support/owner-modules.ts'
+import { ownerFile, ownerOccurrences } from './support/owner-modules.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -49,32 +49,48 @@ const COMPOSITION_INVENTORY: ReadonlyArray<readonly [string, string]> = [
 ]
 
 /**
- * Owner constructions that must have exactly one site in the composition
- * surface. Counts are the frozen post-A4 inventory; a relocation that leaves a
- * second construction behind (or pushes one into a non-composition module)
- * changes the count.
+ * Single-owner constructions, each pinned to the module that OWNS it:
+ * `[site, count, ownerRel]`.
+ *
+ * A5a counted these across the transitionally-broad composition surface. The
+ * final A5 architecture pins the ownership LOCATION instead (plan A5b §8.1):
+ * the named module contains the construction exactly `count` time(s), and the
+ * composition root contains it only where the root itself IS the owner — the
+ * authority/binding constructions and the client-local state the root builds
+ * and injects. Every other entry is owner-internal state that moved OUT of the
+ * composition root during A5b: the owner constructs its private state exactly
+ * once, the root constructs none.
  */
-const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number]> = [
-  ['createSessionOwnershipCore({', 1],
-  ['createSessionScopeAuthority({', 1],
-  ['createDirectApplicationRuntime({', 1],
-  ['bindSessionRuntime(', 1],
-  ['bindSubmissionRuntime({', 1],
-  ['bindCommandRuntime({', 1],
-  ['createSurfaceRuntime<SessionEvent>({', 1],
-  ['new DefaultIntentTracker<', 1],
-  ['new DefaultWriteBarrier(', 1],
-  ['new PendingSubmissions(', 1],
-  ['new SubmitLatencyTracker(', 1],
-  ['new ContextMeasurementCoordinator(', 1],
-  ['new DraftImageStore(', 1],
-  ['new DraftFileStore(', 1],
-  ['new FileHistorySearchSource(', 1],
-  ['new CoalescingRefreshGate(', 1],
-  ['new CatalogRefreshCoordinator(', 1],
-  ['new DirectSubmissionPresentation(', 1],
-  // Two distinct transcript windows: the main session and the viewed child.
-  ['new TranscriptWindowController(', 2],
+const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
+  // Composition-root authority/binding constructions (the root IS the owner;
+  // plan A5b §7.6.4 lists these as legitimate bootstrap composition).
+  ['createSessionOwnershipCore({', 1, 'src/app/bootstrap.ts'],
+  ['createSessionScopeAuthority({', 1, 'src/app/bootstrap.ts'],
+  ['createDirectApplicationRuntime({', 1, 'src/app/bootstrap.ts'],
+  ['bindSessionRuntime(', 1, 'src/app/bootstrap.ts'],
+  ['bindSubmissionRuntime({', 1, 'src/app/bootstrap.ts'],
+  ['createSurfaceRuntime<SessionEvent>({', 1, 'src/app/bootstrap.ts'],
+  // Client-local composition state the root builds and injects into owners.
+  ['new DraftImageStore(', 1, 'src/app/bootstrap.ts'],
+  ['new DraftFileStore(', 1, 'src/app/bootstrap.ts'],
+  ['new FileHistorySearchSource(', 1, 'src/app/bootstrap.ts'],
+  // A5b-3: the command runtime binding + its catalog/refresh state.
+  ['bindCommandRuntime({', 1, 'src/app/command/surface.ts'],
+  ['new CoalescingRefreshGate(', 1, 'src/app/command/surface.ts'],
+  ['new CatalogRefreshCoordinator(', 1, 'src/app/command/surface.ts'],
+  // A5b-3a: the model-selection intent + default-write state.
+  ['new DefaultIntentTracker<', 1, 'src/app/command/model-selection.ts'],
+  ['new DefaultWriteBarrier(', 1, 'src/app/command/model-selection.ts'],
+  // A5b-4: the submission FIFO / ack / local-echo / presentation state.
+  ['new PendingSubmissions(', 1, 'src/app/submission/controller.ts'],
+  ['new SubmitLatencyTracker(', 1, 'src/app/submission/controller.ts'],
+  ['new DirectSubmissionPresentation(', 1, 'src/app/submission/controller.ts'],
+  // A5b-2: the context-measurement cache.
+  ['new ContextMeasurementCoordinator(', 1, 'src/app/surface/status-runtime.ts'],
+  // A5b-1: two distinct transcript windows — the main session and the viewed
+  // child — each owned by its presentation module.
+  ['new TranscriptWindowController(', 1, 'src/app/surface/session-presentation.ts'],
+  ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
 test('A5: the composition surface is the entry plus the composition root', () => {
@@ -120,24 +136,43 @@ test('A5a: the composition ROOT owns every composition site (the entry owns none
     assert.equal(entry.includes(marker), false, `src/index.ts must not contain ${marker} (§29)`)
   }
 
-  // Every inventoried responsibility and single-owner site lives in the ROOT.
+  // Every inventoried composition responsibility lives in the ROOT.
   for (const [name, site] of COMPOSITION_INVENTORY) {
     assert.equal(entry.includes(site), false, `the entry must not own ${name}`)
     assert.ok(root.includes(site), `the composition root must own ${name} (${site})`)
   }
-  // Owner-internal state constructors: A5b moves some of these into the owner
-  // module that owns the lifetime (plan A5b §8.1), so the lock follows the
-  // ownership LOCATION to the A5b owner surface instead of pinning them to the
-  // composition root; the entry must still construct none of them.
-  const ownerSurface = ownerSource()
-  for (const [site] of SINGLE_OWNER_SITES) {
+  // Single-owner constructions follow the ownership LOCATION to the module that
+  // owns them (plan A5b §8.1): the owner constructs its private state exactly
+  // once, the root constructs none of what an A5b owner took over, and the
+  // entry constructs none of it at all. The root IS the named owner for the
+  // authority/binding constructions and the client-local state it injects.
+  for (const [site, expected, owner] of SINGLE_OWNER_SITES) {
     assert.equal(entry.includes(site), false, `the entry must not construct ${site}`)
-    assert.ok(ownerSurface.includes(site), `the owning module must construct ${site}`)
+    assert.equal(
+      ownerFile(owner).split(site).length - 1,
+      expected,
+      `${owner} must construct ${site} exactly ${expected} time(s) (plan A5b §8.1)`,
+    )
+    if (owner !== 'src/app/bootstrap.ts') {
+      assert.equal(
+        root.split(site).length - 1,
+        0,
+        `src/app/bootstrap.ts must not construct ${site} — its owner is ${owner}`,
+      )
+    }
   }
 })
 
-test('A5: every application owner is constructed exactly once in the owner surface', () => {
+test('A5: every single-owner construction has exactly its expected count across the owner surface', () => {
+  // The aggregate companion to the per-module location lock above: the TOTAL
+  // count across the owner surface (which includes the composition root) must
+  // still match, so a relocation that duplicates a construction in TWO owner
+  // modules fails even when each module individually looks plausible.
+  const expectedBySite = new Map<string, number>()
   for (const [site, expected] of SINGLE_OWNER_SITES) {
+    expectedBySite.set(site, (expectedBySite.get(site) ?? 0) + expected)
+  }
+  for (const [site, expected] of expectedBySite) {
     assert.equal(ownerOccurrences(site), expected,
       `${site} must have exactly ${expected} construction site(s) in the A5b owner surface`)
   }

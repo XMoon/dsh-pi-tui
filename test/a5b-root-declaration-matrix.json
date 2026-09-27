@@ -562,10 +562,10 @@
       "hostDependency": true,
       "head": "const model = createModelSelectionOwner<ModelSelection>({",
       "tests": [
+        "a5-composition-inventory.test.ts",
         "a5b-bootstrap-closure.test.ts",
         "action-tool-card.test.ts",
-        "approval.test.ts",
-        "attachment-submit.test.ts"
+        "approval.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
@@ -1572,8 +1572,8 @@
       "tests": [
         "a3-writer-admission.test.ts",
         "a4-surface-ownership.test.ts",
-        "a5b-bootstrap-closure.test.ts",
-        "assistant-stream-direct.test.ts"
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",

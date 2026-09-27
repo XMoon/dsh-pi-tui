@@ -120,6 +120,40 @@ test('only the composition owners may import Direct wiring', () => {
   }
 })
 
+test('application owners importing app/bootstrap are rejected (index -> bootstrap -> owners)', () => {
+  for (const file of [
+    'app/surface/runtime.ts',
+    'app/command/surface.ts',
+    'app/submission/controller.ts',
+    'app/session/runtime.ts',
+    'tui-app.ts',
+    'transcript.ts',
+  ]) {
+    const depth = file.split('/').length - 1
+    const up = '../'.repeat(depth)
+    const violations = findViolations([entry(file, `import { bootstrap } from '${up}app/bootstrap.ts'\n`)])
+    assert.equal(violations.length, 1, `${file} -> app/bootstrap.ts must be rejected`)
+    assert.equal(violations[0].rule, 'owner-imports-bootstrap')
+  }
+  // The composition direction itself is the ONE allowed exception: the entry
+  // imports bootstrap, and bootstrap may name its own module.
+  for (const file of ['index.ts', 'app/bootstrap.ts']) {
+    const depth = file.split('/').length - 1
+    const up = '../'.repeat(depth)
+    assert.deepEqual(
+      findViolations([entry(file, `import { bootstrap } from '${up}app/bootstrap.ts'\n`)]),
+      [],
+      `${file} must stay allowed to import app/bootstrap.ts`,
+    )
+  }
+  // A type-only import is still an inverted dependency.
+  assert.equal(
+    findViolations([entry('app/surface/runtime.ts', "import type { B } from '../bootstrap.ts'\n")]).length,
+    1,
+    'a type-only owner -> bootstrap import must be rejected',
+  )
+})
+
 test('the only non-composition Direct import is the allowlisted legacy settings TYPE import', () => {
   const withoutAllowlist = findViolations(collectSourceEntries(), { allowlist: [] })
   assert.deepEqual(
