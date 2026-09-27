@@ -16,9 +16,13 @@
  *   A5b-6 the submission rows; the final A5b state has none).
  */
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import ts from 'typescript'
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const bootstrapSource = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
 const matrix = JSON.parse(
@@ -121,6 +125,23 @@ test('A5b-0 matrix: every root declaration of startRunner() is classified', () =
         `${row.name} (${row.classification}) must record its lifecycle ownership`)
     }
   }
+})
+
+test('A5b-0 matrix: the committed artifact is CURRENT (deep check)', () => {
+  // The artifact is a durable gate, not a snapshot: the committed generator must
+  // deep-compare the regenerated matrix (every row's lines/refs/host-seam/tests/
+  // callers/lifecycle/capabilities/classification/owner + the bootstrap content
+  // hash) and fail when anything drifted. Running the official CLI here means the
+  // gate cannot be forgotten.
+  const result = spawnSync(process.execPath, ['scripts/a5b-root-matrix.mjs', '--check'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  })
+  assert.equal(
+    result.status,
+    0,
+    `the ownership matrix is stale — regenerate it with \`node scripts/a5b-root-matrix.mjs --write\`:\n${result.stdout}${result.stderr}`,
+  )
 })
 
 test('A5b-0 matrix: the residual ownership ledger is exact', () => {
