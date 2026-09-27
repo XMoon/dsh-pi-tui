@@ -272,7 +272,7 @@ in Stage D.
 | M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no physical session lock in Remote mode — DSH writer ownership stays Host-side |
 | M3 | Experimental in-process wire: separate Host/Client Cordis contexts, DSH Connection over the Semantic Port, no TCP | Wire parity on the transcript parity suite; Host composition stays experimental |
 | M4 | Local Host process / IPC split; crash semantics (TUI↔Host, Ctrl+C/D, SIGTERM, HMR, parent/child death) | IPC integration lane green; ordinary local mode: TUI owns ephemeral Host lifecycle |
-| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; remote `!` disabled until a Host-side shell seam; remote external editor unsupported | Security review; fail-closed locality checks |
+| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; user-entered `!`/`!!` bypass mode remains Client-local, while `localShellSandbox=sandbox` stays unsupported until a real Client-side sandbox carrier exists; remote external editor unsupported | Security review; fail-closed locality checks |
 | M6 | Production dual stack: `--backend wire-local` opt-in, direct default; extension CI matrix (direct × wire-local) | One stable observation cycle; no perceptible regression |
 | M7 | Default flip to wire-local; `--backend direct` rollback kept for ≥ 1 release | Rollback verified on the release train |
 | M8 | Direct ownership retirement (the SessionHandle `direct` escape — live Agent/AgentHandle; the physical lock stack is already removed legacy) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
@@ -323,11 +323,12 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   fields through one whole-document settings round-trip; it
   must not invent a callback or merge definitions into layout refs.
 - **The footer command status line (M5) is DIRECT-ONLY, client-local
-  execution.** The trusted command runs on the Client machine's shell
-  (like the local `!` shell) with a USER-layer-only trust gate. There is
-  no Remote/wire story yet: remote attach must fail closed — the command
-  mode stays disabled and the native layout applies until a Host-side
-  execution seam exists (the same blocker as remote `!`).
+  execution.** The trusted command runs on the Client machine's shell with a
+  USER-layer-only trust gate. External attach is a different security case from
+  an explicit user-entered `!`: the command text would arrive from Host-owned
+  settings and could otherwise trigger Client execution. Remote attach therefore
+  keeps command mode fail-closed until an explicit attached-Host trust model is
+  designed; the native layout applies meanwhile.
 - **The `/footer` configurator and the /settings footer rows are
   client-local UI over Host-owned settings** (the dsh-pi-tui settings
   document via the settings service).
@@ -487,9 +488,11 @@ adapter's job is transport mapping, not reimplementation.
   object; it never builds its own history RPC or transport cursor.
 - **Existing-session skills** — the official skills Remote serves the
   catalog for an existing session. The Remote adapter must not copy
-  `serviceFor` / `standingKeyFor` discovery; the sessionless staged-preset
-  catalog (`StagedPresetSkillCatalog`) stays client-side because no session
-  exists yet to attach a Remote to.
+  `serviceFor` / `standingKeyFor` discovery. There is no Session-addressable
+  carrier before a Session exists, so the sessionless staged-preset standing
+  catalog is **INTENTIONAL_UNSUPPORTED_IN_M3** on the wire; Remote completion
+  fails closed instead of running Direct `StagedPresetSkillCatalog` against
+  Client-local preset/cwd facts.
 - **Remote errors** — use the official `RemoteResult<T>` / `RemoteError.code`
   vocabulary. Do not define a `TuiRemoteError` / `SessionRemoteError` family,
   and never `instanceof RemoteError` across bundle boundaries (identity does
@@ -741,6 +744,92 @@ M3-1 proves the generated supported presets mount `@deepseek-ai/dsh-tool-skill`.
 It is not inferred from a hidden Host service. M5/external attach must fail
 closed rather than reuse that local composition assumption when the remote Host
 cannot prove the capability.
+
+
+### Permission/access facts on the rc.2 wire
+
+Permission **preset selection** and the two underlying knobs are not the same
+wire fact. rc.2's public `permissions` Session projection contains only
+`PermissionSelection.currentValue`; the Host projection's internal
+sandbox/approval fold is not part of the public Client value.
+
+Therefore M3 freezes the split:
+
+- current permission preset: public `permissions.currentValue`;
+- selectable/default presets: `permissionPresets/catalog` + settings;
+- preset apply (including Shift+Tab cycle): the semantic
+  `ConfigPort.permissions.applyPermissionPreset()` path, which executes the
+  official Host permission command. The Client computes the next catalog entry,
+  fences the async write by the exact Session/binding generation, and refreshes
+  from authoritative projection state. The Remote branch never calls Host
+  `permissionPresets.set(session, next)`;
+- independent effective sandbox mode: no public rc.2 Client read — omit the
+  structured Remote status fact, never infer it from a preset name;
+- independent session approval override: no public rc.2 Client read, and
+  `InteractionPort.setApprovalPolicy()` is a synchronous boolean contract with
+  no exact public synchronous carrier. Remote M3 returns `undefined`/`false` as
+  *unavailable* and hides/disables the session Approval-policy settings row.
+  It must not turn an unavailable read into `?? 'ask'`, scan the whole Session
+  log to reconstruct a private Host fold, or infer the knob from the current
+  preset.
+
+Approval/question interactive waterfalls remain fully separate and continue to
+use the official forwarded events.
+
+### Local `!` / `!!` shell under a wire backend
+
+The user shell gesture is Client-local, but the current Direct implementation has
+two execution branches:
+
+```text
+localShellSandbox=bypass
+  -> Client/TUI spawn(command, cwd=session cwd)
+
+localShellSandbox=sandbox
+  -> Host ctx.shell.resolve/execute(...)
+```
+
+Only the first branch is placement-safe for M3→M4. The Host `ctx.shell`
+capability is not a Client-local wire service and must not be borrowed merely
+because M3 happens to run both Contexts in one process.
+
+Remote M3 contract:
+
+- bypass mode remains a Client-local spawn;
+- context-mode `!` sends the completed text back through the semantic
+  `SessionWriter`, while `!!` remains presentation-only;
+- currentness/cancel uses exact Session/binding generation plus
+  `SessionWriter.cancel(sessionId)`, never an exact Agent object;
+- explicit `localShellSandbox=sandbox` is
+  **INTENTIONAL_UNSUPPORTED_IN_M3**: show a visible error and execute nothing.
+  In particular, do not keep the Direct behavior that warns and silently falls
+  back to unsandboxed spawn when the requested sandbox capability is absent.
+
+A future true Client-local sandbox can remove this limitation without changing
+ownership.
+
+### Legacy TUI settings migration stays on the Host side
+
+The one-shot `migrateLegacySettings()` path reads the retired Host profile
+`$DSH_HOME/settings.yaml(.imported)`, writes Host Settings forms and validates a
+historical preset through the Host preset registry. It is profile-data migration,
+not a Client preference import and not a Remote protocol.
+
+M3 ordering is:
+
+```text
+Host profile/bootstrap
+  -> migrateLegacySettings(...)
+  -> Remote Host/Client composition readiness
+  -> first Remote settings mirror describe/commit
+  -> Session compose/resume
+```
+
+The existing no-marker-on-failure/retry semantics remain unchanged. A Remote
+Client never opens its own `$DSH_HOME` or calls a local preset registry to
+complete this migration. M3-1 owns the ordering barrier; M3-3B settings readiness
+depends on it. This keeps M4's process split a placement change rather than a
+second migration redesign.
 
 ### Connection lifecycle
 
@@ -1632,7 +1721,9 @@ backend selection/loading; Remote main-surface owner install; the
 `retain new -> commit -> release old` transition; writer-held caller/UI
 recovery; Remote submission-presentation composition; Client-owned TUI/extension
 command execution; tool-card presentation without Host presenter callbacks;
-whole-log `/rewind` over `turnOutline`; image prompt/read wiring; Remote
+whole-log `/rewind` over `turnOutline`; image prompt/read wiring; permission
+preset/access convergence; Client-local-shell ownership + sandbox fail-closed
+behavior; Host-local legacy-settings-migration readiness ordering; Remote
 Task/Presentation production consumption; Remote Plugin Manager panel wiring;
 Remote Job viewer wiring.
 
@@ -1822,10 +1913,10 @@ invalidation behavior) are stage acceptance tests, not missing Pre-M3 coverage.
 | Blocker | Level | Mitigation |
 |---|---|---|
 | Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + in-process rpc carrier (see `docs/m3-entry-contract.md` §4.2). No product redesign required |
-| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see `docs/m3-entry-contract.md` §2.4, §11 M3-1) |
+| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: after the Host-local legacy-settings migration prerequisite settles, M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see `docs/m3-entry-contract.md` §2.4, §4.4, §11 M3-1) |
 | Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/m3-entry-contract.md` §8) |
 | Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
-| Shell execution on the wrong machine | Critical | Locality hard rule; remote `!` fails closed |
+| Shell execution on the wrong machine | Critical | Locality hard rule: Remote `!`/`!!` **bypass** mode executes only in the Client/TUI process; an explicitly requested sandboxed local shell has no rc.2 Client carrier and fails closed. The Remote branch never borrows Host `ctx.shell` merely because M3 is in-process |
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
 | Credentials exposure beyond loopback | Critical | Attach limited to localhost/SSH until real auth |
 | Dual-stack semantic drift | Medium | Shared backend contract test matrix |
