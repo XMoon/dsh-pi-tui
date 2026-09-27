@@ -1,0 +1,1246 @@
+{
+  "generatedFrom": "src/app/bootstrap.ts @ a1db3df4",
+  "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
+  "total": 78,
+  "rows": [
+    {
+      "name": "agents",
+      "kind": "const",
+      "mutable": false,
+      "lines": "261-261",
+      "refs": 12,
+      "hostDependency": true,
+      "head": "const agents = ctx.get('agents')",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a5-composition-inventory.test.ts",
+        "action-tool-card.test.ts",
+        "authorization-login.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "defaultModel",
+      "kind": "const",
+      "mutable": false,
+      "lines": "262-262",
+      "refs": 5,
+      "hostDependency": true,
+      "head": "const defaultModel = ctx.get('agentDefaultModel')",
+      "tests": [
+        "export-command.test.ts",
+        "runner-session-bootstrap.test.ts",
+        "submit-hot-path.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "sessions",
+      "kind": "const",
+      "mutable": false,
+      "lines": "263-263",
+      "refs": 12,
+      "hostDependency": true,
+      "head": "const sessions = ctx.get('sessions')",
+      "tests": [
+        "busy-enter.test.ts",
+        "export-command.test.ts",
+        "extension-registry-m5.test.ts",
+        "history.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "ownership",
+      "kind": "const",
+      "mutable": false,
+      "lines": "275-278",
+      "refs": 53,
+      "hostDependency": false,
+      "head": "const ownership = createSessionOwnershipCore({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "sessionScope",
+      "kind": "const",
+      "mutable": false,
+      "lines": "284-295",
+      "refs": 8,
+      "hostDependency": false,
+      "head": "const sessionScope = createSessionScopeAuthority({",
+      "tests": [
+        "a3-command-identity.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "submissionRuntime",
+      "kind": "let",
+      "mutable": true,
+      "lines": "302-302",
+      "refs": 9,
+      "hostDependency": false,
+      "head": "let submissionRuntime!: SubmissionRuntime",
+      "tests": [
+        "a3-writer-admission.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "requireLiveScope",
+      "kind": "const",
+      "mutable": false,
+      "lines": "306-310",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const requireLiveScope = (): LiveSessionScope => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "submissionWriterSection",
+      "kind": "const",
+      "mutable": false,
+      "lines": "319-323",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "const submissionWriterSection = <T>(task: () => Promise<T>): Promise<T> => {",
+      "tests": [
+        "a5b-root-matrix.test.ts"
+      ],
+      "classification": "MUST_MOVE:app-submission",
+      "owner": "app-submission",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "settingsForms",
+      "kind": "const",
+      "mutable": false,
+      "lines": "339-339",
+      "refs": 6,
+      "hostDependency": true,
+      "head": "const settingsForms = ctx.get('settings') as SettingsFormsLike | undefined",
+      "tests": [
+        "rules.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "tuiSettings",
+      "kind": "const",
+      "mutable": false,
+      "lines": "340-340",
+      "refs": 15,
+      "hostDependency": false,
+      "head": "const tuiSettings = new DirectTuiSettings(config, settingsForms)",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "direct-backend-assembly.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "persistedTuiSettings",
+      "kind": "const",
+      "mutable": false,
+      "lines": "368-368",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "const persistedTuiSettings = tuiSettings?.get() as unknown as TuiSettingsDoc | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "displayResolution",
+      "kind": "const",
+      "mutable": false,
+      "lines": "369-371",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const displayResolution = resolveDisplayPreset({",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "displayState",
+      "kind": "const",
+      "mutable": false,
+      "lines": "372-372",
+      "refs": 6,
+      "hostDependency": false,
+      "head": "const displayState: DisplayState = { preset: displayResolution.preset }",
+      "tests": [
+        "command-rendering.test.ts",
+        "compact-display.test.ts",
+        "compact-extension-work.test.ts",
+        "compact-performance-hardening.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "progressUpdatesState",
+      "kind": "const",
+      "mutable": false,
+      "lines": "374-374",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const progressUpdatesState: ProgressUpdatesState = { mode: parseProgressUpdates(persistedTuiSettings?.progressUpdates) }",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "communication-policy.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "responseStyleState",
+      "kind": "const",
+      "mutable": false,
+      "lines": "375-375",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const responseStyleState: ResponseStyleState = { style: parseResponseStyle(persistedTuiSettings?.responseStyle) }",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "communication-policy.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "surface",
+      "kind": "const",
+      "mutable": false,
+      "lines": "394-399",
+      "refs": 170,
+      "hostDependency": false,
+      "head": "const surface = createSurfaceRuntime<SessionEvent>({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "viewedQueueAgent",
+      "kind": "let",
+      "mutable": true,
+      "lines": "411-415",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "let viewedQueueAgent: {",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "directRuntime",
+      "kind": "const",
+      "mutable": false,
+      "lines": "416-431",
+      "refs": 24,
+      "hostDependency": true,
+      "head": "const directRuntime = createDirectApplicationRuntime({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "agentNow",
+      "kind": "const",
+      "mutable": false,
+      "lines": "438-438",
+      "refs": 28,
+      "hostDependency": true,
+      "head": "const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "session-scope.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "handleNow",
+      "kind": "const",
+      "mutable": false,
+      "lines": "440-443",
+      "refs": 2,
+      "hostDependency": true,
+      "head": "const handleNow = (): AgentHandle | undefined => {",
+      "tests": [
+        "a2-ownership-cutover.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "captureMatches",
+      "kind": "const",
+      "mutable": false,
+      "lines": "450-451",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const captureMatches = (subject: SessionSubject | undefined): boolean =>",
+      "tests": [
+        "a2-ownership-cutover.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "isCurrentOwnerAgent",
+      "kind": "const",
+      "mutable": false,
+      "lines": "456-459",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const isCurrentOwnerAgent = (candidate: Agent): boolean => {",
+      "tests": [
+        "a2-ownership-cutover.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "directAgentOfOwner",
+      "kind": "const",
+      "mutable": false,
+      "lines": "464-465",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const directAgentOfOwner = (owner: SessionOwnerRef): Agent | undefined =>",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "model",
+      "kind": "const",
+      "mutable": false,
+      "lines": "476-482",
+      "refs": 32,
+      "hostDependency": true,
+      "head": "const model = createModelSelectionOwner<ModelSelection>({",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "action-tool-card.test.ts",
+        "approval.test.ts",
+        "attachment-submit.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "sessionRuntime",
+      "kind": "const",
+      "mutable": false,
+      "lines": "483-557",
+      "refs": 21,
+      "hostDependency": true,
+      "head": "const sessionRuntime = bindSessionRuntime(ownership, {",
+      "tests": [
+        "a3-writer-admission.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "backend",
+      "kind": "const",
+      "mutable": false,
+      "lines": "567-567",
+      "refs": 42,
+      "hostDependency": true,
+      "head": "const backend = directRuntime.backend",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "authorization-login.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "settings",
+      "kind": "const",
+      "mutable": false,
+      "lines": "571-583",
+      "refs": 47,
+      "hostDependency": false,
+      "head": "const settings = createSettingsRuntime({",
+      "tests": [
+        "a3-command-identity.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "compose",
+      "kind": "const",
+      "mutable": false,
+      "lines": "585-585",
+      "refs": 8,
+      "hostDependency": true,
+      "head": "const compose = (presetId?: string): Promise<DirectAgentComposition> => directRuntime.compose(presetId)",
+      "tests": [
+        "communication-policy.test.ts",
+        "direct-backend-assembly.test.ts",
+        "direct-session-fork.test.ts",
+        "footer-configurator-ui.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "launchPreset",
+      "kind": "const",
+      "mutable": false,
+      "lines": "606-606",
+      "refs": 14,
+      "hostDependency": true,
+      "head": "const launchPreset = startup.presetId ?? (process.env.DSH_PI_TUI_PRESET?.trim() || undefined)",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "pendingPreset",
+      "kind": "let",
+      "mutable": true,
+      "lines": "613-613",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "let pendingPreset: string | undefined",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "launchComposition",
+      "kind": "const",
+      "mutable": false,
+      "lines": "632-644",
+      "refs": 5,
+      "hostDependency": true,
+      "head": "const launchComposition = async (): Promise<{ composition: DirectAgentComposition; failure?: string }> => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "resumeFailure",
+      "kind": "let",
+      "mutable": true,
+      "lines": "651-651",
+      "refs": 11,
+      "hostDependency": false,
+      "head": "let resumeFailure: string | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "handle",
+      "kind": "let",
+      "mutable": true,
+      "lines": "656-656",
+      "refs": 19,
+      "hostDependency": false,
+      "head": "let handle: SessionHandle | undefined",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "advanced-cordis-lifecycle.test.ts",
+        "advanced-input.test.ts",
+        "advanced-interactive.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "resumeResolved",
+      "kind": "let",
+      "mutable": true,
+      "lines": "660-660",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "let resumeResolved = false",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "resumeQuiesce",
+      "kind": "const",
+      "mutable": false,
+      "lines": "754-769",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const resumeQuiesce = sessionRuntime.publishResumedOwner(handle, (owner) => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "initialSnapshot",
+      "kind": "let",
+      "mutable": true,
+      "lines": "778-778",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "let initialSnapshot: SurfaceCatalogSnapshot | undefined",
+      "tests": [
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "initialSkills",
+      "kind": "let",
+      "mutable": true,
+      "lines": "779-779",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "let initialSkills: HumanSkillCatalog | undefined",
+      "tests": [
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "surfaceNotice",
+      "kind": "let",
+      "mutable": true,
+      "lines": "780-780",
+      "refs": 6,
+      "hostDependency": false,
+      "head": "let surfaceNotice: string | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "currentPreset",
+      "kind": "const",
+      "mutable": false,
+      "lines": "823-838",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const currentPreset = (): string | undefined => {",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "sessionBlank",
+      "kind": "const",
+      "mutable": false,
+      "lines": "842-849",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const sessionBlank = (): boolean | undefined => {",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "viewerRef",
+      "kind": "let",
+      "mutable": true,
+      "lines": "856-856",
+      "refs": 6,
+      "hostDependency": true,
+      "head": "let viewerRef: ViewerRuntime<SessionEvent, Agent> | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "presentation",
+      "kind": "const",
+      "mutable": false,
+      "lines": "857-889",
+      "refs": 38,
+      "hostDependency": true,
+      "head": "const presentation = createSessionPresentation<SessionEvent>({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "cwd",
+      "kind": "const",
+      "mutable": false,
+      "lines": "922-922",
+      "refs": 24,
+      "hostDependency": false,
+      "head": "const cwd = process.cwd()",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "authorization-login.test.ts",
+        "builtins.test.ts",
+        "busy-enter.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "command",
+      "kind": "const",
+      "mutable": false,
+      "lines": "930-1060",
+      "refs": 48,
+      "hostDependency": true,
+      "head": "const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({",
+      "tests": [
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "status",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1065-1089",
+      "refs": 74,
+      "hostDependency": true,
+      "head": "const status = createStatusRuntime({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "history",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1093-1099",
+      "refs": 26,
+      "hostDependency": false,
+      "head": "const history = createInputHistory({",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "busy-enter.test.ts",
+        "child-view.test.ts",
+        "compact-performance-hardening.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "cleanedUp",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1103-1103",
+      "refs": 27,
+      "hostDependency": false,
+      "head": "let cleanedUp = false",
+      "tests": [
+        "a3-writer-admission.test.ts",
+        "runner-session-bootstrap.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "app",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1105-1105",
+      "refs": 96,
+      "hostDependency": false,
+      "head": "let app: TuiApp",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "extensionService",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1108-1168",
+      "refs": 25,
+      "hostDependency": false,
+      "head": "let extensionService: (PiTuiExtensionService & {",
+      "tests": [
+        "submit-hot-path.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "tools",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1184-1184",
+      "refs": 8,
+      "hostDependency": true,
+      "head": "const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined",
+      "tests": [
+        "catalog-port.test.ts",
+        "command-catalog.test.ts",
+        "command-transcript.test.ts",
+        "compact-display.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "present",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1185-1189",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const present = toolPresenterFrom(name => {",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "action-tool-card.test.ts",
+        "authorization-login.test.ts",
+        "autocomplete-active-screen-repaint.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "signal",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1191-1191",
+      "refs": 41,
+      "hostDependency": false,
+      "head": "const signal = lifecycleController.signal",
+      "tests": [
+        "a3-writer-admission.test.ts",
+        "a5-composition-inventory.test.ts",
+        "advanced-broker.test.ts",
+        "approval.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "draftImages",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1195-1195",
+      "refs": 10,
+      "hostDependency": false,
+      "head": "const draftImages = new DraftImageStore()",
+      "tests": [
+        "rules.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "draftFiles",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1196-1196",
+      "refs": 8,
+      "hostDependency": false,
+      "head": "const draftFiles = new DraftFileStore()",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "lifecycleAgents",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1199-1202",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const lifecycleAgents: TuiCommandRunner['agents'] = {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "localShell",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1207-1224",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const localShell = createLocalShell<Agent>({",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "disposeSurface",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1231-1286",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const disposeSurface = (): void => {",
+      "tests": [
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts",
+        "notification-wiring.test.ts",
+        "rules.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:mount-dispose-fatal-coordination",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "requestExit",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1296-1310",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "const { requestExit } = createExitController({",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "registerRunnerDisposal",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1338-1353",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const registerRunnerDisposal = (): void => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:mount-dispose-fatal-coordination",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "assistantStreamBaselineFor",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1358-1358",
+      "refs": 6,
+      "hostDependency": false,
+      "head": "let assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[] = () => []",
+      "tests": [
+        "remote-presentation-shadow.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "viewer",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1362-1378",
+      "refs": 64,
+      "hostDependency": true,
+      "head": "const viewer = createViewerRuntime<SessionEvent, Agent>({",
+      "tests": [
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "assistant-stream-direct.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "submission",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1385-1478",
+      "refs": 44,
+      "hostDependency": true,
+      "head": "const submission = createSubmissionController<Agent>({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "artifacts",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1483-1490",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const artifacts = createArtifactSaveOwner<Agent>({",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "advanced-input.test.ts",
+        "context-row.test.ts",
+        "focus-mode.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "runClipboardCommand",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1504-1504",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "const runClipboardCommand = createClipboardRunner()",
+      "tests": [
+        "a5b-root-matrix.test.ts"
+      ],
+      "classification": "MUST_MOVE:app-surface",
+      "owner": "app-surface",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "clipboardEnv",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1505-1512",
+      "refs": 6,
+      "hostDependency": true,
+      "head": "const clipboardEnv: ClipboardEnvironment = {",
+      "tests": [
+        "a5b-root-matrix.test.ts"
+      ],
+      "classification": "MUST_MOVE:app-surface",
+      "owner": "app-surface",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "runCopyCommand",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1515-1516",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "const runCopyCommand: CopyExecutor = (command, args, input) =>",
+      "tests": [
+        "a5b-root-matrix.test.ts"
+      ],
+      "classification": "MUST_MOVE:app-surface",
+      "owner": "app-surface",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "copyEnv",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1521-1527",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const copyEnv: CopyEnvironment = {",
+      "tests": [
+        "a5b-root-matrix.test.ts"
+      ],
+      "classification": "MUST_MOVE:app-surface",
+      "owner": "app-surface",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "pluginManager",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1538-1538",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "const pluginManager = surface.attachPluginManager({ port: backend.pluginManager, diag })",
+      "tests": [
+        "a4-surface-ownership.test.ts",
+        "direct-backend-assembly.test.ts",
+        "job-observation-direct.test.ts",
+        "plugin-manager-direct.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "surfaceEvents",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1543-2018",
+      "refs": 2,
+      "hostDependency": true,
+      "head": "const surfaceEvents: TuiAppEvents = {",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "a5b-root-matrix.test.ts"
+      ],
+      "classification": "MUST_MOVE:app-surface",
+      "owner": "app-surface",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "jobs",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2269-2269",
+      "refs": 22,
+      "hostDependency": true,
+      "head": "const jobs = ctx.get('jobs')",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts",
+        "disclosure-search-path.test.ts",
+        "extension-focus-seat.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "subagents",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2270-2270",
+      "refs": 7,
+      "hostDependency": true,
+      "head": "const subagents = ctx.get('subagents')",
+      "tests": [
+        "action-tool-card.test.ts",
+        "busy-enter.test.ts",
+        "preset.test.ts",
+        "remote-official-contract.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "jobSnapshot",
+      "kind": "let",
+      "mutable": true,
+      "lines": "2274-2274",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "let jobSnapshot: { key: string; rows: ReturnType<NonNullable<typeof jobs>['list']> } | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "openRewindPicker",
+      "kind": "function",
+      "mutable": false,
+      "lines": "2355-2431",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "function openRewindPicker(): void {",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "a5b-root-matrix.test.ts",
+        "authorization-login.test.ts",
+        "busy-enter.test.ts"
+      ],
+      "classification": "MUST_MOVE:app-surface",
+      "owner": "app-surface",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "startupAgent",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2483-2483",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const startupAgent = agentNow()",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "currentWorkingFromLog",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2515-2518",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const currentWorkingFromLog = (): boolean => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "flushTurn",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2520-2533",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const flushTurn = (): void => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    },
+    {
+      "name": "assistantStreamHandle",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2543-2549",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const assistantStreamHandle = directRuntime.installAssistantStream({",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching (composition seam)"
+    },
+    {
+      "name": "disposeCredentialSubscription",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2588-2588",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const disposeCredentialSubscription = backend.config.credentials.onChanged(() => surface.routeProviderRefresh())",
+      "tests": [
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability"
+    }
+  ]
+}
