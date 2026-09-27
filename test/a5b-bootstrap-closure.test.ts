@@ -212,11 +212,44 @@ interface TypedObjectLiteral {
  */
 function typedObjectLiterals(rel: string, source: string, typeName: string): TypedObjectLiteral[] {
   const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  // Local type aliases (`type Events = TuiAppEvents`, incl. chains) are
+  // resolved so an aliased annotation is not a blind spot; a CONTEXTUALLY typed
+  // literal (an argument whose parameter is declared elsewhere as this type) has
+  // no syntactic annotation here and is outside this guard's stated scope.
+  const aliasNames = new Set<string>([typeName])
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false
+    const scanAliases = (node: ts.Node): void => {
+      if (ts.isTypeAliasDeclaration(node) && ts.isTypeReferenceNode(node.type) && ts.isIdentifier(node.type.typeName)) {
+        if (aliasNames.has(node.type.typeName.text) && !aliasNames.has(node.name.text)) {
+          aliasNames.add(node.name.text)
+          changed = true
+        }
+      }
+      ts.forEachChild(node, scanAliases)
+    }
+    scanAliases(sf)
+    if (!changed) break
+  }
   const isType = (node: ts.TypeNode | undefined): boolean =>
     node !== undefined
     && ts.isTypeReferenceNode(node)
     && ts.isIdentifier(node.typeName)
-    && node.typeName.text === typeName
+    && aliasNames.has(node.typeName.text)
+  /** The return-type annotation of the function-like node enclosing `from`. */
+  const returnAnnotationOf = (from: ts.Node): ts.TypeNode | undefined => {
+    let node: ts.Node | undefined = from
+    while (node !== undefined) {
+      if (
+        ts.isFunctionDeclaration(node)
+        || ts.isFunctionExpression(node)
+        || ts.isArrowFunction(node)
+        || ts.isMethodDeclaration(node)
+      ) return node.type
+      node = node.parent
+    }
+    return undefined
+  }
   const found = new Map<ts.ObjectLiteralExpression, TypedObjectLiteral>()
   const consider = (expr: ts.Expression, declaredName: string | undefined, annotation: ts.TypeNode | undefined): void => {
     let typed = isType(annotation)
@@ -235,6 +268,9 @@ function typedObjectLiterals(rel: string, source: string, typeName: string): Typ
   const visit = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && node.initializer !== undefined) {
       consider(node.initializer, ts.isIdentifier(node.name) ? node.name.text : undefined, node.type)
+    }
+    if (ts.isReturnStatement(node) && node.expression !== undefined) {
+      consider(node.expression, undefined, returnAnnotationOf(node))
     }
     if (
       ts.isAsExpression(node)
@@ -546,64 +582,93 @@ test('A5b: each extracted owner is constructed exactly once, from the compositio
 })
 
 /**
- * The whole-tree production file set each `OWNER_CONSTRUCTIONS` site may appear
- * in, in the SAME style as the A5 composition inventory's
- * `WHOLE_TREE_NON_OWNER_SITES` guard.
+ * The extracted-owner factories and their SINGLE production call site.
  *
- * Six of the twelve site strings also match the owner's own factory DECLARATION
- * (`export function createStatusRuntime(`), so their whole-tree file set is the
- * owner module plus the composition root. The other six spell the concrete
- * type arguments of a generic call (`createViewerRuntime<SessionEvent, Agent>(`),
- * which the declaration does not, so they exist only at the bootstrap call
- * site.
- *
- * The rows are EXPLICIT and never derived from the file under test: a second,
- * type-correct construction in ANY production module (including a generic owner
- * re-called from its own module) changes the file set or the total count and
- * fails, even while the existing root-count assertion stays at 1. This closes
- * the review gap where `OWNER_CONSTRUCTIONS` uniqueness was only counted inside
- * bootstrap.
+ * The lock is over AST `CallExpression` callees, never over source spellings:
+ * these factories infer their generics from `deps`, so `createViewerRuntime(deps)`
+ * is as valid as `createViewerRuntime<SessionEvent, Agent>(deps)` and a
+ * spelling-based scan silently misses the former (A5b-7 review P2). A factory
+ * DECLARATION is not a call, so no declaration bookkeeping is needed either.
  */
-const OWNER_CONSTRUCTION_FILES: Readonly<Record<string, readonly string[]>> = {
-  'createStatusRuntime(': ['src/app/bootstrap.ts', 'src/app/surface/status-runtime.ts'],
-  'createInputHistory(': ['src/app/bootstrap.ts', 'src/app/surface/input-history.ts'],
-  'createSettingsRuntime(': ['src/app/bootstrap.ts', 'src/app/surface/settings-runtime.ts'],
-  'createModelSelectionOwner<': ['src/app/bootstrap.ts', 'src/app/command/model-selection.ts'],
-  'createCommandSurface<ModelSelection, SessionId, Agent>(': ['src/app/bootstrap.ts'],
-  'createArtifactSaveOwner<Agent>(': ['src/app/bootstrap.ts'],
-  'createSessionPresentation<SessionEvent>(': ['src/app/bootstrap.ts'],
-  'createViewerRuntime<SessionEvent, Agent>(': ['src/app/bootstrap.ts'],
-  'createSubmissionController<Agent>(': ['src/app/bootstrap.ts'],
-  'createLocalShell<Agent>(': ['src/app/bootstrap.ts'],
-  'createApplicationEvents(': ['src/app/bootstrap.ts', 'src/app/surface/application-events.ts'],
-  'createClientActions(': ['src/app/bootstrap.ts', 'src/app/surface/client-actions.ts'],
+const OWNER_FACTORY_NAMES: readonly string[] = [
+  'createStatusRuntime',
+  'createInputHistory',
+  'createSettingsRuntime',
+  'createModelSelectionOwner',
+  'createCommandSurface',
+  'createArtifactSaveOwner',
+  'createSessionPresentation',
+  'createViewerRuntime',
+  'createSubmissionController',
+  'createLocalShell',
+  'createApplicationEvents',
+  'createClientActions',
+]
+
+/**
+ * Every production call site of one factory identifier (callee identity),
+ * following simple identifier ALIASES (`const make = createViewerRuntime`, and
+ * alias-of-alias) so `make(deps)` counts as a `createViewerRuntime` call.
+ *
+ * Stated scope: this is a SYNTACTIC guard over direct calls, wrapper
+ * expressions (`(f)(x)`, `f as T`) and identifier aliases. Computed indirection
+ * (`obj[key](x)`, a factory re-exported through an object, a `Proxy`, …) is
+ * outside it — the architecture gate, the per-owner location locks and review
+ * cover those layers.
+ */
+function factoryCallSites(name: string): string[] {
+  const sources = productionSources().map(({ rel, source }) => ({
+    rel,
+    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+  }))
+  const aliases = new Set<string>()
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false
+    for (const { file } of sources) {
+      const scan = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+          const inner = unwrapExpression(node.initializer)
+          if (ts.isIdentifier(inner) && (inner.text === name || aliases.has(inner.text)) && !aliases.has(node.name.text)) {
+            aliases.add(node.name.text)
+            changed = true
+          }
+        }
+        ts.forEachChild(node, scan)
+      }
+      scan(file)
+    }
+    if (!changed) break
+  }
+  const sites: string[] = []
+  for (const { rel, file } of sources) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const callee = unwrapExpression(node.expression)
+        if (ts.isIdentifier(callee) && (callee.text === name || aliases.has(callee.text))) sites.push(rel)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+  }
+  return sites.sort()
 }
 
-test('A5b: every extracted-owner construction is pinned across production src/**', () => {
+test('A5b: every extracted-owner factory is called exactly once, from the composition root', () => {
   // The per-module location lock above reads the hand-listed root only, so a
-  // second, type-correct `createViewerRuntime(...)` added in ANY other
-  // production file leaves the root count at 1 and is invisible to it. This is
-  // the repo-wide file-set + total-count companion the A5 composition inventory
-  // uses (plan A5b §8.1/§8.3), over the SHARED production walkers.
+  // second, type-correct construction added in ANY other production file leaves
+  // the root count at 1 and is invisible to it. This repo-wide companion (plan
+  // A5b §8.1/§8.3) counts SEMANTIC call sites: an inferred-generic call, an
+  // explicit-generic call and a parenthesized callee are the same fact.
   assert.deepEqual(
-    Object.keys(OWNER_CONSTRUCTION_FILES).sort(),
-    OWNER_CONSTRUCTIONS.map(([, , site]) => site).sort(),
-    'OWNER_CONSTRUCTION_FILES must pin exactly the OWNER_CONSTRUCTIONS sites',
+    [...OWNER_FACTORY_NAMES].sort(),
+    [...new Set(OWNER_CONSTRUCTIONS.map(([, factory]) => factory))].sort(),
+    'OWNER_FACTORY_NAMES must cover exactly the extracted owners',
   )
-  const sources = productionSources()
-  const whole = productionSource()
-  for (const [, factory, site] of OWNER_CONSTRUCTIONS) {
-    const expected = OWNER_CONSTRUCTION_FILES[site]!
-    const files = sources.filter(({ source }) => source.includes(site)).map(({ rel }) => rel)
+  for (const name of OWNER_FACTORY_NAMES) {
     assert.deepEqual(
-      files,
-      [...expected].sort(),
-      `${factory} (${site}) must occur only in its owner module and src/app/bootstrap.ts across production src/**`,
-    )
-    assert.equal(
-      whole.split(site).length - 1,
-      expected.length,
-      `${factory} (${site}) must occur exactly ${expected.length} time(s) across production src/**`,
+      factoryCallSites(name),
+      ['src/app/bootstrap.ts'],
+      `${name} must be called exactly once, from src/app/bootstrap.ts, across production src/** (AST call sites, never spellings)`,
     )
   }
 })
