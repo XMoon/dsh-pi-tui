@@ -781,3 +781,5 @@ test('M3. disposeRemoteContributions isolates failures and runs every disposer i
   assert.equal(errors.length, 1, 'exactly one disposal failure must be collected')
   assert.equal(errors[0], sentinel)
 })
+
+// ---------------------------------------------------------------------------
