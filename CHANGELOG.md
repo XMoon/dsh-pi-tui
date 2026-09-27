@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### 修复
+
+- Task Center 在 subagent 较多时，不再因 lifecycle/tool/job/open 等同一波
+  invalidation 并发启动多次完整 descendant traversal：已有 refresh 在飞时只记录
+  dirty，结算后合并为一次 trailing refresh，避免新 subagent 因 refresh storm
+  被长时间拖后。单次上游递归遍历本身的成本不在本次修复范围内。
+
 ## [0.4.9] - 2026-09-25
 
 ### 安装与版本对应

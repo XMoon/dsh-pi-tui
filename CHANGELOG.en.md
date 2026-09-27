@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- When many subagents are tracked, the Task Center no longer starts several full
+  descendant traversals for one burst of lifecycle/tool/job/open invalidations:
+  invalidations arriving while a refresh is in flight are coalesced into a single
+  trailing refresh, so a new subagent is no longer pushed back by a refresh
+  storm. The cost of one upstream recursive traversal is unchanged by this fix.
+
 ## [0.4.9] - 2026-09-25
 
 ### Installation and version pairing

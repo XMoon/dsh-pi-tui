@@ -324,11 +324,12 @@ test('the preferred cursor is the first running subagent, else the first active 
 })
 
 test('Case D3: overlapping catalog refreshes commit in REQUEST order (epoch supersede)', async () => {
-  // The initial badge refresh and an open-browser refresh can be in
-  // flight together; the NEWER request must stay authoritative even when
-  // its listing settles FIRST and the older one settles later (review
-  // round 1, P1): an older response must never overwrite newer
-  // membership/tree state.
+  // `refreshCatalog()` stays overlap-correct for ANY direct/future caller: the
+  // NEWER request must stay authoritative even when its listing settles FIRST
+  // and the older one settles later (review round 1, P1) — an older response
+  // must never overwrite newer membership/tree state. The production surface no
+  // longer creates this overlap itself (its catalog gate is single-flight), so
+  // this locks the runtime contract, not a production trigger.
   const h = makeHarness()
   h.setStatus('child-new', 'running')
   const initial = h.runtime.refreshCatalog()
@@ -842,4 +843,52 @@ test('PR2 review: a scoped viewer never re-arms acknowledged global failures (re
   assert.equal(h.summaries().at(-1)!.failedAttention, 0,
     'a scoped round-trip must not re-arm acknowledged global failures')
   assert.equal(h.summaries().at(-1)!.failedTotal, 1, 'the global failure total stays intact')
+})
+
+// ---------------------------------------------------------------------------
+// Catalog refresh coalescing (surface-owned single-flight gate)
+// ---------------------------------------------------------------------------
+
+test('the surface coalesces every production catalog refresh through one gate', () => {
+  // Exactly ONE production start point: the surface-owned coalescing gate.
+  // Any other direct `refreshCatalog()` call in the surface is a bypass that
+  // restores the refresh storm (N invalidations -> N full descendant reads).
+  const starts = surfaceSource.split('.refreshCatalog()').length - 1
+  assert.equal(starts, 1,
+    `the surface must have exactly one refreshCatalog() start point (the gate); found ${starts}`)
+  const gateStart = surfaceSource.indexOf('const startTaskCatalogRefresh = ')
+  const gateEnd = surfaceSource.indexOf('const settleTaskCatalogRefresh = ')
+  assert.ok(gateStart >= 0 && gateEnd > gateStart, 'the surface must define the coalescing gate')
+  const gate = surfaceSource.slice(gateStart, gateEnd)
+  // Ownership state must be committed BEFORE the synchronous factory runs: a
+  // re-entrant invalidation from the loading commit has to observe in-flight.
+  assert.ok(gate.includes('taskCatalogRefreshInFlight = true'),
+    'the gate must claim in-flight before starting the traversal')
+  assert.ok(gate.indexOf('taskCatalogRefreshInFlight = true') < gate.indexOf('runOwned('),
+    'in-flight must be set before runOwned invokes the factory')
+  // The browser open and the Full Task Center R path must both route through
+  // the gate, never a direct bypass.
+  const open = surfaceSource.slice(
+    surfaceSource.indexOf('const openTasksBrowser = ('),
+    surfaceSource.indexOf('const handleWorkflowAction'),
+  )
+  assert.ok(!open.includes('refreshCatalog'),
+    'browser open / R must never call refreshCatalog() directly')
+  assert.ok(open.includes('refreshAgents()'),
+    'browser open / R must invalidate through the coalesced gate')
+  // The session-generation reset must invalidate the gate: an old session's
+  // slow traversal may not hold back (or clear) the new session's gate.
+  const reset = surfaceSource.slice(surfaceSource.indexOf('resetTasks() {'))
+  assert.ok(reset.includes('taskCatalogRefreshGeneration += 1'),
+    'a session-generation bump must invalidate the coalescing gate')
+  // `agent/status` stays runtime-only: it must never enter the catalog gate.
+  // (`the runner wires agent/status to the membership-gated RUNTIME-only
+  // refresh` above locks the full routing; this keeps the coalescing guard
+  // self-contained.)
+  const agentStatus = surfaceSource.slice(
+    surfaceSource.indexOf('const routeAgentStatus = '),
+    surfaceSource.indexOf('const routeProviderRefresh = '),
+  )
+  assert.ok(!agentStatus.includes('refreshAgents()'),
+    'agent/status must never trigger a catalog refresh through the coalescing gate')
 })
