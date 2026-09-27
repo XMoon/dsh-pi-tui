@@ -23,7 +23,7 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
@@ -65,24 +65,20 @@ import { createLocalShell, type LocalShellCapability } from './submission/local-
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
-import { childOwnEvents, TranscriptFolder } from '../transcript.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
-import { isFocusDisplayPreset, resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
+import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
 import { computeStats } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
-import type { CompositionStatus, HostStatus, WorkspaceStatus } from '../status/types.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
 import { color } from '../theme.ts'
 import { isEmptyAcceleratedViewerSubmit, type TuiApp, type TuiAppEvents } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
-import { type ViewerAccess } from '../tasks-browser.ts'
 import { resolveComposerDelivery, type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
-import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from '../detached.ts'
-import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../history-persist.ts'
+import { runDetached, runOwned, type OwnedTaskOptions } from '../detached.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
 import { DraftImageStore } from '../image/draft-store.ts'
@@ -95,17 +91,15 @@ import { iconStyleOf } from '../icons.ts'
 import { checkImageLimits } from '../image/intake.ts'
 import { ImageLoadError } from '../image/errors.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments, type PrepareInputDeps } from '../image/submit.ts'
-import { expandImagePlaceholders } from '../image/placeholder.ts'
-import { draftHasFiles } from '../attachment/placeholder.ts'
 import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, steerAll, type SteerAgentLike } from '../steer.ts'
-import { resolveSubagentSettleTarget, subagentPromptDisposition, viewerCanonicalizeScope, type SubagentPromptOutcome, type SubagentPromptReject, type SubagentViewerSubmitRequest } from '../subagent-viewer-submit.ts'
+import { viewerCanonicalizeScope, type SubagentViewerSubmitRequest } from '../subagent-viewer-submit.ts'
 import { createDirectApplicationRuntime } from '../app/direct/runtime.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
-import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from '../app/session/scope.ts'
+import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope } from '../app/session/scope.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
@@ -113,16 +107,11 @@ import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
-import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, type ShellSubmitAgentLike } from '../shell-context.ts'
-import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_DISK_CAP_BYTES } from '../bounded-output.ts'
 import { parseShellWords } from '../shell-words.ts'
 import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import { collectRewindCandidates, rewindPickerItem } from '../rewind.ts'
 import { type RewindLiveIdentity } from '../session-fork.ts'
-import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from '../submit-ack.ts'
-import { type PendingSubmissionPlacement } from '../pending-submission.ts'
-import { DirectSubmissionPresentation, type SubmissionPresentationSource } from '../submission-presentation.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { dangerCommand } from '../command-policy.ts'
 import { viewerActionCapability } from '../subagent-viewer.ts'
@@ -130,7 +119,7 @@ import { resolveInitialCatalog } from '../surface-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
 import { queueTextOf } from '../pending-presentation.ts'
 import { bundleVersion, packageVersion } from '../dsh-version.ts'
-import { compactingFromLog, workingFromLog } from '../compaction-presentation.ts'
+import { workingFromLog } from '../compaction-presentation.ts'
 import { hostRunningProfile, resumeCommand } from '../dsh-profile.ts'
 
 import type { Config } from '../tui-config.ts'
@@ -1105,6 +1094,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       surface: { get app() { return app } },
       clientCwd: cwd,
       sessionCwd: () => status.sessionCwd(),
+      diag,
+      isCleanedUp: () => cleanedUp,
     })
 
     // Surface lifetime fence: every callback below can outlive the TUI
@@ -1386,84 +1377,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       restoreMainTranscriptAnchor: () => presentation.restoreMainTranscriptAnchor(),
     })
     viewerRef = viewer
-    /**
-     * Restore the submitted text into the editor after a failed submission
-     * (review finding: the restore MUST run BEFORE the reservation pin
-     * releases — the restored placeholders must keep their backing drafts
-     * against concurrent attach-time prunes). Correctness side effect
-     * first; never throws.
-     */
-    /**
-     * The COMPOSER-side attachment policy for one parsed line (DSH web
-     * parity): returns the refusal text, or undefined when the line may carry
-     * the staged attachments.
-     * - a TUI/core local command and a client contribution are UI controls —
-     *   refused;
-     * - an explicit `/skill <name> ...` invocation and a LIVE skill wrapper
-     *   are agent-facing — loadSkill delivers them and their attachments to
-     *   the model (never classified as a command);
-     * - a line the HOST catalog CLAIMS accepts attachments ONLY when the
-     *   claiming descriptor declares `input.attachments` (upstream refuses
-     *   otherwise before dispatch). The claim is LINE-level: an argued line
-     *   of an execute-kind command is no invocation at all (it falls back to
-     *   the ordinary submission) and keeps its attachments;
-     * - a declared command still refuses a FILE attachment: the host expects
-     *   an upload receipt, which this client has no seam to produce (fail
-     *   closed rather than silently drop the file).
-     * The host executor re-enforces the declaration at admission.
-     */
-    const attachmentRefusal = (
-      parsed: { name: string; rawInput?: string },
-      draft: string,
-      // Whether THIS LINE is a local command line — the dispatch's ONE
-      // classification (`commandIsLocalForAttachments`), computed by the
-      // caller because it must be re-readable against the FINAL catalog for a
-      // deferred start.
-      isLocal: boolean,
-      // The ONE skill-invocation predicate (`isSkillInvocation`: an explicit
-      // `/skill <name> ...` or a live skill wrapper) — TUI-owned agent-facing
-      // input that loadSkill owns. It is supplied rather than re-derived: the
-      // predicate applies the argued-`/skill` short-circuit, and WITHOUT it
-      // the line would fall into the HOST branch below (`/skill` is itself a
-      // registered TUI command) and be refused as a non-declaring command.
-      skillInvocation: boolean,
-    ): string | undefined => {
-      if (!draftHasAttachments(draft, draftImages, draftFiles)) return undefined
-      if (skillInvocation) return undefined
-      if (!isLocal) {
-        const claim = command.hostClaimOf(parsed)
-        if (claim?.claimed === true) {
-          if (claim.attachments !== true) {
-            return `/${parsed.name} does not accept attachments; remove them first`
-          }
-          if (draftHasFiles(draft, draftImages, draftFiles)) {
-            return `/${parsed.name} cannot receive file attachments in this client; remove them first`
-          }
-        }
-        return undefined
-      }
-      return 'Attachments cannot be included in a local command.'
-    }
-    /** The encoded images ONE command invocation carries (DSH
-     * `CommandSubmitAttachment`): the draft store holds the exact bytes, and
-     * the host admits them through its own store at execute time. Only a
-     * declared host command reaches this builder — an undeclared command and
-     * any file attachment are refused before dispatch. A RECALLED image
-     * carries no local bytes (it is already durable): the wire has no
-     * ref-based variant, so the host's admission rejects the empty payload
-     * and the command settles as an error — the draft and its attachments
-     * are kept for correction (never silently dropped). */
-    const commandSubmitAttachments = (draft: string) => expandImagePlaceholders(draft, draftImages)
-      .flatMap(segment => segment.type === 'image' ? [segment.image] : [])
-      .map(image => ({
-        type: 'image' as const,
-        mediaType: image.mediaType,
-        data: Buffer.from(image.bytes).toString('base64'),
-        ...(image.name === undefined ? {} : { name: image.name }),
-      }))
-    /** The official `beginSubmission` placement for one local echo. */
-    const submissionPlacement = (mode: 'queue' | 'steer', running: boolean): PendingSubmissionPlacement =>
-      running ? (mode === 'steer' ? 'steering' : 'queued') : 'transcript'
     // A5b-4: the submission/input controller — the submit FIFO turn, the local
     // submit acknowledgement + latency timeline, the client-local echoes, the
     // session/command dispatch and the Alt+Up pull-back. Writer authority stays
@@ -1531,8 +1444,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       status: { sessionCwd: () => status.sessionCwd() },
       surface: { refreshPendingInput: () => surface.refreshPendingInput() },
       history: {
-        lastContent: () => history.lastContent(),
-        setLastContent: (content) => history.setLastContent(content),
+        persist: (record) => history.persist(record),
+        persistAfterSession: (resolveSession, persist) => history.persistAfterSession(resolveSession, persist),
       },
       viewer: { isViewing: () => viewer.isViewing() },
       extensions: {
@@ -1556,9 +1469,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       },
       tuiSettings,
       submissionWriterSection,
-      submissionPlacement,
-      attachmentRefusal,
-      commandSubmitAttachments,
       captureMatches,
       direct: {
         withPromptAdmission: (agent, hasImages, task) => directRuntime.withPromptAdmission(agent as Agent, hasImages, task),
@@ -1745,14 +1655,11 @@ export function applyRunner(ctx: Context, config: Config): void {
             break
           }
           case 'steer-draft': {
-            const text = app.getDraft()
-            // The steered draft is an agent-facing submission: the
-            // snapshot (ts + image check) happens BEFORE the draft is
-            // cleared, and the row is written inside steerNow AFTER the
-            // session exists (the deferred-start gate) with the FINAL
-            // session id.
-            app.setDraft('')
-            submission.steer(text)
+            // The steered draft is an agent-facing submission: the OWNER
+            // snapshots the persist facts (ts + image check) BEFORE consuming
+            // the draft, and the row is written after the session exists (the
+            // deferred-start gate) with the FINAL session id.
+            submission.steer(app.getDraft())
             break
           }
           case 'cancel-activity': {
@@ -2548,14 +2455,15 @@ export function applyRunner(ctx: Context, config: Config): void {
         markDispatch: (sessionId) => submission.markDispatch(sessionId),
         beginLocalSubmission: ({ requestId, text, scope, generation, ackToken }) => {
           const agent = command.agentForLiveScope(scope)
-          submission.beginLocalSubmission(
+          submission.beginLocalSubmission({
             requestId,
             text,
-            submissionPlacement('queue', agent.status === 'running'),
-            agent.session.id,
+            mode: 'queue',
+            running: agent.status === 'running',
+            sessionId: agent.session.id,
             generation,
             ackToken,
-          )
+          })
         },
         settleLocalSubmission: (requestId) => submission.settleLocalSubmission(requestId),
         settleSubmitAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),

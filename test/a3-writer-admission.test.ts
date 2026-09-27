@@ -424,6 +424,13 @@ test('P1-1 static: no production fence carries the transition gate into an admit
   // supplies the narrow `transitionPending` capability the owner reads.
   assert.ok(index.includes('transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,'),
     'the pull-back transition reconciliation is untouched')
+  // ...and the OWNER must actually CONSUME that capability at its pull-back
+  // reconciliation: a root-only injection assertion would keep passing if the
+  // owner stopped reading it (A5b-4 review finding).
+  const controller = readFileSync(new URL('../src/app/submission/controller.ts', import.meta.url), 'utf8')
+  const pullBackAt = controller.indexOf('isTransitionPending: () => deps.ownership.transitionPending(),')
+  assert.ok(pullBackAt > 0,
+    'the submission controller must consume the injected transition-pending capability in its pull-back reconciliation')
 })
 
 test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a transition', () => {
