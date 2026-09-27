@@ -13,10 +13,7 @@ import {
   commandClaimOf,
   type SurfaceAuthorityShadowOutcome,
 } from '../src/runtime/remote/surface-authority-shadow.ts'
-import type {
-  RemoteConnectionGeneration,
-  RemoteConnectionGenerationSource,
-} from '../src/runtime/remote/session-reader-remote.ts'
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 function deferred<T>(): {
   promise: Promise<T>
@@ -24,27 +21,6 @@ function deferred<T>(): {
   reject: (error: unknown) => void
 } {
   return Promise.withResolvers<T>()
-}
-
-function generations(initial: RemoteConnectionGeneration | undefined = { id: 'g1' }): {
-  source: RemoteConnectionGenerationSource
-  set: (generation: RemoteConnectionGeneration | undefined) => void
-} {
-  let current: RemoteConnectionGeneration | undefined = initial
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: (listener) => {
-        listeners.add(listener)
-        return () => listeners.delete(listener)
-      },
-    },
-    set: (generation) => {
-      current = generation
-      for (const listener of listeners) listener()
-    },
-  }
 }
 
 function snapshot(
@@ -73,7 +49,7 @@ test('reports an exact match as comparable with no mismatches', async () => {
   const shadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => value),
     readerOf(async () => value),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   const outcome = await shadow.compare({ sessionId: 'session-a' })
@@ -86,7 +62,7 @@ test('reports an exact match as comparable with no mismatches', async () => {
 })
 
 test('fences reentrant generation reset during the live gate', async () => {
-  const clock = generations()
+  const clock = createObservableGenerationHarness()
   let remoteCalls = 0
   const shadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => { assert.fail('stale gate must not start Direct discovery') }, () => {
@@ -118,7 +94,7 @@ test('reports caller cancellation reentrant from the live gate', async () => {
     readerOf(async () => {
       assert.fail('cancelled gate must not start Remote discovery')
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   assert.deepEqual(await shadow.compare({ sessionId: 'session-a', signal: controller.signal }), {
@@ -147,7 +123,7 @@ test('starts both observations before deferred discovery and catalog mutation', 
       await discovery.promise
       return captured
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   const pending = shadow.compare({ sessionId: 'session-a' })
   // No Connection generation change: only the Host catalog changes while
@@ -171,7 +147,7 @@ test('reports command and skill membership mismatches separately', async () => {
       [{ name: 'remote-command', description: 'Remote' }],
       [{ name: 'remote-skill', description: 'Remote', modelInvocable: true }],
     )),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   const outcome = await shadow.compare({ sessionId: 'session-a' })
@@ -213,7 +189,7 @@ test('compares command identity/input and skill metadata, and derives bare/argum
       { name: 'eli5', description: 'Remote explain', whenToUse: 'always', modelInvocable: false },
     ],
   )
-  const clock = generations()
+  const clock = createObservableGenerationHarness()
   const shadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => direct),
     readerOf(async () => remote),
@@ -256,7 +232,7 @@ test('bounds mismatch diagnostics instead of copying unbounded remote metadata',
   const shadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => snapshot([{ name: longName, description: 'Direct' }])),
     readerOf(async () => snapshot()),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   const outcome = await shadow.compare({ sessionId: 'session-a' })
@@ -276,7 +252,7 @@ test('bounds mismatch diagnostics instead of copying unbounded remote metadata',
       description: 'Direct',
     })))),
     readerOf(async () => snapshot()),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   const manyOutcome = await manyShadow.compare({ sessionId: 'session-a' })
   assert.equal(manyOutcome.status, 'compared')
@@ -285,7 +261,7 @@ test('bounds mismatch diagnostics instead of copying unbounded remote metadata',
 })
 
 test('returns unavailable/error outcomes without turning failures into empty catalogs', async () => {
-  const disconnected = generations()
+  const disconnected = createObservableGenerationHarness()
   disconnected.set(undefined)
   const disconnectedShadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => snapshot()),
@@ -308,7 +284,7 @@ test('returns unavailable/error outcomes without turning failures into empty cat
       remoteCallsWithoutDirect += 1
       return snapshot()
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   assert.deepEqual(await directUnavailable.compare({ sessionId: 'session-a' }), {
     status: 'unavailable',
@@ -321,7 +297,7 @@ test('returns unavailable/error outcomes without turning failures into empty cat
   const failed = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => snapshot()),
     readerOf(async () => { throw remoteFailure }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   const errorOutcome = await failed.compare({ sessionId: 'session-a' })
   assert.equal(errorOutcome.status, 'error')
@@ -331,7 +307,7 @@ test('returns unavailable/error outcomes without turning failures into empty cat
   const remoteUnavailable = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => snapshot()),
     readerOf(async () => undefined),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   assert.deepEqual(await remoteUnavailable.compare({ sessionId: 'session-a' }), {
     status: 'unavailable',
@@ -349,7 +325,7 @@ test('aborts the owned operation when the current provider fails', async () => {
       remoteSignal = signal
       throw remoteFailure
     }),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   const outcome = await shadow.compare({ sessionId: 'session-a' })
@@ -369,7 +345,7 @@ test('discards a stale success when a newer compare supersedes it', async () => 
   const shadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => directCalls++ === 0 ? firstDirect.promise : value),
     readerOf(async () => remoteCalls++ === 0 ? firstRemote.promise : value),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
 
   const first = shadow.compare({ sessionId: 'session-a' })
@@ -385,7 +361,7 @@ test('discards a stale success when a newer compare supersedes it', async () => 
 test('discards stale Remote failure after a Connection generation change', async () => {
   const remoteRead = deferred<SurfaceAuthoritySnapshot | undefined>()
   const remoteStarted = deferred<void>()
-  const clock = generations()
+  const clock = createObservableGenerationHarness()
   const shadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => snapshot()),
     readerOf(async () => {
@@ -410,7 +386,7 @@ test('reports caller cancellation and disposal rather than committing late resul
   const shadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => firstDirect.promise),
     readerOf(async () => firstRemote.promise),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   const cancelled = shadow.compare({ sessionId: 'session-a', signal: controller.signal })
   controller.abort()
@@ -423,7 +399,7 @@ test('reports caller cancellation and disposal rather than committing late resul
   const disposedShadow = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => lateDirect.promise),
     readerOf(async () => lateRemote.promise),
-    generations().source,
+    createObservableGenerationHarness().source,
   )
   const disposed = disposedShadow.compare({ sessionId: 'session-a' })
   disposedShadow.dispose()

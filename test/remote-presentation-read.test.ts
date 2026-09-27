@@ -6,26 +6,13 @@ import {
   type RemotePresentationEventEntry,
   type RemotePresentationSessionsSource,
 } from '../src/runtime/remote/presentation-read-remote.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
+import { createSnapshotGenerationHarness } from './support/remote-generation.ts'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ConnectionGenerationState } from '@deepseek-ai/dsh-client-connection/client'
 import { retainableSource, type RetainableSource } from './remote-reference-source.ts'
 
 function constructOfficialReader(sessions: ISessions, generation: ConnectionGenerationState): RemotePresentationReader {
   return new RemotePresentationReader(sessions, generation)
-}
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  return {
-    source: { getSnapshot: () => current, subscribe: () => () => {} },
-    set(value) { current = value },
-  }
 }
 
 function durable(seq: number, type = 'turn/start', data: Record<string, unknown> = { turn: seq }): RemotePresentationEventEntry {
@@ -114,7 +101,7 @@ test('passes deliverables/presented through as a generic durable event', async (
       durable(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
     ],
   })
-  const reader = new RemotePresentationReader(fixture.source, generationHarness().source)
+  const reader = new RemotePresentationReader(fixture.source, createSnapshotGenerationHarness().source)
 
   const snapshot = await reader.read('session')
   assert.ok(snapshot !== undefined)
@@ -140,7 +127,7 @@ test('exposes a message-bounded leading partial turn without inventing completen
     ],
     hasMore: true,
   })
-  const reader = new RemotePresentationReader(fixture.source, generationHarness().source)
+  const reader = new RemotePresentationReader(fixture.source, createSnapshotGenerationHarness().source)
 
   const snapshot = await reader.read('session')
   assert.ok(snapshot !== undefined)
@@ -158,7 +145,7 @@ test('does not treat arbitrary data.turn metadata as an official paging boundary
     ],
     hasMore: true,
   })
-  const reader = new RemotePresentationReader(fixture.source, generationHarness().source)
+  const reader = new RemotePresentationReader(fixture.source, createSnapshotGenerationHarness().source)
 
   const snapshot = await reader.read('session')
   assert.ok(snapshot !== undefined)
@@ -167,7 +154,7 @@ test('does not treat arbitrary data.turn metadata as an official paging boundary
 })
 
 test('discards or cancels explicit paging after its read fence changes', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const staleFixture = harness({
@@ -205,7 +192,7 @@ test('reconstructs one synthetic start per live tuple and preserves each plane s
       live('attempt-b', 0, 1, 12, 'retry'),
     ],
   })
-  const reader = new RemotePresentationReader(fixture.source, generationHarness().source)
+  const reader = new RemotePresentationReader(fixture.source, createSnapshotGenerationHarness().source)
 
   const snapshot = await reader.read('session')
   assert.deepEqual(snapshot?.durableEvents.map(event => event.seq), [0, 1])
@@ -227,7 +214,7 @@ test('reconstructs one synthetic start per live tuple and preserves each plane s
 test('replace snapshots rebuild transient inputs and detach nested event data', async () => {
   const payload = { nested: { value: 1 } }
   const fixture = harness({ entries: [durable(0, 'custom/event', payload)] })
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const reader = new RemotePresentationReader(fixture.source, generations.source)
   const first = await reader.read('session')
   assert.ok(first)
@@ -251,7 +238,7 @@ test('replace snapshots rebuild transient inputs and detach nested event data', 
 
 test('pages history only through SessionFace.loadOlder and respects current flags', async () => {
   const fixture = harness({ entries: [durable(1)], hasMore: true })
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const reader = new RemotePresentationReader(fixture.source, generations.source)
   const first = await reader.read('session')
   assert.equal(first?.hasMore, true)
@@ -272,7 +259,7 @@ test('pages history only through SessionFace.loadOlder and respects current flag
 })
 
 test('discards stale or cancelled paging results after the official operation settles', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const fixture = harness({ entries: [durable(1)], hasMore: true, loadOlder: () => gate })
@@ -295,7 +282,7 @@ test('discards stale or cancelled paging results after the official operation se
 })
 
 test('discards a late history-page failure after the generation changes', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let rejectPage!: (error: unknown) => void
   const page = new Promise<void>((_resolve, reject) => { rejectPage = reject })
   const fixture = harness({ entries: [durable(1)], hasMore: true, loadOlder: () => page })
@@ -307,7 +294,7 @@ test('discards a late history-page failure after the generation changes', async 
 })
 
 test('returns unavailable for a missing binding or disconnected generation', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const missing = new RemotePresentationReader(retainableSource<RemotePresentationBinding>().source, generations.source)
   assert.equal(await missing.read('session'), undefined)
 
@@ -318,7 +305,7 @@ test('returns unavailable for a missing binding or disconnected generation', asy
 })
 
 test('loadOlder pins the exact generation for the paging round-trip and releases it once', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let releasePage!: () => void
   const page = new Promise<void>((resolve) => { releasePage = resolve })
   const fixture = harness({ entries: [durable(1)], hasMore: true, loadOlder: () => page })
@@ -341,7 +328,7 @@ test('loadOlder pins the exact generation for the paging round-trip and releases
 })
 
 test('loadOlder keeps the pinned generation alive when the navigation owner hands off mid-page', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let releasePage!: () => void
   const page = new Promise<void>((resolve) => { releasePage = resolve })
   const fixture = harness({ entries: [durable(1)], hasMore: true, loadOlder: () => page })
@@ -369,7 +356,7 @@ test('loadOlder keeps the pinned generation alive when the navigation owner hand
 })
 
 test('a non-open history state keeps the selected identity, is never paged, and is not reported unavailable', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   for (const openState of ['cold', 'loading', 'error'] as const) {
     const fixture = harness({ entries: [durable(1)], hasMore: true, openState })
     const reader = new RemotePresentationReader(fixture.source, generations.source)

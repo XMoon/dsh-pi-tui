@@ -15,34 +15,11 @@ import {
   type RemoteModelRemotes,
   type RemoteModelSessionsSource,
 } from '../src/runtime/remote/model-remote.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
+import { createObservableGenerationHarness, type GenerationHarness } from './support/remote-generation.ts'
 
 /** A structural official Remote failure (code is the only discriminator). */
 function failure(code: string, message: string, details: Record<string, unknown> = {}): unknown {
   return { code, message, details }
-}
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: listener => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
 }
 
 const DIRECTORY = {
@@ -135,7 +112,7 @@ function modelHarness(): ModelHarness {
       return binding
     },
   }
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   return {
     catalog: new RemoteModelCatalog(session, sessions, generation.source),
     generation,

@@ -2,8 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   RemoteSessionReader,
-  type RemoteConnectionGeneration,
-  type RemoteConnectionGenerationSource,
   type RemoteProjectionValues,
   type RemoteReadResult,
   type RemoteSessionBinding,
@@ -11,6 +9,7 @@ import {
   type RemoteSessionListState,
   type RemoteSessionsReadSource,
 } from '../src/runtime/remote/session-reader-remote.ts'
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 import type { SessionContentSearchPage, SessionSummary } from '../src/runtime/session-reader-port.ts'
 import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -19,29 +18,6 @@ import type { ConnectionGenerationState } from '@deepseek-ai/dsh-client-connecti
 
 function constructOfficialReader(sessions: ISessions, generation: ConnectionGenerationState): RemoteSessionReader {
   return new RemoteSessionReader(sessions, generation)
-}
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: listener => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
 }
 
 function listRow(
@@ -114,7 +90,7 @@ test('official Client Session and Connection faces satisfy the adapter boundary'
 })
 
 test('list maps official ids/order/activity and never treats running as Direct live', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const source = remoteSource({
     state: state(
       ['session-b', 'session-a'],
@@ -137,7 +113,7 @@ test('list maps official ids/order/activity and never treats running as Direct l
 })
 
 test('read operations never touch a write-capable source surface', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const writes: string[] = []
   const source = remoteSource({ state: state(['session-a'], { 'session-a': listRow('session-a', 1) }) })
   const guarded = new Proxy(source, {
@@ -157,7 +133,7 @@ test('read operations never touch a write-capable source surface', async () => {
 })
 
 test('list distinguishes pending/disconnected from an established empty list', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const pendingSource = remoteSource({ state: state([], {}, 'pending') })
   const pendingReader = new RemoteSessionReader(pendingSource, generations.source)
   assert.equal(await pendingReader.list(undefined), undefined)
@@ -173,7 +149,7 @@ test('list distinguishes pending/disconnected from an established empty list', a
 })
 
 test('a resolved refresh does not invent a fresh list baseline', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const source = remoteSource({ state: state([], {}), refresh: async () => {} })
   const reader = new RemoteSessionReader(source, generations.source)
 
@@ -183,7 +159,7 @@ test('a resolved refresh does not invent a fresh list baseline', async () => {
 })
 
 test('list rejects when its caller aborts during the official refresh', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const refresh = Promise.withResolvers<void>()
   const source = remoteSource({ state: state([], {}), refresh: async () => refresh.promise })
   const reader = new RemoteSessionReader(source, generations.source)
@@ -195,7 +171,7 @@ test('list rejects when its caller aborts during the official refresh', async ()
 })
 
 test('projectionBatch prefers list projection values and falls back to bound Client faces', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const bindCalls: string[] = []
   const source = remoteSource({
     state: state(['session-listed', 'session-bound', 'session-missing'], {
@@ -230,7 +206,7 @@ test('projectionBatch prefers list projection values and falls back to bound Cli
 })
 
 test('projectionBatch rejects pre-aborted calls and returns no values while disconnected', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const source = remoteSource({ state: state([], {}) })
   const reader = new RemoteSessionReader(source, generations.source)
   const controller = new AbortController()
@@ -242,7 +218,7 @@ test('projectionBatch rejects pre-aborted calls and returns no values while disc
 })
 
 test('search maps successful pages, including an established empty page', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   let receivedSignal: AbortSignal | undefined
   const source = remoteSource({
     state: state([], {}),
@@ -267,7 +243,7 @@ test('search maps successful pages, including an established empty page', async 
 })
 
 test('search maps disabled capability to unavailable but preserves business failures', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const disabled = remoteSource({
     state: state([], {}),
     search: async () => ({ ok: false, error: { code: 'SESSION_QUERY_SEARCH_DISABLED' } }),
@@ -296,7 +272,7 @@ test('search maps disabled capability to unavailable but preserves business fail
 })
 
 test('maps the official rc1 unmounted session-query error shape to unavailable', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   // ApiSessionList in rc1 uses this exact generic RemoteError because the
   // deployment capability is absent; generic gateway/internal failures must
   // still propagate (covered above).
@@ -314,7 +290,7 @@ test('maps the official rc1 unmounted session-query error shape to unavailable',
 })
 
 test('maps the official rc1 disabled-search wrapper to unavailable', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const queryError = new SessionQueryError(
     'session search is disabled: this deployment configures the session-query index with openAt "never"',
     'SESSION_QUERY_SEARCH_DISABLED',
@@ -338,7 +314,7 @@ test('maps the official rc1 disabled-search wrapper to unavailable', async () =>
 })
 
 test('search preserves abort semantics and does not turn cancellation into empty results', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const controller = new AbortController()
   controller.abort()
   let calls = 0
@@ -372,7 +348,7 @@ test('search preserves abort semantics and does not turn cancellation into empty
 })
 
 test('search discards a result whose Connection generation changed while it was in flight', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const deferred = Promise.withResolvers<RemoteReadResult<{ readonly items: readonly []; readonly hasMore: false }>>()
   const source = remoteSource({
     state: state([], {}),
@@ -386,13 +362,13 @@ test('search discards a result whose Connection generation changed while it was 
 })
 
 test('measureContext is explicitly unavailable because the Client read face has no equivalent', () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const reader = new RemoteSessionReader(remoteSource({ state: state([], {}) }), generations.source)
   assert.equal(reader.measureContext('session-a'), undefined)
 })
 
 test('blank reads the official Client Session-summary blank bit (v2 §0.6)', () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const source = remoteSource({
     state: state(
       ['session-a', 'session-b'],

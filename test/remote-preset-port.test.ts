@@ -14,24 +14,11 @@ import {
   type RemotePresetRemotes,
   type RemotePresetRoster,
 } from '../src/runtime/remote/preset-remote.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
+import { createSnapshotGenerationHarness, type GenerationHarness } from './support/remote-generation.ts'
 
 /** A structural official Remote failure (code is the only discriminator). */
 function failure(code: string, message: string, details: Record<string, unknown> = {}): unknown {
   return { code, message, details }
-}
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  return {
-    source: { getSnapshot: () => current, subscribe: () => () => {} },
-    set(value) { current = value },
-  }
 }
 
 const ROSTER: RemotePresetRoster = {
@@ -66,7 +53,7 @@ function presetHarness(): PresetHarness {
   let selectThrow: unknown
   let listHook: (() => void | Promise<void>) | undefined
   const listQueue: Array<{ ok: true; value: RemotePresetRoster } | { ok: false; error: unknown }> = []
-  const generation = generationHarness()
+  const generation = createSnapshotGenerationHarness()
   const presets: RemotePresetRemotes = {
     list: async () => {
       calls.lists += 1

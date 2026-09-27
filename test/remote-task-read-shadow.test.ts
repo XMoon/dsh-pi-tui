@@ -4,31 +4,8 @@ import {
   RemoteTaskReadShadow,
   type TaskReadShadowOutcome,
 } from '../src/runtime/remote/task-read-shadow.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 import type { TaskReader, TaskReadSnapshot } from '../src/runtime/task-read-port.ts'
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe(listener) {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
-}
 
 function snapshot(overrides: Partial<TaskReadSnapshot> = {}): TaskReadSnapshot {
   return {
@@ -50,7 +27,7 @@ function reportOf(outcome: TaskReadShadowOutcome) {
 }
 
 test('compares task catalog/jobs and records the explicit descendant-tree upstream gap', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const value = snapshot()
   const shadow = new RemoteTaskReadShadow(fixedReader(value), fixedReader(structuredClone(value)), generations.source)
 
@@ -63,7 +40,7 @@ test('compares task catalog/jobs and records the explicit descendant-tree upstre
 })
 
 test('reports semantic child/job fields and projected task-row differences', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const direct = snapshot()
   const remote = snapshot({
     parentAvailable: false,
@@ -92,7 +69,7 @@ test('reports semantic child/job fields and projected task-row differences', asy
 })
 
 test('bounds large Task parity diagnostics', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const jobs = Array.from({ length: 300 }, (_, index) => ({
     id: `job-${index}`,
     kind: 'bash',
@@ -118,7 +95,7 @@ test('bounds large Task parity diagnostics', async () => {
 })
 
 test('returns disconnected without invoking either reader', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   generations.set(undefined)
   let reads = 0
   const reader: TaskReader = { readDirectChildren: async () => { reads += 1; return snapshot() } }
@@ -129,7 +106,7 @@ test('returns disconnected without invoking either reader', async () => {
 })
 
 test('discards stale generation success and stale failure', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   let releaseSuccess!: () => void
   const successGate = new Promise<void>(resolve => { releaseSuccess = resolve })
   const delayedSuccess: TaskReader = {
@@ -162,7 +139,7 @@ test('discards stale generation success and stale failure', async () => {
 })
 
 test('newer compare supersedes older and caller abort is cancelled', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   let calls = 0
@@ -203,7 +180,7 @@ test('newer compare supersedes older and caller abort is cancelled', async () =>
 })
 
 test('aborts the sibling read when a current provider fails', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   const failure = new Error('direct read failed')
   let siblingAborted = false
   const failing: TaskReader = {
@@ -232,7 +209,7 @@ test('aborts the sibling read when a current provider fails', async () => {
 })
 
 test('dispose discards an in-flight comparison', async () => {
-  const generations = generationHarness()
+  const generations = createObservableGenerationHarness()
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const reader: TaskReader = {
