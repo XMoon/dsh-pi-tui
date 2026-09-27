@@ -29,6 +29,10 @@ const matrix = JSON.parse(
   readonly rows: ReadonlyArray<{
     readonly name: string
     readonly classification: string
+    readonly owner: string
+    readonly lifecycle: string
+    readonly capabilities: string
+    readonly callers: readonly string[]
     readonly mutable: boolean
     readonly lines: string
     readonly hostDependency: boolean
@@ -101,11 +105,20 @@ test('A5b-0 matrix: every root declaration of startRunner() is classified', () =
   assert.deepEqual(
     [...new Set(declared)].sort(),
     [...new Set(classified)].sort(),
-    'the ownership matrix must cover EXACTLY the declarations bootstrap declares today (regenerate temp/a5b-matrix.mjs --write --commit-artifact when this changes)',
+    'the ownership matrix must cover EXACTLY the declarations bootstrap declares today (regenerate with `node scripts/a5b-root-matrix.mjs --write`)',
   )
   for (const row of matrix.rows) {
     assert.ok(ALLOWED.has(row.classification), `${row.name} has an unknown classification: ${row.classification}`)
     assert.notEqual(row.classification, '', `${row.name} must be classified`)
+    assert.notEqual(row.owner, '', `${row.name} must name its owner (or 'bootstrap')`)
+    assert.notEqual(row.capabilities, '', `${row.name} must record its capability set`)
+    // The plan §6.1 fields a slice needs to actually execute a move: the
+    // residual rows and the non-trivial owner connectors must carry a
+    // lifecycle story, not just a category.
+    if (row.classification.startsWith('MUST_MOVE:') || row.classification === 'KEEP_BOOTSTRAP:owner-connector') {
+      assert.ok(row.lifecycle !== '' && !row.lifecycle.startsWith('n/a'),
+        `${row.name} (${row.classification}) must record its lifecycle ownership`)
+    }
   }
 })
 

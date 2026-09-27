@@ -1,5 +1,5 @@
 {
-  "generatedFrom": "src/app/bootstrap.ts @ a1db3df4",
+  "generatedFrom": "src/app/bootstrap.ts @ b6db374a",
   "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
   "total": 78,
   "rows": [
@@ -19,7 +19,17 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "command",
+        "lifecycleAgents",
+        "viewer",
+        "root-statement@265",
+        "root-statement@614",
+        "root-statement@2149",
+        "root-statement@2275"
+      ]
     },
     {
       "name": "defaultModel",
@@ -36,7 +46,13 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "directRuntime",
+        "model",
+        "root-statement@265"
+      ]
     },
     {
       "name": "sessions",
@@ -54,7 +70,16 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "viewer",
+        "surfaceEvents",
+        "flushTurn",
+        "root-statement@265",
+        "root-statement@2024",
+        "root-statement@2149"
+      ]
     },
     {
       "name": "ownership",
@@ -72,7 +97,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionScope",
+        "directRuntime",
+        "handleNow",
+        "captureMatches",
+        "isCurrentOwnerAgent",
+        "model",
+        "sessionRuntime",
+        "command",
+        "status",
+        "localShell",
+        "viewer",
+        "submission"
+      ]
     },
     {
       "name": "sessionScope",
@@ -87,7 +127,16 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "requireLiveScope",
+        "submissionWriterSection",
+        "sessionRuntime",
+        "command",
+        "submission",
+        "root-statement@2441"
+      ]
     },
     {
       "name": "submissionRuntime",
@@ -102,7 +151,15 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "submissionWriterSection",
+        "sessionRuntime",
+        "command",
+        "submission",
+        "root-statement@2441"
+      ]
     },
     {
       "name": "requireLiveScope",
@@ -115,7 +172,13 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "SessionScopeAuthority.captureLive/requireLive",
+      "lifecycle": "per-write admission seam (scope capture or throw)",
+      "callers": [
+        "localShell",
+        "submission",
+        "root-statement@2275"
+      ]
     },
     {
       "name": "submissionWriterSection",
@@ -130,7 +193,13 @@
       ],
       "classification": "MUST_MOVE:app-submission",
       "owner": "app-submission",
-      "capabilities": "pure / owner capability"
+      "capabilities": "SessionScopeAuthority.captureLive + SubmissionRuntime.withWriter",
+      "lifecycle": "per-write: scope-fenced async section",
+      "callers": [
+        "localShell",
+        "submission",
+        "surfaceEvents"
+      ]
     },
     {
       "name": "settingsForms",
@@ -145,7 +214,15 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "tuiSettings",
+        "settings",
+        "surfaceEvents",
+        "root-statement@349",
+        "root-statement@590"
+      ]
     },
     {
       "name": "tuiSettings",
@@ -163,7 +240,20 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "persistedTuiSettings",
+        "surface",
+        "directRuntime",
+        "settings",
+        "command",
+        "localShell",
+        "submission",
+        "surfaceEvents",
+        "root-statement@590",
+        "root-statement@2024"
+      ]
     },
     {
       "name": "persistedTuiSettings",
@@ -176,7 +266,13 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "displayResolution",
+        "progressUpdatesState",
+        "responseStyleState"
+      ]
     },
     {
       "name": "displayResolution",
@@ -189,7 +285,12 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "displayState",
+        "root-statement@590"
+      ]
     },
     {
       "name": "displayState",
@@ -207,7 +308,14 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "directRuntime",
+        "command",
+        "root-statement@590",
+        "root-statement@2024"
+      ]
     },
     {
       "name": "progressUpdatesState",
@@ -225,7 +333,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "directRuntime",
+        "command"
+      ]
     },
     {
       "name": "responseStyleState",
@@ -243,7 +356,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "directRuntime",
+        "command"
+      ]
     },
     {
       "name": "surface",
@@ -261,7 +379,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "settings",
+        "resumeQuiesce",
+        "presentation",
+        "command",
+        "status",
+        "history",
+        "extensionService",
+        "disposeSurface",
+        "registerRunnerDisposal",
+        "viewer",
+        "submission"
+      ]
     },
     {
       "name": "viewedQueueAgent",
@@ -276,7 +409,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "viewer publishQueueAuthority + Direct runtime getViewedQueueAgent",
+      "lifecycle": "late-bound slot: written by the viewer owner, read by the Direct runtime",
+      "callers": [
+        "directRuntime",
+        "viewer"
+      ]
     },
     {
       "name": "directRuntime",
@@ -292,7 +430,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "agentNow",
+        "handleNow",
+        "isCurrentOwnerAgent",
+        "directAgentOfOwner",
+        "model",
+        "sessionRuntime",
+        "backend",
+        "compose",
+        "resumeQuiesce",
+        "presentation",
+        "command",
+        "submission"
+      ]
     },
     {
       "name": "agentNow",
@@ -309,7 +462,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "DirectApplicationRuntime.owners.currentDirectAttachment",
+      "lifecycle": "live read, per call (exact Direct attachment)",
+      "callers": [
+        "model",
+        "currentPreset",
+        "sessionBlank",
+        "command",
+        "status",
+        "present",
+        "localShell",
+        "requestExit",
+        "viewer",
+        "submission",
+        "surfaceEvents",
+        "openRewindPicker"
+      ]
     },
     {
       "name": "handleNow",
@@ -324,7 +492,11 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "DirectApplicationRuntime owner attachment handle",
+      "lifecycle": "live read, per call (exact Direct handle)",
+      "callers": [
+        "root-statement@444"
+      ]
     },
     {
       "name": "captureMatches",
@@ -339,7 +511,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "SessionOwnershipCore.captureSubject",
+      "lifecycle": "live read, per call (ownership subject fence)",
+      "callers": [
+        "submission",
+        "root-statement@2275"
+      ]
     },
     {
       "name": "isCurrentOwnerAgent",
@@ -354,7 +531,11 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "DirectApplicationRuntime.owners.currentDirectAttachment",
+      "lifecycle": "live read, per call (currentness check)",
+      "callers": [
+        "root-statement@2149"
+      ]
     },
     {
       "name": "directAgentOfOwner",
@@ -367,7 +548,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "DirectApplicationRuntime.owners.attachmentOf",
+      "lifecycle": "live read, per call (owner → attachment)",
+      "callers": [
+        "sessionRuntime"
+      ]
     },
     {
       "name": "model",
@@ -385,7 +570,17 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "directRuntime",
+        "sessionRuntime",
+        "command",
+        "status",
+        "submission",
+        "surfaceEvents",
+        "root-statement@2149"
+      ]
     },
     {
       "name": "sessionRuntime",
@@ -400,7 +595,21 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "resumeQuiesce",
+        "command",
+        "localShell",
+        "requestExit",
+        "registerRunnerDisposal",
+        "submission",
+        "openRewindPicker",
+        "root-statement@561",
+        "root-statement@1314",
+        "root-statement@2275",
+        "root-statement@2441"
+      ]
     },
     {
       "name": "backend",
@@ -418,7 +627,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "settings",
+        "sessionBlank",
+        "command",
+        "status",
+        "lifecycleAgents",
+        "localShell",
+        "submission",
+        "artifacts",
+        "pluginManager",
+        "surfaceEvents",
+        "disposeCredentialSubscription"
+      ]
     },
     {
       "name": "settings",
@@ -436,7 +660,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "settingsForms",
+        "command",
+        "extensionService",
+        "disposeSurface",
+        "surfaceEvents",
+        "root-statement@346",
+        "root-statement@590",
+        "root-statement@614",
+        "root-statement@2024",
+        "root-statement@2078",
+        "root-statement@2079",
+        "root-statement@2133"
+      ]
     },
     {
       "name": "compose",
@@ -454,7 +693,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "directRuntime",
+        "launchComposition"
+      ]
     },
     {
       "name": "launchPreset",
@@ -467,7 +711,14 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "launchComposition",
+        "command",
+        "root-statement@614",
+        "root-statement@661"
+      ]
     },
     {
       "name": "pendingPreset",
@@ -485,7 +736,13 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "launchComposition",
+        "command",
+        "root-statement@781"
+      ]
     },
     {
       "name": "launchComposition",
@@ -498,7 +755,12 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "root-statement@781"
+      ]
     },
     {
       "name": "resumeFailure",
@@ -511,7 +773,14 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "root-statement@661",
+        "root-statement@781",
+        "root-statement@2503"
+      ]
     },
     {
       "name": "handle",
@@ -529,7 +798,16 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "resumeQuiesce",
+        "extensionService",
+        "disposeSurface",
+        "root-statement@254",
+        "root-statement@661",
+        "root-statement@1314"
+      ]
     },
     {
       "name": "resumeResolved",
@@ -542,7 +820,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@661"
+      ]
     },
     {
       "name": "resumeQuiesce",
@@ -555,7 +837,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@770"
+      ]
     },
     {
       "name": "initialSnapshot",
@@ -570,7 +856,13 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "presentation",
+        "root-statement@781",
+        "root-statement@2498"
+      ]
     },
     {
       "name": "initialSkills",
@@ -585,7 +877,13 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "presentation",
+        "root-statement@781",
+        "root-statement@2498"
+      ]
     },
     {
       "name": "surfaceNotice",
@@ -598,7 +896,12 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@781",
+        "root-statement@2499"
+      ]
     },
     {
       "name": "currentPreset",
@@ -616,7 +919,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "command",
+        "status"
+      ]
     },
     {
       "name": "sessionBlank",
@@ -634,7 +942,11 @@
       ],
       "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "command"
+      ]
     },
     {
       "name": "viewerRef",
@@ -647,7 +959,13 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "presentation",
+        "status",
+        "root-statement@1379"
+      ]
     },
     {
       "name": "presentation",
@@ -665,7 +983,18 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "ownership",
+        "sessionRuntime",
+        "status",
+        "viewer",
+        "surfaceEvents",
+        "root-statement@2149",
+        "root-statement@2484",
+        "root-statement@2600"
+      ]
     },
     {
       "name": "cwd",
@@ -683,7 +1012,19 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "presentation",
+        "command",
+        "status",
+        "history",
+        "artifacts",
+        "surfaceEvents",
+        "root-statement@614",
+        "root-statement@2024"
+      ]
     },
     {
       "name": "command",
@@ -701,7 +1042,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "presentation",
+        "extensionService",
+        "disposeSurface",
+        "requestExit",
+        "submission",
+        "clipboardEnv",
+        "runCopyCommand",
+        "surfaceEvents",
+        "openRewindPicker",
+        "root-statement@2024",
+        "root-statement@2109"
+      ]
     },
     {
       "name": "status",
@@ -719,7 +1075,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "settings",
+        "resumeQuiesce",
+        "presentation",
+        "command",
+        "history",
+        "localShell",
+        "disposeSurface",
+        "viewer",
+        "submission",
+        "surfaceEvents",
+        "root-statement@661",
+        "root-statement@781"
+      ]
     },
     {
       "name": "history",
@@ -737,7 +1108,15 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "presentation",
+        "submission",
+        "surfaceEvents",
+        "root-statement@2024",
+        "root-statement@2146"
+      ]
     },
     {
       "name": "cleanedUp",
@@ -753,7 +1132,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "ownership",
+        "sessionRuntime",
+        "presentation",
+        "status",
+        "history",
+        "localShell",
+        "disposeSurface",
+        "viewer",
+        "submission",
+        "artifacts",
+        "surfaceEvents",
+        "root-statement@2149"
+      ]
     },
     {
       "name": "app",
@@ -771,7 +1165,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "resumeQuiesce",
+        "command",
+        "history",
+        "extensionService",
+        "localShell",
+        "disposeSurface",
+        "submission",
+        "artifacts",
+        "surfaceEvents",
+        "openRewindPicker",
+        "flushTurn"
+      ]
     },
     {
       "name": "extensionService",
@@ -786,7 +1195,16 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "settings",
+        "command",
+        "submission",
+        "surfaceEvents",
+        "root-statement@1498",
+        "root-statement@1499"
+      ]
     },
     {
       "name": "tools",
@@ -804,7 +1222,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "present",
+        "root-statement@614"
+      ]
     },
     {
       "name": "present",
@@ -822,7 +1245,11 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@2024"
+      ]
     },
     {
       "name": "signal",
@@ -840,7 +1267,22 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "directRuntime",
+        "sessionRuntime",
+        "settings",
+        "resumeQuiesce",
+        "command",
+        "extensionService",
+        "lifecycleAgents",
+        "submission",
+        "artifacts",
+        "surfaceEvents",
+        "root-statement@254",
+        "root-statement@661"
+      ]
     },
     {
       "name": "draftImages",
@@ -855,7 +1297,16 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "command",
+        "disposeSurface",
+        "submission",
+        "surfaceEvents",
+        "root-statement@2441"
+      ]
     },
     {
       "name": "draftFiles",
@@ -868,7 +1319,16 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "command",
+        "disposeSurface",
+        "submission",
+        "surfaceEvents",
+        "root-statement@2441"
+      ]
     },
     {
       "name": "lifecycleAgents",
@@ -881,7 +1341,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "command"
+      ]
     },
     {
       "name": "localShell",
@@ -894,7 +1358,12 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "disposeSurface",
+        "submission"
+      ]
     },
     {
       "name": "disposeSurface",
@@ -912,7 +1381,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:mount-dispose-fatal-coordination",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "requestExit",
+        "registerRunnerDisposal"
+      ]
     },
     {
       "name": "requestExit",
@@ -930,7 +1404,13 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "command",
+        "submission",
+        "surfaceEvents"
+      ]
     },
     {
       "name": "registerRunnerDisposal",
@@ -943,7 +1423,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:mount-dispose-fatal-coordination",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@1354"
+      ]
     },
     {
       "name": "assistantStreamBaselineFor",
@@ -958,7 +1442,13 @@
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "presentation",
+        "viewer",
+        "root-statement@2550"
+      ]
     },
     {
       "name": "viewer",
@@ -976,7 +1466,19 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "presentation",
+        "command",
+        "status",
+        "disposeSurface",
+        "submission",
+        "surfaceEvents",
+        "root-statement@1379",
+        "root-statement@2149",
+        "root-statement@2275"
+      ]
     },
     {
       "name": "submission",
@@ -994,7 +1496,18 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "sessionRuntime",
+        "presentation",
+        "command",
+        "localShell",
+        "surfaceEvents",
+        "root-statement@2149",
+        "root-statement@2275",
+        "root-statement@2441"
+      ]
     },
     {
       "name": "artifacts",
@@ -1012,7 +1525,11 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "submission"
+      ]
     },
     {
       "name": "runClipboardCommand",
@@ -1027,7 +1544,13 @@
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
-      "capabilities": "pure / owner capability"
+      "capabilities": "client-local clipboard policy only (no Host port)",
+      "lifecycle": "process-lifetime: created once at startup",
+      "callers": [
+        "runCopyCommand",
+        "surfaceEvents",
+        "root-statement@2024"
+      ]
     },
     {
       "name": "clipboardEnv",
@@ -1042,7 +1565,13 @@
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "client-local clipboard environment (no Host port)",
+      "lifecycle": "process-lifetime: immutable client policy",
+      "callers": [
+        "copyEnv",
+        "surfaceEvents",
+        "root-statement@2024"
+      ]
     },
     {
       "name": "runCopyCommand",
@@ -1057,7 +1586,12 @@
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
-      "capabilities": "pure / owner capability"
+      "capabilities": "client-local copy executor (no Host port)",
+      "lifecycle": "process-lifetime: immutable client executor",
+      "callers": [
+        "command",
+        "root-statement@2024"
+      ]
     },
     {
       "name": "copyEnv",
@@ -1072,7 +1606,12 @@
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "client-local copy environment (no Host port)",
+      "lifecycle": "process-lifetime: immutable client policy",
+      "callers": [
+        "command",
+        "root-statement@2024"
+      ]
     },
     {
       "name": "pluginManager",
@@ -1090,7 +1629,11 @@
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "command"
+      ]
     },
     {
       "name": "surfaceEvents",
@@ -1106,7 +1649,11 @@
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "SubmissionController, CommandSurface, presentation/status/settings owners, SurfaceRuntime, extension semantic hooks, lifecycle/exit callbacks (A5b-5: app/surface/application-events.ts; must not become a callback bag)",
+      "lifecycle": "mount-owned: installed by surface.start(), disposed with the surface",
+      "callers": [
+        "root-statement@2024"
+      ]
     },
     {
       "name": "jobs",
@@ -1124,7 +1671,14 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "disposeSurface",
+        "surfaceEvents",
+        "jobSnapshot",
+        "root-statement@2275"
+      ]
     },
     {
       "name": "subagents",
@@ -1142,7 +1696,12 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "surfaceEvents",
+        "root-statement@2275"
+      ]
     },
     {
       "name": "jobSnapshot",
@@ -1155,7 +1714,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@2275"
+      ]
     },
     {
       "name": "openRewindPicker",
@@ -1173,7 +1736,12 @@
       ],
       "classification": "MUST_MOVE:app-surface",
       "owner": "app-surface",
-      "capabilities": "pure / owner capability"
+      "capabilities": "presentation/status owner reads (rewind candidates)",
+      "lifecycle": "per-gesture action (status/presentation reads)",
+      "callers": [
+        "command",
+        "surfaceEvents"
+      ]
     },
     {
       "name": "startupAgent",
@@ -1186,7 +1754,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@2484"
+      ]
     },
     {
       "name": "currentWorkingFromLog",
@@ -1199,7 +1771,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@2149"
+      ]
     },
     {
       "name": "flushTurn",
@@ -1212,7 +1788,11 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@2149"
+      ]
     },
     {
       "name": "assistantStreamHandle",
@@ -1225,7 +1805,12 @@
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "Host/Direct-touching (composition seam)"
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@2550",
+        "root-statement@2551"
+      ]
     },
     {
       "name": "disposeCredentialSubscription",
@@ -1240,7 +1825,11 @@
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
-      "capabilities": "pure / owner capability"
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "callers": [
+        "root-statement@2589"
+      ]
     }
   ]
 }
