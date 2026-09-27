@@ -54,7 +54,7 @@ import {
   OFFICIAL_CLIENT_BUNDLES,
   type RemoteClientRuntime,
 } from '../src/app/remote/client-runtime.ts'
-import { createRemoteHostRuntime, type RemoteHostRuntime } from '../src/app/remote/host-runtime.ts'
+import { createRemoteHostRuntime, mergeCause, type RemoteHostRuntime } from '../src/app/remote/host-runtime.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
@@ -167,18 +167,24 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     })
   } catch (error) {
     disposed = true
-    // Error-isolated teardown: both steps run, and the ORIGINAL setup error
-    // is rethrown (a disposal failure rides its cause chain).
+    // Error-isolated teardown: both steps run even when the second fails,
+    // and the ORIGINAL setup error is rethrown (a disposal failure rides
+    // its cause chain via mergeCause, never overwriting an existing cause).
     let persistenceError: unknown
     try {
       await persistenceFiber?.dispose()
     } catch (disposeError) {
       persistenceError = disposeError
     }
-    await ctx.fiber.dispose()
-    if (persistenceError !== undefined) {
-      ;(error as { cause?: unknown }).cause ??= persistenceError
+    try {
+      await ctx.fiber.dispose()
+    } catch (ctxError) {
+      if (persistenceError !== undefined) {
+        mergeCause(ctxError instanceof Error ? ctxError : new Error(String(ctxError)), persistenceError)
+      }
+      throw ctxError
     }
+    if (persistenceError !== undefined) throw persistenceError
     throw error
   }
   const dispose = async (): Promise<void> => {
@@ -186,21 +192,24 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     disposed = true
     // Both steps run even if the first fails (error-isolated teardown); the
     // first failure surfaces with the second attached as its cause.
-    let persistenceError: unknown
+    const errors: unknown[] = []
     try {
       await persistenceFiber?.dispose()
     } catch (error) {
-      persistenceError = error
+      errors.push(error)
     }
     try {
       await ctx.fiber.dispose()
     } catch (error) {
-      if (persistenceError !== undefined) {
-        ;(error as { cause?: unknown }).cause ??= persistenceError
-      }
-      throw error
+      errors.push(error)
     }
-    if (persistenceError !== undefined) throw persistenceError
+    if (errors.length > 0) {
+      const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+      if (errors.length > 1) {
+        mergeCause(failure, new AggregateError(errors.slice(1), 'fixture: remaining disposal failures'))
+      }
+      throw failure
+    }
   }
   // The owning lifecycle also disposes the fixture (idempotent) before its
   // temp roots are removed.
@@ -624,6 +633,11 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
     let activeStreams = 0
     const inducedReason = new Error('induced client readiness failure')
     const controller = new AbortController()
+    // One REAL disposal failure: the first closing stream's disposer
+    // completes its teardown (the drain) and then rejects with a unique
+    // sentinel, so the cause-merge branch is exercised on the call path.
+    const closeSentinel = new Error('L2 sentinel: stream disposal failure')
+    let sentinelThrown = false
     const countingCarrier = {
       ownsHost: true as const,
       fetch: hostRuntime.carrier.fetch,
@@ -637,6 +651,10 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
             yield* inner
           } finally {
             activeStreams -= 1
+            if (sentinelThrown === false && openedStreams >= 1 && activeStreams === 0) {
+              sentinelThrown = true
+              throw closeSentinel
+            }
           }
         })()
       },
@@ -645,8 +663,9 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
       createRemoteClientRuntime({ carrier: countingCarrier, signal: controller.signal }),
       (error: Error) => {
         assert.match(error.message, /aborted/, 'the readiness failure must surface')
-        // The readiness error's own cause (the abort reason) must survive
-        // the unwind - cause chains are merged, never overwritten.
+        // No cleanup failure occurred in this scenario, so the original
+        // cause (the abort reason) must pass through untouched - the
+        // merge-branch itself is unit-covered in M.
         assert.equal(error.cause, inducedReason)
         return true
       },
@@ -704,4 +723,27 @@ test('M. the Client composition never crosses the Host legacy-settings boundary'
     assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open \$DSH_HOME/settings.yaml(.imported)`)
     assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read \$DSH_HOME`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// M2 — mergeCause unit coverage (the aggregation branch of the cleanup
+// error path; the call-path passthrough is asserted in L2)
+// ---------------------------------------------------------------------------
+
+test('M2. mergeCause preserves an existing cause and aggregates secondaries', () => {
+  // No existing cause: the secondary becomes the cause directly.
+  const plain = new Error('plain')
+  mergeCause(plain, 'secondary-a')
+  assert.equal(plain.cause, 'secondary-a')
+
+  // An existing cause is preserved next to the new secondary.
+  const withCause = new Error('primary', { cause: 'original-reason' })
+  mergeCause(withCause, 'secondary-b')
+  assert.ok(withCause.cause instanceof AggregateError)
+  assert.deepEqual((withCause.cause as AggregateError).errors, ['original-reason', 'secondary-b'])
+
+  // A undefined secondary is a no-op.
+  const untouched = new Error('untouched')
+  mergeCause(untouched, undefined)
+  assert.equal(untouched.cause, undefined)
 })
