@@ -71,7 +71,7 @@ export const DEPRECATED_READER_ALLOWLIST = [
   { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'child-viewer durable history merge (A5b-1 viewer owner)' },
   { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'live-session resume history branch (A5b-1 presentation owner)' },
   { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: ': mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)', why: 'live-session resume history merge branch (A5b-1 presentation owner)' },
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'const candidates = collectRewindCandidates(source.session.snapshotEvents())', why: 'Direct rewind candidate fold' },
+  { file: 'src/app/surface/application-events.ts', call: 'snapshotEvents', site: 'const candidates = collectRewindCandidates(source.session.snapshotEvents())', why: 'Direct rewind candidate fold (A5b-5 application-event owner; relocated from the composition root)' },
   // A3-2 relocated the two command-fact reads from commands.ts into the
   // scope-bound facade providers (the Direct implementation is now localized
   // in the runner); the debt moved WITH the call site, never doubled. A3-5

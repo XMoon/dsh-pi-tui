@@ -22,6 +22,9 @@ import { compositionSource } from './support/composition-surface.ts'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const indexSource = compositionSource()
 const surfaceSource = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.ts'), 'utf8')
+// A5b-5: the TuiApp event adapter (onUserInput / onTerminalFocus / ...) moved
+// into its owner, so the per-method wiring locks read the owner module.
+const eventsSource = readFileSync(join(root, 'src', 'app', 'surface', 'application-events.ts'), 'utf8')
 const commitOrderSource = readFileSync(join(root, 'src', 'app', 'session', 'commit-order.ts'), 'utf8')
 
 /**
@@ -136,10 +139,10 @@ test('user activity restores the tracker to focused (the onUserInput wiring)', (
   // PER METHOD: each surface entry must itself do both halves — a future edit
   // that drops one half of one path must fail here (a whole-file `includes`
   // check would keep passing).
-  const wiringStart = indexSource.indexOf('onUserInput: () => {')
+  const wiringStart = eventsSource.indexOf('onUserInput: () => {')
   assert.ok(wiringStart >= 0, 'the app events must wire onUserInput')
-  const wiring = indexSource.slice(wiringStart, wiringStart + 300)
-  assert.ok(wiring.includes('surface.noteUserInput()'),
+  const wiring = eventsSource.slice(wiringStart, wiringStart + 300)
+  assert.ok(wiring.includes('deps.surface.noteUserInput()'),
     'onUserInput must route to the surface tracker restore')
   const restoreBody = surfaceMethodBody('noteUserInput')
   assert.ok(restoreBody.includes('terminalFocusTracker.markFocused()'),
@@ -147,10 +150,10 @@ test('user activity restores the tracker to focused (the onUserInput wiring)', (
   assert.ok(restoreBody.includes('completionController.setFocus(terminalFocusTracker.state)'),
     'noteUserInput must re-sync the controller focus')
   // The onTerminalFocus wiring keeps feeding the tracker + controller.
-  const focusStart = indexSource.indexOf('onTerminalFocus: (focused) => {')
+  const focusStart = eventsSource.indexOf('onTerminalFocus: (focused) => {')
   assert.ok(focusStart >= 0, 'the app events must wire onTerminalFocus')
-  const focusWiring = indexSource.slice(focusStart, focusStart + 300)
-  assert.ok(focusWiring.includes('surface.handleTerminalFocus(focused)'),
+  const focusWiring = eventsSource.slice(focusStart, focusStart + 300)
+  assert.ok(focusWiring.includes('deps.surface.handleTerminalFocus(focused)'),
     'onTerminalFocus must route to the surface tracker')
   const focusBody = surfaceMethodBody('handleTerminalFocus')
   assert.ok(focusBody.includes('terminalFocusTracker.handleFocusReport('),

@@ -116,6 +116,9 @@ const CLASSIFICATION = {
   sessionRuntime: BIND, backend: BIND, settings: BIND, command: BIND, status: BIND,
   history: BIND, localShell: BIND, viewer: BIND, presentation: BIND, submission: BIND,
   artifacts: BIND, pluginManager: BIND, submissionRuntime: BIND,
+  // A5b-5: the application-event owner + the client-local platform owner are
+  // constructed in the composition root (owner-construction-or-bind).
+  applicationEvents: BIND, clientActions: BIND,
   // Narrow owner-to-owner connectors (incl. the late-bound viewed-queue slot).
   agentNow: CONN, handleNow: CONN, captureMatches: CONN, isCurrentOwnerAgent: CONN,
   directAgentOfOwner: CONN, requireLiveScope: CONN, viewedQueueAgent: CONN,

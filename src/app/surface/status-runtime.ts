@@ -104,6 +104,10 @@ export interface StatusRuntime {
   refreshTerminalTitle(): void
   /** The cheap footer/status refresh (never measures context). */
   refresh(): void
+  /** Cycle the live session's permission preset (Shift+Tab / the semantic
+   *  `cycle-permission` action) and refresh the footer. A no-op without a live
+   *  agent or a composed preset table. */
+  cyclePermission(): void
   /** Mark the cached context measurement dirty (model-visible events only). */
   markContextDirty(): void
   /** Measure through the semantic reader and repaint cheaply. */
@@ -382,6 +386,33 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     })
   }
 
+  /**
+   * Shift+Tab / the semantic `cycle-permission` action: cycle the live
+   * session's permission preset through the composed table (read-only →
+   * workspace-write → danger-full-access). The switch goes through the official
+   * service (sandbox + approval + preset log in one call, no transcript card),
+   * with a red warning only on the no-approval preset (plain switches notify in
+   * the dim info style) and an immediate footer refresh.
+   */
+  const cyclePermission = (): void => {
+    const agent = deps.liveAgent()
+    if (agent === undefined) return
+    const permission = deps.host().permissionPresets
+    if (permission?.names === undefined || permission.set === undefined) return
+    const names = permission.names
+    if (names.length === 0) return
+    const current = permission.current(agent.session)
+    const index = names.indexOf(current)
+    const next = names[(index + 1) % names.length] ?? names[0]
+    if (next === undefined || next === current) return
+    permission.set(agent.session, next)
+    deps.surface.app.notify(next === 'danger-full-access'
+      ? `⚠ ${next} — no approvals`
+      : `permission: ${next}`,
+    next === 'danger-full-access' ? 'error' : 'info')
+    refreshStatusCheap()
+  }
+
   // PR D2: the explicit, event-driven context measurement path. Call
   // sites FIRST mark the cache dirty (markContextDirty — only
   // model-visible lifecycle events may), then this function measures
@@ -462,6 +493,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     sessionCwd,
     refreshTerminalTitle,
     refresh: refreshStatusCheap,
+    cyclePermission,
     markContextDirty,
     refreshContextMeasurement,
     forceContextMeasurement,
