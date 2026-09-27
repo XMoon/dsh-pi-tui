@@ -45,6 +45,7 @@
       "tests": [
         "export-command.test.ts",
         "runner-session-bootstrap.test.ts",
+        "runner-session-retirement.test.ts",
         "submit-hot-path.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
@@ -1212,7 +1213,7 @@
       "hostDependency": false,
       "head": "let cleanedUp = false",
       "tests": [
-        "runner-session-bootstrap.test.ts"
+        "runner-session-navigation.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
