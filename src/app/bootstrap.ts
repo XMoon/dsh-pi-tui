@@ -94,7 +94,7 @@ import { mergeDraft, refuseByTransitionFence, type SteerAgentLike } from '../ste
 import { createDirectApplicationRuntime } from '../app/direct/runtime.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
-import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope } from '../app/session/scope.ts'
+import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
@@ -299,19 +299,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       if (scope === undefined) throw new Error('a live owner must carry a live session scope')
       return scope
     }
-    /**
-     * The busy/steer and shell-submit writer admission (A3-4): the helper
-     * modules receive a writer SECTION, not the raw barrier. It captures the
-     * live scope at the SAME synchronous admission point and enters through
-     * `SubmissionRuntime.withWriter`, so the operation barrier has exactly ONE
-     * admission owner and a stale capture refuses with
-     * `SessionScopeSupersededError`.
-     */
-    const submissionWriterSection = <T>(task: () => Promise<T>): Promise<T> => {
-      const scope = sessionScope.captureLive()
-      if (scope === undefined) return Promise.reject(new SessionScopeSupersededError())
-      return submissionRuntime.withWriter(scope, task)
-    }
     // The abort-aware quiesce mechanism lives in the Direct owner retirement;
     // the runner only decides WHEN to quiesce.
 
@@ -397,13 +384,9 @@ export function applyRunner(ctx: Context, config: Config): void {
     // per-Agent model-selection owner shared with the picker, the Direct
     // resolvers, the semantic Backend, and the Direct assistant-stream install.
     // It reads the live session authority through getters, so this runner keeps
-    // the single `liveAgent` / `viewedQueueAgent` mutable truth (A2 relocates
-    // that authority into `app/session`).
-    let viewedQueueAgent: {
-      readonly parentSessionId: string
-      readonly childSessionId: string
-      readonly agent: Agent
-    } | undefined
+    // the single `liveAgent` mutable truth (A2 relocates that authority into
+    // `app/session`). The viewed-queue authority is VIEWER-owned (A5b-6): the
+    // Direct queue resolver reads it through the late-bound `viewerRef` getter.
     const directRuntime = createDirectApplicationRuntime({
       ctx,
       diag,
@@ -418,7 +401,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // runtime's Agent-scoped model-selection install.
       compose: (installSelection, presetId) =>
         composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState),
-      getViewedQueueAgent: () => viewedQueueAgent,
+      getViewedQueueAgent: () => viewerRef?.viewedQueueAuthority(),
     })
     /**
      * The Direct attachment of the CURRENT owner (A2 transitional projection):
@@ -1213,7 +1196,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       ownership: { generation: () => ownership.generation() },
       session: { withWriter: (scope, task) => sessionRuntime.withWriter(scope, task) },
       requireLiveScope,
-      writerSection: submissionWriterSection,
+      writerSection: (task) => submission.withWriterSection(task),
       writer: backend.sessionWriter,
       status: { sessionCwd: () => status.sessionCwd() },
       tuiSettings,
@@ -1373,7 +1356,6 @@ export function applyRunner(ctx: Context, config: Config): void {
       },
       childAgent: (childId) => agents.get(SessionId(childId)),
       assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
-      publishQueueAuthority: (authority) => { viewedQueueAgent = authority },
       refreshStatus: () => status.refresh(),
       restoreMainTranscriptAnchor: () => presentation.restoreMainTranscriptAnchor(),
     })
@@ -1469,7 +1451,6 @@ export function applyRunner(ctx: Context, config: Config): void {
         llm: () => ctx.get('llm') as PrepareInputDeps['llm'],
       },
       tuiSettings,
-      submissionWriterSection,
       captureMatches,
       direct: {
         withPromptAdmission: (agent, hasImages, task) => directRuntime.withPromptAdmission(agent as Agent, hasImages, task),
@@ -1538,7 +1519,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         queueAgentFor: (childId) => directRuntime.queueAgentFor(childId) as unknown as SteerAgentLike | undefined,
         pendingInputReader: backend.pendingInputReader,
         writer: backend.sessionWriter,
-        writerSection: submissionWriterSection,
+        writerSection: (task) => submission.withWriterSection(task),
         subagent: backend.subagent,
         hostFile: backend.hostFile,
       },
