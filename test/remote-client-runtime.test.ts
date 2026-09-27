@@ -12,7 +12,7 @@
  * readiness · E real FileUpload dependency · F sessionStats + turnOutline
  * projections · G same-binding identity · H job roster · I
  * reconnect/generation reset · J archive route · K reverse disposal/no leaks
- * · L partial construction failure.
+ * · L partial construction failure · M legacy-settings boundary (§23).
  *
  * @module @xmoon76/dsh-pi-tui/remote-client-runtime.test
  */
@@ -23,7 +23,7 @@ import type { TestContext } from 'node:test'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Context, type Fiber } from '@deepseek-ai/cordis'
+import { Context, type Fiber, RegistryService, symbols } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
@@ -76,6 +76,7 @@ class StubLlmAdapter extends LlmAdapter {
 
   override async *stream(_options: unknown): AsyncGenerator<never> {}
 }
+
 const EXPECTED_REGISTRATION_IDS = [
   '@deepseek-ai/dsh-typert-registry',
   '@deepseek-ai/dsh-client-connection',
@@ -104,7 +105,10 @@ interface HostFixture {
   dispose(): Promise<void>
 }
 
-async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
+async function createHostFixture(
+  life: TestLifecycle,
+  poison?: (ctx: Context) => void,
+): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3-l5-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
@@ -134,11 +138,6 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
       },
       admitPromptContent: async (content: unknown) => content,
     } as never)
-    // `attachments` is a base-layer business dependency of the real
-    // fileUploads row, not an M3-1 target service; no concrete
-    // AttachmentStore plugin ships in the pinned packages (the real
-    // composition belongs to the dsh base layer), so the proven M2
-    // peripheral shape is the fixture here. Every §2.4.1 row itself is real.
     ctx.provide('webServer', { registerUpgrade: () => () => {} })
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
@@ -165,6 +164,7 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
       new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
     })
+    poison?.(ctx)
   } catch (error) {
     disposed = true
     // Error-isolated teardown: both steps run even when the second fails,
@@ -234,12 +234,139 @@ function loadRuntimeModule(): Promise<typeof import('../src/app/remote/runtime.t
 }
 
 // ---------------------------------------------------------------------------
-// Shared main fixture: one Host + one composed runtime for the behavior axis,
-// owned by the parent test below and disposed before its subtests' assertions
-// in K run last.
+// A - host prerequisite barrier
 // ---------------------------------------------------------------------------
 
-test('D–K. the composed runtime behavior axis over one shared Host + Client composition', async (t) => {
+test('A. the runtime cannot compose or become ready ahead of the Host prerequisites', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  try {
+    let resolvePrerequisites: (() => void) | undefined
+    const pending = (await loadRuntimeModule()).createExperimentalRemoteRuntime({
+      hostContext: host.ctx,
+      waitForHostPrerequisites: () => new Promise<void>(resolve => { resolvePrerequisites = resolve }),
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    // No M3 Host connection service before the gate resolves.
+    assert.equal(host.ctx.reflect.get('connection'), undefined, 'no M3 Host row may mount before the prerequisite gate')
+    assert.ok(resolvePrerequisites !== undefined, 'the runtime must be waiting on the prerequisite barrier')
+    resolvePrerequisites()
+    const runtime = await pending
+    assert.notEqual(host.ctx.reflect.get('connection'), undefined, 'the M3 Host rows mount after the gate resolves')
+    assert.notEqual(runtime.client.connection.generation.getSnapshot(), undefined)
+    await runtime.dispose()
+    assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 rows unwind with the runtime')
+  } finally {
+    await host.dispose()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// B - scoped loader exactness
+// ---------------------------------------------------------------------------
+
+test('B. the scoped loader capture is exact, single-flight, and restores the process globals', async () => {
+  // The capture runs on first use and is reused for every later runtime.
+  const first = await loadOfficialClientModulesOnce()
+  const second = await loadOfficialClientModulesOnce()
+  assert.ok(Object.is(first, second), 'the single-flight cache must return the identical module-export table')
+  assert.ok(Object.isFrozen(first), 'the captured module exports must be frozen')
+  for (const key of ['typert', 'connection', 'gateway', 'fileUpload', 'session', 'jobs'] as const) {
+    assert.equal(typeof first[key].apply, 'function', `captured ${key} module must expose the plugin apply`)
+    assert.ok(Array.isArray(first[key].inject), `captured ${key} module must expose the plugin inject`)
+  }
+  assert.equal(typeof first.connection.installConnection, 'function')
+
+  // Loader admission rules: unknown id, duplicate id, non-function factory,
+  // and a /client dependency requested before its capture are all rejected;
+  // a missing expected id fails the completeness check.
+  const loader = createScopedClientModuleLoader([
+    '@deepseek-ai/dsh-typert-registry',
+    '@deepseek-ai/dsh-api-gateway',
+  ])
+  assert.throws(
+    () => loader.load({ id: '@deepseek-ai/dsh-not-allowed', factory: () => ({}) }),
+    /unexpected registration id/,
+    'an unknown registration id must be rejected',
+  )
+  const factory = () => ({ apply: () => {}, inject: [] })
+  loader.load({ id: '@deepseek-ai/dsh-typert-registry', factory })
+  assert.throws(
+    () => loader.load({ id: '@deepseek-ai/dsh-typert-registry', factory }),
+    /registered twice/,
+    'a duplicate registration id must be rejected',
+  )
+  const freshLoader = createScopedClientModuleLoader(['@deepseek-ai/dsh-typert-registry'])
+  assert.throws(
+    () => freshLoader.load({ id: '@deepseek-ai/dsh-typert-registry', factory: undefined as never }),
+    /non-function factory/,
+    'a non-function factory must be rejected',
+  )
+  assert.throws(
+    () => loader.requireModule('@deepseek-ai/dsh-api-gateway/client'),
+    /before @deepseek-ai\/dsh-api-gateway was captured/,
+    'a /client dependency requested before capture must be rejected',
+  )
+  assert.throws(
+    () => loader.assertComplete(),
+    /@deepseek-ai\/dsh-api-gateway never registered through __ModuleLoader__/,
+    'a missing expected registration id must be rejected',
+  )
+  assert.deepEqual(loader.registeredIds(), ['@deepseek-ai/dsh-typert-registry'])
+  const completeLoader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
+  for (const id of EXPECTED_REGISTRATION_IDS) completeLoader.load({ id, factory })
+  assert.deepEqual(completeLoader.registeredIds(), EXPECTED_REGISTRATION_IDS)
+  assert.doesNotThrow(() => completeLoader.assertComplete(), 'the exact six ids must pass the completeness check')
+
+  // The capture shim is gone after the capture.
+  assert.equal('window' in globalThis, false, 'the temporary window global must be restored')
+  assert.equal('__ModuleLoader__' in globalThis, false)
+})
+
+// ---------------------------------------------------------------------------
+// C - no browser/global carrier dependency
+// ---------------------------------------------------------------------------
+
+test('C. compose/connect/list run with every browser global trapped or absent', async (t) => {
+  const life = testLifecycle(t)
+  const globalScope = globalThis as Record<string, unknown>
+  const trapped = ['fetch', 'WebSocket', 'Worker', 'document', 'navigator', 'location']
+  const previous = new Map<string, PropertyDescriptor | undefined>()
+  for (const name of trapped) {
+    previous.set(name, Object.getOwnPropertyDescriptor(globalScope, name))
+    Object.defineProperty(globalScope, name, {
+      configurable: true,
+      get() {
+        throw new Error(`browser global "${name}" must not be reached by the Remote runtime`)
+      },
+    })
+  }
+  let host: HostFixture | undefined
+  try {
+    host = await createHostFixture(life)
+    seedHostSession(host)
+    const runtime = await (await loadRuntimeModule()).createExperimentalRemoteRuntime({
+      hostContext: host.ctx,
+      waitForHostPrerequisites: async () => {},
+    })
+    await waitFor('client readiness under trapped globals', () =>
+      runtime.client.sessions.list.getSnapshot().phase === 'ready')
+    assert.ok(runtime.client.sessions.list.getSnapshot().ids.map(String).includes(SEED_SESSION_ID))
+    await runtime.dispose()
+  } finally {
+    await host?.dispose()
+    for (const [name, descriptor] of previous) {
+      if (descriptor === undefined) delete globalScope[name]
+      else Object.defineProperty(globalScope, name, descriptor)
+    }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// D-K - the shared-runtime behavior axis
+// ---------------------------------------------------------------------------
+
+test('D-K. the composed runtime behavior axis over one shared Host + Client composition', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   seedHostSession(host)
@@ -416,181 +543,19 @@ test('D–K. the composed runtime behavior axis over one shared Host + Client co
       host.ctx.sessions.list().some(session => String(session.id) === SEED_SESSION_ID),
       'the ordinary Host Session store must remain servable',
     )
+
+    await host.dispose()
   })
 })
 
 // ---------------------------------------------------------------------------
-// A — host prerequisite barrier
-// ---------------------------------------------------------------------------
-
-test('A. the runtime cannot compose or become ready ahead of the Host prerequisites', async (t) => {
-  const host = await createHostFixture(testLifecycle(t))
-  try {
-    let resolvePrerequisites: (() => void) | undefined
-    const pending = (await loadRuntimeModule()).createExperimentalRemoteRuntime({
-      hostContext: host.ctx,
-      waitForHostPrerequisites: () => new Promise<void>(resolve => { resolvePrerequisites = resolve }),
-    })
-    await new Promise(resolve => setTimeout(resolve, 50))
-    // No M3 Host connection service before the gate resolves.
-    assert.equal(host.ctx.reflect.get('connection'), undefined, 'no M3 Host row may mount before the prerequisite gate')
-    assert.ok(resolvePrerequisites !== undefined, 'the runtime must be waiting on the prerequisite barrier')
-    resolvePrerequisites()
-    const runtime = await pending
-    assert.notEqual(host.ctx.reflect.get('connection'), undefined, 'the M3 Host rows mount after the gate resolves')
-    assert.notEqual(runtime.client.connection.generation.getSnapshot(), undefined)
-    await runtime.dispose()
-    assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 rows unwind with the runtime')
-  } finally {
-    await host.dispose()
-  }
-})
-
-// ---------------------------------------------------------------------------
-// B — scoped loader exactness
-// ---------------------------------------------------------------------------
-
-test('B. the scoped loader capture is exact, single-flight, and restores the process globals', async () => {
-  // The capture runs on first use and is reused for every later runtime.
-  const first = await loadOfficialClientModulesOnce()
-  const second = await loadOfficialClientModulesOnce()
-  assert.ok(Object.is(first, second), 'the single-flight cache must return the identical module-export table')
-  assert.ok(Object.isFrozen(first), 'the captured module exports must be frozen')
-  for (const key of ['typert', 'connection', 'gateway', 'fileUpload', 'session', 'jobs'] as const) {
-    assert.equal(typeof first[key].apply, 'function', `captured ${key} module must expose the plugin apply`)
-    assert.ok(Array.isArray(first[key].inject), `captured ${key} module must expose the plugin inject`)
-  }
-  assert.equal(typeof first.connection.installConnection, 'function')
-
-  // Loader admission rules: unknown id, duplicate id, non-function factory,
-  // and a /client dependency requested before its capture are all rejected;
-  // a missing expected id fails the completeness check.
-  const loader = createScopedClientModuleLoader([
-    '@deepseek-ai/dsh-typert-registry',
-    '@deepseek-ai/dsh-api-gateway',
-  ])
-  assert.throws(
-    () => loader.load({ id: '@deepseek-ai/dsh-not-allowed', factory: () => ({}) }),
-    /unexpected registration id/,
-    'an unknown registration id must be rejected',
-  )
-  const factory = () => ({ apply: () => {}, inject: [] })
-  loader.load({ id: '@deepseek-ai/dsh-typert-registry', factory })
-  assert.throws(
-    () => loader.load({ id: '@deepseek-ai/dsh-typert-registry', factory }),
-    /registered twice/,
-    'a duplicate registration id must be rejected',
-  )
-  const freshLoader = createScopedClientModuleLoader(['@deepseek-ai/dsh-typert-registry'])
-  assert.throws(
-    () => freshLoader.load({ id: '@deepseek-ai/dsh-typert-registry', factory: undefined as never }),
-    /non-function factory/,
-    'a non-function factory must be rejected',
-  )
-  assert.throws(
-    () => loader.requireModule('@deepseek-ai/dsh-api-gateway/client'),
-    /before @deepseek-ai\/dsh-api-gateway was captured/,
-    'a /client dependency requested before capture must be rejected',
-  )
-  assert.throws(
-    () => loader.assertComplete(),
-    /@deepseek-ai\/dsh-api-gateway never registered through __ModuleLoader__/,
-    'a missing expected registration id must be rejected',
-  )
-  assert.deepEqual(loader.registeredIds(), ['@deepseek-ai/dsh-typert-registry'])
-  const completeLoader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
-  for (const id of EXPECTED_REGISTRATION_IDS) completeLoader.load({ id, factory })
-  assert.deepEqual(completeLoader.registeredIds(), EXPECTED_REGISTRATION_IDS)
-  assert.doesNotThrow(() => completeLoader.assertComplete(), 'the exact six ids must pass the completeness check')
-
-  // The exact specifier ↔ registration-id pairing (§22.B).
-  assert.deepEqual(OFFICIAL_CLIENT_BUNDLES.map(bundle => `${bundle.id}/client`),
-    OFFICIAL_CLIENT_BUNDLES.map(bundle => bundle.specifier))
-  assert.deepEqual(OFFICIAL_CLIENT_BUNDLES.map(bundle => bundle.id), EXPECTED_REGISTRATION_IDS)
-
-  // Exact process-state restoration across all three pre-states.
-  const scope = globalThis as Record<string, unknown>
-  const noopLoader = () => {}
-  // (1) window absent → absent again, shim present while installed.
-  {
-    const restore = installScopedModuleLoaderShim(noopLoader)
-    assert.equal(typeof (scope.window as { __ModuleLoader__: unknown }).__ModuleLoader__, 'object')
-    restore()
-    assert.equal('window' in scope, false, 'an absent window must stay absent')
-  }
-  // (2) pre-existing window object with its own loader → restored verbatim.
-  {
-    const sentinel = { __sentinel__: true }
-    scope.window = { __ModuleLoader__: sentinel }
-    const restore = installScopedModuleLoaderShim(noopLoader)
-    assert.notEqual((scope.window as { __ModuleLoader__: unknown }).__ModuleLoader__, sentinel,
-      'the shim must be installed over a pre-existing loader')
-    restore()
-    assert.equal((scope.window as { __ModuleLoader__: unknown }).__ModuleLoader__, sentinel,
-      'the pre-existing loader descriptor must be restored verbatim')
-    delete scope.window
-  }
-  // (3) own window property whose value is undefined → preserved exactly.
-  {
-    scope.window = undefined
-    const restore = installScopedModuleLoaderShim(noopLoader)
-    restore()
-    const descriptor = Object.getOwnPropertyDescriptor(scope, 'window')
-    assert.ok(descriptor !== undefined && !('get' in descriptor) && descriptor.value === undefined,
-      'a pre-existing window property with value undefined must be restored exactly')
-    delete scope.window
-  }
-
-  // The capture shim is gone after the capture.
-  assert.equal('window' in globalThis, false, 'the temporary window global must be restored')
-  assert.equal('__ModuleLoader__' in globalThis, false)
-})
-
-// ---------------------------------------------------------------------------
-// C — no browser/global carrier dependency
-// ---------------------------------------------------------------------------
-
-test('C. compose/connect/list run with every browser global trapped or absent', async (t) => {
-  const globalScope = globalThis as Record<string, unknown>
-  const trapped = ['fetch', 'WebSocket', 'Worker', 'document', 'navigator', 'location']
-  const previous = new Map<string, PropertyDescriptor | undefined>()
-  for (const name of trapped) {
-    previous.set(name, Object.getOwnPropertyDescriptor(globalScope, name))
-    Object.defineProperty(globalScope, name, {
-      configurable: true,
-      get() {
-        throw new Error(`browser global "${name}" must not be reached by the Remote runtime`)
-      },
-    })
-  }
-  let host: HostFixture | undefined
-  try {
-    host = await createHostFixture(testLifecycle(t))
-    await seedHostSession(host)
-    const runtime = await (await loadRuntimeModule()).createExperimentalRemoteRuntime({
-      hostContext: host.ctx,
-      waitForHostPrerequisites: async () => {},
-    })
-    await waitFor('client readiness under trapped globals', () =>
-      runtime.client.sessions.list.getSnapshot().phase === 'ready')
-    assert.ok(runtime.client.sessions.list.getSnapshot().ids.map(String).includes(SEED_SESSION_ID))
-    await runtime.dispose()
-  } finally {
-    await host?.dispose()
-    for (const [name, descriptor] of previous) {
-      if (descriptor === undefined) delete globalScope[name]
-      else Object.defineProperty(globalScope, name, descriptor)
-    }
-  }
-})
-
-// ---------------------------------------------------------------------------
-// L — partial construction failure
+// L - partial construction failure
 // ---------------------------------------------------------------------------
 
 test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async (t) => {
-  const host = await createHostFixture(testLifecycle(t))
-  await seedHostSession(host)
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  seedHostSession(host)
   try {
     // A foreign fileUploads double must make the real row fail loudly.
     host.ctx.provide('fileUploads', { fake: true })
@@ -620,10 +585,12 @@ test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leav
 })
 
 test('L2. a Client-side readiness failure unwinds the partial Client cleanly', async (t) => {
-  const host = await createHostFixture(testLifecycle(t))
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
   try {
     const jobControllerBefore = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     const hostRuntime = await createRemoteHostRuntime(host.ctx)
+    const realJobsModule = (await loadOfficialClientModulesOnce()).jobs
     // The failing client instance is observed DIRECTLY: the wrapped carrier
     // counts every opened Remote stream, and the FIRST open fires the abort
     // synchronously - so positive wire activity is guaranteed to be observed
@@ -632,12 +599,8 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
     let openedStreams = 0
     let activeStreams = 0
     const inducedReason = new Error('induced client readiness failure')
+    const closeSentinel = new Error('L2 sentinel: jobs fiber disposal failure')
     const controller = new AbortController()
-    // One REAL disposal failure: the first closing stream's disposer
-    // completes its teardown (the drain) and then rejects with a unique
-    // sentinel, so the cause-merge branch is exercised on the call path.
-    const closeSentinel = new Error('L2 sentinel: stream disposal failure')
-    let sentinelThrown = false
     const countingCarrier = {
       ownsHost: true as const,
       fetch: hostRuntime.carrier.fetch,
@@ -651,32 +614,44 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
             yield* inner
           } finally {
             activeStreams -= 1
-            if (sentinelThrown === false && openedStreams >= 1 && activeStreams === 0) {
-              sentinelThrown = true
-              throw closeSentinel
-            }
           }
         })()
       },
     }
-    await assert.rejects(
-      createRemoteClientRuntime({ carrier: countingCarrier, signal: controller.signal }),
-      (error: Error) => {
-        assert.match(error.message, /aborted/, 'the readiness failure must surface')
-        // No cleanup failure occurred in this scenario, so the original
-        // cause (the abort reason) must pass through untouched - the
-        // merge-branch itself is unit-covered in M.
-        assert.equal(error.cause, inducedReason)
-        return true
-      },
-      'the induced readiness failure must fail the Client composition',
-    )
+
+    // Real disposer fault injection: intercept the Cordis mount of the REAL
+    // Jobs fiber and register a one-shot rejecting disposer on it. Cordis
+    // contains unload-disposer failures inside `fiber.dispose()` (logged,
+    // never propagated), so this injection proves the unwind tolerates a
+    // real rejecting disposer without truncating the remaining cleanup.
+    const originalPlugin = RegistryService.prototype.plugin as unknown as (...args: unknown[]) => Fiber & PromiseLike<Fiber>
+    RegistryService.prototype.plugin = function (this: unknown, plugin: unknown, ...args: unknown[]): Fiber & PromiseLike<Fiber> {
+      const fiber = originalPlugin.apply(this, [plugin, ...args])
+      if (plugin === realJobsModule) {
+        fiber.effect(() => () => { throw closeSentinel })
+      }
+      return fiber
+    }
+
+    let rejectionError: unknown
+    try {
+      await createRemoteClientRuntime({ carrier: countingCarrier, signal: controller.signal })
+      assert.fail('the induced readiness failure must fail the Client composition')
+    } catch (error) {
+      rejectionError = error
+    }
+    RegistryService.prototype.plugin = originalPlugin
+
+    assert.match(rejectionError instanceof Error ? rejectionError.message : String(rejectionError), /aborted/,
+      'the readiness failure must surface')
+
     await waitFor('the failed client streams to drain to zero', () => activeStreams === 0)
+    assert.ok(openedStreams >= 1, 'the drain assertion requires positive stream activity to have been observed')
     assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
     const jobControllerAfter = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     assert.ok(
       jobControllerAfter?.typertRemote !== undefined && jobControllerAfter.typertRemote === jobControllerBefore.typertRemote,
-      'the existing jobController remains',
+      'the existing jobController must survive',
     )
     assert.notEqual(host.ctx.reflect.get('connection'), undefined, 'the composed Host rows stay until their own owner disposes')
 
@@ -703,34 +678,11 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
   }
 })
 
-// ---------------------------------------------------------------------------
-// M. legacy settings migration boundary (plan §23, static assertions)
+
+// M - mergeCause + legacy-settings boundary
 // ---------------------------------------------------------------------------
 
-test('M. the Client composition never crosses the Host legacy-settings boundary', () => {
-  // Only Host bootstrap owns the legacy settings migration (plan §23): the
-  // Client composition must not import the migration, read `profileContext`,
-  // or open `$DSH_HOME/settings.yaml(.imported)`. The scan is deliberately
-  // textual (the temp-hygiene-gate convention): it cannot be evaded by
-  // aliasing or re-export because the token itself is banned. The runtime
-  // half of the proof is the whole suite above, which composes, connects,
-  // lists and disposes under the runner's contained temp DSH_HOME.
-  const clientRuntimeDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'remote')
-  for (const file of ['client-runtime.ts', 'host-runtime.ts', 'runtime.ts']) {
-    const source = readFileSync(join(clientRuntimeDir, file), 'utf8')
-    assert.doesNotMatch(source, /legacy-settings-migration/, `${file} must not import the legacy settings migration`)
-    assert.doesNotMatch(source, /profileContext/, `${file} must not read profileContext`)
-    assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open \$DSH_HOME/settings.yaml(.imported)`)
-    assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read \$DSH_HOME`)
-  }
-})
-
-// ---------------------------------------------------------------------------
-// M2 — mergeCause unit coverage (the aggregation branch of the cleanup
-// error path; the call-path passthrough is asserted in L2)
-// ---------------------------------------------------------------------------
-
-test('M2. mergeCause preserves an existing cause and aggregates secondaries', () => {
+test('M. mergeCause preserves an existing cause and aggregates secondaries', () => {
   // No existing cause: the secondary becomes the cause directly.
   const plain = new Error('plain')
   mergeCause(plain, 'secondary-a')
@@ -746,4 +698,22 @@ test('M2. mergeCause preserves an existing cause and aggregates secondaries', ()
   const untouched = new Error('untouched')
   mergeCause(untouched, undefined)
   assert.equal(untouched.cause, undefined)
+})
+
+test('M2. the Client composition never crosses the Host legacy-settings boundary', () => {
+  // Only Host bootstrap owns the legacy settings migration (plan §23): the
+  // Client composition must not import the migration, read `profileContext`,
+  // or open `$DSH_HOME/settings.yaml(.imported)`. The scan is deliberately
+  // textual (the temp-hygiene-gate convention): it cannot be evaded by
+  // aliasing or re-export because the token itself is banned. The runtime
+  // half of the proof is the whole suite above, which composes, connects,
+  // lists and disposes under the runner's contained temp DSH_HOME.
+  const clientRuntimeDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'remote')
+  for (const file of ['client-runtime.ts', 'host-runtime.ts', 'runtime.ts']) {
+    const source = readFileSync(join(clientRuntimeDir, file), 'utf8')
+    assert.doesNotMatch(source, /legacy-settings-migration/, `${file} must not import the legacy settings migration`)
+    assert.doesNotMatch(source, /profileContext/, `${file} must not read profileContext`)
+    assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open \$DSH_HOME/settings.yaml(.imported)`)
+    assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read \$DSH_HOME`)
+  }
 })
