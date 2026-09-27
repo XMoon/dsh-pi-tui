@@ -11,13 +11,15 @@
 > classification is READY only when every method of the semantic port has a proven
 > Remote/public source; a nearby namespace with a similar name is never enough.
 >
-> Review correction: this revision closes both M3-0 review passes. The first
-> closed Host/Client dependency closure, CommandRuntimeSurface migration, Session
-> handoff ordering and settings-mirror reconnect/race semantics. The final
-> reverse-coupling pass additionally freezes Client-owned slash-command execution,
-> tool-card presentation, image submit/read ownership, whole-log `/rewind`
-> navigation, and the rc.2 skill-invalidation limitation. Those are frozen
-> decisions, not TODOs.
+> Review correction: this revision closes the full M3-0 review sequence. Earlier
+> passes closed Host/Client dependency closure, CommandRuntimeSurface migration,
+> Session handoff ordering, settings-mirror reconnect/race semantics, Client-owned
+> slash-command execution, tool-card presentation, image submit/read ownership,
+> whole-log `/rewind` navigation and the rc.2 skill-invalidation limitation. The
+> final reverse-coupling closure additionally freezes independent
+> permission/sandbox/approval semantics, Shift+Tab permission cycling, local-shell
+> placement/fail-closed behavior, Remote turn-end flush semantics and Host-local
+> legacy-settings migration readiness. These are frozen decisions, not TODOs.
 
 ## 1. Baseline
 
@@ -52,7 +54,7 @@ without its own capability-name entry, so the two inventories are deliberately n
 | `pendingInputReader` | `PendingInputReader` (queue/steering lanes) | `runtime/direct/pending-input-reader-direct.ts` | `runtime/remote/pending-input-reader-remote.ts` | `session.projections.faceOf('inbox')` (`dsh-agent/lib/types/types.d.ts:52-55`) | READY | M3-3A | L3 `test/remote-pending-input-reader.test.ts` |
 | `sessionWriter` | `SessionWriter` (ordinary prompt, Ctrl+S steer, Alt+Up remove, cancel, rename) | `runtime/direct/session-writer-direct.ts` | `runtime/remote/session-writer-remote.ts` | `SessionFace.beginSubmission/prompt/updateQueue/cancel/rename` (`.../client/contract/session.d.ts:73-140`); `session/prompt\|updateQueue\|cancel\|rename` Remotes | READY. `refreshTitle` = INTENTIONAL_UNSUPPORTED_IN_M3; generic client-local file attachment needs the D4 upload receipt and fails closed before dispatch | M3-3A | L3 `test/remote-session-writer.test.ts`; D4 relief exists at `fileUploads/upload` (`dsh-client-file-upload/lib/typert.remote-client.d.ts:14`) |
 | `sessionLifecycle` | `SessionLifecycle` (create/open/fork) | `runtime/direct/session-lifecycle-direct.ts` | `runtime/remote/session-lifecycle-remote.ts` | `ISessions.create/retain/fork` (`.../contract/sessions.d.ts:80/52/124`); `session.create\|fork` Remotes | READY | M3-2 (owner handoff) + M3-3A (adapter) | L3 `test/remote-session-lifecycle.test.ts`; L5 `smoke:remote-session-lifecycle-parity` |
-| `interaction` | `InteractionPort` (approval prompt, `ask_user_question` provider, session approval policy) | `runtime/direct/interaction-direct.ts` | **none** | approval + question claim/settle = forwarded **waterfall** events `approval/request`, `user-questions/request` (`dsh-api-remotes/lib/types/remote-events.d.ts:16,91`; subscriber `ctx.remote.$on`, `dsh-typert-protocol/lib/types/types.d.ts:367`). There is **no** `approval/*`/`question/*` Remote endpoint. `setApprovalPolicy` has **no dedicated** rc.2 carrier | NEEDS_ADAPTER; `setApprovalPolicy` is a bounded **DECISION_GATE**: M3-3B probes `commands/execute` with the official permission command line (the same public carrier `applyPermissionPreset` already uses); if it cannot preserve the required session-scoped semantics, the affected `/settings` row is explicitly unsupported and fails closed | M3-3B | L3 test that a forwarded `approval/request` waterfall settles through the TUI prompt; L5 either proves the command-line carrier or L3/L6 prove the disabled `/settings` row + notice. `approvalOverrideOf` reads the `permissions` projection (`dsh-permission-presets/lib/types/types.d.ts:47-57`) |
+| `interaction` | `InteractionPort` (approval prompt, `ask_user_question` provider, session approval policy) | `runtime/direct/interaction-direct.ts` | **none** | approval + question claim/settle = forwarded **waterfall** events `approval/request`, `user-questions/request` (`dsh-api-remotes/lib/types/remote-events.d.ts:16,91`; subscriber `ctx.remote.$on`, `dsh-typert-protocol/lib/types/types.d.ts:367`). There is **no** `approval/*`/`question/*` Remote endpoint. `setApprovalPolicy(sessionId, policy)` is a synchronous boolean semantic method, while rc.2 exposes neither a dedicated approval-policy Remote nor a synchronous exact-equivalent carrier | NEEDS_ADAPTER for approval/question presentation; `setApprovalPolicy` = INTENTIONAL_UNSUPPORTED_IN_M3 on the Remote backend and returns `false`. The Remote `/settings` approval row is omitted/disabled rather than guessing a current value or changing the semantic port to async | M3-3B | L3 test that forwarded approval/question waterfalls settle through the TUI prompt; L3/L6 prove Remote `setApprovalPolicy` fails closed and the approval settings row is unavailable with no hidden Host fallback |
 | `catalog` | `Catalog` = `models` + `presets` + `skills` | `runtime/direct/catalog-direct.ts` | models `model-remote.ts`, presets `preset-remote.ts`; **no complete skills adapter** | see §2.2 | NEEDS_ADAPTER | M3-3A | per §2.2 |
 | `config` | `ConfigPort` = 9 sub-domains | `runtime/direct/config-direct.ts` | **none** | see §2.3 | NEEDS_ADAPTER | M3-3B | per §2.3 |
 | `hostFile` | `HostFilePort` (`@`-mention discovery, send-time existence resolution, draft canonicalization) | `runtime/direct/host-file-direct.ts` | **none** | session/agent-scoped `fileReferences/list(agentId, query, signal)` (`dsh-api-session-controller/lib/typert.remote-client.d.ts:40,68`; `lib/types/file-references.d.ts:24`). Sessionless/workspace-scoped discovery, and existence-based canonicalization, have **no** rc.2 expression | NEEDS_ADAPTER for the session scope; sessionless/workspace scope + existence probe = INTENTIONAL_UNSUPPORTED_IN_M3 (fail closed, §10) | M3-3A (session scope) / M3-5 (viewer scope preference) | L3 test over `fileReferences/list`; a viewer-child prompt must resolve through the child Session identity rather than a cwd string |
@@ -90,7 +92,7 @@ assembly that advertises exactly the capabilities it serves
 | `credentials` | `available`, `setReference`, `unsetReference`, `describeReference`, `onChanged` | `credentials/set\|unset\|describe` (`dsh-api-settings-controller/lib/typert.remote-client.d.ts:25-27`); `credentials/reference-updated`, `credentials/record-updated` forwarded events (`dsh-api-remotes/lib/types/remote-events.d.ts:43-47`) | NEEDS_ADAPTER |
 | `credentials` | `listRecords()`, `deleteRecord(key)` | **not found** — no `credentials/list`, no record delete; the key grammars are disjoint (`dsh-credentials/lib/types/types.d.ts:86-88`) | INTENTIONAL_UNSUPPORTED_IN_M3 — only `/logout` record enumeration/deletion is affected; owner M3-3B, fail closed with an explicit notice |
 | `authorization` | `available`, `listTargets`, `begin`, `onEvent`, `respond`, `cancel` | **not found** — `dsh-authorization` publishes no `./client`/`./remote`/`./typert`; no `authorization` namespace and no authorization event in the forwarded allowlist | INTENTIONAL_UNSUPPORTED_IN_M3 — provider sign-in flows (`/login` device/OAuth path) are unavailable on the experimental backend; the API-key path still works through `credentials/set`. Owner M3-3B, fail closed with an explicit notice. Closest public relief: `account/startSignIn\|cancelSignIn` (a different, DeepSeek-account semantic) |
-| `permissions` | `presetNames`, `defaultPreset`, `setDefaultPreset`, `applyPermissionPreset`, `approvalOverrideOf` | `permissionPresets/catalog()` (`dsh-permission-presets/lib/typert.remote-client.d.ts:13`); per-session value = the `permissions` projection (`lib/types/types.d.ts:47-57`); apply = `commands/execute` (the official command line, exactly as Direct `/yolo` does); default = settings | NEEDS_ADAPTER. `approvalOverrideOf` is served by the `permissions` projection; the approval-policy **write** is the same bounded **DECISION_GATE** as `interaction.setApprovalPolicy`, with fail-closed fallback if the public command carrier cannot preserve the required semantics |
+| `permissions` | `presetNames`, `defaultPreset`, `setDefaultPreset`, `applyPermissionPreset`, `approvalOverrideOf` | `permissionPresets/catalog()` (`dsh-permission-presets/lib/typert.remote-client.d.ts:13`) supplies selectable/default preset metadata; the public per-session `permissions` projection exposes **only** `PermissionSelection.currentValue` (`dsh-permission-presets/lib/types/types.d.ts:35-57`); preset apply = `commands/execute` of the official `/permission <preset>` line; default = settings. rc.2 exposes no public Client read for the independent session `approval/policy` override | NEEDS_ADAPTER for preset catalog/default/apply. `approvalOverrideOf(sessionId)` = INTENTIONAL_UNSUPPORTED_IN_M3 on Remote and returns `undefined` only as “unavailable”, never as evidence that the effective policy is `ask`; Remote UI MUST hide/disable the session approval row instead of applying `?? 'ask'` |
 | `presetDefault` | `available`, `get`, `set` | `agentPresets/list` default + `settings/*` on `agent-preset-registry.selectedDefault` | NEEDS_ADAPTER |
 | `subagentModelSelection` | `available`, `get`, `set` | `settings/describe` + `settings/update\|replace` on the official `subagent-model-selection` section | NEEDS_ADAPTER |
 
@@ -251,6 +253,8 @@ left implicit merely because it is not a `Backend` property.
 | tool-card presentation | `bootstrap.ts` resolves `ctx.tools.get(name, liveAgent)` and calls Host `ToolDefinition.presentCall/presentResult` | none | Client derives cards from raw durable/transient `tool/call` + `tool/result` fields and persisted metadata/content; Host presenter callbacks never cross the Client contract. TUI/extension renderers stay Client-owned; unknown/custom tools use the existing bounded generic/raw fallback | NEEDS_APPLICATION_SEAM | M3-4 |
 | image draft / prompt preparation | `bootstrap.ts` reads `ctx.attachments.imageLimits`, `ctx.attachments.saveImages`, `ctx.llm.resolveModelInfo` during Direct preparation | none | Client-local draft bytes + safety caps; after a Session exists, validate against the Session `imageLimits` projection when available and serialize official `PromptContentPart {type:'image', mediaType, data, name?}`. Host `session/prompt` owns durable admission and model-modality refusal | NEEDS_APPLICATION_SEAM | M3-4 |
 | durable Session image read | `surface.start(...readImage)` calls Host `ctx.attachments.readImage(ref)` | none | official `session/attachment({sessionId, attachmentId})`, addressed by the exact main/child Session and fenced by binding generation. Recalled images that need re-send bytes use the same authorized read before prompt serialization | NEEDS_APPLICATION_SEAM | M3-4 main / M3-5 child viewer |
+| local `!` / `!!` execution + interrupt | `app/submission/local-shell.ts` currently resolves Host `ctx.shell` for the optional sandboxed path and carries an exact Direct Agent for cancel/currentness | none | bypass/local execution is Client `spawn` in the Client process; currentness = exact Session/binding generation; context-mode result write and turn cancel use semantic `SessionWriter`. rc.2 has no Client-local equivalent of Host `ctx.shell` | NEEDS_APPLICATION_SEAM. On Remote, `localShellSandbox=bypass` remains Client-local; `localShellSandbox=sandbox` is INTENTIONAL_UNSUPPORTED_IN_M3 and **fails closed without executing** — never warn-and-fallback to unsandboxed. No Remote branch may resolve `ctx.shell` or an Agent | M3-4 |
+| legacy TUI settings migration bootstrap | `bootstrap.ts` calls `migrateLegacySettings()` with Host `profileContext.home`/`$DSH_HOME`, Host SettingsForms and Host `agentPresets.resolve()` before compose/resume | none (and none required) | this is a **Host-local one-shot data migration**, not a Client Remote capability. It remains on the Host side of the bundle and must settle before the first Remote settings mirror/readiness and before any Session compose/resume | RESOLVED_COMPOSITION_CONTRACT — the Client never opens its own `$DSH_HOME/settings.yaml(.imported)` and never resolves a legacy preset locally | M3-1 ordering; consumed by M3-3B readiness |
 | `TaskReader` | `src/task-browser-runtime.ts`, `src/app/surface/runtime.ts:279-305` | `runtime/remote/task-read-remote.ts` (READY) | `projectionsBySession.subagentCatalog` + `IJobs.watchRows`; full descendant tree stays an upstream gap | NEEDS_APPLICATION_SEAM | M3-5 |
 | `SurfaceAuthorityReader` | shadow only today | `runtime/remote/surface-authority-remote.ts` (READY) | `commands/list` + `skills/list` | NEEDS_APPLICATION_SEAM | M3-4 |
 | `SubmissionPresentation` | `src/app/submission/controller.ts:431` (hardwired Direct) | `RemoteSubmissionPresentation` (`src/submission-presentation.ts:129-161`) | official `SessionSnapshot.pendingSubmissions` (`.../client/contract/snapshot.d.ts:58-61`) | NEEDS_APPLICATION_SEAM (only hardwired non-Backend source) | M3-4 |
@@ -260,7 +264,10 @@ left implicit merely because it is not a `Backend` property.
 | status: current session/model | `status-runtime.ts:196-249` | `RemoteModelCatalog.sessionSelection()` | `modelSelection` projection + Client list `cwd` | NEEDS_APPLICATION_SEAM | M3-4 |
 | status: cwd/workspace | `status-runtime.ts:171,254-261` | `RemoteSessionReader.list()` row `cwd` | Client list/binding `cwd`; git branch stays Client-local | NEEDS_APPLICATION_SEAM | M3-4 |
 | status: preset/composition | `status-runtime.ts:244-248` | `RemotePresetCatalog` | `agentPreset` projection | NEEDS_APPLICATION_SEAM | M3-4 |
-| status: permissions/sandbox/approval | `status-runtime.ts:302-414` | none | `permissions` projection (`dsh-permission-presets/lib/types/types.d.ts:47-57`); `permissionPresets/catalog` for options | NEEDS_ADAPTER | M3-3B / M3-4 |
+| status: permission preset | `status-runtime.ts:302-414` | none | public `permissions.currentValue` projection + `permissionPresets/catalog` for label/options | NEEDS_ADAPTER | M3-3B / M3-4 |
+| status: independent sandbox mode | `status-runtime.ts:302-414` currently calls Host `sandboxPolicy.resolve({session})` | none | **no public rc.2 Client view** of the effective session sandbox mode/deployment default; Host `sandboxMode` is internal projection state, not a public `SessionProjectionMap` value | INTENTIONAL_UNSUPPORTED_IN_M3 — omit this structured fact on Remote; never infer it from a preset name/currentValue | M3-4 |
+| status: independent approval override | `status-runtime.ts:302-414` currently calls Host `approval.overrideOf(session)` | none | **no public rc.2 Client read** of the last `approval/policy` override; public `permissions` projection exposes only preset `currentValue` | INTENTIONAL_UNSUPPORTED_IN_M3 — omit this structured fact on Remote; the `/settings` session-approval row is disabled/hidden | M3-3B / M3-4 |
+| permission-cycle action (`Shift+Tab` / `app.permission.cycle`) | `status-runtime.ts` currently calls Host `permissionPresets.set(session, next)` synchronously | none | current preset = public `permissions.currentValue`; selectable order = `permissionPresets/catalog`; write = `ConfigPort.permissions.applyPermissionPreset(sessionId, next)` → official Host command carrier | NEEDS_APPLICATION_SEAM — Client computes `next`, dispatches the semantic async write under the current Session/binding generation, and refreshes from authoritative projection/catalog; Remote never calls Host `permissionPresets.set` | M3-4 |
 | status: plan | `status-runtime.ts:337-339`, `session-presentation.ts:332` | none | `plan` projection (`dsh-plan-mode/lib/types/types.d.ts:42-45`) | NEEDS_ADAPTER | M3-4 |
 | status: goal | `status-runtime.ts:485-503` | none (fold) | `goal` projection / `goal/change` durable events | NEEDS_ADAPTER | M3-4 |
 | status: todos | `tui-app.ts` todo dock | none (fold) | `todos` projection (`dsh-tool-todo/lib/types/types.d.ts:38-45`) | NEEDS_ADAPTER | M3-4 |
@@ -281,7 +288,7 @@ Direct Agent/Session behind the Remote path.
 | `listScopedCommands()` | Host command registry via the Direct composition | `RemoteSurfaceAuthorityReader` / `commands/list`, keyed by the current live Session scope; completion synthesis stays Client-local | M3-4; command claim/collision parity |
 | `sessionRunning(sessionId)` | exact Direct Agent `.status` | exact `SessionBinding`/`SessionSnapshot.running`; currentness is the existing `SessionScopeAuthority` + binding-generation fence | M3-4 |
 | `sessionRouting(sessionId)` | Direct Agent `options.provider/model` + `session.header.cwd` | provider/model from `modelSelection` projection; cwd from Client Session list/binding | M3-4 |
-| `approvalOverride(sessionId)` | `ConfigPort.permissions.approvalOverrideOf` (already semantic) | same `ConfigPort` implementation over the `permissions` projection | M3-3B, consumed by M3-4 |
+| `approvalOverride(sessionId)` | `ConfigPort.permissions.approvalOverrideOf` (already semantic) | Remote `ConfigPort` returns `undefined` as an **unavailable exact override read**; M3-4 must not interpret that as `ask` and must omit/disable the only consumer row that needs the exact override | M3-3B, consumed by M3-4; fail-closed settings-row test |
 | `sessionStats(sessionId)` | `computeStats(directSession.snapshotEvents())` | one Remote metrics facade: lifetime `turns/steps/llmMs` from official `sessionStats`, token/cache totals from `tokenUsage`, `contextWindow` from the context projections, and the TUI's deliberately recent TTFT/TPS from the exact binding's durable+transient window. If fewer than the required recent valid samples are loaded, page older history only until the recent window is complete or history-start is reached; never scan the whole log for lifetime totals | M3-4; Direct-vs-Remote `SessionStats` parity fixture |
 | `lastAssistantText(sessionId)` | Direct Session event scan | exact binding `eventSource`; search the loaded window newest-first and call `loadOlder()` until an assistant message is found or history-start is proven | M3-4; cold-resume + paged-history test |
 | `refreshLiveCatalog(sessionId, source)` | `CatalogRefreshCoordinator` captures the exact Direct Agent | keep the coordinator but replace its target with the already-fenced live Session scope / exact binding generation; read commands through `RemoteSurfaceAuthorityReader` and skills through `SkillCatalogCapability`. No Agent-shaped compatibility wrapper | M3-4; session-switch stale refresh must be rejected |
@@ -454,6 +461,38 @@ bootstrap runtime selection  --dynamic import()-->  experimental Remote runtime
   and adds the corresponding test rows in the gate's own test file** — no new test
   module.
 
+
+### 4.4 Legacy TUI settings migration is Host-local and precedes Client readiness
+
+`src/legacy-settings-migration.ts` is a one-shot migration of the retired
+Host-profile `$DSH_HOME/settings.yaml(.imported)` into the current Host Settings
+forms. It reads Host profile storage and validates the historical preset through
+the Host preset registry, so it is **not** a Client-local preference import and
+does not gain a Remote protocol.
+
+M3 freezes the ordering:
+
+```text
+Host/profile startup prerequisites
+  -> migrateLegacySettings(Host profileContext + SettingsForms + agentPresets)
+  -> RemoteHostRuntime composition
+  -> Client runtime / Connection readiness
+  -> Remote ConfigPort settings mirror first describe
+  -> application compose/resume
+```
+
+The existing “before display/progress/response/notification startup state and
+before compose/resume” rule remains authoritative. The new additional rule is
+that a Remote Client never reads its own process `$DSH_HOME` to satisfy this
+migration. M3-1 owns the ordering barrier; M3-3B may not declare its first
+settings mirror ready until that Host migration prerequisite has settled.
+
+Acceptance: L5 composition proves the Remote Client path performs no
+`profileContext`/legacy-file read and cannot race the first settings mirror ahead
+of the Host migration. A migration failure remains visible/retriable exactly as
+today and prevents the marker from being falsely advanced.
+
+
 ## 5. Session ownership contract
 
 ### 5.1 Exact identity rule (frozen)
@@ -582,7 +621,7 @@ or the parked-owner drain.
 | `assistantStreamBaselineFor(agent)` / `installAssistantStream` (`bootstrap.ts:839,1961-1969`) | live transient output with exact identity | `eventSource` transient entries via a subscription ingress; identity = binding generation | surface | M3-4 / M3-5 |
 | `agent.status === 'running'` (`submission/controller.ts:444,677`) | submit-vs-queued row, delivery resolution | `SessionSnapshot.running` | submission | M3-4 |
 | `workingFromLog(agent.session.snapshotEvents())` (`bootstrap.ts:1934`) | compaction/working read | Client event window | presentation | M3-4 |
-| `sessions.flush(agent.session)` (`bootstrap.ts:1941-1950`) | durable turn barrier | no public Client flush verb → Host-owned (no-op on Remote) | session | M3-5 |
+| `sessions.flush(agent.session)` (`bootstrap.ts:1941-1950`) | Direct turn-end durability hint | no public Client flush verb → Host owns durability; the Remote application hook is a deliberate no-op | session/application | M3-4 (main event routing must already be Direct-free) |
 | `agentNow()` / `registeredAgentIs` / `queueAgentFor(childId)` (`bootstrap.ts:412,1519,1772`) | current owner identity, exact Agent fence, child queue address | binding generation identity + child Session identity + `SessionWriter.updateQueue` | app/session | M3-2 / M3-5 |
 | `ctx.jobs` / `ctx.subagents` (`bootstrap.ts:1792-1826`) | Task Center roster/detail | `RemoteTaskReader` + `RemoteJobObservationPort` + `IJobs.watchRows` | task surface | M3-5 |
 | `sessions.get` / `agents.get().status` / `sessionQuery.observeSession` (viewer) | live + cold child transcript/activity | child binding generation + `RemotePresentationReader` + `RemoteTaskReader` | viewer | M3-5 |
@@ -591,6 +630,9 @@ or the parked-owner drain.
 | command runtime exact-Agent catalog target | live `/reload`/catalog refresh must not retarget after switch | exact `SessionScope` + binding generation; `RemoteSurfaceAuthorityReader` + `SkillCatalogCapability` | command/application | M3-4 |
 | command runtime `promptAdmission(agent, ...)` | Direct per-Agent prompt/image admission | writer/scope admission + Client-local preflight + official Session write; unsupported attachment class fails before dispatch | submission/command | M3-4 |
 | TUI/extension command callback via `ctx.commands.execute` | normalize/execute Client-owned slash-command callbacks | Client-local execution plane from §3.3; Host commands alone cross `HostCommandPort` | command/application | M3-4 |
+| `statusRuntime.cyclePermission()` → Host `permissionPresets.set(session,next)` | Shift+Tab permission cycling | Client reads authoritative `permissions.currentValue` + catalog order, then calls semantic async `ConfigPort.permissions.applyPermissionPreset`; stale generation cannot apply UI state | status/application | M3-4 |
+| `LocalShell.resolveShell()` → Host `ctx.shell`; exact Agent interrupt | optional sandboxed user shell + cancel/currentness | Client-local spawn for bypass mode; exact binding-generation fence + `SessionWriter.cancel`/prompt for session semantics; Remote sandbox mode fails closed because rc.2 has no Client-local sandbox shell carrier | submission/application | M3-4 |
+| `migrateLegacySettings(profileContext.home, SettingsForms, agentPresets.resolve)` | one-shot retired Host-profile settings import before first compose/resume | stays Host-local and completes before Remote settings readiness; no Client `$DSH_HOME`/preset-registry access | startup/composition | M3-1 |
 
 No fake `Agent` wrapper is introduced anywhere, including inside the command runtime.
 No Host callback is moved into the Client: tool presentation and TUI command
@@ -607,7 +649,8 @@ in-process wire, M4/M5 change placement only.
 | terminal rendering, editor, overlays, keybindings | ✓ | | none | local |
 | clipboard / OSC 52 | ✓ | | none | local (never backend-determined) |
 | external editor | ✓ | | none | local |
-| local `!` / `!!` shell | ✓ | | none | local (Client process, Client cwd); unchanged under M3's in-process wire |
+| local `!` / `!!` shell (`localShellSandbox=bypass`) | ✓ | | none | local `spawn` in the Client process / current Session cwd; context-mode result returns through `SessionWriter` |
+| local `!` / `!!` shell (`localShellSandbox=sandbox`) | Client gesture, Host capability today | current Direct path uses Host `ctx.shell`; rc.2 exposes no Client-local equivalent | **no M3 wire carrier** | INTENTIONAL_UNSUPPORTED_IN_M3 on Remote: fail closed with a visible error and run nothing; never silently fall back to unsandboxed spawn |
 | `@file` discovery (session scope) | | ✓ | `fileReferences/list(agentId, query, signal)` | remote Host |
 | `@file` discovery (sessionless/workspace scope) | | | **no rc.2 expression** | fail closed (INTENTIONAL_UNSUPPORTED_IN_M3) |
 | `@file` existence/canonicalization | | ✓ | **no callable rc.2 expression** (the Host canonicalizes internally when promoting prompt file parts) | fail closed; relative mentions keep their literal text |
@@ -629,11 +672,16 @@ in-process wire, M4/M5 change placement only.
 | pending-input presentation policy (lane labels) | ✓ | | none | local over the semantic projection |
 | model-selection *intent* install | | ✓ | `modelSelection` projection | remote Host |
 
-M3 is an in-process wire on one machine, so the "explicitly split" operations keep
-their current Client-local behavior unchanged under M3: `!`/`!!` (spawns in the TUI
-process with the TUI cwd), `/image` and `/attach` local reads, the external editor,
-`/export`/`/transcript` file writes (Save Location), and `/open`-style working
-directory changes. A local `/image` read is only **staging**: before a Session
+M3 is an in-process wire on one machine, but locality is frozen as if M4 could
+split the process tomorrow. `!`/`!!` in **bypass** mode spawns in the Client/TUI
+process with the Session cwd; the context-mode result returns through the
+semantic Session writer. The explicit **sandbox** preference is different:
+Direct may continue using Host `ctx.shell`, but Remote M3 has no public Client
+carrier and therefore fails closed without running the command. An in-process
+M3 implementation must not “borrow” Host `ctx.shell` just because both sides
+happen to share one process. `/image` and `/attach` local reads, the external
+editor, `/export`/`/transcript` file writes (Save Location), and `/open`-style
+working-directory changes. A local `/image` read is only **staging**: before a Session
 exists the TUI can enforce only its own memory/safety cap; after creation/retain,
 the exact Session's `imageLimits` projection is re-applied before serialization,
 and Host `session/prompt` remains the final image/model admission authority. A
@@ -725,7 +773,9 @@ stay `indeterminate` (`src/runtime/remote/write-failure.ts:131-153`).
 | full descendant subagent tree | POST_M3_NON_BLOCKING | no exact official equivalent (D1 skip) | post-M3 / upstream | direct-child catalog parity only |
 | `session.createdAt`, Direct `live` bit | POST_M3_NON_BLOCKING | no public Client field / different `running` semantic | post-M3 | D1 ledger skips |
 | cross-client concurrency (Web+TUI, reconnect, cold resume, Host crash) | POST_M3_NON_BLOCKING (M8) | DSH `SessionHandle`/`SessionWriteLease` is the writer authority; the full matrix is an M8 deliverable | M8 | M8 proof |
-| `interaction.setApprovalPolicy` carrier; `permissions.setDefaultPreset` | DECISION_GATE_WITH_FAIL_CLOSED_DEFAULT | no dedicated rc.2 approval-policy endpoint. M3-3B first probes `commands/execute` using the official permission command line (the same public carrier already used by permission-preset apply); if that does not preserve the required session-scoped semantics, the affected `/settings` row is explicitly unsupported. There is no hidden Host fallback | M3-3B | L5 proves the command carrier **or** L3/L6 prove the disabled row and notice; either outcome closes the gate |
+| exact session approval-policy read/write (`InteractionPort.setApprovalPolicy`, `ConfigPort.permissions.approvalOverrideOf`, `/settings` approval row) | INTENTIONAL_UNSUPPORTED_IN_M3 | rc.2 has no public Client read of the independent `approval/policy` override and no synchronous exact carrier matching `InteractionPort.setApprovalPolicy`; public `permissions` exposes only preset `currentValue` | M3-3B/M3-4 | Remote setter returns `false`, override read returns `undefined` as unavailable, and the Remote approval settings row is hidden/disabled; no `?? 'ask'`, event-log reconstruction or preset-name inference |
+| independent sandbox/approval structured status facts | INTENTIONAL_UNSUPPORTED_IN_M3 | rc.2 does not expose the Host `sandboxPolicy.resolve()` result or approval override as public Session projection values | M3-4 | permission preset remains visible from `permissions.currentValue`; sandbox/approval fields are omitted, never guessed |
+| sandboxed local `!` / `!!` on the Remote backend | INTENTIONAL_UNSUPPORTED_IN_M3 | current Direct implementation uses Host `ctx.shell`; rc.2 has no Client-local sandbox-shell carrier | M3-4 | explicit `localShellSandbox=sandbox` fails closed and executes nothing; bypass mode remains Client-local spawn |
 | synchronous `TuiSettingsConfig.get()` over async settings Remote | RESOLVED_ADAPTER_CONTRACT | §2.3 freezes listener-before-read, serialized describe, `settings/document-updated` + `connection/reset` invalidation, in-flight invalidation rerun and post-write authoritative refresh | M3-3B | race tests: event-during-read, disconnect-change-reconnect, write/read round trip |
 | Client runtime uses Web module-loader bundles | RESOLVED_PACKAGING_ADAPTATION | exact six-entry shim allowlist and lifecycle are frozen in §2.4.3/§4.2; `/remote` contributions stay native ESM | M3-1 | L5 connect/list/reconnect/dispose + allowed/forbidden bundle-loader tests; no browser fallback reached |
 | Host composition dependency closure | RESOLVED_COMPOSITION_CONTRACT | §2.4.1 includes Host connection → fileUploads → sessionStats/turnOutline → session-controller, settings, forwarded events and session-log-export; existing jobController is reused, not duplicated | M3-1 | L5 real composition (no `fileUploads`/`fileUpload` test doubles) + `sessionStats`/`turnOutline` projection + archive route probes |
@@ -735,10 +785,11 @@ stay `indeterminate` (`src/runtime/remote/write-failure.ts:131-153`).
 | Remote image submit/read | RESOLVED_APPLICATION_CONTRACT | official image prompt parts + Host `session/prompt` admission, Session `imageLimits` projection, and `session/attachment` durable reads cover images without the D4 generic-file receipt path | M3-4/M3-5 | sessionless staging, first-create recheck, model refusal, recalled-image resend, main/child durable read |
 | `/rewind` full-history candidate source | RESOLVED_APPLICATION_CONTRACT | `turnOutline` is the whole-log turn index; `loadThrough(seq)` materializes only selected/needed old turns without changing normal bounded transcript retention | M3-1/M3-4 | candidate beyond initial window is visible; generation replacement/abort discards stale picker work |
 
-**No pinned rc.2 M3_BLOCKER remains after these decisions.** The approval-policy
-row is a bounded implementation decision with an already-frozen fail-closed
-outcome; every other formerly open item now has an exact owner, dependency
-closure and acceptance proof. The intentionally unsupported skill hot-refresh
+**No pinned rc.2 M3_BLOCKER remains after these decisions.** The independent
+approval-policy read/write/status surface and Remote sandboxed-local-shell mode
+are explicit fail-closed unsupported classes rather than deferred carrier
+guesses; every supported item has an exact owner, dependency closure and
+acceptance proof. The intentionally unsupported skill hot-refresh
 behavior is explicit and does not authorize a private Remote event. M3-1 may
 start only from this revised contract.
 
@@ -764,12 +815,14 @@ Each stage declares its L1–L6 test layer
   `fileUpload` before Sessions and the explicit `fileUploads` `/remote`
   contribution. The six-entry scoped loader shim is the only Node adaptation.
 - **Behavior axis**: in-process official Connection/Gateway/Remotes/domain
-  Clients, readiness, generation/reset observation and reverse disposal. No TUI
-  product cutover.
+  Clients, readiness, generation/reset observation and reverse disposal. The
+  §4.4 Host-local legacy-settings migration settles before Client/settings
+  readiness; the Remote Client never reads its own `$DSH_HOME`. No TUI product
+  cutover.
 - **Tests**: L5 `test/remote-client-runtime.test.ts`: real connect/list,
   fileUpload dependency present, `sessionStats` + `turnOutline` projections
   present, Job roster, reconnect, same-binding probe, archive-route registration, dispose; zero leaked
-  subscriptions/fibers/refs; loader allowlist test; architecture-gate tests.
+  subscriptions/fibers/refs; loader allowlist test; Host legacy-migration-before-settings-readiness ordering and a static/runtime no-Client-`profileContext`/legacy-file-read assertion; architecture-gate tests.
 - **Must not change**: `src/startup.ts` zero-dependency/static graph;
   `cordis.patch.yml` Direct composition; public CLI/entry exports; production
   backend remains Direct.
@@ -816,8 +869,8 @@ Each stage declares its L1–L6 test layer
 - **Files/owners**: new `src/runtime/remote/config-remote.ts` (generation-aware
   serialized settings mirror, footer trust/custom items, providers,
   credentials, permissions, preset default, subagent-model-selection), new
-  `src/runtime/remote/interaction-remote.ts` (forwarded waterfalls + the
-  `setApprovalPolicy` decision gate), new
+  `src/runtime/remote/interaction-remote.ts` (forwarded waterfalls;
+  Remote `setApprovalPolicy` is the explicit fail-closed unsupported method), new
   `src/runtime/remote/session-archive-remote.ts` (`/api/session.export` through
   the composition-owned fetch), `BackendKind` gains `remote`, Remote `Backend`
   assembly + exact capability advertisement.
@@ -826,7 +879,8 @@ Each stage declares its L1–L6 test layer
   disconnect and never commit a describe result that raced an invalidation.
 - **Tests**: L3 + L5; archive abort; settings initial readiness,
   event-during-describe rerun, disconnect/change/reconnect refresh and
-  write/read round trip; approval-policy gate either proven or fail-closed.
+  write/read round trip; approval-policy read/write unsupported behavior and
+  hidden/disabled Remote settings row.
 - **Must not change**: Direct backend assembly; capability vocabulary semantics.
 - **Entry**: M3-2 + M3-3A. **Exit**: complete Remote backend or explicit
   unsupported classification; no Direct Host fallback. **Rollback**: keep
@@ -842,23 +896,34 @@ Each stage declares its L1–L6 test layer
   facts** (commands/running/routing/approval/stats/last-assistant/catalog
   refresh/prompt admission); the §3.3 Client command execution plane; whole-log
   `/rewind` over `turnOutline`; Client-derived tool cards; main-Session image
-  staging/prompt admission and durable image reads.
+  staging/prompt admission and durable image reads; permission-preset cycling
+  through `ConfigPort.permissions.applyPermissionPreset`; Client-local shell
+  ownership; the Remote no-op replacement for the Direct `sessions.flush`
+  turn-end hint.
 - **Behavior axis**: the first complete main TUI on the in-process wire. The
   command layer keeps its scope/currentness semantics but has no Direct
   Agent/Session resolver on this branch; no TUI/extension callback is executed
-  by Host `ctx.commands`, and no tool card calls Host `ctx.tools`.
+  by Host `ctx.commands`, no tool card calls Host `ctx.tools`, Shift+Tab never
+  calls Host `permissionPresets.set`, and local shell never resolves Host
+  `ctx.shell` on the Remote branch.
 - **Tests**: L6 application composition; transcript/status/presentation parity;
   command catalog/claim parity plus local TUI/extension execution; cold paged
   last-assistant; Remote `SessionStats` parity; catalog-refresh stale fence;
   `/rewind` candidate outside the initial event window; representative tool-card
   live/replay parity; sessionless image staging → first-create limit recheck →
   Host model/admission refusal; recalled durable-image resend; busy/queue/image
-  prompt-admission parity; static/runtime assertions that `attachmentForSession`,
-  Host `ctx.commands.execute` for Client-owned commands, `ctx.tools.get`, and
-  Direct `ctx.attachments`/`ctx.llm` image admission are not reachable from the
-  Remote branch.
+  prompt-admission parity; permission-cycle async write + stale-generation
+  rejection; Remote approval/sandbox status omission; local-shell bypass
+  execution + context submit + cancel and explicit sandbox fail-closed behavior;
+  turn-end routing proves the Remote flush hook is a no-op; static/runtime
+  assertions that `attachmentForSession`, Host `ctx.commands.execute` for
+  Client-owned commands, `ctx.tools.get`, Host `permissionPresets.set`,
+  `ctx.shell`, Direct `ctx.attachments`/`ctx.llm` image admission, and Direct
+  `sessions.flush` are not reachable from the Remote branch.
 - **Must not change**: Direct default; transition gate/commit order; no fake
-  Agent; unsupported standing-skill/generic-file classes stay fail-closed.
+  Agent; unsupported standing-skill/generic-file, independent
+  approval/sandbox-status, and Remote sandboxed-local-shell classes stay
+  fail-closed.
 - **Entry**: M3-3B. **Exit**: the main TUI **including slash-command runtime**
   runs on the wire with Direct default intact. **Rollback**: remove the
   selection seam's Remote branch.
@@ -899,7 +964,7 @@ Each stage declares its L1–L6 test layer
 [x] every Backend property classified
 [x] Catalog sub-domains individually classified
 [x] ConfigPort method families individually classified
-[x] all non-Backend M3 seams classified, including every CommandRuntimeSurface hook, Client command execution, tool-card presentation, rewind history and image submit/read
+[x] all non-Backend M3 seams classified, including every CommandRuntimeSurface hook, Client command execution, tool-card presentation, rewind history, image submit/read, permission-cycle/local-shell ownership and Host-local legacy-settings migration
 [x] every READY row cites an exact rc.2 public Client/Remote source
 [x] no Remote row relies on Direct Host service fallback
 [x] Host + Client composition dependency closure and disposal owners frozen, including sessionStats + turnOutline projection units
@@ -911,13 +976,13 @@ Each stage declares its L1–L6 test layer
 [x] all lifecycle/supersession/fatal/HMR reference paths accounted for
 [x] Direct assumptions in presentation/viewer/status/tasks inventoried
 [x] assistant transient-stream replacement identified
-[x] locality matrix complete, including sessionless image staging vs Host image admission and generic-file D4
+[x] locality matrix complete, including sessionless image staging vs Host image admission, generic-file D4, and Remote local-shell bypass-vs-sandbox fail-closed semantics
 [x] extension Client/Host Context ownership decided; Client command callbacks never cross into Host ctx.commands
 [x] generation replacement/reconnect semantics frozen, including settings mirror invalidation
 [x] writer-held recovery stage/behavior frozen (M3-5)
 [x] M3-1..M3-6 boundaries finalized
 [x] each stage has entry/exit/test/rollback scope
-[x] zero unowned UNKNOWN/TBD items; rc.2 skills/change hot invalidation is explicitly unsupported rather than silently assumed
+[x] zero unowned UNKNOWN/TBD items; rc.2 skills/change hot invalidation, independent approval/sandbox reads and Remote sandboxed-local-shell execution are explicitly unsupported rather than silently assumed
 [x] blocker verdict explicit: M3 ENTRY GREEN
 [x] docs updated
 [x] normal gates green (recorded in the M3-0 PR)
@@ -953,8 +1018,8 @@ Run at this baseline (documentation-only diff):
 | 1 | Can rc.2 satisfy every `Backend` property without Direct fallback? | §2.1 — 7 of 13 are READY today; the other 6 are Remote-adapter work with a named rc.2 source and named fail-closed classes (no property needs a Direct Host fallback) |
 | 2 | Which exact Remote adapter files are missing today? | §2.1 `interaction`, `config`; §2.2 `skills`; §2.3 all; `hostFile`, `sessionArchive`; plus the owner spine (M3-2) |
 | 3 | Is `Catalog` fully composable remotely, including Skills? | §2.2 — models/presets yes (provider discovery is adapter work); live skills list yes; Client skill-body read, sessionless standing catalog and live `skills/change` subscription are explicit M3 unsupported classes |
-| 4 | Is `ConfigPort` fully expressible on rc.2? | §2.3 — all but authorization and credential-record enumeration/deletion |
-| 5 | Is `InteractionPort` fully expressible on rc.2? | §2.1 + §10 — approval/question yes via forwarded waterfalls; `setApprovalPolicy` is an owned M3-3B gate |
+| 4 | Is `ConfigPort` fully expressible on rc.2? | §2.3/§10 — preset catalog/default/apply and most settings/credentials are expressible; authorization, credential-record enumeration/deletion, and the exact independent approval-override read are explicit M3 unsupported classes |
+| 5 | Is `InteractionPort` fully expressible on rc.2? | §2.1 + §10 — approval/question yes via forwarded waterfalls; synchronous `setApprovalPolicy` has no exact public rc.2 carrier and is explicitly unsupported on Remote M3 |
 | 6 | Can all `HostFilePort` semantics be expressed remotely? | §2.1 + §7 — session scope yes; sessionless scope and existence-based canonicalization no |
 | 7 | Can `SessionArchivePort` map to a public rc.2 carrier without private APIs? | §2.1 — yes, HTTP `/api/session.export` via the composition-owned fetch; cancellation is adapter-owned |
 | 8 | Which module owns Host/Client Remote composition? | §2.4/§4.1 — `src/app/remote/host-runtime.ts` + `src/app/remote/client-runtime.ts` (M3-1) |
@@ -973,15 +1038,14 @@ Run at this baseline (documentation-only diff):
 | 21 | What replaces child exact-Agent identity in viewer mode? | §3 + §6 — child binding generation + Session identity |
 | 22 | What replaces Direct assistant-stream install/baseline? | §3 + §6 — `eventSource` transient entries through a subscription ingress |
 | 23 | What replaces `ctx.jobs` / `ctx.subagents` on the Remote path? | §3 + §11 M3-5 — `RemoteTaskReader`, `RemoteJobObservationPort`, Client projections |
-| 24 | Where do status/command facts come from remotely? | §3 — Client Session projections/event source plus the §3.2 fact mapping and §3.3 Client command execution plane; no Direct Agent/Host-callback fallback |
+| 24 | Where do status/command facts come from remotely? | §3 — public Client Session projections/event source plus the §3.2 fact mapping and §3.3 Client command execution plane; permission preset is public, while independent sandbox/approval facts are explicitly omitted rather than inferred; no Direct Agent/Host-callback fallback |
 | 25 | Which secondary surfaces are deferred to M3-5? | §11 M3-5 |
-| 26 | Which commands/actions remain Client-local? | §3.3 + §7 — TUI built-ins/extension callbacks, terminal/editor/local shell, local draft/file reads and Client artifact saves; Host commands still execute through `HostCommandPort` |
+| 26 | Which commands/actions remain Client-local? | §3.3 + §7 — TUI built-ins/extension callbacks, terminal/editor, bypass-mode local shell, local draft/file reads and Client artifact saves; Host commands still execute through `HostCommandPort`; Remote sandboxed local shell is fail-closed rather than borrowing Host `ctx.shell` |
 | 27 | Which path/file operations are Host-owned? | §7 |
 | 28 | Where do extension UI callbacks live? | §8 — Client Context |
 | 29 | How do Host extension facts cross without callbacks? | §8 — as serializable public Remote facts |
-| 30 | Is M3 entry GREEN or BLOCKED? | §10/§12 — GREEN after both closure passes: composition/lifetime/settings plus Client command execution, tool presentation, image ownership, rewind history and explicit skill-invalidation limitation |
+| 30 | Is M3 entry GREEN or BLOCKED? | §10/§12 — GREEN after the final reverse-coupling closure: composition/lifetime/settings, Client command execution, tool presentation, image ownership, rewind history, permission/access semantics, local-shell locality, Host-local legacy migration, and explicit unsupported classes |
 | 31 | What are the final M3-1..M3-6 PR boundaries? | §11 |
 | 32 | Which stage first produces a complete experimental wire TUI? | M3-4, including the command runtime (not only transcript/submission) |
 | 33 | Which stage handles writer-held UI recovery? | M3-5 |
 | 34 | Which stage closes reconnect/HMR/fatal cleanup? | M3-6 (generation semantics frozen in M3-0 §9; observation in M3-1) |
-
