@@ -72,6 +72,7 @@ function harness() {
   const calls = { forks: 0, opens: [] as string[], creates: 0, fromHandle: 0 }
   const live = new Map<string, { binding: FakeBinding; refs: number }>()
   const arms = new Map<string, OpenArm>()
+  let forkHook: (() => void) | undefined
   let nextChildId = 0
 
   const retain = (sessionId: string): ClientSessionOwner => {
@@ -107,12 +108,20 @@ function harness() {
   const services = createRemoteSessionOwnerServices({
     binding: (id: string) => live.get(id)?.binding,
   })
+  let failCompletionIdentity = false
   const countingOwners = {
     owners: {
       ...services.owners,
       fromHandle: (handle: SessionHandle): SessionOwnerRef | undefined => {
         calls.fromHandle += 1
         return services.owners.fromHandle(handle)
+      },
+      completionIdentity: (owner: SessionOwnerRef): string | undefined => {
+        if (failCompletionIdentity) {
+          failCompletionIdentity = false
+          throw new Error('completionIdentity exploded after publication')
+        }
+        return services.owners.completionIdentity(owner)
       },
     },
     retirement: services.retirement,
@@ -147,6 +156,7 @@ function harness() {
     },
     fork: async (request): Promise<ForkResult> => {
       calls.forks += 1
+      forkHook?.()
       nextChildId += 1
       // Publication only: catalogued identity, NO retain, NO binding.
       return { ownership: 'current', outcome: { kind: 'forked', handle: { session: { id: `child-${nextChildId}` } } } }
@@ -180,9 +190,15 @@ function harness() {
     resetOpening: () => {},
   }
 
+  let explodeNextGenerationReset = false
   const core = createSessionOwnershipCore({
     isSurfaceDisposed: (): boolean => disposed,
-    resetForGeneration: () => {},
+    resetForGeneration: (): void => {
+      if (explodeNextGenerationReset) {
+        explodeNextGenerationReset = false
+        throw new Error('generation reset exploded after the bump')
+      }
+    },
   })
   const controller = new AbortController()
   const runtime = bindSessionRuntime(core, {
@@ -240,8 +256,11 @@ function harness() {
     isLive: (id: string): boolean => live.has(id),
     countRefs: (id: string): number => live.get(id)?.refs ?? 0,
     disposeSurface: (): void => { disposed = true },
+    setForkHook: (hook: (() => void) | undefined): void => { forkHook = hook },
+    failNextGenerationReset: (): void => { explodeNextGenerationReset = true },
     failNextCommitBeforePublication,
     failNextCompletionOwnerAfterPublication,
+    failNextCompletionIdentity: (): void => { failCompletionIdentity = true },
   }
 }
 
@@ -356,6 +375,8 @@ test('H6: a fork stale before adoption never opens the child', async () => {
   assert.equal(h.calls.opens.length, 0, 'a stale navigation must not adopt or open the child')
   assert.equal(h.core.currentSessionId(), 'session-a', 'the source remains current')
   assert.equal(h.countRefs('session-a'), 1, 'the source reference stays held')
+  assert.equal(h.events.filter(entry => entry.startsWith('recalls:')).length, 0,
+    'this stale path never entered the transition gate, so no recall was deferred and none may settle')
 })
 
 test('H7: a fork stale AFTER the adoption open releases the NEW owner exactly once', async () => {
@@ -370,6 +391,9 @@ test('H7: a fork stale AFTER the adoption open releases the NEW owner exactly on
   assert.equal(h.countRefs('child-1'), 0, 'the retained NEW owner was released exactly once')
   assert.equal(h.core.currentSessionId(), 'session-a', 'the source remains current')
   assert.ok(!h.events.some(entry => entry.startsWith('init:child')), 'no child surface init ran')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0, 'nothing may commit the recalls')
+  assert.equal(h.events.filter(entry => entry === 'recalls:false').length, 1,
+    'the unified fork transaction-finally restores the deferred recall exactly once')
 })
 
 test('H8: a failed adoption open never redispatches the fork and keeps the current owner', async () => {  const h = harness()
@@ -381,6 +405,9 @@ test('H8: a failed adoption open never redispatches the fork and keeps the curre
   assert.equal(h.core.currentSessionId(), 'session-a', 'the current owner is unchanged')
   assert.equal(h.countRefs('child-1'), 0, 'no Client reference leaked')
   assert.equal(h.countRefs('session-a'), 1, 'the source reference stays held')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0, 'nothing may commit the recalls')
+  assert.equal(h.events.filter(entry => entry === 'recalls:false').length, 1,
+    'the unified fork transaction-finally restores the deferred recall exactly once')
   // The child is real: the outcome is truthful about the publication, never
   // "the fork did not happen".
   if (outcome.kind === 'error') {
@@ -665,8 +692,8 @@ test('a Direct pre-publication commit throw releases the child once and never re
     assert.match(outcome.text, /session-direct-child/, 'the truthful outcome names the published child')
     assert.match(outcome.text, /commit seam exploded/, 'the seam failure is preserved')
   }
-  assert.deepEqual(retirementCalls, ['recalls:false', 'retire:child:transition'],
-    'the queued recalls are restored, the child owner is released exactly once, and it is NEVER re-parked')
+  assert.deepEqual(retirementCalls, ['retire:child:transition', 'recalls:false'],
+    'the child owner is released exactly once and the recalls are restored by the unified transaction-finally; the child is NEVER re-parked')
   assert.equal(core.currentSessionId(), 'session-direct-source', 'the source remains current')
 })
 
@@ -866,4 +893,88 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
   assert.ok(retirementCalls.indexOf('recalls:false') > retirementCalls.indexOf('retire:new:transition'),
     'the recalls are restored only AFTER the awaited release (the second empty-list settle(false) is the pre-existing switch-wrapper no-op)')
   assert.ok(!retirementCalls.includes('recalls:true'), 'a pre-publication failure never commits the recalls')
+})
+
+test('a completionIdentity throw is PRE-publication: nothing commits and the recalls restore (ordinary)', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.failNextCompletionIdentity()
+  // The owner-metadata lookup runs BEFORE core.setCurrentOwner (the seamless
+  // commit point), so its throw is a pre-publication failure: the transition
+  // aborts, the acquired NEW owner is released, and the recalls restore.
+  const result = await h.runtime.switchSession('session-b')
+  assert.match(String(result), /completionIdentity exploded/,
+    'the original failure surfaces to the caller')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'OLD stays current')
+  assert.equal(h.countRefs('session-b'), 0, 'the acquired NEW owner is released exactly once')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0,
+    'nothing may commit the recalls')
+  assert.ok(h.events.includes('recalls:false'), 'the recalls are restored')
+})
+
+test('a completionIdentity throw is PRE-publication: nothing commits and the recalls restore (fork)', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.failNextCompletionIdentity()
+  // The owner-metadata lookup runs BEFORE core.setCurrentOwner, and the
+  // navigation identity no longer contains the surface generation, so this
+  // post-bump pre-publication throw is NOT misclassified as supersession:
+  // the caller gets the truthful adoption failure naming the published child.
+  const outcome = await h.runtime.forkSession('session-a')
+  if (outcome.kind === 'error') {
+    assert.match(outcome.text, /child-1/, 'the truthful outcome names the published child')
+    assert.match(outcome.text, /completionIdentity exploded/, 'the seam failure is preserved')
+  } else {
+    assert.fail('a pre-publication fork failure must not report adoption success')
+  }
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the source stays current')
+  assert.equal(h.countRefs('child-1'), 0, 'the retained child owner is released exactly once')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0, 'nothing may commit the recalls')
+  assert.equal(h.events.filter(entry => entry === 'recalls:false').length, 1,
+    'the unified fork transaction-finally restores the recalls exactly once')
+})
+
+test('a fork refused inside adoptFork (surface disposed during dispatch) restores the deferred recall', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  // The surface dies while the Host fork dispatch is in flight: forkSession's
+  // own fence does not check disposal, so adoptFork ENTERS the gate (a
+  // finishing writer may defer a recall against it) and refuses at its
+  // internal fence. The unified transaction-finally must restore the recall.
+  h.setForkHook(() => { h.disposeSurface() })
+  const outcome = await h.runtime.forkSession('session-a')
+  assert.equal(outcome.kind, 'success')
+  assert.equal(h.calls.opens.length, 0, 'a disposed surface must not adopt or open the child')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the source remains current')
+  assert.equal(h.countRefs('session-a'), 1, 'the source reference stays held')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0, 'nothing may commit the recalls')
+  assert.equal(h.events.filter(entry => entry === 'recalls:false').length, 1,
+    'the gate-held refusal restores the deferred recall exactly once through the unified finally')
+})
+
+test('a post-bump generation-reset throw is a truthful failure, never supersession silence', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.failNextGenerationReset()
+  // runForkCommit bumps the generation and THEN resets the presentation; the
+  // reset throws BEFORE the owner publication. The navigation identity
+  // (session id + navigation epoch) is untouched by the bump, so this local
+  // commit-seam failure must NOT be misclassified as user supersession: the
+  // caller gets the truthful adoption failure, the source stays current, the
+  // acquired child owner is released exactly once, and the recalls restore.
+  const outcome = await h.runtime.forkSession('session-a')
+  if (outcome.kind === 'error') {
+    assert.match(outcome.text, /child-1/, 'the truthful outcome names the published child')
+    assert.match(outcome.text, /generation reset exploded/, 'the seam failure is preserved')
+  } else {
+    assert.fail('a post-bump pre-publication commit failure must surface, not go silent')
+  }
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the source stays current')
+  assert.equal(h.countRefs('child-1'), 0, 'the retained child owner is released exactly once')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0, 'nothing may commit the recalls')
+  assert.equal(h.events.filter(entry => entry === 'recalls:false').length, 1,
+    'the unified fork transaction-finally restores the deferred recall exactly once')
+  // The generation stays bumped (no rollback): a same-owner surface with a
+  // new presentation generation is a valid state.
+  assert.ok(h.core.generation() >= 1, 'the generation bump is not rolled back')
 })

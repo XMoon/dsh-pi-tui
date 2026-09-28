@@ -44,7 +44,7 @@ import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import type { SubagentPort } from '../../runtime/subagent-port.ts'
-import type { RewindLiveIdentity } from '../../session-fork.ts'
+import type { RewindNavigationIdentity } from '../../session-fork.ts'
 import { mergeDraft, steerAll, type SteerAgentLike } from '../../steer.ts'
 import {
   isEmptyAcceleratedViewerSubmit,
@@ -183,7 +183,7 @@ export interface ApplicationEventsDeps {
       sourceSessionId: string,
       atSeq: number,
       onAdopted: () => void,
-      pickerIdentity: RewindLiveIdentity,
+      pickerIdentity: RewindNavigationIdentity,
     ): Promise<SessionForkOutcome>
   }
   /** The subagent viewer's Host delivery ports. */
@@ -225,9 +225,8 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // Capture the picker-open identity, not only the Session id. A switch away
     // and back to the same id must still supersede the old candidate.
     const sourceId = source.session.id
-    const pickerIdentity: RewindLiveIdentity = {
+    const pickerIdentity: RewindNavigationIdentity = {
       sessionId: sourceId,
-      generation: deps.lifecycle.generation(),
       navigationEpoch: deps.lifecycle.navigationEpoch(),
     }
     app.openPicker(
