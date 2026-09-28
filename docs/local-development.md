@@ -183,24 +183,37 @@ allowing `next` to continue forward development.
 The branch flow is:
 
 ```text
-next fixed snapshot
-  |
-  +-- promote/next-to-main-<dsh-release>
-          |
-          +-- reserve the intended stable release identity
-          +-- qualify the published DSH release
-          +-- fix qualification-exposed compatibility issues only
-          +-- finalize the release metadata
-          |
-          +------------------------------> main
-                                             |
-                                             +-- verify the merged candidate
-                                             |
-                                             +-- stable tag / publication
-                                             |
-                                             +------ merge released main ------> next
-                                                                                  |
-                                                                                  +-- continue with future DSH
+next development
+        |
+        | decide the intended release scope
+        v
+next fixed snapshot / promotion branch
+        |
+        v
+A. reserve the release identity
+        |
+        v
+B. qualify the published DSH baseline
+        |
+        v
+C. release-scoped capability development
+        |
+        v
+D. RC freeze
+        |
+        v
+E. final release qualification
+        |
+        v
+F. finalize the release metadata
+        |
+        +----------------------------->  main
+                                         |
+                                         +-- verify the merged candidate
+                                         |
+                                         +-- stable tag / publication
+                                         |
+                                         +------ merge released main ------> next
 ```
 
 Create the promotion branch from the exact `next` commit being promoted:
@@ -211,32 +224,72 @@ git pull --ff-only
 git switch -c promote/next-to-main-<dsh-release>
 ```
 
-The promotion branch is a release candidate, not another forward-development
+The promotion branch is a release line, not another forward-development
 branch. Because the TUI package version is materially coupled to the
 compatibility matrix (`current.since`, the current row's `tui`), startup
 guidance, release-note pairing and the packed candidate's identity, a
-promotion MAY update the package version — together with every
-version-coupled field, atomically — BEFORE qualification, so the
-qualification gates validate the exact artifact intended for publication. An
-untagged version on the branch is a RESERVED candidate identity, not
-evidence the release exists; the identity is consumed only when the stable
-tag is created (see [docs/releasing.md](releasing.md)). The branch's allowed
-scope is exactly:
+promotion MAY reserve the package version — together with every
+version-coupled field, atomically — very early, so the eventual gates
+validate the exact artifact intended for publication. An untagged version
+on the branch is a RESERVED candidate identity, not evidence the release
+exists; the identity is consumed only when the stable tag is created (see
+[docs/releasing.md](releasing.md)).
+
+**Release identity reservation is not the feature-freeze boundary.** The
+promotion branch may continue release-scoped product development after
+baseline qualification. The feature-freeze boundary is the explicit RC
+freeze before final release qualification. The branch's allowed scope is:
 
 - reserve the release identity (version + matrix `current.since` + current
   row `tui` + DSH target/family metadata, all in one atomic change);
-- move the validated DSH target from the development/prerelease baseline to
-  the published DSH release;
-- update compatibility metadata and current installation guidance;
-- fix only compatibility failures exposed by that release;
+- qualify the target published DSH baseline first: existing TUI behavior,
+  upstream contract changes, installation, Source Mode, Direct/Remote
+  seams, persistence/native primitives, and the old peer floor;
+- perform the compatibility migration and cleanup that baseline requires
+  (retiring local workarounds in favor of new official capabilities
+  included);
+- implement release-scoped product capabilities — especially capabilities
+  enabled by the newly qualified DSH baseline — with their feature-specific
+  tests;
+- fix regressions and blockers discovered during release development;
+- enter RC freeze once the planned scope is complete, then run the FINAL
+  full qualification against the exact candidate intended for publication
+  (baseline evidence alone is not release authority once feature work has
+  landed);
 - finalize release metadata (bilingual changelogs, release-note guidance,
-  release-specific documentation) after the gates are green — preferably in
-  a dedicated final commit;
-- run the normal build/test gates and the npm DSH compatibility lane.
+  release-specific documentation) — preferably in a dedicated final commit.
 
-It remains prohibited to add unrelated product features, adaptations for
-later unpublished DSH commits, or post-release refactors on the promotion
-branch.
+Work NOT belonging to the declared scope of the reserved release stays
+prohibited on the branch: unrelated opportunistic features, work intended
+for the next release, adaptations for future unpublished DSH commits, and
+unrelated cleanup or architecture refactors.
+
+### RC freeze
+
+The freeze is declared only after baseline qualification AND the planned
+release-scoped capability work are complete. After RC freeze, normal
+product feature development stops; the branch accepts only release
+blockers, regressions, compatibility/correctness fixes, packaging and
+test/gate fixes, documentation corrections, and release metadata. If a
+significant new capability must be added after freeze, explicitly reopen
+the release scope and invalidate/restart the affected final-qualification
+evidence for the new state.
+
+### New-DSH-capability peer-floor decisions
+
+When a release feature depends on a newer DSH API, decide the peer floor
+explicitly and on evidence:
+
+- **Optional capability** — the TUI operates correctly on the old floor and
+  the new feature is an addition: the floor may stay, but the
+  implementation must use a real capability/version boundary and must not
+  unconditionally import or use an API absent from the old floor; tests
+  must prove BOTH states (old floor without the capability, new target
+  with it).
+- **Mandatory release contract** — the release cannot operate correctly
+  without the newer API: raise the peer floor with the failing seam/call
+  site as evidence. Do not keep an old floor merely for compatibility
+  optics.
 
 Merge the promotion branch into `main` with a normal merge commit. Do not
 squash the promotion. Preserving the ancestry tells Git that the promoted

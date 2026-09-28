@@ -30,20 +30,44 @@ stable tag vX.Y.Z                  = identity committed to publication
 ```
 
 When a stable release is produced through a promotion branch, the intended
-package version MAY be reserved BEFORE qualification whenever that identity
-is consumed by compatibility metadata (`src/dsh-compat-matrix.json`
+package version MAY be reserved very early whenever that identity is
+consumed by compatibility metadata (`src/dsh-compat-matrix.json`
 `current.since` and the current row's `tui`), candidate packaging, startup
-guidance, or release gates — qualification then validates the exact artifact
-intended for publication. Version-coupled metadata must move atomically
-(one partial move, e.g. a bumped version with a stale `current.since`, is a
-release bug; the peer-window tooling test rejects it).
+guidance, or release gates — the eventual qualification then validates the
+exact artifact intended for publication. Version-coupled metadata must move
+atomically (one partial move, e.g. a bumped version with a stale
+`current.since`, is a release bug; the peer-window tooling test rejects it).
+
+Reservation establishes IDENTITY ONLY — it is not a feature freeze. A
+promotion follows the staged model:
+
+```text
+1. Reserve release identity
+2. Qualify the target DSH baseline
+3. Complete the planned release-scoped development
+4. Enter RC freeze
+5. Run the final qualification
+6. Finalize the release metadata
+7. Merge to main
+8. Verify main
+9. Tag / publish
+```
+
+Steps 2 and 5 are DIFFERENT evidence. Baseline qualification proves the new
+DSH release does not regress the existing TUI; the final qualification —
+run after all release-scoped capability work and after RC freeze — proves
+the new DSH release × existing functionality × new release functionality ×
+the final package identity. Baseline evidence is not release authority once
+feature work has landed (see [docs/local-development.md](local-development.md)
+for the RC-freeze and peer-floor decision rules).
 
 Moving the candidate from the promotion branch to `main` does not require a
-second version bump. Before the tag, ordinary qualification fixes keep the
-reserved version (`0.5.0` stays `0.5.0`); consume a NEW version number only
-when (a) the previous version was already tagged/published, or (b) the
-maintainers deliberately reclassify the release scope — and then the whole
-version-coupled identity is updated atomically in one change.
+second version bump. Before the tag, pre-freeze development and
+qualification fixes alike keep the reserved version (`0.5.0` stays `0.5.0`);
+consume a NEW version number only when (a) the previous version was already
+tagged/published, or (b) the maintainers deliberately reclassify the release
+scope — and then the whole version-coupled identity is updated atomically in
+one change.
 
 ## main / next synchronization
 
@@ -83,13 +107,14 @@ were a promised capability.
 Stable release metadata may be finalized in one of two places:
 
 - **Promotion path (preferred):** when a stable release is promoted from a
-  mature `next` snapshot, the promotion branch reserves the version before
-  qualification and finalizes the release metadata (changelogs, guidance,
-  release-specific docs) at the end of the branch, AFTER the compatibility
-  gates are green — preferably in a dedicated final commit. The merged
+  mature `next` snapshot, the promotion branch reserves the version early
+  and finalizes the release metadata (changelogs, guidance, release-specific
+  docs) at the end of the branch, AFTER RC freeze and the final
+  qualification — preferably in a dedicated final commit. The merged
   `main` candidate is then byte-for-byte the state intended to be tagged,
   except for changes strictly required by the merge itself. See
-  [docs/local-development.md](local-development.md) for the promotion flow.
+  [docs/local-development.md](local-development.md) for the staged
+  promotion flow.
 - **Direct path:** a release not using a promotion branch finalizes its
   metadata directly on `main`.
 
