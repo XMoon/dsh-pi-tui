@@ -2046,7 +2046,10 @@ the composition and presentation.
   The monotonic navigation epoch alone still solves A → B → A staleness
   (locked by the rewind picker regression), the generation bump is never
   rolled back, and every owner-metadata lookup that can throw runs before
-  `setCurrentOwner` so the commit point is seamless.
+  `setCurrentOwner` so the commit point is seamless. In the fork adoption the
+  `sessionId` lookup additionally lives INSIDE the pre-publication protected
+  region: even a throw from it takes the exactly-once release path for the
+  open-retained child owner.
   The four "without a Direct owner" throws are now
   transport-neutral owned-generation failures; `adoptFork` grew the Remote
   publication→open adoption: an ownerless fork handle is retained through

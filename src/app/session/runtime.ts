@@ -652,7 +652,6 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             return
           }
         }
-        const nextSessionId = deps.owners.sessionId(nextOwner)
         // The fork-adoption commit ORDER is fixed by `runForkCommit` (plan §4B):
         // the generation reset runs BEFORE the child is published, exactly like
         // the ordinary transition. A pre-publication seam failure must release
@@ -660,8 +659,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // post-publication seam failure is CONTAINED (the committed child
         // stands — the same contract as the ordinary transition). The recall
         // restore for EVERY pre-publication exit is owned by the single
-        // transaction-finally below, never by this catch.
+        // transaction-finally below, never by this catch. The sessionId
+        // lookup joins the protected region: a throw from it must also take
+        // the exactly-once release path for the open-retained child owner.
+        let nextSessionId!: string
         try {
+          nextSessionId = deps.owners.sessionId(nextOwner)
           runForkCommit({
             settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
             settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
