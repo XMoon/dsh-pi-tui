@@ -72,9 +72,10 @@ const PATTERNS = [
   { key: (m) => m[1], re: new RegExp(`ctx\\.get\\(['"](${SERVICE_ALT})['"]`) },
   // ctx.<service> property access (would throw without inject; still debt).
   { key: (m) => m[1], re: new RegExp(`ctx\\.(${SERVICE_ALT})\\b`) },
-  // Concrete Host object types.
-  { key: () => 'import:dsh-agent', re: /@deepseek-ai\/dsh-agent/ },
-  { key: () => 'import:dsh-session', re: /@deepseek-ai\/dsh-session/ },
+  // Concrete Host object types. The negative lookahead (?![\w-]) ensures
+  // exact package matching: `dsh-agent` does not match `dsh-agent-preset-registry`.
+  { key: () => 'import:dsh-agent', re: /@deepseek-ai\/dsh-agent(?![\w-])/ },
+  { key: () => 'import:dsh-session', re: /@deepseek-ai\/dsh-session(?![\w-])/ },
 ]
 
 /** True when the line is (heuristically) inside a comment. */
