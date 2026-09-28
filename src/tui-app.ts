@@ -14369,6 +14369,10 @@ export class TuiApp {
     // summary, phase/member rows) — a resize must rebuild it at the new
     // width (PR2 plan §16.8).
     if (message.kind === 'workflow') return true
+    // A TOOL_NOT_STARTED diagnostic truncates its title row at build time
+    // in BOTH the folded and expanded layouts — a resize must rebuild it
+    // or the old truncation survives the wider terminal.
+    if (message.kind === 'tool' && message.origin === 'tool-not-started') return true
     if (expanded) {
       // An expanded Edit bakes its diff; an expanded PTC root bakes its
       // sub-call rows (truncateToWidth at build time) — both must rebuild

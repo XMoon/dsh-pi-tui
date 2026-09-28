@@ -49,7 +49,7 @@ import {
   type CompactActionStatsAccumulator,
 } from './compact-process-preview.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
-import { isSurfacedInteractionTool, isSurfacedContext, classifyTranscriptMessage } from './transcript-semantics.ts'
+import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import { isNoticeContext } from './context-presentation.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import type { TranscriptContainerPath } from './transcript-disclosure.ts'
@@ -734,15 +734,17 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
   // It must therefore stay VISIBLE outside the collapsed Thought — like a
   // user/steer row or a settled interaction — instead of being hidden as
   // process and/or claimed by the Thought's Action slot.
-  // An ATTENTION row (turn-error / turn-interrupted / turn-max-tokens /
-  // tool-not-started recovery diagnostics) is likewise never ordinary
-  // process evidence to fold away: the shared semantic classification is
-  // the ONE authority (no second Focus-specific predicate), so the row
-  // stays visible as a standalone diagnostic while collapsed and returns
-  // to its raw chronology when the Thought opens.
+  // A TOOL_NOT_STARTED diagnostic is the ONE attention row without a
+  // turn-level presentation of its own: the other attention origins
+  // (turn-error / turn-interrupted / turn-max-tokens) are already
+  // presented by the Focus header status label and the collapsed Error
+  // slot, so hoisting their synthetic rows would only duplicate the same
+  // fact. The not-started recovery is invisible there — it must stay a
+  // standalone visible diagnostic while collapsed and return to its raw
+  // chronology when the Thought opens.
   return message.kind === 'user' || isSurfacedContext(message) || isSurfacedInteractionTool(message)
     || message.kind === 'command'
-    || classifyTranscriptMessage(message).class === 'attention'
+    || (message.kind === 'tool' && message.origin === 'tool-not-started')
 }
 
 /**

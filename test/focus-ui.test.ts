@@ -3838,3 +3838,110 @@ test('Focus keeps a TOOL_NOT_STARTED diagnostic standalone: no Action slot, no a
     `the expanded turn owns no Action slot:\n${expanded}`)
   app.stop()
 })
+
+// ── Collapsed-Focus controls: the OTHER attention origins keep their
+// turn-level presentation and are NOT hoisted standalone (P1 fix) ────────
+
+/** A turn closed with the given end reason, carrying one real tool call so
+ * the turn has ordinary work beside the terminal fact. */
+function closedReasonTurn(reason: Record<string, unknown>): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'do work' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'ls' }) }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason }, T0 + 4, 4),
+  ]
+}
+
+test('collapsed Focus keeps turn-error/interrupted/max-tokens inside the Thought (no standalone duplicates)', async () => {
+  // Each case: the Focus header keeps its turn-level status label, and the
+  // synthetic terminal row's text appears ONLY inside the Thought's own
+  // labeled slots — never as a standalone hoisted card duplicating the fact.
+  const cases: ReadonlyArray<{ name: string; reason: Record<string, unknown>; label: RegExp; synthetic: RegExp; allowedOn: RegExp }> = [
+    {
+      name: 'turn-error',
+      reason: { kind: 'error', error: { code: 'E', message: 'boom' } },
+      label: /Failed/,
+      synthetic: /E: boom/,
+      allowedOn: /^Error:/,
+    },
+    {
+      name: 'turn-interrupted',
+      reason: { kind: 'aborted' },
+      label: /Interrupted/,
+      synthetic: /cancelled by user/,
+      allowedOn: /^Error:/,
+    },
+    {
+      name: 'turn-max-tokens',
+      reason: { kind: 'max-tokens' },
+      label: /Max tokens/,
+      synthetic: /max tokens reached/,
+      allowedOn: /^Error:/,
+    },
+  ]
+  for (const testCase of cases) {
+    const { vt, app } = startApp()
+    const folder = new TranscriptFolder()
+    applyMixed(folder, closedReasonTurn(testCase.reason))
+    app.setFocusMode(true)
+    show(app, folder)
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(testCase.label.test(view), `${testCase.name}: the Focus header keeps its turn-level status label:\n${view}`)
+    const occurrences = view.split('\n').filter(line => testCase.synthetic.test(line))
+    assert.ok(occurrences.every(line => testCase.allowedOn.test(line)),
+      `${testCase.name}: the synthetic terminal fact stays inside the Thought's labeled slots, never a standalone duplicate:\n${view}`)
+    // The process allows ONE live TuiApp: dispose before the next case.
+    startedApps.delete(app)
+    if (!app.isDisposed()) app.dispose()
+  }
+})
+
+test('a TOOL_NOT_STARTED diagnostic title never keeps a stale truncation after a resize', async () => {
+  const vt = new VirtualTerminal(24, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, notStartedTurn())
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  const narrow = vt.getViewport().join('\n')
+  assert.ok(narrow.includes('Tool request not sta'), `the narrow terminal truncates the diagnostic title:\n${narrow}`)
+  assert.ok(!narrow.includes('· Bash'), `the narrow terminal cuts the tool identity:\n${narrow}`)
+
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  const wide = vt.getViewport().join('\n')
+  assert.ok(wide.includes('Tool request not started · Bash'),
+    `the wide terminal rebuilds the title without the stale truncation (collapsed):\n${wide}`)
+
+  // The expanded layout bakes the title row too.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  vt.resize(24, 24)
+  await vt.waitForRender()
+  const narrowExpanded = vt.getViewport().join('\n')
+  assert.ok(!narrowExpanded.includes('· Bash'), `the narrow EXPANDED terminal cuts the identity again:\n${narrowExpanded}`)
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  const wideExpanded = vt.getViewport().join('\n')
+  assert.ok(wideExpanded.includes('Tool request not started · Bash'),
+    `the wide EXPANDED terminal rebuilds the title (no stale truncation):\n${wideExpanded}`)
+  app.stop()
+})
