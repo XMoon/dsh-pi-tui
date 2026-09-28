@@ -122,10 +122,13 @@ test('S6: a cancelled preview leaves no ghost row and no fake pending Activity',
 
 test('S7: multiple ownerless previews fail open as one full Preparing row each', async () => {
   const { vt, app } = startApp()
+  // Deliberately UNORDERED input: the rendered rows must follow the
+  // streamingToolPreviewsForTurn() ordering (index, then step, then callId),
+  // never the raw arrival order.
   const previews = [
+    preview('p-c', { index: 2, name: 'read', summary: 'src/c.ts' }),
     preview('p-a', { index: 0, name: 'read', summary: 'src/a.ts' }),
     preview('p-b', { index: 1, name: 'bash', summary: 'pnpm test' }),
-    preview('p-c', { index: 2, name: 'read', summary: 'src/c.ts' }),
   ]
   app.setTranscript([{ kind: 'assistant', turn: 1, text: 'boundary' }], new Map(), undefined, previews)
   await vt.waitForRender()
@@ -136,13 +139,13 @@ test('S7: multiple ownerless previews fail open as one full Preparing row each',
   assert.equal(workHeaders(view).length, 0, `an ownerless pending run never mints an Activity header:\n${view}`)
   const rows = view.split('\n').filter(line => line.includes('Preparing'))
   assert.equal(rows.length, 3, `three previews render three full rows, never an aggregated card:\n${view}`)
-  assert.ok(rows[0]!.includes('src/a.ts'), `row order follows the preview index:\n${view}`)
-  assert.ok(rows[1]!.includes('pnpm test'), `row order follows the preview index:\n${view}`)
-  assert.ok(rows[2]!.includes('src/c.ts'), `row order follows the preview index:\n${view}`)
+  assert.ok(rows[0]!.includes('src/a.ts'), `row 0 is the index-0 preview despite arrival order:\n${view}`)
+  assert.ok(rows[1]!.includes('pnpm test'), `row 1 is the index-1 preview despite arrival order:\n${view}`)
+  assert.ok(rows[2]!.includes('src/c.ts'), `row 2 is the index-2 preview despite arrival order:\n${view}`)
   assert.ok(!rows.some(row => /\+\d/.test(row)), `no first-row +N aggregation summary:\n${view}`)
 
   // One settles while the others remain: only the still-live full rows stay.
-  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'boundary' }], new Map(), undefined, [previews[0]!])
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'boundary' }], new Map(), undefined, [previews[1]!])
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.equal(workHeaders(after).length, 0, `no ghost Activity header after a partial settle:\n${after}`)
