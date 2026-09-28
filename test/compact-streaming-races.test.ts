@@ -230,6 +230,50 @@ test('S10: preset and surface switches during Preparing keep one source of truth
   assert.equal(workHeaders(view).length, 1, `regular Compact keeps one Work span:\n${view}`)
 })
 
+test('S10b: preset and surface switches during an OWNERLESS pending run keep one source of truth', async () => {
+  const { vt, app } = startApp()
+  // A boundary closes the run, so the preview is an ownerless pending-run:
+  // across every preset/surface switch there is exactly ONE live Preparing
+  // evidence, never a second (pending) Activity header, never a stale
+  // Action slot, and no disclosure owner is ever minted (plan §5.1 S10).
+  const messages: TranscriptMessage[] = [
+    { kind: 'thinking', turn: 1, text: 'closed reasoning' },
+    { kind: 'assistant', turn: 1, text: 'boundary' },
+  ]
+  app.setTranscript(messages, new Map(), undefined, [preview('p-switch-ownerless', { summary: 'switch call' })])
+  await vt.waitForRender()
+  assert.equal(preparingRows(vt.getViewport().join('\n')).length, 1, 'precondition: the fail-open row is visible')
+
+  for (const preset of ['focus', 'full', 'compact'] as const) {
+    app.setDisplayPreset(preset)
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(preparingRows(view).length <= 1, `preset ${preset}: the call is never duplicated:\n${view}`)
+    assert.ok(workHeaders(view).length <= 1,
+      `preset ${preset}: at most the DURABLE closed Activity — a pending run never mints one:\n${view}`)
+    assert.ok(!/Action:\s+Preparing/.test(view), `preset ${preset}: no stale pending Action slot:\n${view}`)
+    assert.equal(app.expandedWorkOwnersForTest().size, 0, `preset ${preset}: no disclosure owner is minted`)
+  }
+  // (focus projects no Thought root for a turn without TurnActivity records,
+  // so its row count stays 0 there; compact/full show the one fail-open row.)
+  let view = vt.getViewport().join('\n')
+  assert.equal(preparingRows(view).length, 1, `returning to Compact reconstructs exactly one call:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `compact keeps exactly the durable closed Activity:\n${view}`)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(preparingRows(view).length, 1, `fullscreen keeps exactly one ordinary Preparing row:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `fullscreen mints no pending Activity:\n${view}`)
+  assert.ok(!/Action:\s+Preparing/.test(view), `fullscreen shows no stale pending Action slot:\n${view}`)
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(preparingRows(view).length, 1, `regular Compact reconstructs one call:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `regular Compact keeps the one durable Activity:\n${view}`)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'no disclosure owner was ever minted')
+})
+
 // --- expanded run insertion -----------------------------------------------
 
 test('an expanded trailing run renders the live call once and keeps raw member order', async () => {
