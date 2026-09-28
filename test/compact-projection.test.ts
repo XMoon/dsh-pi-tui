@@ -21,7 +21,7 @@ import {
 } from '../src/context-presentation.ts'
 import { contextPresentation, isTranscriptContextForm } from '../src/context.ts'
 import { projectCompact } from '../src/compact-projection.ts'
-import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent, CompactPendingWorkComponent } from '../src/compact-work.ts'
+import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/compact-work.ts'
 import { compactActionPresentation } from '../src/compact-process-preview.ts'
 import { contextClusterSummaryParts, formatContextClusterHeader, ContextClusterComponent } from '../src/context-cluster.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
@@ -461,6 +461,8 @@ test('container chrome shares the transcript left edge; internal card structure 
   const span = projectCompact([thinking(0, 'reasoning'), tool(0)], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
   // Collapsed Activity: header + Think + Action rows all start at column 0.
+  // (An ownerless pending run renders no Activity chrome at all — it fails
+  // open as ordinary Preparing rows — so it has no geometry to assert here.)
   for (const row of new CompactWorkComponent({
     span: span.span,
     expanded: false,
@@ -468,10 +470,6 @@ test('container chrome shares the transcript left edge; internal card structure 
     iconStyle: 'symbols',
   }).render(80)) {
     assert.ok(!row.startsWith(' '), `outer chrome row must not indent:\n${row}`)
-  }
-  // The pending Activity card: same flat geometry.
-  for (const row of new CompactPendingWorkComponent({ preparingSummary: 'Preparing Bash…', iconStyle: 'symbols' }).render(80)) {
-    assert.ok(!row.startsWith(' '), `pending Activity row must not indent:\n${row}`)
   }
   // The ambient Context cluster: header + summary share the same edge.
   const clusterRows = [contextRow(0, 'instructions', 'a'), contextRow(0, 'catalog', 'b')]

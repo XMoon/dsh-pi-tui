@@ -202,6 +202,15 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   full-reveals them, fullscreen keeps the per-card click (`(click to expand)`),
   and a hidden member revealed by search is promoted to a manual Work owner when
   the search closes.
+- **Live Preparing and the Activity disclosure.** Live Preparing enters
+  Activity presentation only while a still-open canonical trailing
+  `TranscriptWorkSpan` exists (the collapsed `Action:` slot, or an inserted
+  preview row after the durable members). A Preparing call belonging to a NEW
+  run with no durable Process member yet has NO Work disclosure owner: it fails
+  open as ordinary live Preparing rows — no `▸ Activity` chrome, no pseudo
+  `Action:` summary, no ephemeral owner state. The Activity disclosure appears
+  only after the first durable Process member lands and the canonical WorkSpan
+  forms.
 - The capability is applied where the renderer BUILDS the disclosure, so no
   hidden-row count, marker or search geometry is ever produced for a fold that
   cannot be operated.
@@ -521,17 +530,20 @@ under bad input, long sessions and rapid live updates:
   parser's distinct-label dedup uses a Set for the same reason.
 - **Streaming / Preparing.** One live Preparing call belongs to the turn's
   still-open trailing Process run; once a Conversation / Context / Attention /
-  turn boundary closes it, the call is an ephemeral pending Work that never
-  moves backward, never duplicates a durable Tool, leaves no ghost card on
-  cancel, and leaves no stale owner across a session, preset or surface switch.
+  turn boundary closes it, the call belongs to an ephemeral pending Process
+  run that never moves backward, never duplicates a durable Tool, leaves no
+  ghost row on cancel, and leaves no stale owner across a session, preset or
+  surface switch. A pending Process run is presentation-fail-open until a
+  durable WorkSpan exists: it renders as ordinary Preparing rows and never
+  mints Activity disclosure chrome.
 - **Search / disclosure.** A flat/fail-open container never mints an inoperable
   owner; a surface switch during search re-checks the capability; a topology
   mutation re-resolves the current container path instead of a stale identity;
   and a hidden mid-turn notice is reachable through the temporary reveal above.
-- **Width / grapheme.** Every F4 row family (Work, pending Work, Context cluster,
-  notice, relay, recall) obeys the framebuffer width contract at the current
-  width for ASCII, CJK, emoji, combining marks, ZWJ emoji and ANSI-colored text;
-  the notice summary keeps its natural wrap.
+- **Width / grapheme.** Every F4 row family (Work, pending Preparing rows,
+  Context cluster, notice, relay, recall) obeys the framebuffer width contract
+  at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and
+  ANSI-colored text; the notice summary keeps its natural wrap.
 - **Windowing.** A window clusters and folds only the rows it contains: no
   off-window member is invented, the window-summary marker ends a run, and a
   page/window change is a new disclosure epoch that prunes every Compact

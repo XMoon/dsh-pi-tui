@@ -271,13 +271,17 @@ test('Focus expanded places Preparing rows after the process tail and before the
   const view = vt.getViewport()
   const joined = view.join('\n')
   const processRow = findRow(view, 'Read src/transcript.ts')
-  const preparingRow = findRow(view, 'Preparing Edit +1')
+  const preparingRow = findRow(view, 'Preparing Edit')
   const finalRow = findRow(view, 'The transcript folds events incrementally.')
   assert.ok(hasFocusHeader(joined, true), `expanded Thought missing:\n${joined}`)
   assert.ok(processRow >= 0 && preparingRow >= 0 && finalRow >= 0, `expanded ordering rows missing:\n${joined}`)
   assert.ok(processRow < preparingRow && preparingRow < finalRow,
-    `the pending Work card must sit at the process tail before the final:\n${joined}`)
-  assert.equal((joined.match(/Preparing Edit \+1/g) ?? []).length, 1, `the pending Work summary must render once:\n${joined}`)
+    `the fail-open Preparing rows must sit at the process tail before the final:\n${joined}`)
+  // The ownerless pending run renders one FULL row per live preview (edit at
+  // index 0, bash at index 1) — never an aggregated `+N` Activity card.
+  assert.equal((joined.match(/Preparing Edit/g) ?? []).length, 1, `the edit preview renders once:\n${joined}`)
+  assert.equal((joined.match(/Preparing Bash/g) ?? []).length, 1, `the bash preview renders once:\n${joined}`)
+  assert.ok(!joined.includes('+1'), `no aggregated pending Activity summary:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })

@@ -726,7 +726,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   delegation evidence and the Action.
 - **One transcript left edge for container chrome (2026-09-22 v2 addendum
   §28; body-indent supplement).**
-  The Focus root, Activity, the pending Activity card and the ambient Context
+  The Focus root, Activity and the ambient Context
   cluster render their header/body chrome at the transcript content column
   with NO decorative two-cell outer indent, so a collapsed container header
   and its expanded canonical member rows align on one boundary (no
@@ -817,8 +817,9 @@ F4 behavior and documents the guarantees in
   deterministic race matrices. The live Preparing ownership consumes the SAME
   Work-member boundary authority as the projection, so a settled
   surfaced-interaction card (question / Plan review) closes the trailing run and
-  a following live call starts a new pending Work instead of jumping back before
-  it (Compact collapsed/expanded and expanded Focus alike). A page/window change
+  a following live call starts a new ownerless pending run — rendered fail-open
+  as ordinary Preparing rows, never jumping back before the boundary
+  (Compact collapsed/expanded and expanded Focus alike). A page/window change
   prunes the Compact Work/cluster owners the new window no longer projects (so an
   A→B→A round-trip cannot resurrect a dropped expansion), and a window never
   invents an off-window member.

@@ -173,7 +173,7 @@ import { compactActionPresentation, compactActionSignature, compactActionStatsSi
 import { projectCompact } from './compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './transcript-disclosure.ts'
-import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan, type CompactWorkSummary } from './compact-work.ts'
+import { CompactWorkComponent, summarizeWorkSpan, type CompactWorkSummary } from './compact-work.ts'
 import { ContextClusterComponent } from './context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './context-row.ts'
@@ -3109,11 +3109,14 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
   kind: 'streaming-tool-previews'
   previews: readonly StreamingToolPreview[]
   turn?: number
-  /** Compact only: render the live call as an EPHEMERAL pending Work card
-   * (it belongs to a new Process run, not to any durable Work span). */
+  /** Compact / expanded Focus only: this live preview belongs to a NEW
+   * Process run with no durable TranscriptWorkSpan yet. It is pure
+   * placement/semantic classification — rendered fail-open as ordinary
+   * Preparing rows until the first durable Process member creates a
+   * WorkSpan, never as Activity disclosure chrome. */
   pendingWork?: true
   /** The semantic container ancestry of a live preview inserted into an open
-   * Work/Thought tail (never the globally appended pending card). */
+   * Work/Thought tail (never the globally appended pending-run block). */
   containerPath?: TranscriptContainerPath
 } | {
   kind: 'pending-user'
@@ -9264,20 +9267,27 @@ export class TuiApp {
    * expanded (member insertion) representations can never drift onto different
    * chronology snapshots.
    *
-   * In Compact a `pending-run` call is appended as an ephemeral pending Work at
-   * the transcript tail. In expanded Focus it is placed in the owning turn's
-   * process tail, before the held-back final, and turns whose Thought is
-   * collapsed are skipped entirely (their header summarises the live call).
+   * In Compact a `pending-run` call is appended at the transcript tail; in
+   * expanded Focus it is placed in the owning turn's process tail, before the
+   * held-back final, and turns whose Thought is collapsed are skipped entirely
+   * (their header summarises the live call). A pending-run has no canonical
+   * Work owner yet, so both placements render fail-open as ordinary live
+   * Preparing rows; only a `trailing-run` call enters real Activity
+   * presentation (the collapsed Tool slot, or an inserted preview row after
+   * the durable members).
    */
   private applyWorkPreparing(
     blocks: TranscriptRenderBlock[],
     focusExpandedTurns?: ReadonlySet<number>,
   ): void {
     if (this.streamingToolPreviews.length === 0) return
-    // On a surface with no operable disclosure action the Work container is
-    // flat (materializeFocusWork / projectCompact(workHeader:false)), so a live
-    // call must render as an ordinary preview — never ephemeral `▸ Work`
-    // chrome that the durable handoff does not reproduce (plan §14/§23).
+    // `pendingWork` is pure placement/semantic classification metadata: it
+    // records that the preview belongs to a NEW Process run with no durable
+    // WorkSpan. It never renders Activity chrome — a presentation without
+    // an operable disclosure action classifies the same ownership, and an
+    // ownerless pending-run fails open as ordinary Preparing rows on every
+    // surface until the first durable Process member creates a WorkSpan
+    // (plan §14/§23).
     const workChrome = this.transcriptDisclosureActionAvailable()
     const spans: TranscriptWorkSpan[] = []
     for (const block of blocks) {
@@ -9301,8 +9311,9 @@ export class TuiApp {
               kind: 'streaming-tool-previews',
               turn,
               previews,
-              // A new ephemeral pending Work, exactly like Compact's tail
-              // card, so the durable Work card replaces it at the same height.
+              // The same pending-run classification as Compact's tail block;
+              // rendered fail-open as ordinary Preparing rows until the first
+              // durable Process member creates a WorkSpan.
               ...(workChrome ? { pendingWork: true as const } : {}),
               containerPath: [{ kind: 'focus-root', turn }],
             })
@@ -9612,19 +9623,10 @@ export class TuiApp {
     }
     if (block.kind === 'context-cluster') return this.contextClusterComponentFor(block.cluster, block.expanded)
     if (block.kind === 'streaming-tool-previews') {
-      if (block.pendingWork === true) {
-        // The pending Activity card's elapsed time starts at the live
-        // call's earliest authoritative start (post-F6 plan §12.14).
-        const startedAt = block.previews
-          .map(preview => preview.startedAt)
-          .filter((at): at is number => at !== undefined)
-          .reduce((earliest, at) => Math.min(earliest, at), Number.POSITIVE_INFINITY)
-        return new CompactPendingWorkComponent({
-          preparingSummary: compactPreparingSummary(block.previews) ?? '',
-          iconStyle: this.iconStyle,
-          ...(Number.isFinite(startedAt) ? { startedAt } : {}),
-        })
-      }
+      // Ownerless live Preparing evidence fails open: with no canonical
+      // TranscriptWorkSpan there is no disclosure owner, so every preview —
+      // pending-run or not — renders as an ordinary standalone row through
+      // the ONE streaming preview renderer.
       return this.streamingToolPreviewComponent(block.previews, width)
     }
     if (block.kind === 'pending-user') return this.pendingUserComponentFor(block.row)

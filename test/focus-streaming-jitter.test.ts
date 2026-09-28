@@ -126,9 +126,9 @@ test('expanded live Markdown preserves wheel intent across historical growth and
     show(app, folder)
     await vt.waitForRender()
     assert.deepEqual(frame(app), [22, 21, 0, false])
-    // Growth in the LIVE Markdown body: after F6 a run of live tool previews
-    // collapses into one pending Work card, so the viewport-growth probe must
-    // grow the live text itself.
+    // Growth in the LIVE Markdown body: a run of live tool previews renders
+    // as coarse fail-open rows (one physical row each), so the fine-grained
+    // viewport-growth probe must grow the live text itself.
     for (let i = 0; i < 4; i += 1) folder.applyLiveInput(liveText('\n'))
     folder.applyLiveInput(liveText(`\n\n${'W'.repeat(88)}`))
     show(app, folder)
@@ -240,8 +240,11 @@ async function runPreparingLifecycle(expanded: boolean): Promise<{
 test('Preparing create/progress/clear holds the live high-water and settlement releases it', async () => {
   const collapsed = await runPreparingLifecycle(false)
   const expanded = await runPreparingLifecycle(true)
+  // Collapsed Focus: the Thought header's summary slot owns the call (+1).
+  // Expanded Focus: the ownerless pending run fails open as ONE ordinary
+  // preview row (+1 row +1 inter-block spacer); cleared keeps the floor.
   assert.deepEqual(collapsed, { initial: 6, created: 7, progressed: 7, cleared: 7, settled: 6 })
-  assert.deepEqual(expanded, { initial: 6, created: 9, progressed: 9, cleared: 9, settled: 6 })
+  assert.deepEqual(expanded, { initial: 6, created: 8, progressed: 8, cleared: 8, settled: 6 })
 })
 
 test('formal Preparing handoff does not add a second blank row', async () => {
@@ -305,7 +308,11 @@ test('formal Preparing handoff does not add a second blank row', async () => {
       assert.equal(height(app), created)
 
       // The production handoff clears the migrated preview before the durable
-      // tool/call repaint; the formal card must replace it at the same height.
+      // tool/call repaint. Collapsed Focus keeps the Thought-header summary
+      // slot at one row. Expanded Focus replaces the ONE fail-open preview
+      // row with the real Activity header + Action row — a genuine semantic
+      // transition of exactly ONE extra CONTENT row, never a duplicated
+      // blank row.
       removeStreamingToolPreview(previews, 'formal-edit', 1, 1)
       folder.apply([eventAt('tool/call', {
         turn: 1,
@@ -316,7 +323,7 @@ test('formal Preparing handoff does not add a second blank row', async () => {
       }, 29)])
       show(app, folder, streamingToolPreviewSnapshot(previews))
       await vt.waitForRender()
-      assert.equal(height(app), created)
+      assert.equal(height(app), created + (expanded ? 1 : 0))
     } finally {
       app.dispose()
       startedApps.delete(app)
