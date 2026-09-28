@@ -16,6 +16,8 @@ Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status s
 Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer ownership convergence, NO behavior change — A5a + A5b; see the Pre-M3 TS Architecture Convergence status section)
 M3-0 DONE          (entry contract frozen — the M3 architecture contract is docs/m3-entry-contract.md)
 M3-1 DONE          (experimental in-process wire composition spine: reusable `RemoteHostRuntime` + `RemoteClientRuntime` + `backend-loader.ts` dynamic boundary, zero product cutover — see the M3-1 status section)
+M3-2 DONE          (Remote Session owner spine: exact-`SessionBinding` `SessionOwnerAccess`/`SessionOwnerRetirement` provider, transport-neutral app/session runtime, Remote fork publication→open adoption — zero product cutover, see the M3-2 status section)
+M3-3A NEXT         (Remote backend closure: session / runtime / catalog / host-file)
 M3 product composition NOT STARTED (Direct production/default behavior unchanged; Remote composition NOT active)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -1976,6 +1978,96 @@ WebSocket, fake `location`, or browser `Worker` is reachable on the
 in-process path (proven by the trapped-globals L5 case). The frozen wording
 in `docs/m3-entry-contract.md` §2.4.3/§4.2 has been corrected in place; no
 ownership, stage boundary, or seam policy changed.
+
+## M3-2 status (COMPLETE, zero product cutover)
+
+M3-2 landed the Remote **Session owner spine**: `app/session`'s ownership
+orchestration is now transport-neutral, and a real Remote owner provider
+exists — but nothing about which backend the user runs changed. Direct
+remains the production default; `BackendKind` stays `'direct'`; no production
+`createRemoteSessionOwnerServices` / `createExperimentalRemoteRuntime` call
+site exists; `cordis.patch.yml`, `src/startup.ts` and the public entry exports
+are unchanged. M3-3A owns the Remote semantic backend closure; M3-3B/M3-4 own
+the composition and presentation.
+
+### Implementation owners (actual files)
+
+- `src/app/remote/session-owners.ts` — `createRemoteSessionOwnerServices`:
+  the exact-`SessionBinding` provider of `SessionOwnerAccess` +
+  `SessionOwnerRetirement` over one shared registry state (`WeakMap` keyed by
+  the exact binding object → owner; owner → record with the ONE authoritative
+  wrapper, strongly held so `retire` can `release()`; a released-wrapper
+  `WeakSet` fence; a strong parked collection per session id). Wrapper
+  replacement commits the new authority BEFORE releasing the replaced TUI
+  reference exactly once; a same-id new binding mints a NEW owner;
+  `completionIdentity` is deliberately `undefined` (never the sessionId);
+  `whenIdleOrAbort` borrows the live binding through the official
+  `ISessions.binding(id)` face, fences it by `Object.is` against the owner's
+  binding identity, and observes `SessionSnapshot.running` with a
+  subscribe-then-recheck lost-wakeup fence — abort stops the local wait only,
+  never the Host session; `flush`/`preCancel` are deliberate no-ops (Host owns
+  durability; the real Remote cancel is `SessionWriter.cancel`); `retire`
+  detaches the wrapper state before `release()` (reentrancy) and reports a
+  contained `release` phase failure, with `durabilityFailure` always
+  `undefined`.
+- `src/app/session/runtime.ts` — the ordinary transition maps the NEW owner
+  ONCE in the synchronous commit section (a transaction-local
+  `committedOwner`; the post-commit phases reuse it instead of re-wrapping the
+  Remote reference wrapper); a pre-publication commit seam failure releases
+  the acquired NEW owner exactly once through the owned-task model and OLD
+  stays current; the four "without a Direct owner" throws are now
+  transport-neutral owned-generation failures; `adoptFork` grew the Remote
+  publication→open adoption: an ownerless fork handle is retained through
+  `lifecycle.open(childId)` inside the existing gate/barrier (one Host fork
+  dispatch + at most one adoption open), the fence is re-checked after the
+  retain, and a stale/disposed post-open adoption releases the NEW owner
+  exactly once while OLD stays current (a pre-publication commit seam failure
+  takes the same exactly-once release, and the fork-adoption ledger keeps the
+  error path from re-parking the already-released owner — Direct or Remote);
+  any post-publication adoption failure
+  settles as a truthful "child published but adopting it failed" outcome
+  (never a redispatch, never a fake-absent child); a Direct fork handle still
+  adopts directly with zero extra opens.
+- `src/app/bootstrap.ts` — the two Direct-attachment hard throws
+  (`initLiveSession` / `refreshLiveCatalog`) are M3-2 staging no-ops for an
+  owner without a Direct attachment; Direct behavior is byte-for-byte
+  unchanged and the real Remote presentation/catalog providers arrive with
+  the M3-4 Remote composition.
+- `src/runtime/session-lifecycle-port.ts` — the stale "Direct runner does not
+  consume it yet" note on `clientOwnerOf()` is replaced by the real ownership
+  boundary: the Remote owner provider consumes it as its sole mapping source
+  and `ClientSessionOwner` never leaves the Remote ownership implementation
+  boundary.
+
+### Evidence
+
+- L6 `test/remote-session-owners.test.ts` — R1–R12: exact-binding identity,
+  same-binding wrapper transfer with exactly-once release, released-wrapper
+  resurrection refusal, same-id new-binding owner change, unknown-owner fast
+  fail, idle fast path, running→idle settle with single unsubscribe, abort
+  local-wait-only with listener cleanup (counting signal), exactly-once
+  retire across modes, no-op flush/preCancel, parked retained-owner drain,
+  contained release failure.
+- L6 `test/session-runtime-remote-owner-handoff.test.ts` — H1–H12 over the
+  real `bindSessionRuntime` + REAL Remote owner services + a Remote-shaped
+  fake lifecycle: ordinary-switch ordering (retain NEW → commit NEW → release
+  OLD → post-handoff init; owner mapped exactly once), pre-commit
+  supersession, same-id rollover, rapid-switch A→B(superseded)→C, Remote fork
+  successful adoption (fork ×1, open ×1, source release ×1), stale-before-open
+  (open ×0), stale-after-open (NEW release ×1), failed open (no redispatch,
+  truthful outcome, no leak), same-binding reconnect identity, full-scope
+  re-materialize identity, exit-before-commit and fatal-after-commit release
+  proof, pre-publication commit-throw exactly-once release (ordinary + fork,
+  Remote publication-only AND the Direct owned-handle no-re-park lock),
+  plus the Direct-shaped no-extra-open adoption lock.
+- Direct regression — `test/runner-session-retirement.test.ts` (retirement
+  order unchanged), `test/runner-session-navigation.test.ts` (a production
+  Direct `/fork` never performs the extra adoption open; resume list stays
+  exactly the startup entry), `test/a2-ownership-cutover.test.ts` (the four
+  commit shapes still publish only through the injected owner provider into
+  `SessionOwnershipCore`; the production bootstrap still injects
+  `directRuntime.owners`).
+
 
 ## Known coverage follow-ups
 

@@ -112,6 +112,18 @@ export type SessionForkOutcome =
   | { readonly kind: 'success'; readonly text?: string }
   | { readonly kind: 'error'; readonly text: string }
 
+/**
+ * The fork-adoption ownership ledger (plan §8.5): tracks what adoption
+ * acquired, released or committed, so the fork error path can distinguish an
+ * owner that still awaits parking from one the adoption cleanup already
+ * released exactly once (re-parking the latter would resurrect a disposed
+ * Direct handle or double-retire on the exit drain).
+ */
+interface ForkAdoptionLedger {
+  /** The adoption cleanup already released the acquired child owner. */
+  released: boolean
+}
+
 /** The narrow entries the runner consumes. */
 export interface SessionRuntime {
   /**
@@ -205,6 +217,11 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // The OLD owner is captured at ADMISSION: the post-commit retirement must
     // retire exactly the owner this transition replaced.
     const oldOwner = core.owner()
+    // The NEW owner this transaction commits, mapped ONCE in the synchronous
+    // commit section: the post-commit phases reuse it instead of re-wrapping
+    // the handle (each `fromHandle` of a Remote reference wrapper is an
+    // ownership transfer, never a free re-read).
+    let committedOwner: SessionOwnerRef | undefined
     let transitionCommitted = false
     return runTransitionTo<T>({
       quiesceOld: async () => {
@@ -225,26 +242,48 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       },
       commit: (next) => {
         transitionCommitted = true
-        // The commit ORDER is fixed by `runOrdinaryCommit`: the generation reset
-        // runs BEFORE the new owner is published, so it observes the OLD owner;
-        // a disposed surface still publishes the late child for retirement but
-        // touches nothing else.
-        runOrdinaryCommit({
-          isSurfaceDisposed: deps.surface.isSurfaceDisposed,
-          settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
-          settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
-          resetSubmitLatency: deps.surface.resetSubmitLatency,
-          bumpGeneration: core.bumpGeneration,
-          publishOwner: (owner) => {
-            const nextOwner = deps.owners.fromHandle(owner as SessionHandle)
-            if (nextOwner === undefined) throw new Error('ordinary transition published a handle without a Direct owner')
-            core.setCurrentOwner(nextOwner, deps.owners.sessionId(nextOwner))
-            return deps.owners.completionIdentity(nextOwner)
-          },
-          setCompletionOwner: deps.surface.setCompletionOwner,
-        }, next)
+        // Map the NEW owner BEFORE the commit section can throw: the commit
+        // ORDER stays fixed by `runOrdinaryCommit` (the generation reset runs
+        // BEFORE the new owner is published, so it observes the OLD owner),
+        // but a pre-publication seam failure must be able to release the
+        // acquired NEW owner exactly once instead of leaking its reference.
+        const nextOwner = deps.owners.fromHandle(next as SessionHandle)
+        if (nextOwner === undefined) throw new Error('ordinary transition published a handle without an owned Session generation')
+        try {
+          runOrdinaryCommit({
+            isSurfaceDisposed: deps.surface.isSurfaceDisposed,
+            settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
+            settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
+            resetSubmitLatency: deps.surface.resetSubmitLatency,
+            bumpGeneration: core.bumpGeneration,
+            publishOwner: () => {
+              committedOwner = nextOwner
+              core.setCurrentOwner(nextOwner, deps.owners.sessionId(nextOwner))
+              return deps.owners.completionIdentity(nextOwner)
+            },
+            setCompletionOwner: deps.surface.setCompletionOwner,
+          }, next)
+        } catch (error) {
+          if (core.owner() !== nextOwner) {
+            // Pre-publication failure: the NEW owner was acquired (its
+            // reference retained) but never committed. Release it exactly
+            // once through the owned-task model; OLD stays current and the
+            // original failure propagates unchanged.
+            runOwned('transition pre-commit owner release', () =>
+              deps.retirement.retire(nextOwner, 'transition').then(report => {
+                for (const failure of report.failures) {
+                  deps.diag.error('pre-commit NEW owner release failed', {
+                    session: deps.owners.sessionId(nextOwner),
+                    phase: failure.phase,
+                    error: failure.error,
+                  })
+                }
+              }), { diag: deps.diag, sessionId: () => undefined })
+          }
+          throw error
+        }
       },
-      retireOld: async (next) => {
+      retireOld: async () => {
         const retired: string[] = []
         // Retire the OLD owner through the retirement port (which owns the
         // official close order): the pre-commit quiesce already idled + flushed,
@@ -259,53 +298,52 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             retired.push(`old ${failure.phase}: ${failure.error}`)
           }
         }
-        const nextOwner = deps.owners.fromHandle(next as SessionHandle)
-        if (nextOwner === undefined) {
-          // Direct invariant: a committed transition child always has an owner.
-          retired.push('child whenIdle: committed transition child has no Direct owner')
-        } else {
-          try {
-            // The child quiesce is abort-aware too: an exit during this
-            // post-commit phase must cancel the NEW owner instead of hanging past
-            // the watchdog. When the lifecycle aborted, the surface is already
-            // disposed and the retirement takes over: skip the surface
-            // initialization below (it would repaint into the disposed app) and
-            // let the committed child stand.
-            const aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
-            if (aborted) {
-              // The lifecycle is exiting: the committed child stands and the
-              // retirement takes over. Skip the surface init AND the switch
-              // report (the `finally` still clears the opening journal).
-              retired.push('child quiesce aborted by lifecycle')
-              return
-            }
-          } catch (error) {
-            retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
+        // The committed owner was mapped once in the commit section; a
+        // successful commit always published one (the commit section fails
+        // fast otherwise).
+        const nextOwner = committedOwner
+        if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
+        try {
+          // The child quiesce is abort-aware too: an exit during this
+          // post-commit phase must cancel the NEW owner instead of hanging past
+          // the watchdog. When the lifecycle aborted, the surface is already
+          // disposed and the retirement takes over: skip the surface
+          // initialization below (it would repaint into the disposed app) and
+          // let the committed child stand.
+          const aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
+          if (aborted) {
+            // The lifecycle is exiting: the committed child stands and the
+            // retirement takes over. Skip the surface init AND the switch
+            // report (the `finally` still clears the opening journal).
+            retired.push('child quiesce aborted by lifecycle')
+            return
           }
-          try {
-            await deps.surface.initLiveSession(nextOwner)
-          } catch (error) {
-            retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
-          }
-          // The new owner's catalog refresh is AWAITED before the switch is
-          // reported: the old wrappers became revalidating transitions at the
-          // target change, and the report must not precede the new catalog (a
-          // failed attempt still returns a successful switch — the coordinator
-          // warns and the transition commands keep re-validating).
-          try {
-            await deps.surface.refreshLiveCatalog(nextOwner)
-          } catch (error) {
-            retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
-          }
+        } catch (error) {
+          retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
+        }
+        try {
+          await deps.surface.initLiveSession(nextOwner)
+        } catch (error) {
+          retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
+        }
+        // The new owner's catalog refresh is AWAITED before the switch is
+        // reported: the old wrappers became revalidating transitions at the
+        // target change, and the report must not precede the new catalog (a
+        // failed attempt still returns a successful switch — the coordinator
+        // warns and the transition commands keep re-validating).
+        try {
+          await deps.surface.refreshLiveCatalog(nextOwner)
+        } catch (error) {
+          retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
         }
         deps.surface.clearOpening(opening)
         if (retired.length > 0) {
           deps.diag.error('transition retire failed (child committed)', {
-            to: nextOwner === undefined ? undefined : deps.owners.sessionId(nextOwner),
+            to: deps.owners.sessionId(nextOwner),
             failures: retired,
           })
         }
-        if (nextOwner !== undefined) deps.surface.reportSwitch(from, nextOwner)
+        deps.surface.reportSwitch(from, nextOwner)
       },
       recordFailure: (phase, error) => {
         deps.diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
@@ -427,7 +465,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   const isNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
     isRewindIdentityCurrent(core.captureNavigationIdentity(), expected)
 
-  /** Park one refused fork's Direct owner for a later claim. */
+  /** Park one refused fork's owner for a later claim (an ownerless
+   *  publication-only child parks nothing). */
   const parkForkOwner = (handle: SessionHandle | undefined): void => {
     const owner = handle === undefined ? undefined : deps.owners.fromHandle(handle)
     if (owner !== undefined) deps.retirement.park(owner)
@@ -514,12 +553,21 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * a refused child, commit through the fixed §4B order, retire the source owner
    * (deferred to its command settlement when one is open) and rebuild the
    * child's surface. Returns whether the child was adopted.
+   *
+   * A publication-only fork child (the Remote shape) carries no owner: adoption
+   * happens through an explicit `lifecycle.open(childId)` retain of the
+   * published identity — one Host fork dispatch plus at most one adoption
+   * open, and the newly retained owner is released exactly once when a
+   * re-checked fence refuses the commit. `ledger` (plan §8.5) tells the fork
+   * error path when that exactly-once release already happened, so it never
+   * parks an owner the adoption cleanup already released.
    */
   const adoptFork = async (
     handle: SessionHandle,
     expected: RewindLiveIdentity,
     onAdopted?: () => void,
     pin?: ForkSourcePin,
+    ledger: ForkAdoptionLedger = { released: false },
   ): Promise<boolean> => {
     let adopted = false
     try {
@@ -529,23 +577,64 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           return
         }
         const oldOwner = core.owner()
-        const nextOwner = deps.owners.fromHandle(handle)
-        if (nextOwner === undefined) throw new Error(`forked session "${handle.session.id}" has no Direct owner`)
+        let commitHandle: SessionHandle = handle
+        let nextOwner = deps.owners.fromHandle(handle)
+        if (nextOwner === undefined) {
+          // Publication-only child: retain the published identity through the
+          // official open semantic. A failure here settles through the thrown
+          // `LifecycleError` — the child stays published and the fork is never
+          // redispatched.
+          commitHandle = requireOpened(await deps.lifecycle.open({
+            sessionId: handle.session.id,
+            signal: deps.lifecycleSignal,
+          }))
+          nextOwner = deps.owners.fromHandle(commitHandle)
+          if (nextOwner === undefined) {
+            throw new Error(`forked session "${handle.session.id}" has no owned Session generation after adoption open`)
+          }
+          // Re-check the fence AFTER the await: the navigation (or the runner
+          // lifecycle) may have moved while the adoption retain was in flight.
+          // Release the NEW owner exactly once and keep OLD current; the child
+          // stays a published catalog identity.
+          if (deps.surface.isSurfaceDisposed() || !isNavigationCurrent(expected)) {
+            const report = await deps.retirement.retire(nextOwner, 'transition')
+            for (const failure of report.failures) {
+              deps.diag.error('fork adoption cleanup failed', { session: handle.session.id, phase: failure.phase, error: failure.error })
+            }
+            return
+          }
+        }
         const nextSessionId = deps.owners.sessionId(nextOwner)
         // The fork-adoption commit ORDER is fixed by `runForkCommit` (plan §4B):
         // the generation reset runs BEFORE the child is published, exactly like
-        // the ordinary transition.
-        runForkCommit({
-          settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
-          settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
-          resetSubmitLatency: deps.surface.resetSubmitLatency,
-          bumpGeneration: core.bumpGeneration,
-          publishOwner: () => {
-            core.setCurrentOwner(nextOwner, nextSessionId)
-            return deps.owners.completionIdentity(nextOwner)
-          },
-          setCompletionOwner: deps.surface.setCompletionOwner,
-        }, handle)
+        // the ordinary transition. A pre-publication seam failure must release
+        // the acquired child owner exactly once instead of leaking it.
+        try {
+          runForkCommit({
+            settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
+            settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
+            resetSubmitLatency: deps.surface.resetSubmitLatency,
+            bumpGeneration: core.bumpGeneration,
+            publishOwner: () => {
+              core.setCurrentOwner(nextOwner, nextSessionId)
+              return deps.owners.completionIdentity(nextOwner)
+            },
+            setCompletionOwner: deps.surface.setCompletionOwner,
+          }, commitHandle)
+        } catch (error) {
+          if (core.owner() !== nextOwner) {
+            // The child owner was retained (possibly through the adoption
+            // open) but never committed: release it exactly once and keep OLD
+            // current; the child stays a published catalog identity. Mark the
+            // ledger so the fork error path never parks this released owner.
+            ledger.released = true
+            const report = await deps.retirement.retire(nextOwner, 'transition')
+            for (const failure of report.failures) {
+              deps.diag.error('fork pre-commit owner release failed', { session: handle.session.id, phase: failure.phase, error: failure.error })
+            }
+          }
+          throw error
+        }
         adopted = true
         try {
           onAdopted?.()
@@ -630,6 +719,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     const pin = core.beginForkSourcePin(sourceSessionId)
     let settleFork!: () => void
     let forkedHandle: SessionHandle | undefined
+    // The adoption ownership ledger (plan §8.5): only the owner it names may
+    // be parked by the error path — an owner the adoption cleanup already
+    // released exactly once must never re-enter the parked pool.
+    const adoption: ForkAdoptionLedger = { released: false }
     const pending = new Promise<void>(resolve => { settleFork = resolve })
     trackFork(pending)
     try {
@@ -659,13 +752,26 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}; navigation stayed on the newer session` }
       }
       forkedHandle = outcome.handle
-      const adopted = await adoptFork(outcome.handle, expected, onAdopted, pin)
+      const adopted = await adoptFork(outcome.handle, expected, onAdopted, pin, adoption)
       if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
       deps.surface.clearUnpinnedDrafts()
       return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
     } catch (error) {
-      if (forkedHandle !== undefined) parkForkOwner(forkedHandle)
+      // An owner the adoption cleanup already released exactly once must not
+      // be parked again (a disposed Direct handle in the pool would be
+      // claimed as a live owner later, and the exit drain would double-retire).
+      if (forkedHandle !== undefined && !adoption.released) parkForkOwner(forkedHandle)
       if (!isNavigationCurrent(expected)) return { kind: 'success' as const }
+      if (forkedHandle !== undefined) {
+        // The Host fork already published the child; the failure happened
+        // while ADOPTING it (the open, or a commit seam). Report the truthful
+        // outcome — the child exists, must not be redispatched and is not
+        // adopted now — instead of disguising it as "the fork did not happen".
+        return {
+          kind: 'error' as const,
+          text: `forked as ${forkedHandle.session.id}, but adopting the child session failed: ${safeErrorMessage(error)}`,
+        }
+      }
       return { kind: 'error' as const, text: `fork failed: ${safeErrorMessage(error)}` }
     } finally {
       settleFork()
@@ -684,7 +790,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    */
   const commitFirstSession = async (handle: SessionHandle): Promise<boolean> => {
     const childOwner = deps.owners.fromHandle(handle)
-    if (childOwner === undefined) throw new Error('first-session create published a handle without a Direct owner')
+    if (childOwner === undefined) throw new Error('first-session create published a handle without an owned Session generation')
     return runFirstSessionCommit({
       publishOwner: () => {
         core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
@@ -712,9 +818,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
 
   /**
    * Publish the startup-resume owner (plan §4D). The publication itself is
-   * SYNCHRONOUS, and the runner's `preMountQuiesce` hook is consulted only once
-   * an owner exists — a sessionless (deferred) startup therefore gains no
-   * microtask yield here.
+   * SYNCHRONOUS and transport-neutral: the injected `SessionOwnerAccess`
+   * resolves the owner whether the resumed handle is Direct or Remote; the
+   * runner's `preMountQuiesce` hook is consulted only once an owner exists —
+   * a sessionless (deferred) startup therefore gains no microtask yield here.
    */
   const publishResumedOwner = (
     handle: SessionHandle | undefined,

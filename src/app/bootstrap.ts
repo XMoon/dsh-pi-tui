@@ -483,12 +483,18 @@ export function applyRunner(ctx: Context, config: Config): void {
         setCompletionOwner: (identity) => surface.setCompletionOwner(identity),
         initLiveSession: (owner) => {
           const agent = directAgentOfOwner(owner)
-          if (agent === undefined) throw new Error('initLiveSession requires a Direct owner attachment')
+          // M3-2 staging: an owner without a Direct attachment is a Remote
+          // generation whose presentation provider arrives with the M3-4
+          // Remote composition. This runner performs no Direct surface work
+          // for it (the ownership handoff itself is already complete).
+          if (agent === undefined) return Promise.resolve()
           return presentation.initLiveSession(agent)
         },
         refreshLiveCatalog: (owner) => {
           const agent = directAgentOfOwner(owner)
-          if (agent === undefined) throw new Error('refreshLiveCatalog requires a Direct owner attachment')
+          // M3-2 staging: see initLiveSession — no Direct catalog work exists
+          // for a Remote-owned generation yet.
+          if (agent === undefined) return Promise.resolve()
           return command.refreshLiveCatalog(agent)
         },
         reportSwitch: (from, to) => {
