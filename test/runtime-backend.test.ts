@@ -41,6 +41,8 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   }
   const pendingInputReader: PendingInputReader = {
     snapshot: () => ({ running: false, items: [] }),
@@ -144,7 +146,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
   }
   const hostFile = {
-    listReferences: async () => [],
+    listReferences: async () => ({ kind: 'ok' as const, items: [] }),
     resolveReference: async () => ({ kind: 'missing' as const }),
     canonicalizeMentions: async (_scope: unknown, text: string) => text,
   }

@@ -125,6 +125,8 @@ function harness(options: {
     },
     projectionBatch: options.projectionBatch ?? (async () => new Map()),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   }
   const runner: TuiCommandRunner = {
     ctx,

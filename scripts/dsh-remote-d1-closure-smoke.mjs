@@ -16,10 +16,12 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // `presentation.leadingTurnCompleteness` closed with the rc.1 turn-aligned
 // opening windows: the presentation smoke now asserts the COMPLETE leading
 // turn instead of skipping its completeness.
+// `session.measureContext` closed with M3-3A: both backends read the one
+// official contextPressure semantic, so the D1 skip is retired and the field
+// compares like every other.
 const KNOWN_SKIPS = Object.freeze([
   'session.createdAt',
   'session.live',
-  'session.measureContext',
   'subagent.descendantTree',
 ])
 
@@ -64,7 +66,6 @@ function main() {
     output => parseTextProof('session read parity', /same-Host remote session parity smoke passed/, output, [
       'session.createdAt',
       'session.live',
-      'session.measureContext',
     ]),
   )
   const surfaceAuthority = runProof(

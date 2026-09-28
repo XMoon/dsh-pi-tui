@@ -44,6 +44,8 @@ export const HOST_SERVICES = [
   'agentPresets',
   'sessionQuery',
   'sessionPersistence',
+  'sessionProjections',
+  'sessionProjectionCache',
   'sessionTitle',
   'commands',
   'tools',

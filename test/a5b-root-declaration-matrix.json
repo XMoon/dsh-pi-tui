@@ -1550,6 +1550,7 @@
       "hostDependency": false,
       "head": "let assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[] = () => []",
       "tests": [
+        "remote-presentation-read.test.ts",
         "remote-presentation-shadow.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
@@ -1712,7 +1713,7 @@
         "action-tool-card.test.ts",
         "busy-enter.test.ts",
         "preset.test.ts",
-        "remote-official-contract.test.ts"
+        "remote-m3a-assembly.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",

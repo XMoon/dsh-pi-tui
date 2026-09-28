@@ -29,7 +29,9 @@ import {
   type SessionSearchProviderLike,
 } from './session-search-direct.ts'
 import { cancellationError } from '../../detached.ts'
-import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../session-reader-port.ts'
+import { contextPressureOccupancy, type SessionContentSearchPage, type SessionProjectionSummary, type SessionReader, type SessionStatusProjection, type SessionSummary } from '../session-reader-port.ts'
+import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
+import { detachedSessionStatus } from '../session-status-projection.ts'
 
 /**
  * The narrow session-query surface the reader's listing and semantic search
@@ -70,11 +72,6 @@ export interface SessionQueryLike {
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
-}
-
-/** The structural `tokenMeter` surface the reader needs. */
-export interface TokenMeterLike {
-  measure(session: unknown): { totalTokens: number }
 }
 
 /** A live agent as the reader resolves it (structural projection). */
@@ -312,13 +309,69 @@ export class DirectSessionReader implements SessionReader {
   measureContext(sessionId: string): number | undefined {
     const agent = this.liveAgent(sessionId)
     if (agent === undefined) return undefined
-    const meter = this.ctx.get('tokenMeter') as TokenMeterLike | undefined
-    if (meter === undefined) return undefined
+    // The official `contextPressure` Session projection is the one context
+    // authority (M3-3A): the occupancy numerator `projectedTokens ??
+    // pressureTokens`, exactly what the Remote adapter reads off the wire.
+    // The historical `tokenMeter.measure()` total is NOT a second authority.
+    const projections = this.ctx.get('sessionProjections') as {
+      snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
+    } | undefined
+    if (projections === undefined) return undefined
     try {
-      return meter.measure(agent.session).totalTokens
+      const snapshot = projections.snapshot(agent.session, ['contextPressure'])
+      return contextPressureOccupancy(snapshot?.values?.contextPressure)
     } catch {
-      // Measurement is best-effort; the /status row falls back to unmeasured.
+      // The projection capability is best-effort here; the /status row falls
+      // back to unmeasured.
       return undefined
     }
+  }
+
+  turnOutline(sessionId: string): readonly TurnOutlineEntryDto[] | undefined {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return undefined
+    // The official whole-log `turnOutline` projection (M3-4 /rewind
+    // foundation): a detached read of the Host fold, never a client-side
+    // outline over the raw log.
+    const projections = this.sessionProjections()
+    if (projections === undefined) return undefined
+    try {
+      return detachedTurnOutline(projections.snapshot(agent.session, ['turnOutline'])?.values?.turnOutline)
+    } catch {
+      // An unavailable/broken projection read is `undefined` (unknown),
+      // never a crash and never a partial client-side fold.
+      return undefined
+    }
+  }
+
+  sessionStatus(sessionId: string): SessionStatusProjection | undefined {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return undefined
+    // ONE consistent cut over the official projection units of THIS exact
+    // session (M3-4/M3-5 foundation). No StatsFolder, no raw-log fold, no
+    // other session's values ever ride along.
+    const projections = this.sessionProjections()
+    if (projections === undefined) return undefined
+    try {
+      const values = projections.snapshot(agent.session, [
+        'modelSelection',
+        'contextPressure',
+        'contextBreakdown',
+        'tokenUsage',
+        'todos',
+      ])?.values
+      if (values === undefined) return undefined
+      return detachedSessionStatus(sessionId, values, agent.session.header.cwd)
+    } catch {
+      // A projection authority failure is `undefined` (unknown), never a
+      // crash and never partially invented facts.
+      return undefined
+    }
+  }
+
+  private sessionProjections(): {
+    snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
+  } | undefined {
+    return this.ctx.get('sessionProjections') as ReturnType<DirectSessionReader['sessionProjections']> | undefined
   }
 }

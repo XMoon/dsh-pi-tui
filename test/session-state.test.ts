@@ -122,6 +122,8 @@ function stubRunner(
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined, owner),
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
@@ -1596,8 +1598,6 @@ function scriptedModelCatalog(
           failures: [],
         }
       },
-      listProviders: () => [{ id: 'p', name: 'Provider P' }],
-      listModels: async () => [{ id: 'm1' }],
       defaultSelection: () => current,
       saveDefaultSelection: async () => (saveDefaultOutcome ?? { kind: 'committed' as const, value: undefined }) as never,
       sessionSelection: () => current,

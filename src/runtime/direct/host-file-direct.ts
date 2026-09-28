@@ -32,7 +32,7 @@ import type { DiscoverySource } from '../../file-completion/discovery.ts'
 import { discoverForQuery, resolveFdPath } from '../../file-completion/discovery.ts'
 import { reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
 import type {
-  HostFileCandidate,
+  HostFileListResult,
   HostFilePort,
   HostFileResolveResult,
   HostFileScope,
@@ -87,11 +87,17 @@ export class DirectHostFilePort implements HostFilePort {
     scope: HostFileScope,
     query: string,
     options?: { signal?: AbortSignal },
-  ): Promise<readonly HostFileCandidate[]> {
+  ): Promise<HostFileListResult> {
     const workDir = this.scopeCwd(scope)
-    if (workDir === undefined) return []
+    // An unresolvable scope is an UNAVAILABLE capability (the adapter cannot
+    // even form the Host-side query), never an authoritative empty answer.
+    if (workDir === undefined) {
+      return { kind: 'unavailable', reason: 'the session scope has no resolvable Host workspace' }
+    }
     const signal = options?.signal
-    if (signal?.aborted === true) return []
+    if (signal?.aborted === true) {
+      return { kind: 'unavailable', reason: 'the discovery request was cancelled before it started' }
+    }
     // `query` is the editor's at-prefix INCLUDING the leading `@` (and an
     // unclosed `"` for the quoted form). The engine strips the `@` and any
     // trailing quote, resolves the scope and answers discovery with path
@@ -101,17 +107,24 @@ export class DirectHostFilePort implements HostFilePort {
       const resolved = resolveQuery(raw, workDir)
       const candidates = await discoverForQuery(resolved, this.discoverySource, signal ?? new AbortController().signal)
       // `signal` is possibly-undefined: a request without one never aborts.
-      if ((signal?.aborted ?? false)) return []
+      if ((signal?.aborted ?? false)) {
+        return { kind: 'unavailable', reason: 'the discovery request was cancelled' }
+      }
       // THE PORT CONTRACT: paths are USER-FACING — the display base the
       // user typed (`../`, `~/pics/`, `/tmp/`, `src/`) is reattached here
       // (the engine's pure reattachment), so the client's presentation
       // (ranking, quoting, the `@`-insertion value) sees final paths.
-      return candidates.map(candidate => {
-        const display = reattachDisplayBase(candidate, resolved)
-        return { path: display.path, kind: display.kind }
-      })
+      return {
+        kind: 'ok',
+        items: candidates.map(candidate => {
+          const display = reattachDisplayBase(candidate, resolved)
+          return { path: display.path, kind: display.kind }
+        }),
+      }
     } catch {
-      return []
+      // The local discovery engine failing is an unavailable answer here
+      // (never an authoritative "nothing matches").
+      return { kind: 'unavailable', reason: 'local file discovery failed' }
     }
   }
 
@@ -122,9 +135,13 @@ export class DirectHostFilePort implements HostFilePort {
   ): Promise<HostFileResolveResult> {
     // An already-aborted request is a cancelled probe: fail closed before
     // any filesystem access (the caller never consumes a cancelled result).
-    if (options?.signal?.aborted === true) return { kind: 'missing' }
+    if (options?.signal?.aborted === true) {
+      return { kind: 'unavailable', reason: 'the existence probe was cancelled before it started' }
+    }
     const cwd = this.scopeCwd(scope)
-    if (cwd === undefined) return { kind: 'missing' }
+    if (cwd === undefined) {
+      return { kind: 'unavailable', reason: 'the session scope has no resolvable Host workspace' }
+    }
     const candidate = resolveMentionCandidate(path, cwd)
     return exists(candidate)
       ? { kind: 'found', path: candidate }

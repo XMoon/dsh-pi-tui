@@ -93,4 +93,15 @@ export class DirectPresentationReader implements PresentationReader {
   ): Promise<PresentationReadSnapshot | undefined> {
     return this.read(sessionId, signal)
   }
+
+  async loadThrough(
+    sessionId: string,
+    _seq: number,
+    signal?: AbortSignal,
+  ): Promise<PresentationReadSnapshot | undefined> {
+    // Direct exposes the complete in-process log: the official jump is a
+    // cancellation check plus the current FULL snapshot (coverage 'full'),
+    // never a simulated paging loop.
+    return this.read(sessionId, signal)
+  }
 }

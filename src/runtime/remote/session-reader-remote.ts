@@ -11,12 +11,16 @@
  */
 
 import { cancellationError } from '../../detached.ts'
-import type {
-  SessionContentSearchPage,
-  SessionProjectionSummary,
-  SessionReader,
-  SessionSummary,
+import {
+  contextPressureOccupancy,
+  type SessionContentSearchPage,
+  type SessionProjectionSummary,
+  type SessionReader,
+  type SessionSummary,
 } from '../session-reader-port.ts'
+import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
+import { detachedSessionStatus } from '../session-status-projection.ts'
+import type { SessionStatusProjection } from '../session-reader-port.ts'
 
 /** The public generation identity exposed by the official Connection client. */
 export interface RemoteConnectionGeneration {
@@ -256,7 +260,55 @@ export class RemoteSessionReader implements SessionReader {
     }
   }
 
-  measureContext(_sessionId: string): undefined {
-    return undefined
+  measureContext(sessionId: string): number | undefined {
+    // The official `contextPressure` Session projection off the EXACT
+    // retained binding (M3-3A): no retain/open is performed for a
+    // measurement, and an unretained session simply has no value. The
+    // mapping is the one shared semantic (`projectedTokens ??
+    // pressureTokens`) — no Remote token-meter call exists or is invented.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    return contextPressureOccupancy(
+      binding.session.projections.faceOf('contextPressure').getSnapshot(),
+    )
+  }
+
+  turnOutline(sessionId: string): readonly TurnOutlineEntryDto[] | undefined {
+    // The official `turnOutline` projection off the EXACT retained binding
+    // (M3-4 /rewind foundation): a projection read only — no history fetch,
+    // no client-side fold, no retain for an outline.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    return detachedTurnOutline(
+      binding.session.projections.faceOf('turnOutline').getSnapshot(),
+    )
+  }
+
+  sessionStatus(sessionId: string): SessionStatusProjection | undefined {
+    // The official projection values off the EXACT retained binding of THIS
+    // session (main or viewed child alike): no retain, no parent fallback,
+    // no zero-filled guesses — an unretained session simply has no facts.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    const projections = binding.session.projections
+    return detachedSessionStatus(sessionId, {
+      modelSelection: projections.faceOf('modelSelection').getSnapshot(),
+      contextPressure: projections.faceOf('contextPressure').getSnapshot(),
+      contextBreakdown: projections.faceOf('contextBreakdown').getSnapshot(),
+      tokenUsage: projections.faceOf('tokenUsage').getSnapshot(),
+      todos: projections.faceOf('todos').getSnapshot(),
+    }, this.cwdOf(sessionId))
+  }
+
+  /** The official Client list-row cwd fact for one session (undefined when
+   *  the row carries none — never a main-session or client-side guess). */
+  private cwdOf(sessionId: string): string | undefined {
+    const snapshot = this.sessions.list.getSnapshot()
+    if (snapshot.phase !== 'ready') return undefined
+    const cwd = snapshot.byId[sessionId]?.cwd
+    return typeof cwd === 'string' ? cwd : undefined
   }
 }

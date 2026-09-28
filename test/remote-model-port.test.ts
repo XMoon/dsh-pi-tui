@@ -37,6 +37,12 @@ interface ModelHarness {
   readonly catalog: RemoteModelCatalog
   readonly generation: GenerationHarness
   readonly calls: { catalog: number; selections: unknown[]; bindings: string[] }
+  /** The raw official faces the adapter was constructed with. */
+  readonly sources: {
+    readonly session: RemoteModelRemotes
+    readonly sessions: RemoteModelSessionsSource
+    readonly generation: GenerationHarness['source']
+  }
   setCatalogResult(result: { ok: true; value: typeof DIRECTORY } | { ok: false; error: unknown }): void
   setSelectionResult(result: { ok: true; value: { selected: { provider: string; model: string; reasoningEffort?: string } } } | { ok: false; error: unknown }): void
   setProjection(value: unknown): void
@@ -116,6 +122,7 @@ function modelHarness(): ModelHarness {
   return {
     catalog: new RemoteModelCatalog(session, sessions, generation.source),
     generation,
+    sources: { session, sessions, generation: generation.source },
     calls,
     setCatalogResult: (result) => { catalogResult = result },
     setSelectionResult: (result) => { selectionResult = result },
@@ -136,10 +143,6 @@ test('loadDirectory maps the official session.modelCatalog value', async () => {
   const directory = await harness.catalog.loadDirectory()
   assert.deepEqual(directory, DIRECTORY)
   assert.deepEqual(harness.catalog.defaultSelection(), { provider: 'p', model: 'm-default' })
-  // Provider ENDPOINT discovery is UNAVAILABLE on Remote D2.3 (no official
-  // capability) — the directory is not that capability.
-  assert.deepEqual(harness.catalog.listProviders(), [])
-  assert.deepEqual(await harness.catalog.listModels('p'), [])
 })
 
 test('loadDirectory detaches the returned value from the Host object', async () => {
@@ -232,7 +235,6 @@ test('a reconnect invalidates the cached directory projection', async () => {
   harness.generation.set({ id: 2 })
   assert.equal(harness.catalog.defaultSelection(), undefined,
     'a stale Host default must never become a Session fallback after reconnect')
-  assert.deepEqual(harness.catalog.listProviders(), [])
 })
 
 test('an unknown session/model-* code stays indeterminate, never a blind rejection', () => {
@@ -272,10 +274,61 @@ test('a PROVEN REFUSAL returned after a generation replacement stays rejected bu
   assert.equal(result.ownership, 'superseded', 'it still loses the local surface')
 })
 
-test('listProviders is empty before any directory load (Remote provider discovery is load-scoped)', () => {
+test('discoverModels maps the official llm/discoverModels call and detaches the rows', async () => {
+  const calls: Array<{ settingsNs: string; request: unknown; signal: AbortSignal | undefined }> = []
+  const llm = {
+    discoverModels: async (settingsNs: string, request: unknown, signal?: AbortSignal) => {
+      calls.push({ settingsNs, request, signal })
+      return { ok: true as const, value: [{ id: 'discovered-a', name: 'Discovered A' }, { id: 'discovered-b' }] }
+    },
+  }
   const harness = modelHarness()
-  assert.deepEqual(harness.catalog.listProviders(), [],
-    'provider discovery is served from the last loaded Host directory; the subagent allowlist is Direct-only in D2.3')
+  const catalog = new RemoteModelCatalog(harness.sources.session, harness.sources.sessions, harness.sources.generation, llm)
+  const models = await catalog.discoverModels({ provider: 'p', baseURL: 'https://example.test' })
+  assert.deepEqual(models, [{ id: 'discovered-a', name: 'Discovered A' }, { id: 'discovered-b' }])
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]!.settingsNs, 'llm-pi-ai', 'the wizard settings family matches the Direct adapter')
+  assert.deepEqual(calls[0]!.request, { provider: 'p', baseURL: 'https://example.test' })
+})
+
+test('discoverModels surfaces a Host refusal — never an empty fallback list', async () => {
+  const llm = {
+    discoverModels: async () => ({ ok: false as const, error: failure('llm/model-discovery-rejected', 'endpoint refused') }),
+  }
+  const harness = modelHarness()
+  const catalog = new RemoteModelCatalog(harness.sources.session, harness.sources.sessions, harness.sources.generation, llm)
+  await assert.rejects(catalog.discoverModels({ baseURL: 'https://example.test' }), /endpoint refused/)
+})
+
+test('discoverModels without an llm namespace or connection fails fast', async () => {
+  const harness = modelHarness()
+  await assert.rejects(
+    harness.catalog.discoverModels({ baseURL: 'https://example.test' }),
+    /remote llm namespace is not available/,
+  )
+  const disconnected = createObservableGenerationHarness()
+  disconnected.set(undefined)
+  const catalog = new RemoteModelCatalog(harness.sources.session, harness.sources.sessions, disconnected.source, {
+    discoverModels: async () => { throw new Error('must not be called') },
+  })
+  await assert.rejects(catalog.discoverModels({}), /remote connection is not connected/)
+})
+
+test('discoverModels drops the result when the generation is replaced mid-flight', async () => {
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const llm = {
+    discoverModels: async (_settingsNs: string, _request: unknown, _signal?: AbortSignal) => {
+      await gate
+      return { ok: true as const, value: [{ id: 'late' }] }
+    },
+  }
+  const harness = modelHarness()
+  const catalog = new RemoteModelCatalog(harness.sources.session, harness.sources.sessions, harness.sources.generation, llm)
+  const pending = catalog.discoverModels({})
+  harness.generation.set({ id: 2 })
+  release!()
+  await assert.rejects(pending, /remote connection changed while discovering models/)
 })
 
 test('a catalog FAILURE after a reconnect reports the stale-generation fence, not the old failure', async () => {

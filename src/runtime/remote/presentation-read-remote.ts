@@ -60,6 +60,8 @@ export interface RemotePresentationSession {
     readonly loadingOlder: boolean
   }
   loadOlder(): Promise<void>
+  /** The official jump loader: pages backwards until the window covers seq. */
+  loadThrough(seq: number): Promise<void>
 }
 
 /** Existing Client binding face; no binding is retained in the result. */
@@ -233,6 +235,48 @@ export class RemotePresentationReader implements PresentationReader {
       if (!generationMatches(this.generation, capturedGeneration)) return undefined
       // `binding()` PRESENCE alone never authorizes paging; the result belongs
       // to this exact generation only while the id still resolves to it.
+      if (!Object.is(binding, this.sessions.binding(sessionId))) return undefined
+      return snapshotOf(sessionId, binding)
+    } finally {
+      pinned.release()
+    }
+  }
+
+  async loadThrough(
+    sessionId: string,
+    seq: number,
+    signal?: AbortSignal,
+  ): Promise<PresentationReadSnapshot | undefined> {
+    signal?.throwIfAborted()
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) return undefined
+    // Borrow first: a jump must extend an ALREADY-open window, never
+    // cold-open an arbitrary Session as a side effect.
+    if (this.sessions.binding(sessionId) === undefined) return undefined
+    // Pin that exact generation for the whole jump round-trip so a same-id
+    // release/re-retain cannot swap the binding mid-flight.
+    const pinned = pinExistingGeneration(this.sessions, sessionId)
+    if (pinned === undefined) return undefined
+    const binding = pinned.binding
+    try {
+      if (!generationMatches(this.generation, capturedGeneration)) return undefined
+
+      const current = snapshotOf(sessionId, binding)
+      if (current.openState !== 'open') return current
+
+      // The OFFICIAL Client jump loop owns the backwards paging (`Session.
+      // loadThrough`); this adapter never hand-rolls a loadOlder chain.
+      try {
+        await binding.session.loadThrough(seq)
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (!generationMatches(this.generation, capturedGeneration)) return undefined
+        throw error
+      }
+      signal?.throwIfAborted()
+      if (!generationMatches(this.generation, capturedGeneration)) return undefined
+      // The settle belongs to this operation only while the id still
+      // resolves to the exact pinned binding.
       if (!Object.is(binding, this.sessions.binding(sessionId))) return undefined
       return snapshotOf(sessionId, binding)
     } finally {

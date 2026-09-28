@@ -50,6 +50,7 @@ function harness(options: {
   openState?: 'cold' | 'loading' | 'open' | 'error'
   loadingOlder?: boolean
   loadOlder?: () => Promise<void>
+  loadThrough?: (seq: number) => Promise<void>
 } = {}): {
   readonly source: RemotePresentationSessionsSource
   readonly references: RetainableSource<RemotePresentationBinding>
@@ -58,17 +59,24 @@ function harness(options: {
   setHasMore(value: boolean): void
   setLoadingOlder(value: boolean): void
   loadCalls: number
+  loadThroughCalls: number[]
 } {
   let entries = options.entries ?? []
   let hasMore = options.hasMore ?? false
   let loadingOlder = options.loadingOlder ?? false
   let loadCalls = 0
+  const loadThroughCalls: number[] = []
   const binding: RemotePresentationBinding = {
     session: {
       getSnapshot: () => ({ openState: options.openState ?? 'open', loadingOlder }),
       async loadOlder() {
         loadCalls += 1
         await options.loadOlder?.()
+      },
+      async loadThrough(seq: number) {
+        loadCalls += 1
+        loadThroughCalls.push(seq)
+        await options.loadThrough?.(seq)
       },
     },
     eventSource: {
@@ -84,6 +92,7 @@ function harness(options: {
     setHasMore(value) { hasMore = value },
     setLoadingOlder(value) { loadingOlder = value },
     get loadCalls() { return loadCalls },
+    loadThroughCalls,
   }
 }
 
@@ -372,4 +381,92 @@ test('a non-open history state keeps the selected identity, is never paged, and 
     assert.equal(paged?.openState, openState)
     assert.deepEqual(fixture.references.releases, ['session'], 'the paging pin releases even when paging is refused')
   }
+})
+
+
+// ── M3-3A: the official loadThrough jump (W5) ─────────────────────────────
+
+test('H1: loadThrough calls the official Session.loadThrough exactly once with the exact seq', async () => {
+  const { source, loadThroughCalls } = harness({ loadThrough: async () => {} })
+  const reader = new RemotePresentationReader(source, createSnapshotGenerationHarness().source)
+  const snapshot = await reader.loadThrough('session', 42)
+  assert.equal(snapshot?.openState, 'open')
+  assert.deepEqual(loadThroughCalls, [42], 'ONE official jump call carrying the exact target seq')
+})
+
+test('H2: loadThrough never hand-rolls a loadOlder chain', async () => {
+  let olderCalls = 0
+  const { source, loadThroughCalls } = harness({
+    loadOlder: async () => { olderCalls += 1 },
+    loadThrough: async () => {},
+  })
+  const reader = new RemotePresentationReader(source, createSnapshotGenerationHarness().source)
+  await reader.loadThrough('session', 7)
+  assert.equal(olderCalls, 0, 'the official Client owns the paging loop')
+  assert.deepEqual(loadThroughCalls, [7])
+})
+
+test('H3: a stale connection result is dropped after the jump settles', async () => {
+  const generations = createSnapshotGenerationHarness()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const { source } = harness({ loadThrough: () => gate })
+  const reader = new RemotePresentationReader(source, generations.source)
+  const pending = reader.loadThrough('session', 30)
+  generations.set({ id: 2 })
+  release()
+  assert.equal(await pending, undefined)
+})
+
+test('H4: a same-id new binding generation cannot accept the old settle', async () => {
+  const generations = createSnapshotGenerationHarness()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const { source, references, binding } = harness({ loadThrough: () => gate })
+  const reader = new RemotePresentationReader(source, generations.source)
+  const pending = reader.loadThrough('session', 30)
+  // The same id rolls to a NEW binding generation while the jump is in
+  // flight: the pinned old binding must not publish its result.
+  references.setBinding('session', { ...binding, eventSource: binding.eventSource })
+  release()
+  assert.equal(await pending, undefined)
+})
+
+test('H5 (Direct): the Direct mapping is a cancellation check plus the FULL snapshot', async () => {
+  const { DirectPresentationReader } = await import('../src/runtime/direct/presentation-read-direct.ts')
+  let agents = 0
+  const reader = new DirectPresentationReader({
+    agentFor: () => { agents += 1; return { session: { snapshotEvents: () => [] } } },
+    assistantStreamBaselineFor: () => [],
+  })
+  const snapshot = await reader.loadThrough('session', 99, undefined)
+  assert.equal(snapshot?.coverage, 'full', 'Direct already covers the whole log')
+  assert.equal(snapshot?.hasMore, false)
+  assert.equal(agents, 1)
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(reader.loadThrough('session', 99, controller.signal), /aborted/,
+    'a cancelled jump rejects before any agent access')
+})
+
+test('a loadThrough on an unretained session never cold-opens one', async () => {
+  const { source } = harness()
+  const referencesEmpty: RemotePresentationSessionsSource = {
+    ...source,
+    binding: () => undefined,
+    retain: () => { throw new Error('a jump must never retain an unretained id') },
+  }
+  const reader = new RemotePresentationReader(referencesEmpty, createSnapshotGenerationHarness().source)
+  assert.equal(await reader.loadThrough('session', 5), undefined)
+})
+
+test('a loadThrough failure surfaces unless superseded or cancelled', async () => {
+  const generations = createSnapshotGenerationHarness()
+  const { source } = harness({ loadThrough: async () => { throw new Error('jump exploded') } })
+  const reader = new RemotePresentationReader(source, generations.source)
+  await assert.rejects(reader.loadThrough('session', 5), /jump exploded/)
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(reader.loadThrough('session', 5, controller.signal), /aborted/,
+    'a pre-aborted jump rejects before dispatch')
 })

@@ -244,7 +244,11 @@ async function main() {
     assert.deepEqual(outcome.report.mismatches, [])
     assert.ok(outcome.report.skipped.some(field => field.field === 'createdAt'))
     assert.ok(outcome.report.skipped.some(field => field.field === 'live'))
-    assert.ok(outcome.report.skipped.some(field => field.field === 'measureContext'))
+    // M3-3A retired the measureContext skip: the official contextPressure
+    // semantic now compares (both backends read unmeasured here — the
+    // fixture reports no provider usage — and that EQUALITY is the parity).
+    assert.ok(!outcome.report.skipped.some(field => field.field === 'measureContext'))
+    assert.ok(!outcome.report.mismatches.some(mismatch => mismatch.field === 'measureContext'))
     assert.equal(sessions.list.getSnapshot().ids.includes('parity-session'), true)
     await assertExpectedReaderState(direct, 'parity needle', 'Same Host parity', 'fixture-preset')
     await assertExpectedReaderState(remote, 'parity needle', 'Same Host parity', 'fixture-preset')

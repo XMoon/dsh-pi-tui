@@ -250,6 +250,8 @@ function stubRunner(options: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
        ...options.sessionReader,
     },
     catalog: new DirectCatalogPort(options.ctx as never, (sessionId) => {
