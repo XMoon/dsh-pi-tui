@@ -92,7 +92,7 @@ without its own capability-name entry, so the two inventories are deliberately n
 | Backend property | Port (consumer) | Direct impl | Existing Remote impl | Exact rc.2 public source | Status | M3 owner/stage | Acceptance proof |
 |---|---|---|---|---|---|---|---|
 | `subagent` | `SubagentPort` (viewer prompt, Task Center interrupt) | `runtime/direct/subagent-direct.ts` | `runtime/remote/subagent-remote.ts` | `ClientRemote['subagents'].prompt` / `.interruptByParent`; `dsh-subagent/remote` (`lib/typert.remote-client.d.ts:15-16`); child catalog is the `subagentCatalog` Session projection (`dsh-subagent/lib/types/projection-types.d.ts:64-67`) | READY | M3-3A | L3 `test/remote-subagent-port.test.ts` + published-contract gate `test/remote-official-contract.test.ts:105` |
-| `sessionReader` | `SessionReader` (picker list/projection/search, `/status` context row) | `runtime/direct/session-direct.ts` (+`session-search-direct.ts`, `session-projection-direct.ts`) | `runtime/remote/session-reader-remote.ts` (list/blank/projectionBatch/search) | `ISessions.list/refresh/search/binding` (`dsh-api-session-controller/lib/types/client/contract/sessions.d.ts:43-153`); `session/search`, `session/projections` Remotes | NEEDS_ADAPTER — only `measureContext` is missing; source is the `contextPressure` / `contextBreakdown` Session projections (`dsh-token-meter/lib/types/projection.d.ts:65-72`), **not** a new RPC | M3-3A | parity test Direct vs Remote `measureContext` on a live Session; the D1 "no Client equivalent" skip is retired here |
+| `sessionReader` | `SessionReader` (picker list/projection/search, `/status` context row) | `runtime/direct/session-direct.ts` (+`session-search-direct.ts`, `session-projection-direct.ts`) | `runtime/remote/session-reader-remote.ts` (list/blank/projectionBatch/search) | `ISessions.list/refresh/search/binding` (`dsh-api-session-controller/lib/types/client/contract/sessions.d.ts:43-153`); `session/search`, `session/projections` Remotes | READY (M3-3A closed it) — `measureContext` reads the official `contextPressure` projection (`projectedTokens ?? pressureTokens`); the same projection face feeds `turnOutline` and the subject-neutral `sessionStatus` snapshot (`dsh-token-meter/lib/types/projection.d.ts:65-72`), **not** a new RPC | M3-3A | parity test Direct vs Remote `measureContext` on a live Session; the D1 "no Client equivalent" skip is retired here |
 | `pendingInputReader` | `PendingInputReader` (queue/steering lanes) | `runtime/direct/pending-input-reader-direct.ts` | `runtime/remote/pending-input-reader-remote.ts` | `session.projections.faceOf('inbox')` (`dsh-agent/lib/types/types.d.ts:52-55`) | READY | M3-3A | L3 `test/remote-pending-input-reader.test.ts` |
 | `sessionWriter` | `SessionWriter` (ordinary prompt, Ctrl+S steer, Alt+Up remove, cancel, rename) | `runtime/direct/session-writer-direct.ts` | `runtime/remote/session-writer-remote.ts` | `SessionFace.beginSubmission/prompt/updateQueue/cancel/rename` (`.../client/contract/session.d.ts:73-140`); `session/prompt\|updateQueue\|cancel\|rename` Remotes | READY. `refreshTitle` = INTENTIONAL_UNSUPPORTED_IN_M3; generic client-local file attachment needs the D4 upload receipt and fails closed before dispatch | M3-3A | L3 `test/remote-session-writer.test.ts`; D4 relief exists at `fileUploads/upload` (`dsh-client-file-upload/lib/typert.remote-client.d.ts:14`) |
 | `sessionLifecycle` | `SessionLifecycle` (create/open/fork) | `runtime/direct/session-lifecycle-direct.ts` | `runtime/remote/session-lifecycle-remote.ts` | `ISessions.create/retain/fork` (`.../contract/sessions.d.ts:80/52/124`); `session.create\|fork` Remotes | READY | M3-2 (owner handoff) + M3-3A (adapter) | L3 `test/remote-session-lifecycle.test.ts`; L5 `smoke:remote-session-lifecycle-parity` |
@@ -945,6 +945,18 @@ Each stage declares its L1–L6 test layer
 
 ### M3-3A — Remote backend closure: session / runtime / catalog / host-file
 
+- **Status**: DONE — delivered as the M3-3A PR (see
+  `docs/client-server-migration.md` §M3-3A status for the owners, matrix and
+  evidence). Delivered adjustments vs this frozen sketch, all driven by the
+  §1.1 0.2.0-rc.1 requalification and the M3-3A plan: the skill adapter is
+  `src/runtime/remote/skill-remote.ts`; the subagent allowlist picker
+  converged on the official `session.modelCatalog` directory so the port-level
+  `listProviders`/`listModels` pair was RETIRED (a semantic-port correction,
+  not a shape drift); `HostFilePort` gained the truthful
+  `ok`/`unavailable` result split; `SessionReader` gained the `turnOutline`
+  and `sessionStatus` projection reads; `PresentationReader` gained the
+  official `loadThrough`. The Direct adapters map the same semantics (their
+  coupling inventory moved accordingly).
 - **Files/owners**: `RemoteInteractionPort` is **not** here (M3-3B);
   complete `model-remote.ts` (`llm/*` provider discovery, default-selection
   decision), `preset-remote.ts` `resolve` coverage, new
