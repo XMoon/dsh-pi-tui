@@ -25,7 +25,7 @@ function publication(log: string[]) {
   }
 }
 
-test('A ordinary transition: recall settle → ack → latency → bump(reset) → publish → completion', () => {
+test('A ordinary transition: ack → latency → bump(reset) → publish → recall commit → completion', () => {
   const log: string[] = []
   const seams: OrdinaryCommitSeams = {
     isSurfaceDisposed: () => false,
@@ -35,12 +35,14 @@ test('A ordinary transition: recall settle → ack → latency → bump(reset) �
     ...publication(log),
   }
   runOrdinaryCommit(seams, { id: 'next' })
-  assert.deepEqual(log, ['recalls:true', 'ack:session switched', 'latency', 'bump', 'publish', 'completion:agent-1'])
+  assert.deepEqual(log, ['ack:session switched', 'latency', 'bump', 'publish', 'recalls:true', 'completion:agent-1'])
   assert.ok(log.indexOf('bump') < log.indexOf('publish'),
     'the generation reset must run BEFORE the new owner is published (it observes the OLD owner)')
+  assert.ok(log.indexOf('publish') < log.indexOf('recalls:true'),
+    'the queued recalls settle as committed only AFTER the owner publication (the commit point)')
 })
 
-test('A ordinary transition on a disposed surface: only the recall settle and the owner publication', () => {
+test('A ordinary transition on a disposed surface: publish the late child, then the recall commit', () => {
   const log: string[] = []
   const seams: OrdinaryCommitSeams = {
     isSurfaceDisposed: () => true,
@@ -50,11 +52,11 @@ test('A ordinary transition on a disposed surface: only the recall settle and th
     ...publication(log),
   }
   runOrdinaryCommit(seams, { id: 'next' })
-  assert.deepEqual(log, ['recalls:true', 'publish'],
-    'a disposed surface must skip ack/latency/bump and the completion reset, but still publish the late child for retirement')
+  assert.deepEqual(log, ['publish', 'recalls:true'],
+    'a disposed surface must skip ack/latency/bump and the completion reset, but still publish the late child for retirement and settle its recalls as committed')
 })
 
-test('B fork adoption: recall settle → ack(session forked) → latency → bump(reset) → publish → completion', () => {
+test('B fork adoption: ack(session forked) → latency → bump(reset) → publish → recall commit → completion', () => {
   const log: string[] = []
   runForkCommit({
     settlePendingQueueRecalls: (committed) => { log.push(`recalls:${committed}`) },
@@ -62,9 +64,11 @@ test('B fork adoption: recall settle → ack(session forked) → latency → bum
     resetSubmitLatency: () => { log.push('latency') },
     ...publication(log),
   }, { id: 'child' })
-  assert.deepEqual(log, ['recalls:true', 'ack:session forked', 'latency', 'bump', 'publish', 'completion:agent-1'])
+  assert.deepEqual(log, ['ack:session forked', 'latency', 'bump', 'publish', 'recalls:true', 'completion:agent-1'])
   assert.ok(log.indexOf('bump') < log.indexOf('publish'),
     'fork adoption must also reset the generation before publishing the child')
+  assert.ok(log.indexOf('publish') < log.indexOf('recalls:true'),
+    'the queued recalls settle as committed only AFTER the child publication (the commit point)')
 })
 
 test('C first session: publish → completion → await child idle → bump(reset) → init', async () => {

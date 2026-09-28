@@ -881,13 +881,16 @@ Each stage declares its L1–L6 test layer
   `test/runner-session-navigation.test.ts` locks that a production Direct
   `/fork` never performs the extra adoption open.
 - **Delivered as**: PR #195, implementation commit
-  `c913e3f738ca18fd98539801019a95e28752c695` (base `next` @ `226abeb3`); the
-  implementation commit is the frozen evidence anchor — later commits on the
-  same PR (review fixes, doc follow-ups) do not update this line. Reviewed
-  through a review-fix loop ending in an unconditional accept with no
-  unresolved P0/P1/P2, plus a post-accept failure-path hardening round
-  (post-publication commit-seam containment and the awaited pre-publication
-  release, both mutation-verified).
+  `c913e3f738ca18fd98539801019a95e28752c695` (base `next` @ `226abeb3`).
+  §19.1 adjustment (maintainer-directed during the PR review): the evidence
+  anchor is the frozen implementation commit, not a moving PR HEAD — later
+  commits on the same PR (review fixes, doc follow-ups) do not update this
+  line; the PR itself carries the delivered range and per-commit map.
+  Reviewed through a review-fix loop ending in an unconditional accept with
+  no unresolved P0/P1/P2, plus post-accept failure-path hardening rounds
+  (post-publication commit-seam containment, the awaited pre-publication
+  release, and the recall-commit-point boundary — the owner publication is
+  the transition's commit point; all mutation-verified).
 - **Must not change** (verified unchanged): Direct retirement order
   (`cancel → idle → drain → flush → dispose` in
   `test/runner-session-retirement.test.ts`), transition gate/operation barrier
