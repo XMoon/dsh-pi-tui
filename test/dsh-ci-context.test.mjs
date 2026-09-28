@@ -9,10 +9,12 @@ import {
   resolveDshMode,
 } from '../scripts/dsh-ci-context.mjs'
 
-const nextSha = '477b4f420553e8a52c2fbccc464d7561b239c443'
 const expectedNpmDshVersion = Object.entries(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.2'
+const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? expectedNpmDshVersion
+// The tracked source pin is the expectation for forced-source resolutions:
+// read it instead of duplicating the ref/version a second time here.
+const trackedSourceConfig = JSON.parse(readFileSync(new URL('../test/compat/dsh-source.json', import.meta.url), 'utf8'))
 
 /** A temp mode-config file with the given mode (the tracked policy is
  * injectable so the source branch of the resolver is testable without
@@ -96,7 +98,7 @@ test('context uses the current DSH target in every mode and exposes the source p
   const { path } = tempModeConfig('source', life)
   const forcedSource = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next', modeConfigPath: path })
   assert.equal(forcedSource.mode, 'source')
-  assert.equal(forcedSource.version, '0.1.7-rc.2')
-  assert.equal(forcedSource.sourceRef, nextSha)
-  assert.equal(forcedSource.sourceExpectedVersion, '0.1.7-rc.2')
+  assert.equal(forcedSource.version, trackedSourceConfig.expectedVersion)
+  assert.equal(forcedSource.sourceRef, trackedSourceConfig.ref)
+  assert.equal(forcedSource.sourceExpectedVersion, trackedSourceConfig.expectedVersion)
 })

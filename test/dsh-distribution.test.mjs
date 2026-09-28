@@ -556,8 +556,12 @@ test('npm distribution forwards the caller package manifest (path or object) to 
 })
 
 test('npm distribution defaults to the declared package target, never a stale literal', () => {
+  // Read the declared specifier the same way a consumer would: the test must
+  // follow the manifest, not re-hardcode the current target version.
+  const declaredSpec = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+    .devDependencies?.[DSH_AGENT_PACKAGE]
   const declared = npmDshVersion()
-  assert.equal(declared, '0.1.7-rc.2')
+  assert.equal(declared, declaredSpec, 'npmDshVersion must read the manifest, not a literal')
   const distribution = loadDshDistribution({ mode: 'npm' })
   assert.equal(distribution.version, declared, 'an omitted npm version must resolve the declared target')
   // An explicit caller target still wins so historical lanes keep working.

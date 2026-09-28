@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * B3 same-Host fork parity smoke over the pinned official DSH 0.1.7-rc.2
- * Host and Client contracts.
+ * B3 same-Host fork parity smoke over the installed official DSH Host and
+ * Client contracts at the checkout's declared target family.
  *
  * This is a SELF-CONTAINED harness (it deliberately does not import the
  * retired D2.3 parity smoke, whose 0.1.6-era harness still encodes the

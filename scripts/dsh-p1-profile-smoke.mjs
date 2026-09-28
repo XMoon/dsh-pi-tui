@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * RC2 P1 isolated-profile smoke: the candidate bundle composes the official
- * job-controller row in a REAL DSH 0.1.7-rc.2 profile, and the TUI's
+ * P1 isolated-profile smoke: the candidate bundle composes the official
+ * job-controller row in a REAL DSH profile at the checkout's declared target
+ * family, and the TUI's
  * non-consuming observation contract holds against the real `LocalJobRegistry`.
  *
  * A probe bundle installed beside the candidate asserts, inside the running

@@ -8,7 +8,7 @@ const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'),
 const expectedWindow = '>=0.1.7-rc.2'
 const expectedDevVersion = Object.entries(packageJson.devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.2'
+const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? expectedDevVersion
 const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
   .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
 

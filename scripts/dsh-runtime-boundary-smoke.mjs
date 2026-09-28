@@ -4,7 +4,8 @@
  * published below-floor runtime. The candidate must fail on the unsupported
  * runtime. The startup row names the current matrix floor and suggests the
  * recommended published npm upgrade target (both derived from
- * src/dsh-compat-matrix.json, currently the 0.1.7-rc.2 floor).
+ * src/dsh-compat-matrix.json; the floor and the recommended target are
+ * deliberately distinct values).
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -32,7 +33,11 @@ const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 // rejection case is 0.1.1-rc.2; the exact prerelease floor is covered
 // by the startup-gate unit tests.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = COMPAT_MATRIX.current.upgradeDsh
+// The supported floor (last matrix row) and the recommended recovery target
+// (current.upgradeDsh) are deliberately distinct: the floor stays at the
+// minimum peer-supported runtime while the recovery command recommends the
+// validated published target, which may be newer.
+const FLOOR_DSH_VERSION = COMPAT_MATRIX.matrix[COMPAT_MATRIX.matrix.length - 1].dshFrom
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
 const EXPECTED_BOUNDARY_IMPORT = /(?:@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|commands|credentials|goal|jobs|llm|llm-retry|permission-presets|plan-mode|sandbox-policy|session|session-log-export|session-persistence|session-title|settings|shell|skill|subagent|token-meter|tool-todo|tool-workflow|tools|user-approval|user-questions|tool-subagent|cordis-host-runner))(?=['"/]|$)/iu
 
@@ -127,17 +132,17 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 }
 
 // Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the published
-// npm floor (currently 0.1.7-rc.2, derived from the compat matrix) is
-// rejected. The exact prerelease boundary is tested by startup.test.ts
-// because only the 0.1.1 line is installed by this smoke.
+// npm floor (the last compat-matrix row's lower bound) is rejected; the
+// recovery command is the matrix's current upgrade command, whose target may
+// be newer than the floor. The exact prerelease boundary is tested by
+// startup.test.ts because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {
-  if (semver.lt(oldVersion, TARGET_DSH_VERSION)) {
+  if (semver.lt(oldVersion, FLOOR_DSH_VERSION)) {
     return {
-      requires: TARGET_DSH_VERSION,
-      // Derived from the same floor the notice names, so a version-floor move
-      // cannot leave this smoke asserting a stale upgrade target.
-      upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@'
-        + TARGET_DSH_VERSION,
+      requires: FLOOR_DSH_VERSION,
+      // Derived from the matrix's own upgrade command, so a floor or target
+      // move cannot leave this smoke asserting a stale recovery string.
+      upgradeCommand: COMPAT_MATRIX.current.upgradeCommand,
     }
   }
   return undefined

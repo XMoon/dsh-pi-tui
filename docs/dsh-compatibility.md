@@ -21,7 +21,8 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.7-alpha.1` (published) | `dsh-v0.1.6-alpha.1` | Published forward-integration target; keeps its own alpha.1 contract and is the fallback TUI for an alpha.1 runtime |
 | `0.4.7-alpha.2` (published) | `dsh-v0.1.6-alpha.2` | Released forward-integration line; first line on the alpha.2 Client Session contract and the fallback TUI for a 0.1.6-alpha.2 runtime |
 | `0.4.8` (published stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable line: the 0.1.7 profile-owned Config, declarative preset registry, SessionId-owned jobs, execute/result shell, and official Client projections/ClientJobs |
-| `0.4.9` (published stable) | `dsh-v0.1.7-rc.2` | Current stable line: retires the rc.1 preset chooser policy, converges Direct model selection with the rc.2 availability/background-save semantics, and proves rc.2 dynamic tool updates through the existing P1 surfaces |
+| `0.5.0` (published stable) | `dsh-v0.2.0-rc.1` | Current stable line: qualifies the published 0.2.0-rc.1 exact family (Koffi pinned 3.1.1) while keeping the `>=0.1.7-rc.2` runtime floor, converges the install allow list to `@deepseek-ai/dsh-subprocess-local,koffi,node-pty`, retires the `fs-ext` consumer build, and passes Source Mode against the 0.2.0-rc.1 release commit |
+| `0.4.9` (published stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable line: retires the rc.1 preset chooser policy, converges Direct model selection with the rc.2 availability/background-save semantics, and proves rc.2 dynamic tool updates through the existing P1 surfaces |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
@@ -47,19 +48,22 @@ reference contract; its last compatible TUI stays the published
 mount concurrently; the floor is a registry release, so the notice suggests the
 exact npm upgrade target.
 
-For the current stable `0.4.9` line, install the recommended DSH family and the
-stable TUI. DSH `0.1.7-rc.2` is the minimum and the validated target; older
-runtimes must use their paired TUI line from the table above. The recommended
-install command explicitly allows the DSH native install scripts:
+For the current line, install the recommended DSH family and the stable TUI.
+The runtime peer floor and the recommended target are distinct values: DSH
+`0.1.7-rc.2` is the minimum supported runtime, while the exact npm family this
+checkout validates — and the version an old runtime should upgrade to — is the
+published `0.2.0-rc.1`. Older runtimes below the floor must use their paired
+TUI line from the table above. The recommended install command explicitly
+allows the DSH native install scripts:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The `0.4.9` checkout is npm Mode and targets the published
-`0.1.7-rc.2` family through its lockfile. Use the local development
-flow to materialize it:
+The checkout is npm Mode and targets the published `0.2.0-rc.1` family through
+its lockfile while keeping the whole DSH peer floor at `>=0.1.7-rc.2`. Use the
+local development flow to materialize it:
 
 ```sh
 pnpm dev:doctor
@@ -76,7 +80,7 @@ pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 The startup notice on an old runtime suggests the exact published upgrade:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.1
 ```
 
 If the official `dsh-v0.1.0-rc.8` runtime must be kept, use the compatible
@@ -100,12 +104,12 @@ Official `dsh-v0.1.2-alpha.2`/`alpha.3` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, `alpha.4`/`alpha.5` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and `dsh-v0.1.3-alpha.2` uses
 `@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The published 0.1.5-rc.1/rc.2 family is
-the last runtime for the `0.4.6` stable release. The `0.4.9` npm-mode line is
+the last runtime for the `0.4.6` stable release. The current npm-mode line is
 separate: its whole DSH peer floor is unified at `>=0.1.7-rc.2` (the
 rc.2 preset registry peers `dsh-agent` exactly, so a wider legacy floor can
-no longer satisfy a fresh standalone tarball install), and its exact npm
-family is verified by the lockfile. The `0.4.8` line keeps its `>=0.1.7-rc.1`
-floor and stays the rc.1 pairing.
+no longer satisfy a fresh standalone tarball install), while its exact npm
+family is validated against the published `0.2.0-rc.1` distribution. The
+`0.4.8` line keeps its `>=0.1.7-rc.1` floor and stays the rc.1 pairing.
 
 The root README intentionally uses DSH's moving `latest`/`alpha` channels for
 ordinary stable/preview installs; the exact release pairing and compatibility
@@ -167,23 +171,17 @@ The CI policy is deliberately explicit: pushes to `next` and pull requests
 whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
 `main` and every tag, including `next-v*`, always use registry-backed npm mode
 with a frozen lockfile. This checkout's policy is npm mode and targets
-the published `0.1.7-rc.2` family declared by `package.json` and resolved by
-its lockfile. The source lane independently pins `deepseek-harness` to
-`477b4f420553e8a52c2fbccc464d7561b239c443` (`0.1.7-rc.2`) in
-`test/compat/dsh-source.json` and builds and validates that family from source.
-
-**Source Mode is waived for `0.4.9` (BLOCKED upstream, not a release blocker).**
-The DSH `0.1.7-rc.2` upstream source tree is not self-cleanable: the newly
-referenced `tsconfig.desktop-keyboard-tests.json` declares
-`outDir: lib/desktop-keyboard-test-types`, while upstream `scripts/clean.ts`
-rejects every referenced TypeScript `outDir` not ending in `/types` except its
-native-entry special case. The regression was introduced after `rc.1` and is
-still present upstream, so `pnpm compat:dsh:source` cannot run against the exact
-`rc.2` tag without modifying the external DSH checkout. Source Mode is therefore
-waived for this release; **published npm-family compatibility remains the
-`0.4.9` release authority** (`pnpm compat:dsh:npm`,
-`pnpm compat:dsh:npm --exact-family`, and `pnpm compat:dsh:client-family` on the
-published `0.1.7-rc.2` family).
+the published `0.2.0-rc.1` family declared by `package.json` and resolved by
+its lockfile (the runtime peer floor stays `>=0.1.7-rc.2`). The source lane
+independently pins `deepseek-harness` to
+`4878cdabd87d4041bdaff61d04c966883b9fd07a` (`0.2.0-rc.1`) in
+`test/compat/dsh-source.json` and builds and validates that family from
+source; the full source verification passed against that release commit. (The
+historical `0.1.7-rc.2` tag's source tree could not self-clean — its
+`tsconfig.desktop-keyboard-tests.json` declares an `outDir` upstream
+`scripts/clean.ts` rejects — which is why the `0.4.9` release carried a
+Source Mode waiver; the `0.2.0-rc.1` release commit no longer hits that
+path.)
 
 The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the
@@ -198,8 +196,9 @@ pnpm compat:dsh:npm
 ```
 
 The isolated P1 profile smoke installs the packed candidate plus a probe bundle
-into a throwaway `DSH_HOME` and boots the real TUI on the published `0.1.7-rc.2`
-family; the probe proves that the bundle's `job-controller` row composed
+into a throwaway `DSH_HOME` and boots the real TUI on the checkout's published
+exact-family target; the probe proves that the bundle's `job-controller` row
+composed
 (`ctx.jobController`), that `follow()` opens for a real registered Job, and that
 observing it never advances the model-facing `jobs.read()` cursor:
 
@@ -239,6 +238,17 @@ removed with the temporary validation workspace and must never be committed to
   (`test/compat/pi2dsh.json`) keeps recording `apiVersion=1` because that is
   the consumer's own requirement — never silently rewritten to match this
   host. Re-enabling Gate B requires a `pi2dsh` release that accepts API v2.
+- **0.5.0 qualification disposition (user-authorized, 2026-09-28).** The
+  promotion qualification ran the local `pnpm smoke:pi2dsh` driver against the
+  0.5.0 candidate: the metadata preflight blocks with
+  `ECOSYSTEM_CONTRACT_BLOCKER` because every published `pi2dsh` release
+  through `0.25.2` declares `@xmoon76/dsh-pi-tui: ^0.3.3` (which does not
+  cover 0.5.0) and DSH peers that predate the `0.2.0-rc.1` family. The gate is
+  working as designed — it blocks instead of force-installing — and the
+  promotion authority explicitly classified this as an external
+  published-consumer contract blocker for the 0.5.0 qualification (the
+  re-enable condition above is unchanged; no manifest value was rewritten to
+  mask it).
 - The runtime-boundary smoke intentionally runs the 0.4 candidate against DSH
   0.1.1 and requires a nonzero unsupported-runtime outcome. Friendly startup
   guidance is asserted when emitted, but raw import failure is accepted because

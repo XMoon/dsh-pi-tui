@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * D1.1 integration smoke over the published 0.1.7-rc.2 official Client
- * faces.
+ * D1.1 integration smoke over the published official Client faces at the
+ * checkout's declared target family.
  *
  * The browser-facing Client packages are module-loader chunks rather than
  * Node modules, so this harness installs the same tiny loader boundary that a

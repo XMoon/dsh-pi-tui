@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * D1.1 same-Host parity smoke over the pinned official DSH 0.1.7-rc.2
- * Host and Client contracts.
+ * D1.1 same-Host parity smoke over the installed official DSH Host and Client
+ * contracts at the checkout's declared target family.
  *
  * One Host Context owns the live Session, projections, SQLite query provider,
  * Session Controller, Gateway, and forwarded-event source. Direct reads that

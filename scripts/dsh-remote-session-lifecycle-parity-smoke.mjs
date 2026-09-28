@@ -2,7 +2,8 @@
 /**
  *
  * Focused same-Host Session lifecycle/model/preset integration smoke over the
- * pinned official DSH 0.1.7-rc.2 Host and Client contracts. One real Host
+ * installed official DSH Host and Client contracts at the checkout's declared
+ * target family. One real Host
  * Context owns the Session store, the production AgentLoop with an in-process
  * stub LLM route, the declarative agent preset registry, projections, the
  * SQLite session query engine, the local fs service, the real workspace stack,

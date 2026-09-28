@@ -101,11 +101,12 @@ export const inject = ['cmdlineArgs']
  * it is shown as the fallback version label (`>= <since>`) when the
  * bundle's own version cannot be read, so the message stays truthful.
  *
- * The 0.4.9 line has a minimum of the published npm release
+ * The current line has a minimum of the published npm release
  * dsh-v0.1.7-rc.2. The recovery guidance names the recommended published
- * upgrade target and allows its native install scripts. The already-published
- * 0.4.7-alpha.2 line keeps its own alpha.2 contract and remains the compatible
- * fallback for a dsh-v0.1.6-alpha.2 runtime.
+ * upgrade target — which may be NEWER than the floor — and allows its native
+ * install scripts. The already-published 0.4.7-alpha.2 line keeps its own
+ * alpha.2 contract and remains the compatible fallback for a
+ * dsh-v0.1.6-alpha.2 runtime.
  */
 export interface HarnessCompatEntry {
   /** Inclusive lower bound of the incompatible range; absent = unbounded below. */
