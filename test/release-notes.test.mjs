@@ -21,17 +21,25 @@ function currentGuidance(omit) {
   return `\n${entries.map(command => `- ${command}`).join('\n')}`
 }
 
+/** The pairing bullets a release body must carry from the 0.4 line onward;
+ * fixtures get them by default so the generic tag/structure cases exercise
+ * the same gate a real release faces. */
+function guidanceBullets(version) {
+  return `\n${requiredGuidance(version).map(command => `- ${command}`).join('\n')}`
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = '', channel = 'stable' }) {
+function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = undefined, channel = 'stable' }) {
   const root = life.tempDir('dsh-pi-tui-release-notes-')
   const comparePrefix = channel === 'next' ? 'next-v' : 'v'
   const output = join(root, 'release-notes.md')
   const packageJson = join(root, 'package.json')
   const chinese = join(root, 'CHANGELOG.md')
   const english = join(root, 'CHANGELOG.en.md')
+  const injectedGuidance = guidance ?? guidanceBullets(version)
 
   mkdirSync(join(root, 'scripts', 'lib'), { recursive: true })
   mkdirSync(join(root, 'src'), { recursive: true })
@@ -40,8 +48,8 @@ function createFixture(life, { version, englishDate = '2026-08-28', chineseDate 
   cpSync(join(repo, 'scripts/lib/dsh-compat.mjs'), join(root, 'scripts', 'lib', 'dsh-compat.mjs'))
   cpSync(join(repo, 'src', 'dsh-compat-matrix.json'), join(root, 'src', 'dsh-compat-matrix.json'))
   writeFileSync(packageJson, `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version }, null, 2)}\n`)
-  writeFileSync(chinese, `# 更新日志\n\n## [Unreleased]\n\n## [${version}] - ${chineseDate}\n\n### 变更\n\n- 中文迁移说明。${guidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
-  writeFileSync(english, `# Changelog\n\n## [Unreleased]\n\n## [${version}] - ${englishDate}\n\n### Changes\n\n- English migration note.${guidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
+  writeFileSync(chinese, `# 更新日志\n\n## [Unreleased]\n\n## [${version}] - ${chineseDate}\n\n### 变更\n\n- 中文迁移说明。${injectedGuidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
+  writeFileSync(english, `# Changelog\n\n## [Unreleased]\n\n## [${version}] - ${englishDate}\n\n### Changes\n\n- English migration note.${injectedGuidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
   return { root, output, packageJson, chinese, english }
 }
 
