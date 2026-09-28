@@ -531,9 +531,10 @@ export interface StreamingToolPreview {
   readonly summary?: string
   /** Bounded partial args retained until summary is found or a known-name scan reaches the cap. */
   readonly scanPrefix?: string
-  /** The first streamed delta's time (post-F6 plan §12.14): the pending
-   * Activity card's duration and the durable call's start both read it, so
-   * the elapsed time never resets across the Preparing → durable handoff. */
+  /** The first streamed delta's time (post-F6 plan §12.14). The durable
+   * elapsed-time continuity across the Preparing → durable handoff is owned
+   * by the transcript's own preparing-start sidecar (first delta per call
+   * identity); the fail-open Preparing row renders no elapsed time. */
   readonly startedAt?: number
 }
 
@@ -3109,12 +3110,6 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
   kind: 'streaming-tool-previews'
   previews: readonly StreamingToolPreview[]
   turn?: number
-  /** Compact / expanded Focus only: this live preview belongs to a NEW
-   * Process run with no durable TranscriptWorkSpan yet. It is pure
-   * placement/semantic classification — rendered fail-open as ordinary
-   * Preparing rows until the first durable Process member creates a
-   * WorkSpan, never as Activity disclosure chrome. */
-  pendingWork?: true
   /** The semantic container ancestry of a live preview inserted into an open
    * Work/Thought tail (never the globally appended pending-run block). */
   containerPath?: TranscriptContainerPath
@@ -3181,7 +3176,6 @@ function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: Transcript
   }
   if (left.kind === 'streaming-tool-previews' && right.kind === 'streaming-tool-previews') {
     return left.turn === right.turn
-      && (left.pendingWork === true) === (right.pendingWork === true)
       && sameStreamingToolPreviewShape(left.previews, right.previews)
   }
   if (left.kind === 'pending-user' && right.kind === 'pending-user') {
@@ -9281,14 +9275,6 @@ export class TuiApp {
     focusExpandedTurns?: ReadonlySet<number>,
   ): void {
     if (this.streamingToolPreviews.length === 0) return
-    // `pendingWork` is pure placement/semantic classification metadata: it
-    // records that the preview belongs to a NEW Process run with no durable
-    // WorkSpan. It never renders Activity chrome — a presentation without
-    // an operable disclosure action classifies the same ownership, and an
-    // ownerless pending-run fails open as ordinary Preparing rows on every
-    // surface until the first durable Process member creates a WorkSpan
-    // (plan §14/§23).
-    const workChrome = this.transcriptDisclosureActionAvailable()
     const spans: TranscriptWorkSpan[] = []
     for (const block of blocks) {
       if (block.kind === 'work') spans.push(block.span)
@@ -9311,10 +9297,6 @@ export class TuiApp {
               kind: 'streaming-tool-previews',
               turn,
               previews,
-              // The same pending-run classification as Compact's tail block;
-              // rendered fail-open as ordinary Preparing rows until the first
-              // durable Process member creates a WorkSpan.
-              ...(workChrome ? { pendingWork: true as const } : {}),
               containerPath: [{ kind: 'focus-root', turn }],
             })
           }
@@ -9347,11 +9329,7 @@ export class TuiApp {
       }
     }
     if (pending.length > 0) {
-      blocks.push({
-        kind: 'streaming-tool-previews',
-        previews: pending,
-        ...(workChrome ? { pendingWork: true as const } : {}),
-      })
+      blocks.push({ kind: 'streaming-tool-previews', previews: pending })
     }
   }
 

@@ -277,11 +277,3 @@ export class CompactWorkComponent implements Component {
     return lines
   }
 }
-
-/**
- * Ownerless live Preparing evidence (a NEW Process run with no durable span)
- * never renders Activity chrome: only a canonical `TranscriptWorkSpan` may
- * present the Activity disclosure, so a pending run fails open as ordinary
- * Preparing rows (`TuiApp.streamingToolPreviewComponent`) until the first
- * durable Process member creates the span.
- */
