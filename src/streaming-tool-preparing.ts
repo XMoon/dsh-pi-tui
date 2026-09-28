@@ -83,9 +83,8 @@ export interface StreamingToolPreviewInput {
   readonly name?: string
   /** One decoded argumentsDelta from the live assistant stream. */
   readonly argumentsDelta?: string
-  /** The chunk's time: the FIRST delta records the preview's start, so the
-   * elapsed seconds survive the Preparing → durable handoff (post-F6 plan
-   * §12.14). */
+  /** The chunk's time: the FIRST delta records the preview's start
+   * (post-F6 plan §12.14). */
   readonly time?: number
 }
 
