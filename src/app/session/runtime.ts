@@ -222,6 +222,11 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // the handle (each `fromHandle` of a Remote reference wrapper is an
     // ownership transfer, never a free re-read).
     let committedOwner: SessionOwnerRef | undefined
+    // The owner metadata the post-publication phases may consume. Everything
+    // throwable is snapshotted BEFORE `setCurrentOwner` (the sole commit
+    // point); after the publication a transaction never re-resolves the owner
+    // through `SessionOwnerAccess` — it only consumes these primitives.
+    let committedSessionId: string | undefined
     // The exactly-once release of a NEW owner that was acquired but never
     // published, STARTED synchronously in the commit section and AWAITED
     // before this transition settles (so the gate/barrier it holds stay
@@ -270,6 +275,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 const identity = deps.owners.completionIdentity(nextOwner)
                 const sessionId = deps.owners.sessionId(nextOwner)
                 committedOwner = nextOwner
+                committedSessionId = sessionId
                 core.setCurrentOwner(nextOwner, sessionId)
                 // The publication is the transition's COMMIT POINT: only from
                 // here on does the `finally` below stop restoring the queued
@@ -289,8 +295,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // restores the queued recalls when this throw unwinds.
               preCommitRelease = deps.retirement.retire(nextOwner, 'transition').then(report => {
                 for (const failure of report.failures) {
+                  // No owner re-read here: the target id is the semantic id of
+                  // this transaction, and the original failure may itself be a
+                  // metadata throw — a re-read could reject this cleanup and
+                  // mask the transition's real error.
                   deps.diag.error('pre-commit NEW owner release failed', {
-                    session: deps.owners.sessionId(nextOwner),
+                    session: steps.target.id,
                     phase: failure.phase,
                     error: failure.error,
                   })
@@ -305,7 +315,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // and never a skipped OLD release. The recalls were already
               // settled committed by the commit section.
               deps.diag.error('transition commit seam failed after publication (child committed)', {
-                to: deps.owners.sessionId(nextOwner),
+                to: committedSessionId,
                 error: safeErrorMessage(error),
               })
             }
@@ -367,7 +377,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         deps.surface.clearOpening(opening)
         if (retired.length > 0) {
           deps.diag.error('transition retire failed (child committed)', {
-            to: deps.owners.sessionId(nextOwner),
+            to: committedSessionId,
             failures: retired,
           })
         }
@@ -663,8 +673,16 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // lookup joins the protected region: a throw from it must also take
         // the exactly-once release path for the open-retained child owner.
         let nextSessionId!: string
+        let oldSessionId: string | undefined
         try {
+          // The pre-publication metadata snapshot: everything throwable this
+          // transaction still needs (the child's id, the source's id for the
+          // post-commit retirement) resolves BEFORE the publication, so a
+          // metadata failure is a pre-publication failure with an exactly-once
+          // child release — never a committed child that cannot retire its
+          // source.
           nextSessionId = deps.owners.sessionId(nextOwner)
+          oldSessionId = oldOwner === undefined ? undefined : deps.owners.sessionId(oldOwner)
           runForkCommit({
             settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
             settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
@@ -713,8 +731,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         } catch (error) {
           deps.diag.error('fork adoption callback failed after child commit', { error: safeErrorMessage(error), session: nextSessionId })
         }
-        if (oldOwner !== undefined) {
-          const oldSessionId = deps.owners.sessionId(oldOwner)
+        if (oldOwner !== undefined && oldSessionId !== undefined) {
           // The retirement now owns the fork's admission pin: it is released
           // only when the source owner has actually been disposed.
           if (pin !== undefined) pin.state.retirementOwnsRelease = true
