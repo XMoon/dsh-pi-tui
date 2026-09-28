@@ -1952,15 +1952,18 @@ unchanged; no production bootstrap call site exists.
   `dsh-client-connection`, `dsh-client-file-upload`, `dsh-session-stats`,
   `dsh-session-turn-outline`, `dsh-typert-registry`) at `>=0.1.7-rc.2` and
   the four missing exact rc.2 dev pins.
-- `scripts/client-boundary-baseline.json` — two deliberate entries for the
-  composition owners: `app/remote/host-runtime.ts: import:dsh-session` and
-  `app/remote/client-runtime.ts: import:dsh-agent`. Both are substring
-  artifacts of the gate's import heuristic (the files import
-  `dsh-session-stats` / `dsh-session-turn-outline` /
-  `dsh-session-log-export` projection plugins and the
-  `dsh-agent-preset-registry/remote` contribution — not the Host
-  `dsh-agent`/`dsh-session` type packages); the entries record the M3-1
-  composition owners in the inventory per the sanctioned baseline procedure.
+- `scripts/client-boundary-gate.mjs` — the two package-import matchers now
+  require exact package matching (`dsh-agent(?![\w-])` /
+  `dsh-session(?![\w-])`). The earlier prefix pattern classified the
+  composition owners' `dsh-session-stats` / `dsh-session-turn-outline` /
+  `dsh-session-log-export` projection rows and the
+  `dsh-agent-preset-registry/remote` contribution as the base
+  `dsh-agent`/`dsh-session` type packages, so M3-1 briefly carried two
+  `client-boundary-baseline.json` entries that were never real coupling.
+  Narrowing the matcher removed those two and three stale `runtime/direct/*`
+  entries that matched `dsh-agent-preset-registry` the same way; the
+  composition owners now carry no baseline entry and are documented in
+  `docs/client-server-coupling.md` instead.
 
 ### Carrier correction (supersedes the M3-0 `transport.rpc` wording)
 
@@ -1989,7 +1992,7 @@ invalidation behavior) are stage acceptance tests, not missing Pre-M3 coverage.
 
 | Blocker | Level | Mitigation |
 |---|---|---|
-| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + in-process rpc carrier (see `docs/m3-entry-contract.md` §4.2). No product redesign required |
+| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + the in-process explicit transport carrier (`connection.createSharedFetchHandler('/api')` + `typertGateway.wireStream.open`, installed through `installConnection`) (see `docs/m3-entry-contract.md` §4.2). No product redesign required |
 | DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: after the Host-local legacy-settings migration prerequisite settles, M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see `docs/m3-entry-contract.md` §2.4, §4.4, §11 M3-1) |
 | Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/m3-entry-contract.md` §8) |
 | Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
