@@ -183,18 +183,22 @@ allowing `next` to continue forward development.
 The branch flow is:
 
 ```text
-next
+next fixed snapshot
   |
   +-- promote/next-to-main-<dsh-release>
           |
+          +-- reserve the intended stable release identity
           +-- qualify the published DSH release
-          +-- run the promotion verification
+          +-- fix qualification-exposed compatibility issues only
+          +-- finalize the release metadata
           |
           +------------------------------> main
                                              |
-                                             +-- stable release preparation
+                                             +-- verify the merged candidate
                                              |
-                                             +------ merge resulting main ------> next
+                                             +-- stable tag / publication
+                                             |
+                                             +------ merge released main ------> next
                                                                                   |
                                                                                   +-- continue with future DSH
 ```
@@ -208,16 +212,31 @@ git switch -c promote/next-to-main-<dsh-release>
 ```
 
 The promotion branch is a release candidate, not another forward-development
-branch. Keep it limited to work required to make that snapshot suitable for
-`main`:
+branch. Because the TUI package version is materially coupled to the
+compatibility matrix (`current.since`, the current row's `tui`), startup
+guidance, release-note pairing and the packed candidate's identity, a
+promotion MAY update the package version — together with every
+version-coupled field, atomically — BEFORE qualification, so the
+qualification gates validate the exact artifact intended for publication. An
+untagged version on the branch is a RESERVED candidate identity, not
+evidence the release exists; the identity is consumed only when the stable
+tag is created (see [docs/releasing.md](releasing.md)). The branch's allowed
+scope is exactly:
 
+- reserve the release identity (version + matrix `current.since` + current
+  row `tui` + DSH target/family metadata, all in one atomic change);
 - move the validated DSH target from the development/prerelease baseline to
   the published DSH release;
 - update compatibility metadata and current installation guidance;
 - fix only compatibility failures exposed by that release;
-- run the normal build/test gates and the npm DSH compatibility lane;
-- do not add unrelated features or adaptations for later unpublished DSH
-  commits.
+- finalize release metadata (bilingual changelogs, release-note guidance,
+  release-specific documentation) after the gates are green — preferably in
+  a dedicated final commit;
+- run the normal build/test gates and the npm DSH compatibility lane.
+
+It remains prohibited to add unrelated product features, adaptations for
+later unpublished DSH commits, or post-release refactors on the promotion
+branch.
 
 Merge the promotion branch into `main` with a normal merge commit. Do not
 squash the promotion. Preserving the ancestry tells Git that the promoted
@@ -225,13 +244,15 @@ squash the promotion. Preserving the ancestry tells Git that the promoted
 synchronization can rediscover equivalent changes as unrelated history and
 produce avoidable conflicts.
 
-After the promotion reaches `main`, complete any stable-release preparation
-that belongs to that promotion, then merge the resulting `main` state back
-into `next`. Follow [docs/releasing.md](releasing.md) for that release
-checklist. If `next` must resume forward development before the release commit
-is ready, an earlier back-merge is allowed, but `main` must be merged forward
-again after the release commit. Do not reset `next` to `main`: `next` remains
-the forward-integration branch.
+After the promotion reaches `main`, verify the merged state, tag the
+verified commit, publish through the tag workflow, and merge the released
+`main` state back into `next`. Follow [docs/releasing.md](releasing.md) for
+that release checklist; no second version bump is required merely because
+the candidate moved from the promotion branch to `main`. If `next` must
+resume forward development before the release commit is ready, an earlier
+back-merge is allowed, but `main` must be merged forward again after the
+release commit. Do not reset `next` to `main`: `next` remains the
+forward-integration branch.
 
 The final promotion invariant is that the `main` state containing the release
 commit is merged forward into `next`.

@@ -18,6 +18,33 @@ vendored build dependency and must never be published separately.
 - Never create or push a release tag until the local verification below is
   green. Never push without the user's explicit confirmation.
 
+## Version reservation and consumption
+
+A version present in Git is a **reserved candidate identity**, not proof of a
+published release. The stable tag is the boundary that commits the identity
+to the publication workflow:
+
+```text
+package.version present in Git     ≠ published release
+stable tag vX.Y.Z                  = identity committed to publication
+```
+
+When a stable release is produced through a promotion branch, the intended
+package version MAY be reserved BEFORE qualification whenever that identity
+is consumed by compatibility metadata (`src/dsh-compat-matrix.json`
+`current.since` and the current row's `tui`), candidate packaging, startup
+guidance, or release gates — qualification then validates the exact artifact
+intended for publication. Version-coupled metadata must move atomically
+(one partial move, e.g. a bumped version with a stale `current.since`, is a
+release bug; the peer-window tooling test rejects it).
+
+Moving the candidate from the promotion branch to `main` does not require a
+second version bump. Before the tag, ordinary qualification fixes keep the
+reserved version (`0.5.0` stays `0.5.0`); consume a NEW version number only
+when (a) the previous version was already tagged/published, or (b) the
+maintainers deliberately reclassify the release scope — and then the whole
+version-coupled identity is updated atomically in one change.
+
 ## main / next synchronization
 
 - Shared fixes, installation guidance, and branch-neutral documentation land on
@@ -53,11 +80,22 @@ were a promised capability.
 
 ## 2. Update release metadata and documentation
 
-If a stable release is based on a mature `next` snapshot, first merge that
-snapshot from `next` into `main` as described in
-[docs/local-development.md](local-development.md). Complete this release
-checklist on `main`, then merge the resulting released `main` state back into
-`next` as the final promotion step.
+Stable release metadata may be finalized in one of two places:
+
+- **Promotion path (preferred):** when a stable release is promoted from a
+  mature `next` snapshot, the promotion branch reserves the version before
+  qualification and finalizes the release metadata (changelogs, guidance,
+  release-specific docs) at the end of the branch, AFTER the compatibility
+  gates are green — preferably in a dedicated final commit. The merged
+  `main` candidate is then byte-for-byte the state intended to be tagged,
+  except for changes strictly required by the merge itself. See
+  [docs/local-development.md](local-development.md) for the promotion flow.
+- **Direct path:** a release not using a promotion branch finalizes its
+  metadata directly on `main`.
+
+In both cases the tag is created only on the verified `main` commit; an
+untagged version is a reserved candidate identity (see "Version reservation
+and consumption" above).
 
 Choose exactly one release channel before editing metadata:
 

@@ -5,12 +5,18 @@
     "`dshFrom` is the inclusive lower bound and the next row's `dshFrom` is the exclusive",
     "upper bound, so the rows are contiguous by construction. A row without `tui` has no",
     "released compatible TUI (the runtime notice offers the upgrade only). `versions`",
-    "lists the published DSH versions the row covers, oldest first.",
+    "lists the published DSH versions the row covers, oldest first. Historical rows name",
+    "PUBLISHED TUI identities; the row covering the current target may instead name the",
+    "RESERVED candidate release identity this checkout carries while a promotion is being",
+    "qualified — that value becomes an ordinary published fact only once the stable tag",
+    "exists (see docs/releasing.md). There is deliberately no second candidate matrix.",
     "`floor` is the catch-all below the oldest row. `current` describes the line this",
-    "checkout ships: the floor it imposes, the published DSH target and the recovery",
-    "wording. Consumed by src/startup.ts (inlined by the bundler) and, through",
-    "scripts/lib/dsh-compat.mjs, by the release tooling, the installation-doc gate and",
-    "the release-notes tests."
+    "checkout ships: the release line whose identity it reserves (`since`, kept equal to",
+    "package.json's version), the runtime floor it imposes, the recommended published DSH",
+    "target and the recovery wording. The floor and the target are distinct values and",
+    "must stay independently derived. Consumed by src/startup.ts (inlined by the bundler)",
+    "and, through scripts/lib/dsh-compat.mjs, by the release tooling, the",
+    "installation-doc gate and the release-notes tests."
   ],
   "current": {
     "since": "0.5.0",
