@@ -17,7 +17,8 @@ Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer owners
 M3-0 DONE          (entry contract frozen — the M3 architecture contract is docs/m3-entry-contract.md)
 M3-1 DONE          (experimental in-process wire composition spine: reusable `RemoteHostRuntime` + `RemoteClientRuntime` + `backend-loader.ts` dynamic boundary, zero product cutover — see the M3-1 status section)
 M3-2 DONE          (Remote Session owner spine: exact-`SessionBinding` `SessionOwnerAccess`/`SessionOwnerRetirement` provider, transport-neutral app/session runtime, Remote fork publication→open adoption — zero product cutover, see the M3-2 status section)
-M3-3A NEXT         (Remote backend closure: session / runtime / catalog / host-file)
+M3-3A DONE         (Remote session/runtime/catalog/host-file semantic closure: official contextPressure + turnOutline + sessionStatus projection reads, subagent allowlist on the official model directory, Remote skills/list + fileReferences/list adapters, truthful Host-file unavailable states, PresentationReader.loadThrough, one-source M3-3A semantic bundle — zero product cutover, see the M3-3A status section)
+M3-3B NEXT         (Remote ConfigPort, settings mirror, approval/question flow, session-log export, final Remote Backend assembly + BackendKind 'remote')
 M3 product composition NOT STARTED (Direct production/default behavior unchanged; Remote composition NOT active)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -2115,6 +2116,143 @@ the composition and presentation.
   commit shapes still publish only through the injected owner provider into
   `SessionOwnershipCore`; the production bootstrap still injects
   `directRuntime.owners`).
+
+
+## M3-3A status (COMPLETE, zero product cutover)
+
+M3-3A closed the Remote **session / runtime / catalog / host-file semantic
+foundation** against the published DSH 0.2.0-rc.1 contract
+(`docs/m3-entry-contract.md` §1.1 requalification): the semantic ports no
+longer inherit historical Direct shapes, and every M3-3A adapter constructs
+from ONE M3-1 `RemoteClientRuntime`. Nothing about which backend the user
+runs changed: Direct remains the production default, `BackendKind` stays
+`'direct'`, no backend selector exists, and no production bootstrap call site
+consumes the bundle. M3-3B owns the Remote ConfigPort, interaction flow and
+the final complete Remote Backend assembly.
+
+### Implementation owners (actual files)
+
+- `src/runtime/session-reader-port.ts` + the two adapters — the context
+  authority is now the official `contextPressure` projection numerator
+  `projectedTokens ?? pressureTokens` (the shared
+  `contextPressureOccupancy`; Direct reads the Host projection snapshot,
+  Remote reads the exact retained binding's face — never a `tokenMeter`
+  second authority, never an invented RPC). The reader also gained the
+  official `turnOutline` navigation read (M3-4 `/rewind` boundary source)
+  and the subject-neutral `sessionStatus(sessionId)` snapshot (M3-4/M3-5
+  facts: model `next ?? lastUsed`, context pressure/breakdown, `tokenUsage`,
+  `todos`, and the session's own cwd) through the shared
+  `src/runtime/session-status-projection.ts` mapping — one session's values
+  only, absent fields stay absent, no parent fallback, no StatsFolder.
+- `src/subagent-model-menu.ts` — the allowlist picker consumes the official
+  grouped model directory (`ModelCatalog.loadDirectory()`, the
+  `session.modelCatalog()` semantic) in ONE async read; saved routes absent
+  from the current directory stay representable/removable as trailing rows;
+  per-provider failure isolation renders from `directory.failures`; the
+  historical `listProviders()` + `listModels(provider)` cross-backend pair is
+  RETIRED from `ModelCatalog` (Direct keeps it only as the in-process
+  `ctx.llm` face its own directory read uses). `llm.listModels` has no public
+  Remote — no private RPC may ever back it.
+- `src/runtime/remote/model-remote.ts` — `discoverModels` maps the official
+  `llm/discoverModels(settingsNs='llm-pi-ai', request, signal)`: a Host
+  refusal or replaced generation SURFACES (never `[]`), so the wizard
+  distinguishes failure from fallback. `listConfigurableProviders` stays
+  `undefined` on Remote (the /login merge's settings-only fallback; its sync
+  mirror policy is M3-3B's).
+- `src/runtime/remote/skill-remote.ts` — `RemoteSkillCatalog`: the official
+  Session-addressed `skills/list` (detached DTO, abort → cancellation, Host
+  error → error). The sessionless standing catalog and the Client skill-body
+  read stay explicit unsupported; `hostLoadsSkillBody` is a composition
+  fact (constant), and `onSkillsChange` installs no private event (the
+  strong re-read boundaries own freshness).
+- `src/runtime/host-file-port.ts` + `src/runtime/remote/host-file-remote.ts`
+  — `listReferences` now distinguishes an authoritative `ok` (empty included)
+  from `unavailable` (reason carried); `resolveReference` gained the same
+  third state (never fake `missing`). The Remote adapter maps the session
+  scope to the official `fileReferences/list(agentId, query, signal)` with
+  generation fencing; the workspace scope and existence/canonicalization are
+  explicit `unavailable` (no Client fs, no cwd guess, no fake empty), so
+  relative `@`-mentions stay literal.
+- `src/runtime/presentation-read-port.ts` + readers —
+  `PresentationReader.loadThrough(sessionId, seq)` maps the official Client
+  `Session.loadThrough` jump (borrow → pin exact generation → ONE official
+  call → generation + binding-identity recheck → snapshot → release); the
+  TUI never hand-rolls a `loadOlder` chain. Direct answers with its full
+  coverage snapshot after the cancellation check.
+- `src/app/remote/m3a-semantics.ts` — `createRemoteM3ASemantics`: the
+  partial assembly of every closed surface (sessionReader,
+  pendingInputReader, sessionWriter, sessionLifecycle, subagent, catalog,
+  hostFile, hostCommand, presentationReader) from ONE narrow runtime face
+  (`RemoteM3ARuntimeSource`; the official-contract gate proves the real
+  `RemoteClientRuntime` satisfies it). NOT a `Backend` — no
+  interaction/config/sessionArchive, no `BackendKind` change. `dispose()`
+  drops the adapter caches ahead of the Client Context; the M3-2 owner
+  services stay their own owner.
+
+### Supported / unsupported matrix (M3-3A surfaces)
+
+| Surface | Remote state | Carrier / reason |
+|---|---|---|
+| SessionReader list/projectionBatch/search/blank | READY | official Client list/projection faces (D1.1, unchanged) |
+| `measureContext` | READY | official `contextPressure` projection (`projectedTokens ?? pressureTokens`) |
+| `turnOutline` | READY | official `turnOutline` projection off the exact binding |
+| `sessionStatus` | READY | official projections + the session's own cwd fact |
+| PendingInputReader / SessionWriter / SessionLifecycle / SubagentPort / HostCommandPort | READY | D1–D2 adapters, requalified |
+| ModelCatalog `loadDirectory` / selection writes | READY | `session/modelCatalog` / `session/selectModel` (D2.3) |
+| ModelCatalog `discoverModels` | READY | `llm/discoverModels` (failure surfaces) |
+| ModelCatalog `listProviders`/`listModels` | RETIRED | no public Remote for `llm.listModels`; the official directory replaces the pair |
+| ModelCatalog `listConfigurableProviders` | UNAVAILABLE (`undefined`) | config-schema ownership is M3-3B's ConfigPort |
+| SkillCatalog `listHumanSkills` | READY | `skills/list` |
+| SkillCatalog `standing` / `resolveSkill` / `onSkillsChange` | UNSUPPORTED | session-addressed list-only wire; no `skills/read`; no forwarded `skills/*` event |
+| HostFile session scope | READY | `fileReferences/list(agentId, …)` |
+| HostFile workspace scope / existence / canonicalization | UNSUPPORTED | no official carrier — `unavailable`, mentions stay literal |
+| PresentationReader `read`/`loadOlder`/`loadThrough` | READY | official Client event window + jump loop |
+| PresetCatalog roster/default/resolve/select | READY (requalified) | `agentPresets/list`/`select` |
+
+### Projection / Presentation Availability Map (M3-4/M3-5 inputs)
+
+Per addressed session (main retained, child retained, child catalog-only /
+cold, after reconnect) — the authoritative facts M3-4/M3-5 may display:
+
+| Fact | main retained | child retained | child catalog-only/cold | reconnect |
+|---|---|---|---|---|
+| modelSelection (`next ?? lastUsed`) | official projection value | same, from the CHILD's binding | no binding → absent (never the parent's) | generation-fenced: the old Host's value is dropped, the new binding repopulates |
+| contextPressure (`projectedTokens ?? pressureTokens`, `contextWindow`) | official projection value | same, from the child's binding | absent — no guessing | generation-fenced |
+| contextBreakdown | official projection value | same | absent | generation-fenced |
+| todos | official projection value (`null` = none yet) | same | absent | generation-fenced |
+| tokenUsage | official projection value | same | absent | generation-fenced |
+| cwd | the session's own list-row fact | the child's own list-row fact | absent unless the row carries it | re-derived from the new list baseline |
+| turnOutline | official projection value | same | absent (a projection read, never a history fold) | generation-fenced |
+| running/activity | Client Session fact (`SessionSnapshot.running`) | the child's own | catalog semantics only | unknown while disconnected |
+| presentation window (`read`/`loadOlder`/`loadThrough`) | official Client event window | same | no binding → `undefined` | the official reconnect re-opens; stale settles drop |
+
+M3-5 must consume these through `sessionStatus`/`turnOutline` — it must NOT
+build a `ChildStatusReader`, `ViewerStatusPort` or any parent-fallback.
+
+### Evidence
+
+- Unit: `test/remote-session-reader.test.ts` (R1–R6 parity + outline +
+  status isolation + same-id binding replacement),
+  `test/session-status-projection.test.ts` (Direct mapping + child
+  correctness), `test/remote-skill-catalog.test.ts` (S1–S8),
+  `test/remote-host-file-port.test.ts` (F1–F9),
+  `test/remote-presentation-read.test.ts` (H1–H5 + fences),
+  `test/remote-model-port.test.ts` (directory + official discovery),
+  `test/subagent-model-menu.test.ts` (directory-driven picker UX),
+  `test/remote-m3a-assembly.test.ts` (one-source wiring + disposal).
+- Contract: `test/remote-official-contract.test.ts` — the published
+  0.2.0-rc.1 faces satisfy every adapter source, the projection faces, the
+  `Session.loadThrough` face, `llm/discoverModels`, and the M3-3A assembly.
+- Same-Host: `test/remote-m3a-semantics-smoke.test.ts` (P1–P10: real Host
+  Context → M3-1 in-process carrier → real official Client Context → the
+  M3-3A bundle, including the official reconnect generation replacement).
+  The D1 parity shadow's `session.measureContext` skip is RETIRED with it
+  (the field now compares in `smoke:remote-session-read-parity` /
+  `smoke:remote-d1-closure`).
+- Mutation checks (plan §26): A (context mapping), C (workspace fake-empty),
+  D (local-fs canonicalization), E (loadThrough fence), F (child fallback)
+  each verified to fail the guarding tests; B is enforced structurally (the
+  retired pair no longer exists on the port).
 
 
 ## Known coverage follow-ups
