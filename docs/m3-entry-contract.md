@@ -880,9 +880,14 @@ Each stage declares its L1–L6 test layer
   no-extra-open lock);
   `test/runner-session-navigation.test.ts` locks that a production Direct
   `/fork` never performs the extra adoption open.
-- **Delivered as**: PR #195, HEAD `c913e3f738ca18fd98539801019a95e28752c695`
-  (base `next` @ `226abeb3`); reviewed through a three-round review-fix loop
-  ending in an unconditional accept with no unresolved P0/P1/P2.
+- **Delivered as**: PR #195, implementation commit
+  `c913e3f738ca18fd98539801019a95e28752c695` (base `next` @ `226abeb3`); the
+  implementation commit is the frozen evidence anchor — later commits on the
+  same PR (review fixes, doc follow-ups) do not update this line. Reviewed
+  through a review-fix loop ending in an unconditional accept with no
+  unresolved P0/P1/P2, plus a post-accept failure-path hardening round
+  (post-publication commit-seam containment and the awaited pre-publication
+  release, both mutation-verified).
 - **Must not change** (verified unchanged): Direct retirement order
   (`cancel → idle → drain → flush → dispose` in
   `test/runner-session-retirement.test.ts`), transition gate/operation barrier

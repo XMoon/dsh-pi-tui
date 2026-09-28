@@ -215,6 +215,17 @@ function harness() {
     }
   }
 
+  /** Make the NEXT setCompletionOwner seam throw AFTER the owner publication
+   *  (it is the last seam in both commit orders). */
+  const failNextCompletionOwnerAfterPublication = (): void => {
+    const original = surface.setCompletionOwner
+    surface.setCompletionOwner = (identity: string | undefined): void => {
+      surface.setCompletionOwner = original
+      original(identity)
+      throw new Error('completion seam exploded after publication')
+    }
+  }
+
   return {
     events,
     calls,
@@ -229,6 +240,7 @@ function harness() {
     countRefs: (id: string): number => live.get(id)?.refs ?? 0,
     disposeSurface: (): void => { disposed = true },
     failNextCommitBeforePublication,
+    failNextCompletionOwnerAfterPublication,
   }
 }
 
@@ -632,4 +644,194 @@ test('a Direct pre-publication commit throw releases the child once and never re
   assert.deepEqual(retirementCalls, ['retire:child:transition'],
     'the child owner is released exactly once and NEVER re-parked')
   assert.equal(core.currentSessionId(), 'session-direct-source', 'the source remains current')
+})
+
+test('a post-publication completion-seam throw is contained: the transition completes and OLD is still retired', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.failNextCompletionOwnerAfterPublication()
+  // The seam explodes AFTER core.setCurrentOwner(NEW): the child IS
+  // committed, so the failure must be contained as a failed post-commit step —
+  // the transition proceeds to the OLD retirement instead of aborting with a
+  // half-committed state (NEW current + OLD retained).
+  assert.equal(await h.runtime.switchSession('session-b'), undefined,
+    'the committed switch stands (the contained seam failure is not a switch failure)')
+  assert.equal(h.core.currentSessionId(), 'session-b', 'NEW is current')
+  assert.equal(h.countRefs('session-a'), 0, 'OLD is still released by the post-commit retirement')
+  assert.ok(h.events.includes('release:session-a@current=session-b'),
+    'the OLD release happens with the core already committed to NEW')
+  assert.ok(h.events.includes('init:session-b'), 'the post-handoff surface init still runs')
+  assert.ok(h.events.includes('switch:session-a->session-b'), 'the switch is still reported')
+})
+
+test('a Direct fork post-publication completion-seam throw never rolls back or re-parks the committed child', async () => {
+  // Direct shape with a recording retirement: setCompletionOwner explodes
+  // AFTER the child was published. The adoption must CONTINUE (source
+  // retirement, adopted=true, no park of the now-current child).
+  const directChildOwner = {} as SessionOwnerRef
+  const sourceOwner = {} as SessionOwnerRef
+  const retirementCalls: string[] = []
+  let explodeCompletion = false
+  const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  core.setCurrentOwner(sourceOwner, 'session-direct-source')
+  const runtime = bindSessionRuntime(core, {
+    owners: {
+      fromHandle: (handle: SessionHandle): SessionOwnerRef | undefined =>
+        handle.direct === undefined ? undefined : directChildOwner,
+      sessionId: (owner: SessionOwnerRef): string =>
+        owner === directChildOwner ? 'session-direct-child' : 'session-direct-source',
+      completionIdentity: (): string | undefined => 'direct-child',
+    },
+    retirement: {
+      whenIdleOrAbort: async () => false,
+      flush: async () => {},
+      preCancel: () => {},
+      retire: async (owner, mode) => {
+        retirementCalls.push(`retire:${owner === directChildOwner ? 'child' : 'source'}:${mode}`)
+        return { failures: [], durabilityFailure: undefined }
+      },
+      park: (owner) => { retirementCalls.push(`park:${owner === directChildOwner ? 'child' : 'source'}`) },
+      retireParked: async () => ({ failures: [], durabilityFailure: undefined }),
+    },
+    lifecycle: {
+      create: async () => { throw new Error('unexpected create') },
+      open: async () => ({ ownership: 'current' as const, outcome: { kind: 'unavailable' as const, message: 'unexpected open' } }),
+      fork: async () => ({
+        ownership: 'current' as const,
+        outcome: {
+          kind: 'forked' as const,
+          handle: {
+            session: { id: 'session-direct-child' },
+            direct: { agent: {}, ownerHandle: {} },
+          },
+        },
+      }),
+    },
+    lifecycleSignal: new AbortController().signal,
+    surface: {
+      warnRetirement: () => {},
+      warnRetirementSkipped: () => {},
+      isSurfaceDisposed: () => false,
+      beginOpening: (sessionId) => ({ sessionId }),
+      clearOpening: () => {},
+      settlePendingQueueRecalls: () => {},
+      settleLocalSubmitAck: () => {},
+      resetSubmitLatency: () => {},
+      setCompletionOwner: (): void => {
+        if (explodeCompletion) {
+          explodeCompletion = false
+          throw new Error('completion seam exploded after publication')
+        }
+      },
+      initLiveSession: async () => {},
+      refreshLiveCatalog: async () => {},
+      reportSwitch: () => {},
+      clearUnpinnedDrafts: () => {},
+      reportSwitchFailure: () => {},
+      launchComposition: async () => ({ composition: {} }),
+      setResumeFailure: () => {},
+      reportFirstSessionCreateFailure: () => {},
+      notifyResumeFailure: () => {},
+      awaitPendingDefaultWrite: async () => {},
+      newSessionId: () => 'session-first',
+      sessionCreateCwd: () => '/workspace',
+      currentOpening: () => undefined,
+      resetOpening: () => {},
+    } satisfies SessionRuntimeSurface,
+    isScopeCurrent: () => true,
+    diag: fakeDiag,
+  })
+  explodeCompletion = true
+  const outcome = await runtime.forkSession('session-direct-source')
+  assert.equal(outcome.kind, 'success', 'the committed fork stands')
+  assert.deepEqual(retirementCalls, ['retire:source:transition'],
+    'the SOURCE is retired post-commit; the committed child is neither retired nor parked')
+  assert.equal(core.currentSessionId(), 'session-direct-child', 'the child stays current — no rollback')
+})
+
+test('the ordinary pre-publication release is AWAITED: a slow Direct retire keeps the transition open', async () => {
+  // Direct shape with a gated retire: the NEW owner's cleanup release blocks
+  // on an external gate. The failed transition must NOT settle (and the
+  // transition gate must not reopen) until that release actually completes —
+  // an exit retirement or a same-session reopen can never race past it.
+  const newOwner = {} as SessionOwnerRef
+  const oldOwner = {} as SessionOwnerRef
+  const retirementCalls: string[] = []
+  let releaseRetire!: () => void
+  const retireGate = new Promise<void>(resolve => { releaseRetire = resolve })
+  let explodeCommit = false
+  const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  core.setCurrentOwner(oldOwner, 'session-old')
+  const runtime = bindSessionRuntime(core, {
+    owners: {
+      fromHandle: (): SessionOwnerRef | undefined => newOwner,
+      sessionId: (owner: SessionOwnerRef): string => owner === newOwner ? 'session-new' : 'session-old',
+      completionIdentity: (): string | undefined => undefined,
+    },
+    retirement: {
+      whenIdleOrAbort: async () => false,
+      flush: async () => {},
+      preCancel: () => {},
+      retire: async (owner, mode) => {
+        retirementCalls.push(`retire:${owner === newOwner ? 'new' : 'old'}:${mode}`)
+        if (owner === newOwner) await retireGate
+        return { failures: [], durabilityFailure: undefined }
+      },
+      park: () => {},
+      retireParked: async () => ({ failures: [], durabilityFailure: undefined }),
+    },
+    lifecycle: {
+      create: async () => { throw new Error('unexpected create') },
+      open: async () => ({
+        ownership: 'current' as const,
+        outcome: { kind: 'opened' as const, handle: { session: { id: 'session-new' } } },
+      }),
+      fork: async () => { throw new Error('unexpected fork') },
+    },
+    lifecycleSignal: new AbortController().signal,
+    surface: {
+      warnRetirement: () => {},
+      warnRetirementSkipped: () => {},
+      isSurfaceDisposed: () => false,
+      beginOpening: (sessionId) => ({ sessionId }),
+      clearOpening: () => {},
+      settlePendingQueueRecalls: () => {},
+      settleLocalSubmitAck: () => {},
+      resetSubmitLatency: (): void => {
+        if (explodeCommit) {
+          explodeCommit = false
+          throw new Error('commit seam exploded before publication')
+        }
+      },
+      setCompletionOwner: () => {},
+      initLiveSession: async () => {},
+      refreshLiveCatalog: async () => {},
+      reportSwitch: () => {},
+      clearUnpinnedDrafts: () => {},
+      reportSwitchFailure: () => {},
+      launchComposition: async () => ({ composition: {} }),
+      setResumeFailure: () => {},
+      reportFirstSessionCreateFailure: () => {},
+      notifyResumeFailure: () => {},
+      awaitPendingDefaultWrite: async () => {},
+      newSessionId: () => 'session-first',
+      sessionCreateCwd: () => '/workspace',
+      currentOpening: () => undefined,
+      resetOpening: () => {},
+    } satisfies SessionRuntimeSurface,
+    isScopeCurrent: () => true,
+    diag: fakeDiag,
+  })
+  explodeCommit = true
+  let settled = false
+  const pending = runtime.switchSession('session-new').then(result => { settled = true; return result })
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'the transition must stay open while the NEW owner release is in flight')
+  assert.deepEqual(retirementCalls, ['retire:new:transition'], 'the exactly-once release started')
+  releaseRetire()
+  const result = await pending
+  assert.match(String(result), /commit seam exploded before publication/, 'the original failure still surfaces')
+  assert.equal(core.currentSessionId(), 'session-old', 'OLD stays current')
+  assert.deepEqual(retirementCalls, ['retire:new:transition'], 'no second release of the NEW owner')
 })
