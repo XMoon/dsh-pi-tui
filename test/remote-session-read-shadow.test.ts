@@ -26,6 +26,8 @@ function reader(options: {
     projectionBatch: async (rows, signal) => options.projections?.(rows, signal) ?? new Map(),
     search: async (query, signal) => options.search?.(query, signal) ?? { items: [], hasMore: false },
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   }
 }
 
@@ -50,7 +52,9 @@ test('reports comparable list/projection/search fields and explicit non-comparab
   assert.equal(report.generation, '1')
   assert.equal(report.comparable, true)
   assert.deepEqual(report.mismatches, [])
-  assert.deepEqual(report.skipped.map(field => field.field), ['createdAt', 'live', 'measureContext'])
+  assert.deepEqual(report.skipped.map(field => field.field), ['createdAt', 'live'])
+  // M3-3A retired the measureContext skip: both backends read the one
+  // official contextPressure semantic, so the field compares.
   shadow.dispose()
 })
 

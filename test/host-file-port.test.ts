@@ -33,6 +33,12 @@ function fixtureWorkspace(life: TestLifecycle): string {
 
 const abort = new AbortController().signal
 
+/** Unwrap an authoritative ok result (the tests only assert ok paths). */
+function okItems(result: import('../src/runtime/host-file-port.ts').HostFileListResult): readonly import('../src/runtime/host-file-port.ts').HostFileCandidate[] {
+  assert.equal(result.kind, 'ok')
+  return result.items
+}
+
 /** The fallback-only adapter (fd forced absent) over a workspace scope. */
 function fallbackPort(root: string): DirectHostFilePort {
   return new DirectHostFilePort((sessionId) =>
@@ -61,17 +67,21 @@ test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', 
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  const file = await port.listReferences({ kind: 'workspace', cwd: root }, '@file')
+  const file = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@file'))
   assert.ok(file.some(item => item.path === 'file-one.txt' && item.kind === 'file'),
     `file-one missing:\n${JSON.stringify(file)}`)
   assert.ok(file.some(item => item.path === 'file-two.ts' && item.kind === 'file'),
     `file-two missing:\n${JSON.stringify(file)}`)
-  const nested = await port.listReferences({ kind: 'workspace', cwd: root }, '@nested')
+  const nested = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@nested'))
   assert.ok(nested.some(item => item.path === 'src/deep-nested.ts' && item.kind === 'file'),
     `nested file missing:\n${JSON.stringify(nested)}`)
-  const dirs = await port.listReferences({ kind: 'workspace', cwd: root }, '@src')
+  const dirs = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@src'))
   assert.ok(dirs.some(item => item.path === 'src' && item.kind === 'directory'),
     `directory item missing:\n${JSON.stringify(dirs)}`)
+  // A query into a nonexistent directory is an AUTHORITATIVE empty ok,
+  // never an unavailable capability.
+  assert.deepEqual(await port.listReferences({ kind: 'workspace', cwd: root }, '@no-such-dir-zzz/'),
+    { kind: 'ok', items: [] })
 })
 
 test('the fallback returns RAW paths — quoting and filtering are client-side', async (t) => {
@@ -80,7 +90,7 @@ test('the fallback returns RAW paths — quoting and filtering are client-side',
   const port = fallbackPort(root)
   // The port answers "which Host files exist": no `@`, no quotes, no
   // trailing slash, no query filtering (the client ranks and presents).
-  const result = await port.listReferences({ kind: 'workspace', cwd: root }, '@my')
+  const result = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@my'))
   assert.ok(result.some(item => item.path === 'my file.txt' && item.kind === 'file'),
     `the spaced path flows through raw:\n${JSON.stringify(result)}`)
   assert.ok(result.every(item => !item.path.startsWith('@') && !item.path.includes('"') && !item.path.endsWith('/')),
@@ -92,10 +102,8 @@ test('resolveReference honors an already-aborted request (fail closed, no filesy
   const root = fixtureWorkspace(life)
   const controller = new AbortController()
   controller.abort()
-  assert.deepEqual(
-    await fallbackPort(root).resolveReference({ kind: 'workspace', cwd: root }, 'file-one.txt', { signal: controller.signal }),
-    { kind: 'missing' },
-  )
+  const cancelled = await fallbackPort(root).resolveReference({ kind: 'workspace', cwd: root }, 'file-one.txt', { signal: controller.signal })
+  assert.equal(cancelled.kind, 'unavailable', 'a cancelled probe never asserts missing')
 })
 
 test('an abort mid-scan cancels the fallback discovery', async (t) => {
@@ -103,20 +111,21 @@ test('an abort mid-scan cancels the fallback discovery', async (t) => {
   const root = fixtureWorkspace(life)
   const controller = new AbortController()
   controller.abort()
-  assert.deepEqual(
-    await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file', { signal: controller.signal }),
-    [],
-  )
+  const cancelled = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file', { signal: controller.signal })
+  assert.equal(cancelled.kind, 'unavailable', 'a cancelled discovery is unavailable, never an authoritative empty list')
 })
 
 test('the session scope resolves through the live-agent resolver; unresolvable scopes fail closed', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  const viaSession = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, '@file')
+  const viaSession = okItems(await port.listReferences({ kind: 'session', sessionId: 'session-live' }, '@file'))
   assert.ok(viaSession.some(item => item.path === 'file-one.txt'), 'the session cwd drives discovery')
-  assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 'session-other' }, '@file'), [])
-  assert.deepEqual(await port.resolveReference({ kind: 'session', sessionId: 'session-other' }, 'file-one.txt'), { kind: 'missing' })
+  // An unresolvable session scope is UNAVAILABLE, never an authoritative
+  // empty list or a proven-missing probe.
+  const unresolvable = await port.listReferences({ kind: 'session', sessionId: 'session-other' }, '@file')
+  assert.equal(unresolvable.kind, 'unavailable')
+  assert.equal((await port.resolveReference({ kind: 'session', sessionId: 'session-other' }, 'file-one.txt')).kind, 'unavailable')
   assert.equal(await port.canonicalizeMentions({ kind: 'session', sessionId: 'session-other' }, '@file-one.txt'), '@file-one.txt')
 })
 
@@ -166,7 +175,7 @@ test('canonicalizeMentions absolutizes a symlink without realpath-ing it', async
 test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileReferenceCandidate shape)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const [item] = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file')
+  const [item] = okItems(await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file'))
   assert.ok(item !== undefined)
   assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
   assert.equal(typeof item.path, 'string')
@@ -192,7 +201,7 @@ test('the fd branch delegates to the fork fuzzy search and returns path-only can
   const port = new DirectHostFilePort(() => undefined, fakeFd(life,
     `printf 'file-one.txt\\nfile-two.ts\\nsrc/\\nsrc/deep-nested.ts\\n'`))
   const scope = { kind: 'workspace', cwd: root } as const
-  const hits = await port.listReferences(scope, '@file')
+  const hits = okItems(await port.listReferences(scope, '@file'))
   const paths = hits.map(candidate => candidate.path)
   assert.ok(paths.includes('file-one.txt') || paths.includes('file-two.ts'),
     `the fd candidates flow through as path-only DTOs:\n${JSON.stringify(paths)}`)
@@ -206,7 +215,7 @@ test('the fd branch returns RAW paths — quoting is client-side', async (t) => 
   const root = fixtureWorkspace(life)
   const port = new DirectHostFilePort(() => undefined, fakeFd(life,
     `printf 'my file.txt\\nsrc/\\nsrc/deep-nested.ts\\n'`))
-  const hits = await port.listReferences({ kind: 'workspace', cwd: root } as const, '@"my file')
+  const hits = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, '@"my file'))
   assert.ok(hits.some(candidate => candidate.path === 'my file.txt' && candidate.kind === 'file'),
     `a spaced fd candidate must flow through as a RAW path:\n${JSON.stringify(hits.map(h => h.path))}`)
 })
@@ -219,7 +228,7 @@ test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', 
   const controller = new AbortController()
   const pending = port.listReferences({ kind: 'workspace', cwd: root } as const, '@file', { signal: controller.signal })
   controller.abort()
-  assert.deepEqual(await pending, [], 'a cancelled fd query must never serve a late result')
+  assert.equal((await pending).kind, 'unavailable', 'a cancelled fd query must never serve a late result')
 })
 
 test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)', async (t) => {
@@ -229,7 +238,7 @@ test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)
   // contract is fd-FIRST, BOUNDED-FALLBACK — a failure is NOT a valid
   // empty result, so the recursive scan answers.
   const port = new DirectHostFilePort(() => undefined, fakeFd(life, 'exit 3'))
-  const candidates = await port.listReferences({ kind: 'workspace', cwd: root } as const, '@file')
+  const candidates = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, '@file'))
   assert.ok(candidates.length > 0, 'a failed fd must fall back to the bounded scan')
   assert.ok(
     candidates.some(candidate => candidate.path.includes('file-one.txt')),

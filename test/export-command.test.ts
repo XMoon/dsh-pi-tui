@@ -71,6 +71,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
     },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -88,8 +90,6 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       models: {
         available: () => true,
         loadDirectory: async () => ({ default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] }),
-        listProviders: () => [],
-        listModels: async () => [],
         defaultSelection: () => undefined,
         saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
         sessionSelection: () => undefined,

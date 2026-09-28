@@ -42,7 +42,6 @@ import type {
   ModelDirectoryGroupDto,
   ModelDiscoveryRequest,
   ModelInfoSummary,
-  ModelProviderSummary,
   ModelSelectionDto,
   PresetCatalog,
   PresetRosterDto,
@@ -283,20 +282,6 @@ export class DirectModelCatalog implements ModelCatalog {
         .filter(group => group.models.length > 0),
       failures: loaded.flatMap(item => item.kind === 'failure' ? [item.failure] : []),
     }
-  }
-
-  listProviders(): readonly ModelProviderSummary[] {
-    // Provider-discovery capability: detached copies of the provider registry.
-    return (this.llm()?.listProviders() ?? []).map(provider => ({ id: provider.id, name: provider.name }))
-  }
-
-  listModels(providerId: string): Promise<readonly ModelInfoSummary[]> {
-    const llm = this.llm()
-    if (llm === undefined) return Promise.resolve([])
-    return llm.listModels(providerId).then(models => models.map(model => ({
-      id: model.id,
-      ...model.name === undefined ? {} : { name: model.name },
-    })))
   }
 
   defaultSelection(): ModelSelectionDto | undefined {

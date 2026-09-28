@@ -48,23 +48,36 @@ export type HostFileScope =
   | { readonly kind: 'session'; readonly sessionId: string }
   | { readonly kind: 'workspace'; readonly cwd: string }
 
-/** The outcome of one existence probe. */
+/** The outcome of one existence probe. `unavailable` is DISTINCT from
+ * `missing`: the capability could not answer at all (no official carrier,
+ * unresolvable scope, lost connection), while `missing` asserts the Host
+ * checked and the path does not exist. */
 export type HostFileResolveResult =
   | { readonly kind: 'found'; readonly path: string }
   | { readonly kind: 'missing' }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/** The outcome of one completion discovery: an authoritative empty `ok`
+ * (the Host answered: nothing matches) is never conflated with an
+ * `unavailable` capability (no official carrier, unresolvable scope, lost
+ * connection) that must not be presented as "no files". */
+export type HostFileListResult =
+  | { readonly kind: 'ok'; readonly items: readonly HostFileCandidate[] }
+  | { readonly kind: 'unavailable'; readonly reason: string }
 
 /** The Host-file domain port. */
 export interface HostFilePort {
   /** Complete one `@`-mention query (the editor's at-prefix INCLUDING the
    * leading `@`, e.g. `@src/fo` or `@"my file`). Returns the candidates
    * the current Host filesystem discovery offers (fd whole-tree fuzzy
-   * when fd is on the Host PATH, the bounded recursive scan otherwise),
-   * or [] when nothing matches. */
+   * when fd is on the Host PATH, the bounded recursive scan otherwise)
+   * as an authoritative `ok` — `[]` when nothing matches — or
+   * `unavailable` when the capability cannot answer. */
   listReferences(
     scope: HostFileScope,
     query: string,
     options?: { signal?: AbortSignal },
-  ): Promise<readonly HostFileCandidate[]>
+  ): Promise<HostFileListResult>
   /** Probe one raw mention path (`src/foo.ts`, `~/x`, `/abs/x`) for
    * existence in the scope, resolving it to the absolute Host path
    * (`~` expansion; relative against the scope workspace; absolute kept;
@@ -77,6 +90,7 @@ export interface HostFilePort {
   /** Canonicalize every `@`-file mention of one draft for submission: the
    * editor keeps the concise relative form, the model-facing message
    * carries the unambiguous absolute path. A nonexistent path is left
-   * verbatim (typos and non-path `@` words are never mangled). */
+   * verbatim (typos and non-path `@` words are never mangled); a scope
+   * without an existence carrier leaves the WHOLE text literal. */
   canonicalizeMentions(scope: HostFileScope, text: string): Promise<string>
 }

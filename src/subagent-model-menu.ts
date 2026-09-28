@@ -1,19 +1,25 @@
 /**
  * The official subagent model-selection allowlist picker (`/settings` →
  * "Subagent allowed models"). One provider-grouped, searchable flat list of
- * every discovered provider/model route rendered INSIDE the SettingsList's
+ * every selectable provider/model route rendered INSIDE the SettingsList's
  * submenu slot (the fork's `SettingItem.submenu` mechanism) — no second
  * overlay is ever mounted. Enter toggles one `(provider, model)` route in the
  * OFFICIAL `subagent-model-selection` allowlist; the whole section is written
  * through the config port on every toggle (the Host owns the setting; the TUI
  * never keeps a parallel copy beyond the open panel's working snapshot).
  *
- * The provider catalog is the provider-DISCOVERY capability
- * (`listProviders()` + `listModels(providerId)`), NOT the `/model` directory
- * read: the two are distinct semantic capabilities and the allowlist must not
- * depend on (or reverse-fill from) the Session model directory. Provider
- * loads settle PARTIALLY — one provider's failure never blocks editing the
- * others; a failed provider becomes an inert `Unavailable` row.
+ * The catalog source is the OFFICIAL grouped model directory
+ * (`ModelCatalog.loadDirectory()`, the `session.modelCatalog()` semantic):
+ * provider groups in catalog order, per-provider failure isolation, and —
+ * when the wire catalog is Remote — the same directory dsh-web's subagent
+ * model settings consume. The historical per-provider discovery shape
+ * (`listProviders()` + `listModels(provider)`) was retired: `llm.listModels`
+ * has no public Remote, and the directory is the one selectable authority.
+ *
+ * Saved routes the current directory no longer lists stay REPRESENTABLE and
+ * REMOVABLE: they render as trailing rows the user can toggle off (the
+ * allowlist itself is their only source — the provider directory is never
+ * reverse-derived from settings or the allowlist).
  *
  * The official rule "enabled requires at least one allowed model" is
  * enforced client-side too: removing the LAST route while the section is
@@ -21,8 +27,8 @@
  * failing fast keeps the markers truthful).
  *
  * Async cancellation follows the picker contract: the component owns a
- * `disposed` latch and routes every provider load through the injected
- * `runOwned`; a model list that settles after the user left is dropped.
+ * `disposed` latch and routes the directory load through the injected
+ * `runOwned`; a result that settles after the user left is dropped.
  * @module @xmoon76/dsh-pi-tui/subagent-model-menu
  */
 
@@ -35,27 +41,16 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import type { OwnedTaskOptions } from './detached.ts'
+import type { ModelDirectoryDto } from './runtime/catalog-port.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from './runtime/config-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
 import { selectListTheme } from './theme.ts'
 
-/** One provider row of the provider-discovery catalog. */
-export interface AllowlistProvider {
-  readonly id: string
-  readonly name?: string
-}
-
-/** One discovered model row of a provider. */
-export interface AllowlistModel {
-  readonly id: string
-  readonly name?: string
-}
-
-/** The provider-discovery surface the allowlist picker needs (the runtime's
- *  model catalog port, read off the live backend). */
+/** The catalog surface the allowlist picker needs: the OFFICIAL grouped
+ *  model directory (the runtime's model catalog port, read off the live
+ *  backend). */
 export interface AllowlistCatalogServices {
-  listProviders(): readonly AllowlistProvider[]
-  listModels(providerId: string): Promise<readonly AllowlistModel[]>
+  loadDirectory(signal?: AbortSignal): Promise<ModelDirectoryDto>
 }
 
 export interface SubagentAllowlistPickerDeps {
@@ -111,9 +106,12 @@ export interface SubagentAllowlistModelRow {
   readonly modelId: string
   readonly modelName?: string
   readonly allowed: boolean
+  /** The row exists only because the allowlist still carries this route —
+   *  the current model directory does not list it (still removable). */
+  readonly absentFromCatalog?: true
 }
 
-/** One provider whose discovery failed; inert in the list. */
+/** One provider whose directory group failed to load; inert in the list. */
 export interface SubagentAllowlistFailureRow {
   readonly providerId: string
   readonly providerName: string
@@ -133,44 +131,56 @@ export function allowlistRouteKey(providerId: string, modelId: string): string {
 
 const FAILURE_PREFIX = '\u0000unavailable\u0000'
 /** One shared group key for EVERY failed provider, so all failures collapse
- *  into a single private `Unavailable` section (a real provider's own
- *  `groupKey` is its id and can never collide with this NUL-prefixed key). */
+ * into a single private `Unavailable` section (a real provider's own
+ * `groupKey` is its id and can never collide with this NUL-prefixed key). */
 const FAILURE_GROUP_KEY = '\u0000unavailable'
+/** One shared group key for saved routes absent from the current catalog
+ * (same collision rule: a real provider id can never be NUL-prefixed). */
+const SAVED_GROUP_KEY = '\u0000saved'
 
 /**
- * Project the discovered catalog into identity-complete presentation rows in
- * CATALOG ORDER (provider order × model order), independent of the order in
- * which providers finish loading. A provider that has neither models nor a
- * failure yet contributes nothing (still loading). Pure — unit testable.
+ * Project the official model directory into identity-complete presentation
+ * rows in CATALOG ORDER (provider group order × model order), plus one
+ * removable trailing row per SAVED route the directory no longer lists (the
+ * allowlist is that row's only source — the provider directory is never
+ * reverse-derived from settings or the allowlist). Pure — unit testable.
  */
 export function projectSubagentAllowlist(input: {
-  providers: readonly AllowlistProvider[]
-  models: ReadonlyMap<string, readonly AllowlistModel[]>
-  failures: ReadonlyMap<string, string>
+  directory: ModelDirectoryDto | undefined
   allowed: readonly SubagentAllowedModelRoute[]
 }): SubagentAllowlistProjection {
   const models: SubagentAllowlistModelRow[] = []
   const failures: SubagentAllowlistFailureRow[] = []
-  for (const provider of input.providers) {
-    const displayName = provider.name === undefined || provider.name === '' ? provider.id : provider.name
-    const failure = input.failures.get(provider.id)
-    if (failure !== undefined) {
-      failures.push({ providerId: provider.id, providerName: displayName, message: failure })
-      continue
+  const listed = new Set<string>()
+  const directory = input.directory
+  if (directory !== undefined) {
+    for (const failure of directory.failures) {
+      failures.push({ providerId: failure.id, providerName: failure.name, message: failure.message })
     }
-    const loaded = input.models.get(provider.id)
-    if (loaded === undefined) continue
-    for (const model of loaded) {
-      models.push({
-        providerId: provider.id,
-        providerName: displayName,
-        modelId: model.id,
-        ...(model.name === undefined || model.name === '' ? {} : { modelName: model.name }),
-        // Full (provider, model) identity: a same-id model under another
-        // provider must never inherit the allowed marker.
-        allowed: input.allowed.some(route => route.provider === provider.id && route.model === model.id),
-      })
+    for (const group of directory.groups) {
+      for (const model of group.models) {
+        listed.add(allowlistRouteKey(group.id, model.id))
+        models.push({
+          providerId: group.id,
+          providerName: group.name === '' ? group.id : group.name,
+          modelId: model.id,
+          ...model.name === undefined || model.name === '' ? {} : { modelName: model.name },
+          // Full (provider, model) identity: a same-id model under another
+          // provider must never inherit the allowed marker.
+          allowed: input.allowed.some(route => route.provider === group.id && route.model === model.id),
+        })
+      }
     }
+  }
+  for (const route of input.allowed) {
+    if (listed.has(allowlistRouteKey(route.provider, route.model))) continue
+    models.push({
+      providerId: route.provider,
+      providerName: route.provider,
+      modelId: route.model,
+      allowed: true,
+      absentFromCatalog: true,
+    })
   }
   return { models, failures }
 }
@@ -184,14 +194,13 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
   private readonly deps: SubagentAllowlistPickerDeps
   private readonly enabled: boolean
   private allowed: readonly SubagentAllowedModelRoute[]
-  private readonly providers: readonly AllowlistProvider[]
-  private readonly modelsByProvider = new Map<string, readonly AllowlistModel[]>()
-  private readonly failures = new Map<string, string>()
+  /** The settled official model directory (undefined = still loading). */
+  private directory: ModelDirectoryDto | undefined
   private readonly picker: SearchablePicker
-  /** value → route for the SELECTABLE model rows (failure/loading rows are absent). */
+  /** value → route for the SELECTABLE model rows (failure rows are absent). */
   private readonly modelRoutes = new Map<string, SubagentAllowedModelRoute>()
-  /** Provider loads still in flight; the cursor is placed once they all settle. */
-  private pendingLoads: number
+  /** Whether the directory load has settled; the cursor is placed once it does. */
+  private loadSettled = false
   private cursorPlaced = false
   /** Any real user interaction with the list (arrow/wheel move, toggle, or a
    *  filter-query edit) cancels the one-shot initial-cursor placement, so a
@@ -225,55 +234,58 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     const current = deps.selection.get()
     this.allowed = current.allowedModels.map(route => ({ ...route }))
     this.enabled = current.enabled
-    this.providers = deps.catalog.listProviders()
     this.picker = new SearchablePicker([], 8, selectListTheme, {}, {
       enableSearch: true,
       showHint: true,
       header: 'Subagent allowed models',
       hint: '↑↓ move · enter toggle · esc back',
-      noMatchText: this.providers.length === 0 ? '  no providers configured' : '  Loading models…',
+      noMatchText: '  Loading models…',
       descriptionMode: 'selected-below',
     })
     this.picker.onSelect = (item) => { this.toggleValue(item.value) }
     this.picker.onCancel = () => { this.close() }
     this.picker.onSelectionChange = () => { this.userInteracted = true }
-    this.pendingLoads = this.providers.length
-    for (const provider of this.providers) {
-      const displayName = provider.name === undefined || provider.name === '' ? provider.id : provider.name
-      // A rejection landing after the panel closed is a cancellation
-      // (disposed classifier → debug), not a stale failure.
-      deps.runOwned(`subagent allowlist models ${provider.id}`, () => deps.catalog.listModels(provider.id), {
-        isCancellation: () => this.disposed,
-        onResult: (models) => {
-          if (this.disposed) return
-          this.modelsByProvider.set(provider.id, models)
-          this.afterLoad()
-        },
-        onError: (error) => {
-          if (this.disposed) return
-          this.failures.set(provider.id, error instanceof Error ? error.message : String(error))
-          this.afterLoad()
-        },
-      })
-    }
+    // ONE official directory read owns every row (provider groups, per-
+    // provider failure isolation). A rejection landing after the panel
+    // closed is a cancellation (disposed classifier → debug), not a stale
+    // failure.
+    deps.runOwned('subagent allowlist model directory', () => deps.catalog.loadDirectory(), {
+      isCancellation: () => this.disposed,
+      onResult: (directory) => {
+        if (this.disposed) return
+        this.directory = directory
+        this.afterLoad()
+      },
+      onError: (error) => {
+        if (this.disposed) return
+        // A whole-directory failure keeps the picker truthful and editable:
+        // one inert Unavailable row carries the reason, saved routes stay
+        // removable, and no catalog rows are invented.
+        this.directory = {
+          default: { provider: '', model: '' },
+          routableProviders: [],
+          groups: [],
+          failures: [{ id: 'model-directory', name: 'Model directory', message: error instanceof Error ? error.message : String(error) }],
+        }
+        this.afterLoad()
+      },
+    })
     this.rebuild()
     this.setMaxRows(this.rowGrant)
   }
 
   private afterLoad(): void {
-    this.pendingLoads = Math.max(0, this.pendingLoads - 1)
+    this.loadSettled = true
     this.rebuild()
     this.deps.requestRender()
   }
 
-  /** Re-derive the picker rows from the working copy + progressive load
-   *  state. `setItems` preserves the selected row by VALUE, so an optimistic
-   *  toggle or a late provider load never snaps the cursor away. */
+  /** Re-derive the picker rows from the working copy + directory state.
+   *  `setItems` preserves the selected row by VALUE, so an optimistic
+   *  toggle or the directory settling never snaps the cursor away. */
   private rebuild(): void {
     const projection = projectSubagentAllowlist({
-      providers: this.providers,
-      models: this.modelsByProvider,
-      failures: this.failures,
+      directory: this.directory,
       allowed: this.allowed,
     })
     this.modelRoutes.clear()
@@ -284,9 +296,11 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
       return {
         value,
         label,
-        ...(row.modelName === undefined || row.modelName === row.modelId ? {} : { description: row.modelId }),
-        group: row.providerName,
-        groupKey: row.providerId,
+        ...(row.absentFromCatalog === true
+          ? { description: 'saved route not in the current catalog' }
+          : row.modelName === undefined || row.modelName === row.modelId ? {} : { description: row.modelId }),
+        group: row.absentFromCatalog === true ? 'Saved routes' : row.providerName,
+        groupKey: row.absentFromCatalog === true ? SAVED_GROUP_KEY : row.providerId,
         ...(row.allowed ? { badge: 'allowed' } : {}),
         searchText: `${row.providerId} ${row.modelId} ${row.providerName} ${row.modelName ?? ''}`,
       }
@@ -307,18 +321,19 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     this.picker.setItems(items)
     this.picker.setMaxRows(this.rowGrant)
     // The empty state depends on the LOAD state, not just on the filter: a
-    // still-loading progressive fill, a settled-but-empty catalog, and a
-    // zero-match search are three different messages.
-    this.picker.setNoMatchText(this.providers.length === 0
-      ? '  no providers configured'
-      : this.pendingLoads > 0 && items.length === 0
-        ? '  Loading models…'
-        : items.length === 0 ? '  no models available' : '  No matching models')
-    // Initial cursor (plan §12): once every load has settled and before ANY
-    // real interaction, prefer the first allowed route in catalog order, else
-    // the first model row. Never lands on a failure/loading row.
-    if (!this.cursorPlaced && !this.userInteracted && this.pendingLoads === 0) {
-      const preferred = projection.models.find(row => row.allowed) ?? projection.models[0]
+    // still-loading directory, a settled-but-empty catalog, and a zero-match
+    // search are three different messages.
+    this.picker.setNoMatchText(!this.loadSettled && items.length === 0
+      ? '  Loading models…'
+      : items.length === 0 ? '  no models available' : '  No matching models')
+    // Initial cursor (plan §12): once the directory load has settled and
+    // before ANY real interaction, prefer the first allowed route in catalog
+    // order (a saved-but-absent route only when no listed route is allowed),
+    // else the first model row. Never lands on a failure row.
+    if (!this.cursorPlaced && !this.userInteracted && this.loadSettled) {
+      const preferred = projection.models.find(row => row.allowed && row.absentFromCatalog !== true)
+        ?? projection.models.find(row => row.allowed)
+        ?? projection.models[0]
       if (preferred !== undefined) this.picker.setSelectedValue(allowlistRouteKey(preferred.providerId, preferred.modelId))
       this.cursorPlaced = true
     }

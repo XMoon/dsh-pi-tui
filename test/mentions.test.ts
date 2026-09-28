@@ -198,7 +198,7 @@ test('a late port result is dropped when the request was aborted; a port rejecti
     listReferences: async (_scope, _query, options) => {
       await gate
       options?.signal?.throwIfAborted()
-      return [{ path: 'file-one.txt', kind: 'file' }]
+      return { kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }
     },
     resolveReference: async () => ({ kind: 'missing' }),
     canonicalizeMentions: async (_scope, text) => text,
@@ -604,7 +604,7 @@ test('the completion scope is resolved at SUGGESTION time, so a session switch n
   const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
     listReferences: async (scope) => {
       scopes.push(scope)
-      return [{ path: 'file-one.txt', kind: 'file' }]
+      return { kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }
     },
     resolveReference: async () => ({ kind: 'missing' }),
     canonicalizeMentions: async (_scope, text) => text,
@@ -641,7 +641,7 @@ test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-ses
   const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
     listReferences: async () => {
       await gate
-      return [{ path: 'file-one.txt', kind: 'file' }]
+      return { kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }
     },
     resolveReference: async () => ({ kind: 'missing' }),
     canonicalizeMentions: async (_scope, text) => text,

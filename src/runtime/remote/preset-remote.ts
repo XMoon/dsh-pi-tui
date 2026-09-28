@@ -111,6 +111,12 @@ export class RemotePresetCatalog implements PresetCatalog {
   /** The last loaded Host roster (default + rows), generation-tagged,
    *  latest-read-wins, detached on read AND write. */
   private readonly rosterCache = new GenerationCache<PresetRosterDto>(copyRoster)
+
+  /** Assembly disposal seam: drop the cached roster (and any in-flight
+   *  read's publication right) before the Client Context disposal. */
+  disposeCache(): void {
+    this.rosterCache.invalidate()
+  }
   /** Owner token for overlapping same-generation preset selections (v2 §0.2.5).
    *  adapter-global is accepted ONLY under the current single-live-session TUI
    *  invariant; if one adapter later serves independently writable concurrent

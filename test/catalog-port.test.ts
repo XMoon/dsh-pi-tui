@@ -46,8 +46,6 @@ function port(services: Record<string, unknown>): DirectCatalogPort {
 test('models degrade to empty DTOs when the llm service is absent', async () => {
   const models = port({}).models
   assert.equal(models.available(), false)
-  assert.deepEqual(models.listProviders(), [])
-  assert.deepEqual(await models.listModels('p'), [])
   assert.deepEqual(await models.loadDirectory(), { default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] })
   assert.deepEqual(await models.discoverModels({ baseURL: 'x' }), [])
   assert.equal(models.listConfigurableProviders(), undefined)
@@ -72,8 +70,6 @@ test('models surface detached provider/model DTOs and forward discovery', async 
     },
   }).models
   assert.equal(models.available(), true)
-  assert.deepEqual(models.listProviders(), [{ id: 'deepseek', name: 'DeepSeek' }])
-  assert.deepEqual(await models.listModels('deepseek'), [{ id: 'deepseek-chat', name: 'Chat' }])
   assert.deepEqual(await models.loadDirectory(), {
     default: { provider: 'deepseek', model: 'deepseek-chat' },
     routableProviders: ['deepseek'],
@@ -238,12 +234,6 @@ test('catalog DTOs are DETACHED — mutating a returned value never aliases Host
       saveSelection: async () => {},
     },
   }).models
-  const listed = modelsPort.listProviders()
-  ;(listed as Array<{ id: string; name: string }>)[0]!.name = 'MUTATED'
-  assert.equal(providers[0]!.name, 'DeepSeek', 'the provider registry array is never aliased')
-  const modelList = await modelsPort.listModels('deepseek')
-  ;(modelList as Array<{ id: string }>)[0]!.id = 'MUTATED'
-  assert.equal(models[0]!.id, 'deepseek-chat', 'the model list is never aliased')
   const modelDir = await modelsPort.loadDirectory()
   ;(modelDir.groups as unknown as Array<{ models: Array<{ id: string }> }>)[0]!.models[0]!.id = 'MUTATED'
   assert.equal(models[0]!.id, 'deepseek-chat', 'the directory model list is never aliased')

@@ -13,6 +13,7 @@
     "permissionPresets",
     "planMode",
     "sandboxPolicy",
+    "sessionProjections",
     "sessionQuery",
     "sessions",
     "settings",
@@ -84,8 +85,9 @@
   "runtime/direct/session-direct.ts": [
     "agentPresets",
     "import:dsh-session",
-    "sessionQuery",
-    "tokenMeter"
+    "sessionProjectionCache",
+    "sessionProjections",
+    "sessionQuery"
   ],
   "runtime/direct/session-lifecycle-direct.ts": [
     "agentDefaultModel",
@@ -98,10 +100,13 @@
   "runtime/direct/session-preset-direct.ts": [
     "agentPresets",
     "import:dsh-session",
+    "sessionProjections",
     "sessionQuery"
   ],
   "runtime/direct/session-projection-direct.ts": [
-    "import:dsh-session"
+    "import:dsh-session",
+    "sessionProjectionCache",
+    "sessionProjections"
   ],
   "runtime/direct/session-writer-direct.ts": [
     "sessionTitle"

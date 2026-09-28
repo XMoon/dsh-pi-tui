@@ -25,7 +25,6 @@ import type {
   ModelDirectoryGroupDto,
   ModelDiscoveryRequest,
   ModelInfoSummary,
-  ModelProviderSummary,
   ModelSelectionDto,
   ProviderDirectoryEntry,
 } from '../catalog-port.ts'
@@ -46,6 +45,22 @@ export interface RemoteModelRemotes {
     readonly reasoningEffort?: string
   }): Promise<RemoteResultLike<{ readonly selected: ModelSelectionDto }>>
 }
+
+/** The official generated `llm` Remote namespace the wizard probe needs
+ *  (`llm/discoverModels(settingsNs, request, signal)`; `llm.listModels` is a
+ *  Host method with no public Remote — the grouped directory above is the
+ *  only selectable catalog). */
+export interface RemoteLlmRemotes {
+  discoverModels(
+    settingsNs: string,
+    request: ModelDiscoveryRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteResultLike<readonly { readonly id: string; readonly name?: string }[]>>
+}
+
+/** The TUI add-provider wizard's settings family (the Direct adapter probes
+ *  the same namespace; the wizard's provider profiles live under it). */
+const WIZARD_SETTINGS_NS = 'llm-pi-ai'
 
 /** The official Client Session projection face subset used by the read. */
 export interface RemoteModelProjectionFace {
@@ -179,6 +194,7 @@ function projectedSelection(value: unknown): ModelSelectionDto | undefined {
 /** The experimental Remote model catalog. */
 export class RemoteModelCatalog implements ModelCatalog {
   private readonly session: RemoteModelRemotes
+  private readonly llm: RemoteLlmRemotes | undefined
   private readonly sessions: RemoteModelSessionsSource
   private readonly generation: RemoteConnectionGenerationSource
   /** The last successfully loaded Host-generation directory (default fallback):
@@ -199,10 +215,12 @@ export class RemoteModelCatalog implements ModelCatalog {
     session: RemoteModelRemotes,
     sessions: RemoteModelSessionsSource,
     generation: RemoteConnectionGenerationSource,
+    llm?: RemoteLlmRemotes,
   ) {
     this.session = session
     this.sessions = sessions
     this.generation = generation
+    this.llm = llm
   }
 
   available(): boolean {
@@ -246,21 +264,6 @@ export class RemoteModelCatalog implements ModelCatalog {
   defaultSelection(): ModelSelectionDto | undefined {
     const directory = this.cachedDirectory()
     return directory === undefined ? undefined : { ...directory.default }
-  }
-
-  listProviders(): readonly ModelProviderSummary[] {
-    // Provider ENDPOINT/config discovery has no official Remote capability in
-    // D2.3. The `/model` directory is NOT that capability (it drops empty and
-    // failing routable providers and only exists after a read), so the Remote
-    // adapter reports it UNAVAILABLE rather than faking it from the directory
-    // cache. The subagent allowlist and the `/login` merge stay Direct-only.
-    return []
-  }
-
-  listModels(_providerId: string): Promise<readonly ModelInfoSummary[]> {
-    // Same: a per-provider list for provider discovery is not the `/model`
-    // directory read; no official Remote capability → unavailable.
-    return Promise.resolve([])
   }
 
   saveDefaultSelection(_selection: ModelSelectionDto): Promise<WriteOutcome<void>> {
@@ -365,10 +368,36 @@ export class RemoteModelCatalog implements ModelCatalog {
     this.directoryCache.invalidate()
   }
 
-  discoverModels(_request: ModelDiscoveryRequest): Promise<readonly ModelInfoSummary[]> {
-    // Provider discovery has no official Remote verb yet; it remains a Direct
-    // capability (the add-provider wizard is not migrated in D2.3).
-    return Promise.resolve([])
+  /** Assembly disposal seam: drop the cache (and any in-flight read's
+   *  publication right) before the Client Context disposal. */
+  disposeCache(): void {
+    this.directoryCache.invalidate()
+    this.lastLoadedGeneration = undefined
+  }
+
+  async discoverModels(request: ModelDiscoveryRequest): Promise<readonly ModelInfoSummary[]> {
+    // The official `llm/discoverModels(settingsNs, request, signal)` — the
+    // same settings family the Direct adapter probes. A missing llm source,
+    // a replaced Connection generation, or a Host refusal SURFACES as a
+    // rejection: the wizard must distinguish a real failure from an empty
+    // fallback list (never `[]`).
+    if (this.llm === undefined) throw new Error('remote llm namespace is not available')
+    const { signal, ...probe } = request
+    signal?.throwIfAborted()
+    const captured = this.generation.getSnapshot()
+    if (captured === undefined) throw new Error('remote connection is not connected')
+    const result = await this.llm.discoverModels(WIZARD_SETTINGS_NS, probe, signal).catch(
+      (error: unknown) => ({ ok: false as const, error }),
+    )
+    signal?.throwIfAborted()
+    if (generationChanged(this.generation, captured)) {
+      throw new SupersededReadError('remote connection changed while discovering models')
+    }
+    if (!result.ok) throw new Error(`llm.discoverModels failed: ${remoteFailureMessage(result.error)}`)
+    return result.value.map(model => ({
+      id: model.id,
+      ...model.name === undefined ? {} : { name: model.name },
+    }))
   }
 
   listConfigurableProviders(): readonly ProviderDirectoryEntry[] | undefined {

@@ -44,7 +44,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteSessionReader } from '../src/runtime/remote/session-reader-remote.ts'
 import { RemoteSessionWriter, type RemotePromptSerializer } from '../src/runtime/remote/session-writer-remote.ts'
 import { RemoteSessionLifecycle } from '../src/runtime/remote/session-lifecycle-remote.ts'
-import { RemoteModelCatalog } from '../src/runtime/remote/model-remote.ts'
+import { RemoteModelCatalog, type RemoteLlmRemotes } from '../src/runtime/remote/model-remote.ts'
 import { RemotePresetCatalog } from '../src/runtime/remote/preset-remote.ts'
 import { RemotePendingInputReader } from '../src/runtime/remote/pending-input-reader-remote.ts'
 import { RemoteHostCommandPort } from '../src/runtime/remote/host-command-remote.ts'
@@ -55,6 +55,14 @@ import { RemoteSurfaceAuthorityReader } from '../src/runtime/remote/surface-auth
 import { RemoteSubmissionPresentation } from '../src/submission-presentation.ts'
 import { RemotePluginManagerPort } from '../src/runtime/remote/plugin-manager-remote.ts'
 import { RemoteJobObservationPort } from '../src/runtime/remote/job-observation-remote.ts'
+import { RemoteSkillCatalog } from '../src/runtime/remote/skill-remote.ts'
+import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf } from '../src/app/remote/m3a-semantics.ts'
+import { RemoteHostFilePort } from '../src/runtime/remote/host-file-remote.ts'
+import type { ContextPressureProjection, ContextBreakdownProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter'
+import type { TurnOutlineEntry } from '@deepseek-ai/dsh-session-turn-outline/types'
+import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
+import type { SessionStatusProjection, SessionReader } from '../src/runtime/session-reader-port.ts'
+import type { PresentationReader, TurnOutlineEntryDto } from '../src/runtime/presentation-read-port.ts'
 
 function officialSessionReader(sessions: ISessions, generation: ConnectionGenerationState): RemoteSessionReader {
   return new RemoteSessionReader(sessions, generation)
@@ -144,6 +152,82 @@ function officialJobObservationPort(jobs: IJobs): RemoteJobObservationPort {
   return new RemoteJobObservationPort(jobs)
 }
 
+function officialSkillCatalog(
+  skills: ClientRemote['skills'],
+  generation: ConnectionGenerationState,
+): RemoteSkillCatalog {
+  return new RemoteSkillCatalog(skills, generation)
+}
+
+function officialHostFilePort(
+  fileReferences: ClientRemote['fileReferences'],
+  generation: ConnectionGenerationState,
+): RemoteHostFilePort {
+  return new RemoteHostFilePort(fileReferences, generation)
+}
+
+
+/** The official `Session.loadThrough(seq)` jump face (W5): the Remote
+ * PresentationReader's paging target, straight off the published Client
+ * binding type. */
+function officialLoadThroughFace(
+  binding: NonNullable<ReturnType<ISessions['binding']>>,
+): (seq: SessionSeq) => Promise<void> {
+  return binding.session.loadThrough
+}
+
+/** The official context-pressure projection face (W1): the exact published
+ * `ContextPressureProjection` the occupancy numerator reads. */
+function officialContextPressureFace(): ContextPressureProjection {
+  return { projectedTokens: 1, pressureTokens: 2, contextWindow: 3 }
+}
+
+/** The official context-breakdown/usage faces (W6 status projection). */
+function officialContextFactFaces(): { breakdown: ContextBreakdownProjection; usage: TokenUsageProjection } {
+  return {
+    breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 3 },
+    usage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
+  }
+}
+
+/** The M3-3A partial assembly constructs from the REAL M3-1 runtime — a
+ * compile-time proof that `RemoteClientRuntime` satisfies the narrow
+ * one-source face (the same sessions service, Remote namespaces and
+ * Connection generation source feed every adapter). */
+function officialM3ASemanticsAssembly(
+  runtime: import('../src/app/remote/client-runtime.ts').RemoteClientRuntime,
+  options: { promptSerializer: import('../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer },
+): ReturnType<typeof createRemoteM3ASemantics> {
+  return createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(runtime), options)
+}
+
+/** The published `SessionSeq` brand accepts the port's plain number target. */
+function officialLoadThroughSeq(): SessionSeq {
+  return 1 as SessionSeq
+}
+
+/** The official `turnOutline` projection face (W5): the published entry
+ * shape satisfies the detached picker DTO mapping. */
+function officialTurnOutlineFace(): readonly TurnOutlineEntry[] {
+  return [{ turn: 1, seq: officialLoadThroughSeq(), prompt: 'p', response: 'r' }]
+}
+
+/** The M3-3A semantic surfaces are transport-neutral: the reader/presentation
+ * contracts type-check against the shared DTOs (a compile-time proof that
+ * the mappings consume the published faces, never a private shape). */
+function officialM3ASemanticSurfaces(
+  reader: Pick<SessionReader, 'measureContext' | 'turnOutline' | 'sessionStatus'>,
+  presentation: Pick<PresentationReader, 'loadThrough'>,
+): { status: SessionStatusProjection | undefined; outline: readonly TurnOutlineEntryDto[] | undefined } {
+  return {
+    status: reader.sessionStatus('session'),
+    outline: reader.turnOutline('session'),
+    // The port's plain `number` target assignably feeds the official
+    // branded `SessionSeq` face (a compile-time proof).
+    ...presentation.loadThrough('session', officialLoadThroughSeq()) === undefined ? {} : {},
+  }
+}
+
 test('every Remote adapter accepts the published DSH 0.1.7-rc.2 public Client/Remote face', () => {
   // A compile-time proof only runs when the compiler keeps the function in the
   // program; this reference is that keep-alive.
@@ -162,7 +246,27 @@ test('every Remote adapter accepts the published DSH 0.1.7-rc.2 public Client/Re
     officialSubmissionPresentation,
     officialPluginManagerPort,
     officialJobObservationPort,
+    officialSkillCatalog,
+    officialHostFilePort,
   ]) {
     assert.equal(typeof proof, 'function')
   }
 })
+
+test('the M3-3A semantic additions consume the published 0.2.0-rc.1 contract', () => {
+  // Runtime keep-alives for the compile-time face proofs above.
+  assert.equal(typeof officialLoadThroughFace, 'function')
+  assert.equal(typeof officialContextPressureFace, 'function')
+  assert.equal(typeof officialContextFactFaces, 'function')
+  assert.equal(typeof officialTurnOutlineFace, 'function')
+  assert.equal(typeof officialM3ASemanticSurfaces, 'function')
+  assert.equal(typeof officialM3ASemanticsAssembly, 'function')
+  assert.deepEqual(officialContextPressureFace(), { projectedTokens: 1, pressureTokens: 2, contextWindow: 3 })
+  assert.deepEqual(officialTurnOutlineFace(), [{ turn: 1, seq: 1, prompt: 'p', response: 'r' }])
+})
+
+/** The official `llm` namespace satisfies the wizard-probe source (W2): the
+ * Remote catalog's `discoverModels` maps `ClientRemote['llm']` directly. */
+function officialLlmDiscoverModelsSource(llm: ClientRemote['llm']): RemoteLlmRemotes {
+  return llm
+}

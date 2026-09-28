@@ -98,12 +98,6 @@ export interface ModelDiscoveryRequest {
   readonly signal?: AbortSignal
 }
 
-/** One provider row for the provider-discovery capability. */
-export interface ModelProviderSummary {
-  readonly id: string
-  readonly name: string
-}
-
 /** The model/provider catalog sub-domain: the `/model` directory read, the
  *  Session-local selection write, the provider directory the `/login` merge
  *  reads, and the add-provider endpoint probe. */
@@ -113,14 +107,12 @@ export interface ModelCatalog {
   available(): boolean
   /** Load the Host-generation model directory (one semantic read matching
    *  the official `session.modelCatalog()`), including the deployment default
-   *  used by a Session with no local selection. */
+   *  used by a Session with no local selection. This is the ONLY selectable
+   *  provider/model directory: the subagent allowlist picker and every other
+   *  grouped-model consumer reads it, never a per-provider enumeration (the
+   *  historical Direct-only `listProviders()` + `listModels(provider)` pair
+   *  was retired in M3-3A — `llm.listModels` has no public Remote). */
   loadDirectory(signal?: AbortSignal): Promise<ModelDirectoryDto>
-  /** Provider-discovery capability (the subagent allowlist picker and the
-   *  `/login` merge), DISTINCT from the `/model` directory read: it
-   *  enumerates routable providers one call at a time. */
-  listProviders(): readonly ModelProviderSummary[]
-  /** One provider's models for provider-discovery consumers. */
-  listModels(providerId: string): Promise<readonly ModelInfoSummary[]>
   /** The global default used only when a Session has no local selection. */
   defaultSelection(): ModelSelectionDto | undefined
   /** Persist the global default (`agentDefaultModel.saveSelection`) as a

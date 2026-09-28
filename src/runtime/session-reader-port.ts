@@ -10,6 +10,8 @@
  * @module @xmoon76/dsh-pi-tui/runtime/session-reader-port
  */
 
+import type { TurnOutlineEntryDto } from './presentation-read-port.ts'
+
 /** One persisted session summary (the picker's row shape, minus the
  * enriched title). */
 export interface SessionSummary {
@@ -96,8 +98,91 @@ export interface SessionReader {
    *  means the Host authority is unavailable; it is NEVER inferred from the
    *  transcript, rendered rows, running state, or a live Agent object. */
   blank(sessionId: string): boolean | undefined
-  /** Best-effort context-pressure measurement for one session (the
-   * /status context row). `undefined` = unmeasurable (service absent,
-   * session unknown, or a measurement failure — never a crash). */
+  /** Best-effort context occupancy for one session (the /status context
+   * row): the official `contextPressure` projection's numerator
+   * `projectedTokens ?? pressureTokens` (the same field dsh-web's
+   * ContextMeter reads). `undefined` = the projection capability or value
+   * is unavailable for the session (never a second measurement authority —
+   * both backends read this one semantic). */
   measureContext(sessionId: string): number | undefined
+  /** The official whole-log `turnOutline` projection entries for one
+   *  session, in ascending turn order — the M3-4 `/rewind` navigation
+   *  boundary source. `undefined` = the projection capability or session
+   *  is unavailable. This is a projection read only: it never pages
+   *  history and never folds a second outline client-side. */
+  turnOutline(sessionId: string): readonly TurnOutlineEntryDto[] | undefined
+  /** The subject-neutral Session-scoped official facts one footer/status
+   *  surface needs (M3-4/M3-5 foundation): model selection, context
+   *  pressure/breakdown, usage, todos and the cwd fact — read from the
+   *  OFFICIAL projections of that exact session (main or viewed child
+   *  alike). `undefined` = the session is not materialized/retained. An
+   *  absent FIELD means "this projection/capability is not available for
+   *  the session" — never a parent/main-session fallback, never a
+   *  zero-filled guess. */
+  sessionStatus(sessionId: string): SessionStatusProjection | undefined
+}
+
+/** One detached todo entry of the official `todos` projection (the
+ *  `todo/write` whole-list snapshot fields, statuses verbatim). */
+export interface SessionStatusTodoItem {
+  readonly content: string
+  readonly status: 'pending' | 'in_progress' | 'completed'
+}
+
+/** The durable cumulative provider usage of the official `tokenUsage`
+ * projection (four disjoint buckets; reasoning tokens are already inside
+ * `outputTokens`). */
+export interface SessionStatusUsageProjection {
+  readonly uncachedInputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+}
+
+/** The official context facts: the pressure numerator fields (either may be
+ * absent until a provider reports usage), the newest route capacity, and
+ * the heuristic composition breakdown. */
+export interface SessionStatusContextProjection {
+  readonly pressureTokens?: number
+  readonly projectedTokens?: number
+  readonly contextWindow?: number
+  readonly breakdown?: {
+    readonly systemTokens: number
+    readonly toolsTokens: number
+    readonly messageTokens: number
+  }
+}
+
+/** The official Session-scoped status projection snapshot (M3-4/M3-5). */
+export interface SessionStatusProjection {
+  readonly sessionId: string
+  /** The official workspace fact of THIS session (absent when the source
+   *  supplies none — never another session's cwd). */
+  readonly cwd?: string
+  /** The effective model selection (`next ?? lastUsed` of the official
+   *  `modelSelection` projection). */
+  readonly model?: ModelSelectionFact
+  readonly context?: SessionStatusContextProjection
+  readonly todos?: readonly SessionStatusTodoItem[]
+  readonly usage?: SessionStatusUsageProjection
+}
+
+/** A detached provider/model/effort selection value (the official
+ *  `ModelSelection` fields the status surface reads). */
+export interface ModelSelectionFact {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+/** The official context-pressure occupancy numerator shared by both
+ * backends: `projectedTokens ?? pressureTokens` over the raw projection
+ * value (an absent/foreign-shaped field is not coerced; a projection with
+ * neither field reads unmeasured). */
+export function contextPressureOccupancy(value: unknown): number | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const pressure = value as { readonly projectedTokens?: unknown; readonly pressureTokens?: unknown }
+  if (typeof pressure.projectedTokens === 'number') return pressure.projectedTokens
+  if (typeof pressure.pressureTokens === 'number') return pressure.pressureTokens
+  return undefined
 }

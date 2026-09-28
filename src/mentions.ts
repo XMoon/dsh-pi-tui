@@ -210,7 +210,7 @@ export type HostReferencesSeam = {
     scope: MentionScope,
     query: string,
     options?: { signal?: AbortSignal },
-  ) => Promise<readonly import('./runtime/host-file-port.ts').HostFileCandidate[]>
+  ) => Promise<import('./runtime/host-file-port.ts').HostFileListResult>
   resolveReference: (
     scope: MentionScope,
     path: string,
@@ -221,11 +221,11 @@ export type HostReferencesSeam = {
 
 /** The fail-closed seam: no file-aware completion at all. */
 const NO_HOST_REFERENCES = {
-  async listReferences(): Promise<readonly import('./runtime/host-file-port.ts').HostFileCandidate[]> {
-    return []
+  async listReferences(): Promise<import('./runtime/host-file-port.ts').HostFileListResult> {
+    return { kind: 'unavailable', reason: 'Host file discovery is not available' }
   },
   async resolveReference(): Promise<import('./runtime/host-file-port.ts').HostFileResolveResult> {
-    return { kind: 'missing' }
+    return { kind: 'unavailable', reason: 'Host file existence probing is not available' }
   },
   async canonicalizeMentions(_scope: MentionScope, text: string): Promise<string> {
     return text
@@ -598,14 +598,18 @@ export class MentionProvider implements AutocompleteProvider {
     return { prefix: atPrefix, items }
   }
 
-  /** The discovery step (separated for the abort-fence test seam). */
+  /** The discovery step (separated for the abort-fence test seam). An
+   *  `unavailable` capability (or a transport failure) presents as no
+   *  candidates — the port keeps the two states distinct, the completion
+   *  surface does not invent rows for either. */
   private async discoverMention(
     scope: MentionScope,
     atPrefix: string,
     signal: AbortSignal,
   ): Promise<readonly import('./runtime/host-file-port.ts').HostFileCandidate[]> {
     try {
-      return await this.fileReferences.listReferences(scope, atPrefix, { signal })
+      const result = await this.fileReferences.listReferences(scope, atPrefix, { signal })
+      return result.kind === 'ok' ? result.items : []
     } catch {
       return []
     }
