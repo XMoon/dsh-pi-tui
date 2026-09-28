@@ -2045,11 +2045,17 @@ the composition and presentation.
   throw after the bump) can no longer be misclassified as user supersession.
   The monotonic navigation epoch alone still solves A → B → A staleness
   (locked by the rewind picker regression), the generation bump is never
-  rolled back, and every owner-metadata lookup that can throw runs before
-  `setCurrentOwner` so the commit point is seamless. In the fork adoption the
-  `sessionId` lookup additionally lives INSIDE the pre-publication protected
-  region: even a throw from it takes the exactly-once release path for the
-  open-retained child owner.
+  rolled back, and the transactions follow a PRE-PUBLICATION METADATA
+  SNAPSHOT contract: every owner-metadata lookup a transaction still needs
+  (the completion identity, the NEW owner's session id, and for the fork
+  adoption also the SOURCE owner's id for its post-commit retirement)
+  resolves BEFORE `setCurrentOwner` — the sole commit point — inside the
+  pre-publication protected region, so any metadata throw is a
+  pre-publication failure with an exactly-once NEW release (including the
+  open-retained fork child). After the publication the phases consume only
+  the captured primitive values and never re-resolve the owner: a contained
+  post-publication seam failure still retires OLD, and a committed fork
+  child still retires its source.
   The four "without a Direct owner" throws are now
   transport-neutral owned-generation failures; `adoptFork` grew the Remote
   publication→open adoption: an ownerless fork handle is retained through

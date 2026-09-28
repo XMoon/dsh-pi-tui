@@ -110,6 +110,8 @@ function harness() {
   })
   let failCompletionIdentity = false
   let failNextSessionId = false
+  let sessionIdCalls = 0
+  let throwOnSessionIdCall = 0
   const countingOwners = {
     owners: {
       ...services.owners,
@@ -118,9 +120,14 @@ function harness() {
         return services.owners.fromHandle(handle)
       },
       sessionId: (owner: SessionOwnerRef): string => {
+        sessionIdCalls += 1
         if (failNextSessionId) {
           failNextSessionId = false
           throw new Error('sessionId exploded before the fork commit')
+        }
+        if (throwOnSessionIdCall === sessionIdCalls) {
+          throwOnSessionIdCall = 0
+          throw new Error('sessionId re-read after the publication snapshot')
         }
         return services.owners.sessionId(owner)
       },
@@ -270,6 +277,8 @@ function harness() {
     failNextCompletionOwnerAfterPublication,
     failNextCompletionIdentity: (): void => { failCompletionIdentity = true },
     failNextSessionId: (): void => { failNextSessionId = true },
+    sessionIdCallCount: (): number => sessionIdCalls,
+    throwOnSessionIdCall: (call: number): void => { throwOnSessionIdCall = call },
   }
 }
 
@@ -1008,4 +1017,37 @@ test('a sessionId throw inside the fork commit region releases the open-retained
   assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0, 'nothing may commit the recalls')
   assert.equal(h.events.filter(entry => entry === 'recalls:false').length, 1,
     'the unified fork transaction-finally restores the deferred recall exactly once')
+})
+
+test('no owner metadata re-read after the publication: a contained ordinary failure still retires OLD', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const baseline = h.sessionIdCallCount()
+  // Call 1 after arming = the pre-publication snapshot (must succeed); any
+  // LATER sessionId call (a post-publication re-read) throws. The completion
+  // seam then throws post-publication: the containment must consume the
+  // snapshot only — OLD still retires, NEW stays current.
+  h.throwOnSessionIdCall(baseline + 1 + 1)
+  h.failNextCompletionOwnerAfterPublication()
+  assert.equal(await h.runtime.switchSession('session-b'), undefined,
+    'the contained failure must not turn into a half-commit through a metadata re-read')
+  assert.equal(h.core.currentSessionId(), 'session-b', 'NEW is current')
+  assert.equal(h.countRefs('session-a'), 0, 'OLD is still retired by the post-commit retirement')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 1, 'the recalls stay committed exactly once')
+})
+
+test('no owner metadata re-read after the publication: the fork still retires the source exactly once', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const baseline = h.sessionIdCallCount()
+  // Calls 1-2 after arming = the pre-publication snapshot (child + source,
+  // both must succeed); any LATER call (a post-publication OLD re-read)
+  // throws. The fork must still retire the source exactly once and succeed.
+  h.throwOnSessionIdCall(baseline + 2 + 1)
+  const outcome = await h.runtime.forkSession('session-a')
+  assert.equal(outcome.kind === 'success' && outcome.text !== undefined, true,
+    'the fork succeeds — the source retirement consumed the snapshot')
+  assert.ok(h.core.currentSessionId()!.startsWith('child-'), 'the child is current')
+  assert.equal(h.countRefs('session-a'), 0, 'the source owner is retired exactly once')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 1, 'the recalls stay committed exactly once')
 })
