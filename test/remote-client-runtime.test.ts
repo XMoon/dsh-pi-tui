@@ -31,6 +31,7 @@ import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -602,6 +603,7 @@ test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leav
     // A foreign fileUploads double must make the real row fail loudly.
     host.ctx.provide('fileUploads', { fake: true })
     const jobControllerBefore = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
+    const registryBefore = [...host.ctx.registry.keys()]
     await assert.rejects(
       (await loadRuntimeModule()).createExperimentalRemoteRuntime({
         hostContext: host.ctx,
@@ -613,6 +615,16 @@ test('L1. a Host-side composition failure unwinds the mounted M3 fibers and leav
     // The earlier M3 fiber (Host connection) unwound with the failure.
     assert.equal(host.ctx.reflect.get('connection'), undefined, 'the earlier M3 fiber must unwind')
     assert.notEqual(host.ctx.reflect.get('fileUploads'), undefined, 'the fixture-owned double stays untouched')
+    // P1 regression lock (plan §22 L5: "zero leaked subscriptions/fibers/
+    // refs"). `ctx.plugin()` registers the fiber in its plugin runtime before
+    // startup runs, so the failing FileUploads fiber is registry-owned from
+    // creation and only the unwind can remove it. The pre-fix
+    // `fibers.push(await plugin(...))` shape never ran `fibers.push`, leaving
+    // this runtime registered on the long-lived ordinary Host forever.
+    assert.equal(host.ctx.registry.has(FileUploads), false,
+      'the failed FileUploads fiber must not stay registered on the ordinary Host')
+    assert.deepEqual([...host.ctx.registry.keys()], registryBefore,
+      'the failed composition must leave no plugin runtime behind')
     const jobControllerAfter = host.ctx.reflect.get('jobController') as { typertRemote?: unknown }
     assert.ok(
       jobControllerAfter?.typertRemote !== undefined && jobControllerAfter.typertRemote === jobControllerBefore.typertRemote,
