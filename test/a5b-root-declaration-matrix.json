@@ -1,6 +1,6 @@
 {
   "generatedFrom": "src/app/bootstrap.ts",
-  "sourceHash": "sha256:39b962ac7bc7374e",
+  "sourceHash": "sha256:3119195d93df6a61",
   "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
   "total": 71,
   "rows": [
@@ -29,9 +29,9 @@
         "lifecycleAgents",
         "viewer",
         "root-statement@256",
-        "root-statement@589",
-        "root-statement@1672",
-        "root-statement@1794"
+        "root-statement@595",
+        "root-statement@1678",
+        "root-statement@1800"
       ]
     },
     {
@@ -84,8 +84,8 @@
         "viewer",
         "flushTurn",
         "root-statement@256",
-        "root-statement@1547",
-        "root-statement@1672"
+        "root-statement@1553",
+        "root-statement@1678"
       ]
     },
     {
@@ -93,7 +93,7 @@
       "kind": "const",
       "mutable": false,
       "lines": "266-269",
-      "refs": 50,
+      "refs": 51,
       "hostDependency": false,
       "head": "const ownership = createSessionOwnershipCore({",
       "tests": [
@@ -145,7 +145,7 @@
         "sessionRuntime",
         "command",
         "submission",
-        "root-statement@1859"
+        "root-statement@1865"
       ]
     },
     {
@@ -170,7 +170,7 @@
         "sessionRuntime",
         "command",
         "submission",
-        "root-statement@1859"
+        "root-statement@1865"
       ]
     },
     {
@@ -191,7 +191,7 @@
       "callers": [
         "localShell",
         "submission",
-        "root-statement@1794"
+        "root-statement@1800"
       ]
     },
     {
@@ -215,7 +215,7 @@
         "tuiSettings",
         "settings",
         "root-statement@327",
-        "root-statement@565"
+        "root-statement@571"
       ]
     },
     {
@@ -246,8 +246,8 @@
         "command",
         "localShell",
         "submission",
-        "root-statement@565",
-        "root-statement@1547"
+        "root-statement@571",
+        "root-statement@1553"
       ]
     },
     {
@@ -288,7 +288,7 @@
       "sweepNote": "resolveDisplayPreset boot result resolved before the first compose (plan §8.4 ordering).",
       "callers": [
         "displayState",
-        "root-statement@565"
+        "root-statement@571"
       ]
     },
     {
@@ -314,8 +314,8 @@
       "callers": [
         "directRuntime",
         "command",
-        "root-statement@565",
-        "root-statement@1547"
+        "root-statement@571",
+        "root-statement@1553"
       ]
     },
     {
@@ -373,7 +373,7 @@
       "kind": "const",
       "mutable": false,
       "lines": "372-377",
-      "refs": 162,
+      "refs": 163,
       "hostDependency": false,
       "head": "const surface = createSurfaceRuntime<SessionEvent>({",
       "tests": [
@@ -511,7 +511,7 @@
       "sweepNote": "ownership.owner/isSubjectCurrent — ownership subject fence connector.",
       "callers": [
         "submission",
-        "root-statement@1794"
+        "root-statement@1800"
       ]
     },
     {
@@ -532,7 +532,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "ownership.owner plus directRuntime attachmentOf — exact identity connector.",
       "callers": [
-        "root-statement@1672"
+        "root-statement@1678"
       ]
     },
     {
@@ -580,14 +580,14 @@
         "command",
         "status",
         "submission",
-        "root-statement@1672"
+        "root-statement@1678"
       ]
     },
     {
       "name": "sessionRuntime",
       "kind": "const",
       "mutable": false,
-      "lines": "457-531",
+      "lines": "457-537",
       "refs": 21,
       "hostDependency": true,
       "head": "const sessionRuntime = bindSessionRuntime(ownership, {",
@@ -607,18 +607,18 @@
         "requestExit",
         "registerRunnerDisposal",
         "submission",
-        "root-statement@535",
-        "root-statement@1298",
-        "root-statement@1501",
-        "root-statement@1794",
-        "root-statement@1859"
+        "root-statement@541",
+        "root-statement@1304",
+        "root-statement@1507",
+        "root-statement@1800",
+        "root-statement@1865"
       ]
     },
     {
       "name": "backend",
       "kind": "const",
       "mutable": false,
-      "lines": "541-541",
+      "lines": "547-547",
       "refs": 42,
       "hostDependency": true,
       "head": "const backend = directRuntime.backend",
@@ -646,14 +646,14 @@
         "artifacts",
         "pluginManager",
         "disposeCredentialSubscription",
-        "root-statement@636"
+        "root-statement@642"
       ]
     },
     {
       "name": "settings",
       "kind": "const",
       "mutable": false,
-      "lines": "545-558",
+      "lines": "551-564",
       "refs": 46,
       "hostDependency": false,
       "head": "const settings = createSettingsRuntime({",
@@ -675,20 +675,20 @@
         "extensionService",
         "disposeSurface",
         "root-statement@324",
-        "root-statement@565",
-        "root-statement@589",
-        "root-statement@1501",
-        "root-statement@1547",
-        "root-statement@1601",
-        "root-statement@1602",
-        "root-statement@1656"
+        "root-statement@571",
+        "root-statement@595",
+        "root-statement@1507",
+        "root-statement@1553",
+        "root-statement@1607",
+        "root-statement@1608",
+        "root-statement@1662"
       ]
     },
     {
       "name": "compose",
       "kind": "const",
       "mutable": false,
-      "lines": "560-560",
+      "lines": "566-566",
       "refs": 8,
       "hostDependency": true,
       "head": "const compose = (presetId?: string): Promise<DirectAgentComposition> => directRuntime.compose(presetId)",
@@ -713,7 +713,7 @@
       "name": "launchPreset",
       "kind": "const",
       "mutable": false,
-      "lines": "581-581",
+      "lines": "587-587",
       "refs": 14,
       "hostDependency": true,
       "head": "const launchPreset = startup.presetId ?? (process.env.DSH_PI_TUI_PRESET?.trim() || undefined)",
@@ -727,15 +727,15 @@
       "callers": [
         "launchComposition",
         "command",
-        "root-statement@589",
-        "root-statement@636"
+        "root-statement@595",
+        "root-statement@642"
       ]
     },
     {
       "name": "pendingPreset",
       "kind": "let",
       "mutable": true,
-      "lines": "588-588",
+      "lines": "594-594",
       "refs": 5,
       "hostDependency": false,
       "head": "let pendingPreset: string | undefined",
@@ -754,18 +754,20 @@
       "callers": [
         "launchComposition",
         "command",
-        "root-statement@756"
+        "root-statement@762"
       ]
     },
     {
       "name": "launchComposition",
       "kind": "const",
       "mutable": false,
-      "lines": "607-619",
+      "lines": "613-625",
       "refs": 5,
       "hostDependency": true,
       "head": "const launchComposition = async (): Promise<{ composition: DirectAgentComposition; failure?: string }> => {",
-      "tests": [],
+      "tests": [
+        "session-runtime-remote-owner-handoff.test.ts"
+      ],
       "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
       "owner": "bootstrap",
       "capabilities": "Host/Direct-touching composition seam",
@@ -774,14 +776,14 @@
       "sweepNote": "startup compose wrapper (compose plus failure capture); startup orchestration.",
       "callers": [
         "sessionRuntime",
-        "root-statement@756"
+        "root-statement@762"
       ]
     },
     {
       "name": "resumeFailure",
       "kind": "let",
       "mutable": true,
-      "lines": "626-626",
+      "lines": "632-632",
       "refs": 11,
       "hostDependency": false,
       "head": "let resumeFailure: string | undefined",
@@ -794,16 +796,16 @@
       "sweepNote": "resume failure message shown post-mount then cleared; startup/resume transaction state.",
       "callers": [
         "sessionRuntime",
-        "root-statement@636",
-        "root-statement@756",
-        "root-statement@1921"
+        "root-statement@642",
+        "root-statement@762",
+        "root-statement@1927"
       ]
     },
     {
       "name": "handle",
       "kind": "let",
       "mutable": true,
-      "lines": "631-631",
+      "lines": "637-637",
       "refs": 19,
       "hostDependency": false,
       "head": "let handle: SessionHandle | undefined",
@@ -824,15 +826,15 @@
         "extensionService",
         "disposeSurface",
         "root-statement@245",
-        "root-statement@636",
-        "root-statement@1298"
+        "root-statement@642",
+        "root-statement@1304"
       ]
     },
     {
       "name": "resumeResolved",
       "kind": "let",
       "mutable": true,
-      "lines": "635-635",
+      "lines": "641-641",
       "refs": 3,
       "hostDependency": false,
       "head": "let resumeResolved = false",
@@ -844,14 +846,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "resume transaction resolved flag; startup/resume orchestration state.",
       "callers": [
-        "root-statement@636"
+        "root-statement@642"
       ]
     },
     {
       "name": "resumeQuiesce",
       "kind": "const",
       "mutable": false,
-      "lines": "729-744",
+      "lines": "735-750",
       "refs": 3,
       "hostDependency": true,
       "head": "const resumeQuiesce = sessionRuntime.publishResumedOwner(handle, (owner) => {",
@@ -863,14 +865,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "sessionRuntime.publishResumedOwner(...) resume transaction step; startup/resume orchestration.",
       "callers": [
-        "root-statement@745"
+        "root-statement@751"
       ]
     },
     {
       "name": "initialSnapshot",
       "kind": "let",
       "mutable": true,
-      "lines": "753-753",
+      "lines": "759-759",
       "refs": 5,
       "hostDependency": false,
       "head": "let initialSnapshot: SurfaceCatalogSnapshot | undefined",
@@ -885,15 +887,15 @@
       "sweepNote": "prefetched catalog snapshot installed at registration; startup prefetch (plan §7.6.4).",
       "callers": [
         "presentation",
-        "root-statement@756",
-        "root-statement@1916"
+        "root-statement@762",
+        "root-statement@1922"
       ]
     },
     {
       "name": "initialSkills",
       "kind": "let",
       "mutable": true,
-      "lines": "754-754",
+      "lines": "760-760",
       "refs": 5,
       "hostDependency": false,
       "head": "let initialSkills: HumanSkillCatalog | undefined",
@@ -908,15 +910,15 @@
       "sweepNote": "prefetched skill catalog installed at registration; startup prefetch.",
       "callers": [
         "presentation",
-        "root-statement@756",
-        "root-statement@1916"
+        "root-statement@762",
+        "root-statement@1922"
       ]
     },
     {
       "name": "surfaceNotice",
       "kind": "let",
       "mutable": true,
-      "lines": "755-755",
+      "lines": "761-761",
       "refs": 6,
       "hostDependency": false,
       "head": "let surfaceNotice: string | undefined",
@@ -928,15 +930,15 @@
       "sweep": "verified@a5b6",
       "sweepNote": "deferred startup notice shown once post-mount then cleared; startup prerequisite.",
       "callers": [
-        "root-statement@756",
-        "root-statement@1917"
+        "root-statement@762",
+        "root-statement@1923"
       ]
     },
     {
       "name": "currentPreset",
       "kind": "const",
       "mutable": false,
-      "lines": "798-813",
+      "lines": "804-819",
       "refs": 3,
       "hostDependency": true,
       "head": "const currentPreset = (): string | undefined => {",
@@ -961,7 +963,7 @@
       "name": "sessionBlank",
       "kind": "const",
       "mutable": false,
-      "lines": "817-824",
+      "lines": "823-830",
       "refs": 2,
       "hostDependency": false,
       "head": "const sessionBlank = (): boolean | undefined => {",
@@ -985,7 +987,7 @@
       "name": "viewerRef",
       "kind": "let",
       "mutable": true,
-      "lines": "831-831",
+      "lines": "837-837",
       "refs": 8,
       "hostDependency": true,
       "head": "let viewerRef: ViewerRuntime<SessionEvent, Agent> | undefined",
@@ -1002,15 +1004,15 @@
         "directRuntime",
         "presentation",
         "status",
-        "root-statement@1362"
+        "root-statement@1368"
       ]
     },
     {
       "name": "presentation",
       "kind": "const",
       "mutable": false,
-      "lines": "832-864",
-      "refs": 36,
+      "lines": "838-870",
+      "refs": 37,
       "hostDependency": true,
       "head": "const presentation = createSessionPresentation<SessionEvent>({",
       "tests": [
@@ -1030,16 +1032,16 @@
         "sessionRuntime",
         "status",
         "viewer",
-        "root-statement@1672",
-        "root-statement@1902",
-        "root-statement@2018"
+        "root-statement@1678",
+        "root-statement@1908",
+        "root-statement@2024"
       ]
     },
     {
       "name": "cwd",
       "kind": "const",
       "mutable": false,
-      "lines": "897-897",
+      "lines": "903-903",
       "refs": 21,
       "hostDependency": false,
       "head": "const cwd = process.cwd()",
@@ -1062,15 +1064,15 @@
         "status",
         "history",
         "artifacts",
-        "root-statement@589",
-        "root-statement@1547"
+        "root-statement@595",
+        "root-statement@1553"
       ]
     },
     {
       "name": "clientActions",
       "kind": "const",
       "mutable": false,
-      "lines": "901-901",
+      "lines": "907-907",
       "refs": 6,
       "hostDependency": false,
       "head": "const clientActions = createClientActions()",
@@ -1083,15 +1085,15 @@
       "sweepNote": "createClientActions() — the A5b-5 client-local platform owner.",
       "callers": [
         "command",
-        "root-statement@1501",
-        "root-statement@1547"
+        "root-statement@1507",
+        "root-statement@1553"
       ]
     },
     {
       "name": "applicationEvents",
       "kind": "let",
       "mutable": true,
-      "lines": "906-906",
+      "lines": "912-912",
       "refs": 4,
       "hostDependency": false,
       "head": "let applicationEvents: ApplicationEventsOwner",
@@ -1104,15 +1106,15 @@
       "sweepNote": "late-bound ApplicationEventsOwner slot assigned by createApplicationEvents (A5b-5 adapter).",
       "callers": [
         "command",
-        "root-statement@1501",
-        "root-statement@1547"
+        "root-statement@1507",
+        "root-statement@1553"
       ]
     },
     {
       "name": "command",
       "kind": "const",
       "mutable": false,
-      "lines": "914-1044",
+      "lines": "920-1050",
       "refs": 42,
       "hostDependency": true,
       "head": "const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({",
@@ -1135,18 +1137,18 @@
         "disposeSurface",
         "requestExit",
         "submission",
-        "root-statement@1547",
-        "root-statement@1632",
-        "root-statement@1852",
-        "root-statement@1859",
-        "root-statement@1916"
+        "root-statement@1553",
+        "root-statement@1638",
+        "root-statement@1858",
+        "root-statement@1865",
+        "root-statement@1922"
       ]
     },
     {
       "name": "status",
       "kind": "const",
       "mutable": false,
-      "lines": "1049-1073",
+      "lines": "1055-1079",
       "refs": 69,
       "hostDependency": true,
       "head": "const status = createStatusRuntime({",
@@ -1172,16 +1174,16 @@
         "disposeSurface",
         "viewer",
         "submission",
-        "root-statement@636",
-        "root-statement@756",
-        "root-statement@1501"
+        "root-statement@642",
+        "root-statement@762",
+        "root-statement@1507"
       ]
     },
     {
       "name": "history",
       "kind": "const",
       "mutable": false,
-      "lines": "1077-1083",
+      "lines": "1083-1089",
       "refs": 22,
       "hostDependency": false,
       "head": "const history = createInputHistory({",
@@ -1200,15 +1202,15 @@
       "callers": [
         "presentation",
         "submission",
-        "root-statement@1547",
-        "root-statement@1669"
+        "root-statement@1553",
+        "root-statement@1675"
       ]
     },
     {
       "name": "cleanedUp",
       "kind": "let",
       "mutable": true,
-      "lines": "1087-1087",
+      "lines": "1093-1093",
       "refs": 18,
       "hostDependency": false,
       "head": "let cleanedUp = false",
@@ -1233,14 +1235,14 @@
         "viewer",
         "submission",
         "artifacts",
-        "root-statement@1501"
+        "root-statement@1507"
       ]
     },
     {
       "name": "app",
       "kind": "let",
       "mutable": true,
-      "lines": "1089-1089",
+      "lines": "1095-1095",
       "refs": 55,
       "hostDependency": false,
       "head": "let app: TuiApp",
@@ -1267,15 +1269,15 @@
         "submission",
         "artifacts",
         "flushTurn",
-        "root-statement@1547",
-        "root-statement@1600"
+        "root-statement@1553",
+        "root-statement@1606"
       ]
     },
     {
       "name": "extensionService",
       "kind": "let",
       "mutable": true,
-      "lines": "1092-1152",
+      "lines": "1098-1158",
       "refs": 16,
       "hostDependency": false,
       "head": "let extensionService: (PiTuiExtensionService & {",
@@ -1292,15 +1294,15 @@
         "settings",
         "command",
         "submission",
-        "root-statement@1480",
-        "root-statement@1481"
+        "root-statement@1486",
+        "root-statement@1487"
       ]
     },
     {
       "name": "tools",
       "kind": "const",
       "mutable": false,
-      "lines": "1168-1168",
+      "lines": "1174-1174",
       "refs": 8,
       "hostDependency": true,
       "head": "const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined",
@@ -1318,14 +1320,14 @@
       "sweepNote": "ctx.get(tools) Host tool registry read by the presenter connector.",
       "callers": [
         "present",
-        "root-statement@589"
+        "root-statement@595"
       ]
     },
     {
       "name": "present",
       "kind": "const",
       "mutable": false,
-      "lines": "1169-1173",
+      "lines": "1175-1179",
       "refs": 3,
       "hostDependency": false,
       "head": "const present = toolPresenterFrom(name => {",
@@ -1342,14 +1344,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "toolPresenterFrom over the live Agent plus the tools registry; narrow Host read for presentation.",
       "callers": [
-        "root-statement@1547"
+        "root-statement@1553"
       ]
     },
     {
       "name": "signal",
       "kind": "const",
       "mutable": false,
-      "lines": "1175-1175",
+      "lines": "1181-1181",
       "refs": 37,
       "hostDependency": false,
       "head": "const signal = lifecycleController.signal",
@@ -1376,15 +1378,15 @@
         "submission",
         "artifacts",
         "root-statement@245",
-        "root-statement@636",
-        "root-statement@756"
+        "root-statement@642",
+        "root-statement@762"
       ]
     },
     {
       "name": "draftImages",
       "kind": "const",
       "mutable": false,
-      "lines": "1179-1179",
+      "lines": "1185-1185",
       "refs": 7,
       "hostDependency": false,
       "head": "const draftImages = new DraftImageStore()",
@@ -1402,15 +1404,15 @@
         "command",
         "disposeSurface",
         "submission",
-        "root-statement@1501",
-        "root-statement@1859"
+        "root-statement@1507",
+        "root-statement@1865"
       ]
     },
     {
       "name": "draftFiles",
       "kind": "const",
       "mutable": false,
-      "lines": "1180-1180",
+      "lines": "1186-1186",
       "refs": 7,
       "hostDependency": false,
       "head": "const draftFiles = new DraftFileStore()",
@@ -1426,15 +1428,15 @@
         "command",
         "disposeSurface",
         "submission",
-        "root-statement@1501",
-        "root-statement@1859"
+        "root-statement@1507",
+        "root-statement@1865"
       ]
     },
     {
       "name": "lifecycleAgents",
       "kind": "const",
       "mutable": false,
-      "lines": "1183-1186",
+      "lines": "1189-1192",
       "refs": 2,
       "hostDependency": false,
       "head": "const lifecycleAgents: TuiCommandRunner['agents'] = {",
@@ -1453,7 +1455,7 @@
       "name": "localShell",
       "kind": "const",
       "mutable": false,
-      "lines": "1191-1208",
+      "lines": "1197-1214",
       "refs": 4,
       "hostDependency": true,
       "head": "const localShell = createLocalShell<Agent>({",
@@ -1473,7 +1475,7 @@
       "name": "disposeSurface",
       "kind": "const",
       "mutable": false,
-      "lines": "1215-1270",
+      "lines": "1221-1276",
       "refs": 3,
       "hostDependency": false,
       "head": "const disposeSurface = (): void => {",
@@ -1498,7 +1500,7 @@
       "name": "requestExit",
       "kind": "const",
       "mutable": false,
-      "lines": "1280-1294",
+      "lines": "1286-1300",
       "refs": 5,
       "hostDependency": false,
       "head": "const { requestExit } = createExitController({",
@@ -1517,14 +1519,14 @@
       "callers": [
         "command",
         "submission",
-        "root-statement@1501"
+        "root-statement@1507"
       ]
     },
     {
       "name": "registerRunnerDisposal",
       "kind": "const",
       "mutable": false,
-      "lines": "1322-1337",
+      "lines": "1328-1343",
       "refs": 2,
       "hostDependency": false,
       "head": "const registerRunnerDisposal = (): void => {",
@@ -1536,14 +1538,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "ctx.effect cleanup registration; runner lifetime/disposal coordination.",
       "callers": [
-        "root-statement@1338"
+        "root-statement@1344"
       ]
     },
     {
       "name": "assistantStreamBaselineFor",
       "kind": "let",
       "mutable": true,
-      "lines": "1342-1342",
+      "lines": "1348-1348",
       "refs": 6,
       "hostDependency": false,
       "head": "let assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[] = () => []",
@@ -1559,14 +1561,14 @@
       "callers": [
         "presentation",
         "viewer",
-        "root-statement@1968"
+        "root-statement@1974"
       ]
     },
     {
       "name": "viewer",
       "kind": "const",
       "mutable": false,
-      "lines": "1346-1361",
+      "lines": "1352-1367",
       "refs": 37,
       "hostDependency": true,
       "head": "const viewer = createViewerRuntime<SessionEvent, Agent>({",
@@ -1588,17 +1590,17 @@
         "status",
         "disposeSurface",
         "submission",
-        "root-statement@1362",
-        "root-statement@1501",
-        "root-statement@1672",
-        "root-statement@1794"
+        "root-statement@1368",
+        "root-statement@1507",
+        "root-statement@1678",
+        "root-statement@1800"
       ]
     },
     {
       "name": "submission",
       "kind": "const",
       "mutable": false,
-      "lines": "1368-1460",
+      "lines": "1374-1466",
       "refs": 36,
       "hostDependency": true,
       "head": "const submission = createSubmissionController<Agent>({",
@@ -1619,17 +1621,17 @@
         "presentation",
         "command",
         "localShell",
-        "root-statement@1501",
-        "root-statement@1672",
-        "root-statement@1794",
-        "root-statement@1859"
+        "root-statement@1507",
+        "root-statement@1678",
+        "root-statement@1800",
+        "root-statement@1865"
       ]
     },
     {
       "name": "artifacts",
       "kind": "const",
       "mutable": false,
-      "lines": "1465-1472",
+      "lines": "1471-1478",
       "refs": 4,
       "hostDependency": true,
       "head": "const artifacts = createArtifactSaveOwner<Agent>({",
@@ -1653,7 +1655,7 @@
       "name": "pluginManager",
       "kind": "const",
       "mutable": false,
-      "lines": "1492-1492",
+      "lines": "1498-1498",
       "refs": 5,
       "hostDependency": false,
       "head": "const pluginManager = surface.attachPluginManager({ port: backend.pluginManager, diag })",
@@ -1677,7 +1679,7 @@
       "name": "jobs",
       "kind": "const",
       "mutable": false,
-      "lines": "1792-1792",
+      "lines": "1798-1798",
       "refs": 14,
       "hostDependency": true,
       "head": "const jobs = ctx.get('jobs')",
@@ -1695,14 +1697,14 @@
       "sweepNote": "ctx.get(jobs) Host job registry forwarded to surface.attachTasks; narrow list/get/kill reads only.",
       "callers": [
         "disposeSurface",
-        "root-statement@1794"
+        "root-statement@1800"
       ]
     },
     {
       "name": "subagents",
       "kind": "const",
       "mutable": false,
-      "lines": "1793-1793",
+      "lines": "1799-1799",
       "refs": 4,
       "hostDependency": true,
       "head": "const subagents = ctx.get('subagents')",
@@ -1719,14 +1721,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "ctx.get(subagents) Host subagent registry forwarded to surface.attachTasks; narrow descendant reads only.",
       "callers": [
-        "root-statement@1794"
+        "root-statement@1800"
       ]
     },
     {
       "name": "startupAgent",
       "kind": "const",
       "mutable": false,
-      "lines": "1901-1901",
+      "lines": "1907-1907",
       "refs": 3,
       "hostDependency": false,
       "head": "const startupAgent = agentNow()",
@@ -1738,14 +1740,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "agentNow() snapshot deciding the resume vs deferred startup surface; startup orchestration.",
       "callers": [
-        "root-statement@1902"
+        "root-statement@1908"
       ]
     },
     {
       "name": "currentWorkingFromLog",
       "kind": "const",
       "mutable": false,
-      "lines": "1933-1936",
+      "lines": "1939-1942",
       "refs": 3,
       "hostDependency": false,
       "head": "const currentWorkingFromLog = (): boolean => {",
@@ -1757,14 +1759,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "workingFromLog(snapshotEvents()) read for the compaction settle; runner-owned log read.",
       "callers": [
-        "root-statement@1672"
+        "root-statement@1678"
       ]
     },
     {
       "name": "flushTurn",
       "kind": "const",
       "mutable": false,
-      "lines": "1938-1951",
+      "lines": "1944-1957",
       "refs": 3,
       "hostDependency": false,
       "head": "const flushTurn = (): void => {",
@@ -1776,14 +1778,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "turn-persistence hook invoked by the surface routing; Direct/domain persistence seam.",
       "callers": [
-        "root-statement@1672"
+        "root-statement@1678"
       ]
     },
     {
       "name": "assistantStreamHandle",
       "kind": "const",
       "mutable": false,
-      "lines": "1961-1967",
+      "lines": "1967-1973",
       "refs": 3,
       "hostDependency": true,
       "head": "const assistantStreamHandle = directRuntime.installAssistantStream({",
@@ -1795,15 +1797,15 @@
       "sweep": "verified@a5b6",
       "sweepNote": "directRuntime.installAssistantStream handle plus the abort listener; Direct install coordination.",
       "callers": [
-        "root-statement@1968",
-        "root-statement@1969"
+        "root-statement@1974",
+        "root-statement@1975"
       ]
     },
     {
       "name": "disposeCredentialSubscription",
       "kind": "const",
       "mutable": false,
-      "lines": "2006-2006",
+      "lines": "2012-2012",
       "refs": 2,
       "hostDependency": false,
       "head": "const disposeCredentialSubscription = backend.config.credentials.onChanged(() => surface.routeProviderRefresh())",
@@ -1817,7 +1819,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "credentials.onChanged subscription handle disposed on abort; Host event wiring (thin delegation).",
       "callers": [
-        "root-statement@2007"
+        "root-statement@2013"
       ]
     }
   ]

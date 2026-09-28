@@ -577,16 +577,22 @@ according to the normal fatal/application error path; do **not** resurrect OLD
 as an implicit rollback. A superseded NEW acquisition, by contrast, is
 released before commit and OLD remains current.
 
-Current code already commits the new owner synchronously before `retireOld`
-(`src/app/session/commit-order.ts:69-100`, `src/app/session/runtime.ts:226-299`).
-M3-2 preserves that ordering and moves `initLiveSession` to the post-release
-surface phase.
+Current code commits the new owner synchronously before `retireOld`
+(`src/app/session/commit-order.ts`, `src/app/session/runtime.ts`). M3-2 kept
+that ordering and additionally moved the NEW-owner mapping into the synchronous
+commit section (a transaction-local `committedOwner`): the post-commit phases
+reuse the exact owner the commit published instead of re-wrapping the handle,
+because for a Remote reference wrapper every `fromHandle` is an ownership
+transfer, never a free re-read.
 
-Current Direct-owner assumptions M3-2 must remove: `runtime.ts:239-241,262-266,532-533,686-687`
-(the four "without a Direct owner" throws), `runtime.ts:431-434,726` (`fromHandle`),
-`bootstrap.ts:485-493` (`initLiveSession`/`refreshLiveCatalog`), and
-`bootstrap.ts:886-889` — `clientOwnerOf()` (`session-lifecycle-port.ts:266-269`)
-exists but is never consumed by the runner.
+M3-2 (DONE) removed the Direct-owner assumptions this section had inventoried:
+the four "without a Direct owner" throws in `src/app/session/runtime.ts` are
+now transport-neutral owned-generation failures (the fork shape became the
+publication→open adoption path of §5.5 row 5), `bootstrap.ts`'s
+`initLiveSession`/`refreshLiveCatalog` no longer hard-throw on an owner without
+a Direct attachment (an M3-2 staging no-op; M3-4 supplies the real Remote
+presentation provider), and `clientOwnerOf()` is consumed by the Remote owner
+provider `src/app/remote/session-owners.ts` as its sole mapping source.
 
 ### 5.5 Lifecycle reference-ownership table
 
@@ -596,7 +602,7 @@ exists but is never consumed by the runner.
 | 2 | sessionless first create | `lifecycle.create` (`runtime.ts:864-872`) | `commitFirstSession` (`runtime.ts:688-711`) | retirement on exit/HMR | `requireCreated` throws; Remote superseded releases (`:338-341`) | sessionless until commit |
 | 3 | `/new` | `transitionTo` create (`bootstrap.ts:1184`) | commit (`runtime.ts:226-245`) | old owner `runtime.ts:247-261` | pre-commit abort, zero side effects | child after commit |
 | 4 | ordinary switch/open | `lifecycle.open` (`runtime.ts:361-364`) | commit | old owner | Remote `unavailable`/`cancelled` produce no owner | old stays current on failure |
-| 5 | `/fork` success | `lifecycle.fork` publication-only | `adoptFork` commit (`runtime.ts:518-597`) | source retired (`:555-572`) | child parked if not current; Remote child has no `client` | child after adoption |
+| 5 | `/fork` success | `lifecycle.fork` publication-only | `adoptFork` commit: a Direct handle adopts its owned agent directly; a Remote publication-only child is adopted through `lifecycle.open(childId)` (one fork dispatch + at most one adoption retain, re-fenced before commit) | source retired | child parked if not current; a stale-after-open Remote adoption releases the NEW owner exactly once; Remote child publication handles park nothing | child after adoption |
 | 6 | `/rewind` fork/adoption | same as `/fork` (`application-events.ts:228-245`) | `adoptFork` + `onAdopted` | source retired (awaited on the picker path) | park | child after adoption |
 | 7 | superseded create | new handle acquired mid-flight | — | — | Remote releases the new owner; runtime stays silent | old stays current |
 | 8 | superseded open | new retain | — | — | Remote `owner.release()` | old stays current |
@@ -839,20 +845,49 @@ Each stage declares its L1–L6 test layer
 
 ### M3-2 — Remote Session owner spine
 
-- **Files/owners**: new `src/app/remote/session-owners.ts`
-  (`RemoteSessionOwnerAccess` + `RemoteSessionOwnerRetirement`); remove the four
-  Direct-owner throws in `src/app/session/runtime.ts` and the Direct-attachment
-  throws in `bootstrap.ts`; consume `clientOwnerOf()`.
-- **Behavior axis**: exact binding-generation identity; `retain → commit → release`
-  handoff; park/release/supersession/fatal cleanup.
-- **Tests**: L6 ownership (`test/runner-session-retirement.test.ts` extensions +
-  a new Remote owner-mapping L6 test); same-id/new-generation stays distinct; no
-  reference leak or premature release.
-- **Must not change**: Direct retirement order (`cancel → idle → drain → flush →
-  dispose`), transition gate/operation barrier semantics, the synchronous
-  commit-order generation bump.
-- **Entry**: M3-1. **Exit**: L6 green, Direct behavior unchanged. **Rollback**:
-  keep the Direct owner path authoritative; the Remote mapping is additive.
+- **Status**: DONE.
+- **Files/owners**: `src/app/remote/session-owners.ts`
+  (`createRemoteSessionOwnerServices`: `SessionOwnerAccess` +
+  `SessionOwnerRetirement` sharing one registry state); the four
+  Direct-owner throws in `src/app/session/runtime.ts` are removed (transport-
+  neutral owned-generation failures; the fork shape is now the
+  publication→open adoption); the Direct-attachment throws in `bootstrap.ts`
+  are M3-2 staging no-ops; `clientOwnerOf()` is consumed by the Remote owner
+  provider as its sole mapping source.
+- **Behavior axis**: exact binding-generation identity (`WeakMap` keyed by the
+  exact `SessionReference.binding` object; wrapper transfer commits the new
+  authority before releasing the replaced TUI reference exactly once; a
+  released wrapper is a dead ownership claim and is refused outright — it can
+  never re-resolve, so it cannot publish an owner with no retained Client
+  reference, while a fresh retain of a still-live binding re-activates the
+  SAME owner); `retain → commit → release` handoff with a
+  transaction-local `committedOwner` mapped once; a pre-publication commit
+  seam failure releases the acquired NEW owner exactly once (OLD stays
+  current); park/release/supersession/fatal cleanup (`whenIdleOrAbort`
+  observes the borrowed exact binding's `SessionSnapshot.running` with
+  subscribe-then-recheck fencing and full listener cleanup even for a
+  synchronous subscription notification, local abort only; `flush`/`preCancel`
+  are deliberate no-ops; `retire` releases the authoritative Client reference
+  exactly once, state detached before `release()` for reentrancy).
+- **Evidence**: L6 `test/remote-session-owners.test.ts` (R1–R12 identity,
+  transfer, exactly-once release, released-wrapper refusal, still-live-binding
+  re-activation, listener cleanup incl. a synchronous subscription
+  notification, parked drain) and
+  `test/session-runtime-remote-owner-handoff.test.ts` (H1–H12 exact event
+  ordering, supersession, same-id rollover with the stale-subject completion
+  fence, fork publication→open adoption, pre-publication commit-throw
+  exactly-once release, exit/fatal release; plus the Direct-shaped
+  no-extra-open lock);
+  `test/runner-session-navigation.test.ts` locks that a production Direct
+  `/fork` never performs the extra adoption open.
+- **Must not change** (verified unchanged): Direct retirement order
+  (`cancel → idle → drain → flush → dispose` in
+  `test/runner-session-retirement.test.ts`), transition gate/operation barrier
+  semantics, the synchronous commit-order generation bump, fork source-pin /
+  command-settlement ordering.
+- **Entry**: M3-1. **Exit**: L6 green, Direct behavior unchanged.
+  **Rollback**: keep the Direct owner path authoritative; the Remote mapping
+  is additive and non-composed (no production call site exists).
 
 ### M3-3A — Remote backend closure: session / runtime / catalog / host-file
 

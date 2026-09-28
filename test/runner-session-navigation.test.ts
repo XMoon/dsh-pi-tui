@@ -95,6 +95,13 @@ test('/fork inherits the Host-chosen completed prefix including the trailing sou
   }, 'the child effective selection remains the consumed historical A selection')
   assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection,
     'the inherited trailing switch stays a pending intent, Host-owned')
+  // M3-2 regression: the Direct fork handle is already owned, so the adoption
+  // must resolve it directly — the Remote publication→open adoption path must
+  // never add a second `lifecycle.open` (a resume/compose) for the child.
+  assert.ok(!harness.resumeSessionIds.includes(child.id),
+    'a Direct fork adoption must not open/resume the child a second time')
+  assert.deepEqual(harness.resumeSessionIds, [source.id],
+    'only the startup resume ran; the fork child was adopted through its owned handle')
 })
 
 test('/fork leaves the source Session attached until the executor appends command/done', async (t) => {

@@ -1,8 +1,9 @@
 /**
  * A2-2 ownership-cutover locks: the runner keeps NO local ownership authority,
  * the core is the single state owner, the current owner is published only
- * through the Direct registry into the core slot, and no sessionId→Agent
- * lookup reconstructs currentness.
+ * through the injected SessionOwnerAccess provider (Direct composition today,
+ * Remote from M3-2) into the core slot, and no sessionId→Agent lookup
+ * reconstructs currentness.
  * @module @xmoon76/dsh-pi-tui/a2-ownership-cutover.test
  */
 
@@ -48,22 +49,28 @@ test('the ownership core is the single state owner', () => {
   assert.ok(coreSource.includes('const pendingOwnerReleases = new Map<string, Set<Promise<void>>>()'), 'the core owns the release ledger')
 })
 
-test('the current owner is published only through the Direct registry into the core slot', () => {
+test('the current owner is published only through the injected SessionOwnerAccess provider into the core slot', () => {
   // ALL FOUR commit shapes publish inside the bound runtime, each resolving the
-  // owner from the handle that shape actually owns. The runner never publishes an
-  // owner itself.
+  // owner from the handle that shape actually owns (a Direct attachment or a
+  // Remote Client generation — the injected provider decides, never the
+  // runner). The runner never publishes an owner itself.
   assert.equal((indexSource.match(/setCurrentOwner\(/g) ?? []).length, 0,
     'the runner must not publish the current owner at all')
   assert.ok(sessionRuntimeSource.includes('const nextOwner = resumed === undefined ? undefined : deps.owners.fromHandle(resumed)'),
-    'resume publication goes through the registry (runtime)')
-  assert.ok(sessionRuntimeSource.includes('const nextOwner = deps.owners.fromHandle(owner as SessionHandle)'),
-    'ordinary-transition publication goes through the registry (runtime)')
-  assert.ok(sessionRuntimeSource.includes('const nextOwner = deps.owners.fromHandle(handle)'),
-    'fork publication goes through the registry (runtime)')
+    'resume publication goes through the injected owner provider (runtime)')
+  assert.ok(sessionRuntimeSource.includes('const nextOwner = deps.owners.fromHandle(next as SessionHandle)'),
+    'ordinary-transition publication goes through the injected owner provider (runtime)')
+  assert.ok(sessionRuntimeSource.includes('let nextOwner = deps.owners.fromHandle(handle)'),
+    'fork publication goes through the injected owner provider (runtime)')
   assert.ok(sessionRuntimeSource.includes('const childOwner = deps.owners.fromHandle(handle)'),
-    'first-session publication goes through the registry (runtime)')
+    'first-session publication goes through the injected owner provider (runtime)')
   const publishes = sessionRuntimeSource.match(/core\.setCurrentOwner\(/g) ?? []
   assert.equal(publishes.length, 4, `expected the 4 runtime publish sites, saw ${publishes.length}`)
+  // The production bootstrap is still the Direct composition: it injects the
+  // Direct owner provider into the runtime (the Remote provider is composed by
+  // the future Remote runtime selection seam, never by this bootstrap).
+  assert.ok(indexSource.includes('owners: directRuntime.owners,'),
+    'the production bootstrap injects the Direct owner provider')
   assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
   assert.ok(indexSource.includes('const handleNow = (): AgentHandle | undefined =>'),
