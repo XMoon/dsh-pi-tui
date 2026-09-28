@@ -36,12 +36,6 @@
     "sessions",
     "subagents"
   ],
-  "app/remote/client-runtime.ts": [
-    "import:dsh-agent"
-  ],
-  "app/remote/host-runtime.ts": [
-    "import:dsh-session"
-  ],
   "commands.ts": [
     "import:dsh-agent",
     "import:dsh-session"
@@ -55,7 +49,6 @@
   "runtime/direct/catalog-direct.ts": [
     "agentDefaultModel",
     "agentPresets",
-    "import:dsh-agent",
     "llm",
     "tools"
   ],
@@ -104,12 +97,10 @@
   ],
   "runtime/direct/session-preset-direct.ts": [
     "agentPresets",
-    "import:dsh-agent",
     "import:dsh-session",
     "sessionQuery"
   ],
   "runtime/direct/session-projection-direct.ts": [
-    "import:dsh-agent",
     "import:dsh-session"
   ],
   "runtime/direct/session-writer-direct.ts": [
