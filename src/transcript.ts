@@ -17,7 +17,7 @@
  */
 
 import { parseExitStatus } from '@deepseek-ai/dsh-shell'
-import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
+import { isReplacementSurfaceEvent, TOOL_NOT_STARTED } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextPresentation, contextProvenance, contextSummary, type TranscriptContextPresentation } from './context.ts'
@@ -66,7 +66,7 @@ export interface PresentedFilePresentation {
 export type TranscriptSystemOrigin = 'llm-retry' | 'turn-max-tokens'
 
 /** Source-derived origins for synthetic tool presentation rows. */
-export type TranscriptToolOrigin = 'turn-error' | 'turn-interrupted'
+export type TranscriptToolOrigin = 'turn-error' | 'turn-interrupted' | 'tool-not-started'
 
 /** The official command pairing identity (`command/run`/`command/done`),
  * derived from the official event payload — never a plain-string alias. */
@@ -1846,6 +1846,13 @@ export class TranscriptFolder {
   }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
+  /** Unresolved assistant tool REQUESTS by call id (TOOL_NOT_STARTED
+   * compat): the durable `assistant/message` tool-call block identity of a
+   * request that has not reached a durable `tool/call` yet. A `tool/call`
+   * consumes its entry (the request started); any `tool/result` for the id
+   * consumes it too (the request settled). Never a transcript row — only
+   * identity evidence for a not-started recovery diagnostic. */
+  private readonly requestedToolCalls = new Map<string, { turn: number; step: number; name: string }>()
   /** The real command lifecycle index (post-PR166 plan §5): commandId → the
    * ONE `kind: 'command'` row plus its raw item index. Entries survive
    * settlement — the bounded manual-compaction correlation resolves by
@@ -5014,6 +5021,19 @@ export class TranscriptFolder {
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
+        // Durable assistant tool-call blocks are REQUESTED tool identity
+        // (TOOL_NOT_STARTED compat): remember each request so a later
+        // not-started recovery result can name the tool without inventing
+        // a call. The finalized durable blocks are the authority — never
+        // display text, never the embedded stream.
+        for (const block of messageBlocks) {
+          if (block.type !== 'tool-call') continue
+          this.requestedToolCalls.set(block.id, {
+            turn: event.data.turn,
+            step: event.data.step,
+            name: block.name,
+          })
+        }
         const firstVisible = projection?.firstVisibleAt
         if (firstVisible === undefined) activity.firstVisibleAssistantTimes.delete(event.data.step)
         else activity.firstVisibleAssistantTimes.set(event.data.step, firstVisible)
@@ -5169,6 +5189,10 @@ export class TranscriptFolder {
       case 'tool/call': {
         const key = event.data.callId
         this.callNames.set(key, event.data.name)
+        // The request started: its identity is no longer unresolved. A
+        // later TOOL_NOT_STARTED-coded result for this id would be a
+        // malformed contradiction, not a not-started request.
+        this.requestedToolCalls.delete(key)
         // The call's OWN turn (event.data.turn) — never this.currentTurn:
         // a turn-start-less replay fragment must still attribute the call
         // to the right turn (review finding).
@@ -5254,6 +5278,12 @@ export class TranscriptFolder {
         const message = event.data.message
         const key = message.toolCallId
         const pending = this.pendingCalls.get(key)
+        // The unresolved assistant request identity, read BEFORE the
+        // consumption deletions below: only a result with NO observed
+        // tool/call can be a not-started recovery (the `pending ===
+        // undefined` guard keeps a malformed contradictory log from
+        // rewriting an actually observed call as not started).
+        const notStartedRequest = pending === undefined ? this.requestedToolCalls.get(key) : undefined
         const name = this.callNames.get(key) ?? 'tool'
         const text = textOf(message.content)
         const status = message.isError === true ? 'error' : 'ok'
@@ -5264,6 +5294,7 @@ export class TranscriptFolder {
         const turn = pending?.turn ?? event.data.turn
         this.pendingCalls.delete(key)
         this.callNames.delete(key)
+        this.requestedToolCalls.delete(key)
         if (pending !== undefined) {
           // The call's own running card: parallel same-name calls pair
           // correctly because the card is keyed by callId, not by name.
@@ -5286,6 +5317,39 @@ export class TranscriptFolder {
           // A settled read may now be groupable: reflow the run it belongs
           // to (bounded by the nearest non-read cards).
           this.scheduleGrouping(pending.index)
+        } else if (event.data.error?.code === TOOL_NOT_STARTED) {
+          // The official crash-recovery/fork-seed closer for a request
+          // that never reached a durable `tool/call`: standalone
+          // not-started diagnostic evidence (attention), never an
+          // executed Tool and never an orphan Action. The recovered name
+          // is accepted ONLY under the full fence — call id + same turn +
+          // same step — so a reused id from another step/turn cannot
+          // donate an identity; anything less degrades to the generic
+          // diagnostic, never a guess.
+          const recovered = notStartedRequest !== undefined
+            && notStartedRequest.turn === event.data.turn
+            && notStartedRequest.step === event.data.step
+            ? notStartedRequest.name : undefined
+          const card: Extract<TranscriptMessage, { kind: 'tool' }> = {
+            kind: 'tool',
+            turn,
+            name: recovered ?? 'tool',
+            args: '',
+            result: text,
+            status: 'error',
+            resultBlocks: message.content,
+            meta: event.data.meta,
+            error: event.data.error,
+            origin: 'tool-not-started',
+          }
+          // No synthetic tool/call: explicit zero-call provenance.
+          card.callCount = 0
+          setTranscriptTiming(card, pointTiming(event.time))
+          // This diagnostic card is NEWLY materialized: if its owning turn
+          // already ended, it is post-turn replay evidence.
+          if (this.activityByTurn.get(turn)?.completed === true) markPostTurnReplayEvidence(card)
+          this.appendItem(card)
+          this.scheduleGrouping(this.items.length - 1)
         } else {
           // Unknown call (e.g. post-compaction): fall back to the last
           // running card with this name IN THE RESULT'S OWN TURN — an
@@ -5763,6 +5827,18 @@ export function renderTranscriptMarkdown(session: {
   // turn opens the workflow turn (a late turn/start for an older turn — or
   // for a closed turn — is a no-op).
   let currentTurn = -1
+  // Unresolved assistant tool-request names by call id (TOOL_NOT_STARTED
+  // compat): the export walks the same durable evidence as the visual fold
+  // — a `tool-call` block requests a tool, `tool/call` starts it, and a
+  // `TOOL_NOT_STARTED` result settles the request as a never-started
+  // diagnostic without inventing a `### Tool <name>` call heading.
+  const requestedToolNames = new Map<string, { turn: number; step: number; name: string }>()
+  // Call identities with an OBSERVED durable `tool/call`, scoped by the
+  // same composite fence as request identity (call id + turn + step): an
+  // observation from an earlier turn/step never leaks into a later reused
+  // id's recovery export (the fold's `pending === undefined` guard,
+  // mirrored here).
+  const observedToolCalls = new Set<string>()
   // Alpha.4 Session shape: the event log arrives as a snapshot read, never a
   // live array — the markdown export is a full-log fold by definition.
   for (const event of session.snapshotEvents()) {
@@ -5809,15 +5885,37 @@ export function renderTranscriptMarkdown(session: {
       case 'assistant/message': {
         const text = markdownContent(event.data.message.content)
         if (text !== '') lines.push(`## Assistant\n\n${text}\n`)
+        for (const block of event.data.message.content) {
+          if (block.type === 'tool-call') {
+            requestedToolNames.set(block.id, { turn: event.data.turn, step: event.data.step, name: block.name })
+          }
+        }
         break
       }
       case 'tool/call': {
+        requestedToolNames.delete(event.data.callId)
+        observedToolCalls.add(`${event.data.turn}:${event.data.step}:${event.data.callId}`)
         const args = typeof event.data.arguments === 'string' ? event.data.arguments : JSON.stringify(event.data.arguments)
         lines.push(`### Tool ${event.data.name}\n\n\`\`\`json\n${args}\n\`\`\`\n`)
         break
       }
       case 'tool/result': {
+        const request = requestedToolNames.get(event.data.message.toolCallId)
+        requestedToolNames.delete(event.data.message.toolCallId)
         const text = markdownContent(event.data.message.content)
+        if (event.data.error?.code === TOOL_NOT_STARTED
+          && !observedToolCalls.has(`${event.data.turn}:${event.data.step}:${event.data.message.toolCallId}`)) {
+          // A not-started recovery has NO durable tool/call behind it: the
+          // heading states the fact instead of inventing one. The name is
+          // proven only under the full call-id + turn + step fence.
+          const name = request !== undefined
+            && request.turn === event.data.turn
+            && request.step === event.data.step
+            ? request.name : undefined
+          lines.push(`### Tool request not started${name === undefined ? '' : `: ${name}`}\n`)
+          if (text !== '') lines.push(`<details><summary>recovery</summary>\n\n${text}\n\n</details>\n`)
+          break
+        }
         if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
         break
       }

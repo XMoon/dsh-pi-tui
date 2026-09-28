@@ -1179,3 +1179,70 @@ test('internal card hierarchy keeps its indent while the outer chrome stays flat
   assert.ok(childBody !== undefined && childBody > childHeader, `the PTC child body stays deeper than its header:\n${rows.join('\n')}`)
   app.stop()
 })
+
+// ── TOOL_NOT_STARTED standalone diagnostic (DSH 0.1.7-rc.2 compat) ────────
+
+/** A turn whose only process-plane evidence is a not-started recovery
+ * diagnostic: the assistant requested `bash` (durable tool-call block),
+ * no `tool/call` ever landed, and the official recovery closer settled it
+ * with error.code=TOOL_NOT_STARTED. */
+function notStartedFixture(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'run the checks' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{"command":"ls"}' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.' }],
+        isError: true,
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+      error: { name: 'ToolNotStartedError', code: 'TOOL_NOT_STARTED' },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'interrupted' } }, T0 + 4, 4),
+  ]
+}
+
+test('Compact keeps a TOOL_NOT_STARTED diagnostic standalone with no Activity Action', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, notStartedFixture())
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+
+  assert.ok(view.includes('Tool request not started · Bash'),
+    `the explicit not-started diagnostic is visible:\n${view}`)
+  assert.equal(workHeaders(view).length, 0,
+    `a not-started-only turn creates no Activity span:\n${view}`)
+  assert.ok(!view.includes('Action:'),
+    `the diagnostic never owns a collapsed Action slot:\n${view}`)
+  assert.ok(!/\d+ actions?/.test(view),
+    `the diagnostic contributes zero action statistics:\n${view}`)
+  assert.ok(!view.includes('[ok]') && !view.includes('[running]'),
+    `no executed-tool lifecycle pill is fabricated:\n${view}`)
+  assert.ok(!view.includes('$ {"command":"ls"}') && !view.includes('$ ls'),
+    `no shell-command execution preview is fabricated:\n${view}`)
+
+  // The expanded body is the authoritative upstream recovery guidance.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.ok(expanded.includes('interrupted before the Harness recorded it as started'),
+    `the expanded diagnostic keeps the DSH recovery guidance:\n${expanded}`)
+})

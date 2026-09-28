@@ -1460,3 +1460,33 @@ the existing `onTranscriptJumpLatest` semantic action — so a history click
 returns to the GLOBAL latest window instead of stopping at the current history
 window's bottom. The history location gutter now says only where the window
 is; the floating label says how to get back. This vendor seam extends X028.
+
+## TOOL_NOT_STARTED is standalone Attention evidence and never an Action
+
+DSH `0.1.7-rc.2` crash-recovery and fork-seed closers settle an assistant
+tool request that never reached a durable `tool/call` with a synthetic
+`tool/result` carrying `error.code === TOOL_NOT_STARTED` (detected through
+the official exported constant, never recovery prose). The TUI presents
+that row as an explicit **tool-request-not-started diagnostic**:
+
+- the fold recovers the requested tool name from the durable
+  `assistant/message` `tool-call` block, fenced by call id + turn + step,
+  and degrades to a generic diagnostic when the identity is unproven;
+- no synthetic `tool/call` is invented (`callCount = 0`), so the row is
+  neither an executed Tool nor an orphan Action: `origin:
+  'tool-not-started'` classifies it as standalone **attention** evidence,
+  it joins no Activity/Work span, never owns the collapsed `Action:` slot,
+  and contributes zero action statistics;
+- the row is Host-owned: extension tool renderers and the normal
+  ToolPresenter call/result presentation are bypassed (no `$ command`,
+  diff, or read preview implies an execution), and the visible wording
+  literally says `Tool request not started` — with the authoritative DSH
+  recovery guidance as the expanded body;
+- Markdown export states the fact (`### Tool request not started: bash`)
+  instead of inventing a `### Tool <name>` durable-call heading.
+
+`TOOL_OUTCOME_UNKNOWN` keeps the opposite semantics: a genuine started
+tool whose outcome was not durably recorded stays a normal Tool card with
+error outcome. Pinned by `test/session-v4-tool-result.test.ts`,
+`test/transcript-semantics.test.ts`, `test/compact-process-preview.test.ts`,
+`test/compact-display.test.ts`, and `test/focus-ui.test.ts`.
