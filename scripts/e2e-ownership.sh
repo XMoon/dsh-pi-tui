@@ -24,9 +24,11 @@
 #   A8.3 — no-owner.lock assertion: after every case the session directory
 #     must contain NO owner.lock; session.lock is allowed (never mistaken
 #     for residue).
-#   A8.4 — native lease really executes: the fs-ext native binding is
-#     loaded (not a stub) and a second process is refused while the first
-#     holds the lease, then acquires immediately after release.
+#   A8.4 — native lease really executes: the official
+#     @deepseek-ai/node-addon-system/flock primitive holds a real kernel
+#     flock (second descriptor refused, immediate reacquire after close),
+#     and the JSONL persistence write-open refuses a second process while
+#     the first holds the lease, then acquires immediately after release.
 #
 # The E2E runs the REAL bundle (this repo's dist/) in REAL dsh processes
 # under an isolated DSH_HOME with a dedicated profile (link to this
@@ -108,11 +110,13 @@ console.log('--' + slug.slice(0, 251) + '--');
 " "$WORK_DIR")"
 SESSION_DIR="$E2E_HOME/sessions/$PROJECT_KEY/$SESSION_X"
 
-# Only this script's own dsh processes: the master CLI's real process
-# command line is `node .../@deepseek-ai/dsh/lib/bin.js --profile
-# e2e-ownership ...`. The unique profile name makes the match precise; we
-# kill by PID, never with a broad pkill.
-dsh_pids() { pgrep -f "^node .*dsh/lib/bin\.js --profile $PROFILE_NAME" || true; }
+# Only this script's own dsh processes: the master CLI's real process command
+# line is `node ... --profile e2e-ownership ...` where the entry path is either
+# `@deepseek-ai/dsh/lib/bin.js` (a pnpm-style symlinked .bin/dsh) or
+# `node_modules/.bin/dsh` itself (an npm-style shim script run by node). The
+# unique profile name makes the match precise; we kill by PID, never with a
+# broad pkill.
+dsh_pids() { pgrep -f "^node .*(dsh/lib/bin\\.js|\\.bin/dsh) --profile $PROFILE_NAME" || true; }
 
 cleanup() {
   for pid in $(dsh_pids); do kill "$pid" 2>/dev/null || true; done
@@ -154,9 +158,12 @@ cat > "$E2E_HOME/seed.mjs" <<'EOF'
 #!/usr/bin/env node
 // Seed one session artifact through the OFFICIAL master JSONL persistence
 // API (create + flush + close). The TUI later resumes it through the same
-// official path — never a raw parser.
+// official path — never a raw parser. The header version follows the
+// installed family's exported SESSION_FORMAT_VERSION, so the E2E does not
+// hardcode a format generation.
 // Usage: node seed.mjs <sessionsRoot> <sessionId> [cwd]
 import { Context } from '@deepseek-ai/cordis'
+import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const root = process.argv[2]
@@ -166,8 +173,7 @@ const cwd = process.argv[4] ?? process.cwd()
 const ctx = new Context()
 const persistence = new JsonlSessionPersistence(ctx, { root })
 const handle = await persistence.create({
-  type: 'session',
-  version: 2,
+  version: SESSION_FORMAT_VERSION,
   id,
   createdAt: Date.now(),
   isSeeded: false,
@@ -232,57 +238,76 @@ EOF
 
 cat > "$E2E_HOME/native-lease.mjs" <<'EOF'
 #!/usr/bin/env node
-// A8.4 — prove the master JSONL backend REALLY executes the native lease
-// path (fs-ext flock on Linux), not a stub or a dependency-closure text
-// match.
+// A8.4 — prove the official native lease path REALLY executes, not a stub
+// or a dependency-closure text match, in two independent layers.
 //
-//  1. The fs-ext native binding is genuinely loaded (the .node addon file
-//     exists and flock is a real function — not the browser-worker stub).
-//  2. persistence.open(id, "write") — the official seam that internally
-//     calls SessionWriteLease.acquire — succeeds and holds the kernel
-//     flock on session.lock.
-//  3. A SECOND process calling the same open is refused with
-//     SessionAlreadyOwnedError — only possible if the kernel flock is
-//     genuinely held (a stubbed fs-ext would succeed).
-//  4. After close, the second process acquires immediately (kernel
-//     released the lock on descriptor close).
+//  Layer 1 — public @deepseek-ai/node-addon-system/flock primitive:
+//    1. resolve './flock' from the JSONL backend's own package context
+//       (the same instance the backend's SessionWriteLease loads);
+//    2. tryLockExclusive(fd1) on a fresh probe file succeeds;
+//    3. tryLockExclusive(fd2) on a second descriptor of the SAME file is
+//       refused with EAGAIN/EWOULDBLOCK — only a real kernel flock does that;
+//    4. after closing fd1, fd2 acquires immediately (kernel released it).
+//  Layer 2 — JSONL persistence integration:
+//    1. persistence.open(id, "write") — the official seam that internally
+//       calls SessionWriteLease.acquire — succeeds and holds the kernel
+//       flock on session.lock;
+//    2. a SECOND process calling the same open is refused with
+//       SessionAlreadyOwnedError (a stubbed lease would succeed);
+//    3. after close, the second process acquires immediately.
 //
 // Usage: node native-lease.mjs <sessionsRoot> [sessionId]
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { closeSync, openSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const root = process.argv[2]
 const id = process.argv[3] ?? 'session-native-lease-probe'
 const here = dirname(fileURLToPath(import.meta.url))
 
-// 0. Native binding probe: fs-ext must be the real addon, not a stub.
-// fs-ext is a transitive dependency of the JSONL backend, so resolve it
-// from the backend package's own context (the same instance the backend
-// loads at runtime).
+// 0. Public primitive probe: resolve the official flock entry from the JSONL
+// backend's package context and prove real kernel contention on one file.
 const require = createRequire(import.meta.url)
 const persistenceEntry = require.resolve('@deepseek-ai/dsh-session-persistence-jsonl')
 const backendRequire = createRequire(persistenceEntry)
-const fsExtEntry = backendRequire.resolve('fs-ext')
-const fsExt = backendRequire('fs-ext')
-const bindingFile = join(dirname(fsExtEntry), 'build', 'Release', 'fs_ext.node')
-if (typeof fsExt.flock !== 'function' || !existsSync(bindingFile)) {
-  console.log(`NATIVE-BINDING-MISSING: flock=${typeof fsExt.flock} binding=${bindingFile}`)
+const flockEntry = backendRequire.resolve('@deepseek-ai/node-addon-system/flock')
+const flock = await import(pathToFileURL(flockEntry).href)
+if (typeof flock.tryLockExclusive !== 'function') {
+  console.log(`FLOCK-PRIMITIVE-MISSING: tryLockExclusive=${typeof flock.tryLockExclusive} entry=${flockEntry}`)
   process.exit(1)
 }
-console.log(`NATIVE-BINDING-OK: ${bindingFile}`)
+const probeFile = join(here, 'native-lease-probe.lock')
+const fd1 = openSync(probeFile, 'w')
+const fd2 = openSync(probeFile, 'w')
+await flock.tryLockExclusive(fd1)
+let contention = null
+try {
+  await flock.tryLockExclusive(fd2)
+  contention = new Error('second descriptor unexpectedly acquired the exclusive lock')
+} catch (error) {
+  contention = error
+}
+const refusedWith = contention?.code ?? ''
+if (!['EAGAIN', 'EWOULDBLOCK'].includes(refusedWith)) {
+  console.log(`FLOCK-CONTENTION-FAILED: ${refusedWith || 'unexpected-success'} ${contention?.message ?? ''}`)
+  process.exit(1)
+}
+closeSync(fd1)
+await flock.tryLockExclusive(fd2)
+closeSync(fd2)
+console.log(`FLOCK-PRIMITIVE-OK: ${flockEntry} (contention refused, release + reacquire)`)
 
 // Seed the probe session through the official API (create + flush + close).
 const ctx = new Context()
 const persistence = new JsonlSessionPersistence(ctx, { root })
 {
   const handle = await persistence.create({
-    type: 'session',
-    version: 2,
+    version: SESSION_FORMAT_VERSION,
     id,
     createdAt: Date.now(),
     isSeeded: false,
@@ -294,7 +319,10 @@ const persistence = new JsonlSessionPersistence(ctx, { root })
   await handle.close()
 }
 
-// Child: try the same write open; print ACQUIRED or REFUSED.
+// Child: try the same write open; print ACQUIRED or the refusal. Only the
+// official SessionAlreadyOwnedError counts as the expected contention
+// refusal — any other failure is reported distinctly and exits nonzero so
+// the parent cannot mistake an unrelated error for kernel contention.
 const childScript = `
 import { Context } from '@deepseek-ai/cordis'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -308,7 +336,12 @@ try {
   console.log('ACQUIRED')
   await handle.close()
 } catch (error) {
-  console.log('REFUSED: ' + (error?.message ?? String(error)))
+  if (error?.name === 'SessionAlreadyOwnedError') {
+    console.log('REFUSED: ' + (error?.message ?? String(error)))
+  } else {
+    console.log('OPEN-ERROR [' + (error?.name ?? 'AnonymousError') + ']: ' + (error?.message ?? String(error)))
+    process.exitCode = 1
+  }
 }
 `
 const runChild = () => new Promise((resolve) => {
@@ -325,83 +358,66 @@ const runChild = () => new Promise((resolve) => {
 const handle = await persistence.open(id, 'write')
 console.log(`ACQUIRED ${id}`)
 
-// 2. Contention from a second process must be refused (real kernel flock).
+// 2. Contention from a second process must be an OWNERSHIP refusal with a
+// clean child exit (real kernel flock; an errored child is not contention).
 const contended = await runChild()
-if (contended.out.startsWith('REFUSED')) {
+if (contended.code === 0 && contended.out.startsWith('REFUSED')) {
   console.log(`CONTENTION-REFUSED: ${contended.out}`)
 } else {
-  console.log(`CONTENTION-FAILED: ${contended.out || `exit ${contended.code}`}`)
+  console.log(`CONTENTION-FAILED: exit=${contended.code} ${contended.out}`)
   process.exitCode = 1
 }
 
-// 3. Close; the second process must now acquire immediately.
+// 3. Close; the second process must now acquire cleanly (exit 0).
 await handle.close()
 const after = await runChild()
-if (after.out === 'ACQUIRED') {
+if (after.code === 0 && after.out === 'ACQUIRED') {
   console.log('RELEASED-REACQUIRED')
 } else {
-  console.log(`RELEASE-FAILED: ${after.out || `exit ${after.code}`}`)
+  console.log(`RELEASE-FAILED: exit=${after.code} ${after.out}`)
   process.exitCode = 1
 }
 EOF
 
-# ── 3. fs-ext native binding (A8.4 prerequisite) ────────────────────────
-# The master env's pnpm allowBuilds excludes fs-ext, so the native addon
-# may be absent; build it in place so the kernel-flock path really runs.
-FS_EXT_DIR="$(cd "$E2E_HOME" && node -e "
-const { createRequire } = require('node:module');
-const { dirname } = require('node:path');
-const req = createRequire(require.resolve('@deepseek-ai/dsh-session-persistence-jsonl'));
-console.log(dirname(req.resolve('fs-ext')));
-")"
-if [ ! -f "$FS_EXT_DIR/build/Release/fs_ext.node" ]; then
-  echo "== fs-ext native binding missing; building it in $FS_EXT_DIR =="
-  NODE_GYP="$(npm root -g 2>/dev/null)/npm/node_modules/node-gyp/bin/node-gyp.js"
-  if [ ! -f "$NODE_GYP" ]; then NODE_GYP="$(command -v node-gyp || true)"; fi
-  if [ -z "$NODE_GYP" ]; then
-    echo "FAIL: node-gyp not found; build fs-ext manually in $FS_EXT_DIR" >&2
-    exit 1
-  fi
-  (cd "$FS_EXT_DIR" && node "$NODE_GYP" configure build) || {
-    echo "FAIL: fs-ext native build failed" >&2
-    exit 1
-  }
-fi
-
-# ── 4. seed the session through the official API ────────────────────────
+# ── 3. seed the session through the official API ────────────────────────
 node "$E2E_HOME/seed.mjs" "$E2E_HOME/sessions" "$SESSION_X" "$WORK_DIR"
-if [ ! -f "$SESSION_DIR/session.v2.jsonl.zstd" ]; then
-  echo "FAIL: seeded session artifact not found at $SESSION_DIR" >&2
+# The artifact name carries the installed family's current session format
+# generation; derive it instead of hardcoding a version.
+SESSION_ARTIFACT="$(cd "$E2E_HOME" && node -e "console.log('session.v' + require('@deepseek-ai/dsh-session').SESSION_FORMAT_VERSION + '.jsonl.zstd')")"
+if [ ! -f "$SESSION_DIR/$SESSION_ARTIFACT" ]; then
+  echo "FAIL: seeded session artifact not found at $SESSION_DIR (expected $SESSION_ARTIFACT)" >&2
   exit 1
 fi
 
-# ── 5. A8.4: native lease really executes ───────────────────────────────
-echo "== A8.4: native lease (fs-ext flock) really executes =="
+# ── 4. A8.4: native lease really executes ───────────────────────────────
+echo "== A8.4: native lease (node-addon-system flock) really executes =="
 NATIVE_OUT="$(node "$E2E_HOME/native-lease.mjs" "$E2E_HOME/sessions")"
 echo "$NATIVE_OUT" | sed 's/^/  /'
-if echo "$NATIVE_OUT" | grep -q "NATIVE-BINDING-OK" \
+if echo "$NATIVE_OUT" | grep -q "FLOCK-PRIMITIVE-OK" \
   && echo "$NATIVE_OUT" | grep -q "CONTENTION-REFUSED" \
   && echo "$NATIVE_OUT" | grep -q "RELEASED-REACQUIRED"; then
-  ok "native lease path verified (binding + cross-process contention + kernel release)"
+  ok "native lease path verified (flock primitive + persistence cross-process contention + kernel release)"
 else
   bad "native lease verification failed: $NATIVE_OUT"
 fi
 
-# ── 6. tmux harness ─────────────────────────────────────────────────────
+# ── 5. tmux harness ─────────────────────────────────────────────────────
 tmux new-session -d -s "$TMUX_SESSION" -x 120 -y 34
 tmux split-window -t "$TMUX_SESSION" -h
 PANE1="$TMUX_SESSION:0.0"
 PANE2="$TMUX_SESSION:0.1"
 
 pane_text() { tmux capture-pane -t "$1" -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' '; }
-# The launch command echo also contains "--session <id>", so a bare
-# "session <id>" match would false-positive on the echoed command line.
-# The mounted TUI header ("🐋  session <id>") and the refusal notice are
-# the only states that contain "session <id>" WITHOUT the "--session"
-# launcher flag.
+# The mounted-state signature is the welcome card's session row, which pads
+# the label column ("session  <id>" — two spaces). A bare "session <id>"
+# single-space match would false-positive on the echoed launch line (and on
+# the post-exit "To resume this session" banner), so the row layout itself is
+# the discriminator. The TUI renders inline below the shell prompt, and
+# launch_tui routes the session id through an environment variable so the
+# echoed launch line never carries a literal "--session <id>".
 pane_mounted() { # pane_mounted <pane> <sessionId> — 0 when the TUI shows the session mounted
   local text="$(pane_text "$1")"
-  echo "$text" | grep -q "session $2" \
+  echo "$text" | grep -q "session  $2" \
     && ! echo "$text" | grep -q -- "--session $2" \
     && ! echo "$text" | grep -q "$REFUSAL"
 }
@@ -428,7 +444,22 @@ wait_pane_refused() { # wait_pane_refused <pane> <timeout_s> — 0 on refusal, 1
 }
 launch_tui() { # launch_tui <pane> [--session <id>] — a real dsh process
   local pane="$1"; shift
-  tmux send-keys -t "$pane" -l "cd $WORK_DIR && env -u NO_COLOR DSH_TELEMETRY_DISABLED=1 DSH_HOME=$E2E_HOME $MASTER_ENV/node_modules/.bin/dsh --profile $PROFILE_NAME $*"
+  local session_part=""
+  if [ "${1:-}" = "--session" ]; then
+    # Assign the id to a plain shell variable and reference it by NAME in the
+    # dsh flag: the pane's shell (zsh does not word-split ${:+} expansions, so
+    # composing the flag from a variable would pass one merged argument)
+    # expands it at execution time, and the ECHOED launch line never contains
+    # a literal "--session <id>". The inline TUI leaves that echo on screen,
+    # and pane_mounted must distinguish the mounted card from the launch echo
+    # and the post-exit resume banner.
+    session_part="TUI_E2E_SESSION=$2 && "
+    shift 2
+    session_part="${session_part}""env -u NO_COLOR DSH_TELEMETRY_DISABLED=1 DSH_HOME=$E2E_HOME $MASTER_ENV/node_modules/.bin/dsh --profile $PROFILE_NAME --session \$TUI_E2E_SESSION"
+  else
+    session_part="env -u NO_COLOR DSH_TELEMETRY_DISABLED=1 DSH_HOME=$E2E_HOME $MASTER_ENV/node_modules/.bin/dsh --profile $PROFILE_NAME"
+  fi
+  tmux send-keys -t "$pane" -l "cd $WORK_DIR && $session_part $*"
   sleep 0.4
   tmux send-keys -t "$pane" Enter
 }
@@ -487,7 +518,7 @@ assert_no_owner_lock() {
   fi
 }
 
-# ── 7. Case 1: TUI↔TUI contention ───────────────────────────────────────
+# ── 6. Case 1: TUI↔TUI contention ───────────────────────────────────────
 echo "== Case 1: TUI↔TUI contention — B refused while A holds X =="
 launch_tui "$PANE1" --session "$SESSION_X"
 if wait_pane_mounted "$PANE1" "$SESSION_X" 40; then
@@ -520,7 +551,7 @@ assert_no_owner_lock "$SESSION_DIR" "case1"
 quit_pane "$PANE1"
 quit_pane "$PANE2"
 
-# ── 8. Case 2: clean dispose releases ownership ─────────────────────────
+# ── 7. Case 2: clean dispose releases ownership ─────────────────────────
 echo "== Case 2: clean dispose releases ownership =="
 quit_pane "$PANE1"
 launch_tui "$PANE2" --session "$SESSION_X"
@@ -532,7 +563,7 @@ fi
 assert_no_owner_lock "$SESSION_DIR" "case2"
 quit_pane "$PANE2"
 
-# ── 9. Case 3: crash releases kernel ownership ──────────────────────────
+# ── 8. Case 3: crash releases kernel ownership ──────────────────────────
 echo "== Case 3: crash (kill -9) releases kernel ownership =="
 launch_tui "$PANE1" --session "$SESSION_X"
 if wait_pane_mounted "$PANE1" "$SESSION_X" 40; then
@@ -567,7 +598,7 @@ fi
 assert_no_owner_lock "$SESSION_DIR" "case3"
 quit_pane "$PANE2"
 
-# ── 10. Case 4: TUI↔Host (non-TUI writer) ───────────────────────────────
+# ── 9. Case 4: TUI↔Host (non-TUI writer) ───────────────────────────────
 echo "== Case 4: TUI↔Host — authority is not TUI↔TUI-only =="
 # Forward: the Host writer holds X → the TUI resume must be refused.
 node "$E2E_HOME/writer.mjs" hold "$E2E_HOME/sessions" "$SESSION_X" 60000 \

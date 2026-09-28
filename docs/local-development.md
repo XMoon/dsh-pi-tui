@@ -436,26 +436,24 @@ These cost real debugging time once; record new ones here instead of relearning.
   index), run `tsc`, then `git stash pop`. Plain `git stash push` also resets
   the index — the typecheck then validates HEAD, not your staged commit.
 
-### DSH master source environment
+### DSH native lease environment
 
-- Master's `pnpm-workspace.yaml` `allowBuilds` does NOT include `fs-ext`, so
-  every fresh source-mode install lacks the native flock addon and the JSONL
-  backend crashes at boot (`Cannot find module .../fs-ext/build/Release/fs_ext.node`).
-  The alpha.2 npm family added `fs-ext` to `dsh-session-persistence-jsonl`,
-  so an isolated npm-mode install with `--ignore-scripts` hits the same
-  missing binding; the isolated drivers build it via `ensureFsExtBinding`
-  (idempotent) in both modes.
-  After a source install, build it with node-gyp when the binding is missing.
-  Prefer pnpm's bundled node-gyp at
-  `<pnpm-dir>/dist/node_modules/node-gyp/bin/node-gyp.js`, executing it with
-  the current `node` (`node <that node-gyp.js> configure build`). This is
-  deterministic under `pnpm/setup@v2`, whose Node runtime may omit npm. Keep
-  the `npm root -g`/PATH fallback only for ordinary local or older pnpm
-  installs; use `spawnSync` for the npm probe because `runBounded` streams
-  stdio and captures nothing. The build runs in the fs-ext package dir. Do NOT
-  run bare `node-gyp` through `node <name>` (node treats it as a script path).
+- The POSIX Session write lease is provided by the official
+  `@deepseek-ai/node-addon-system/flock` family (stable Node-API prebuilts,
+  declared by `dsh-session-persistence-jsonl`). The historical `fs-ext`
+  consumer-build workaround is retired: an isolated install with
+  `--ignore-scripts` needs no native build step in either mode, and the
+  compatibility drivers no longer patch installed distributions.
+- A distribution whose native payload is genuinely missing or unloadable
+  fails loudly through the normal package load path. Treat that as a
+  distribution/source-pack problem to report against upstream — never
+  re-introduce a consumer-side `node-gyp` repair for it.
+- The ownership E2E proves the real kernel-flock behavior through the public
+  `@deepseek-ai/node-addon-system/flock` primitive (two-descriptor contention,
+  immediate reacquire) plus the persistence integration probe; see
+  `scripts/e2e-ownership.sh` (A8.4).
 - Never write a glob containing `*/` inside a doc comment
-  (e.g. `` `.pnpm/fs-ext@*/node_modules/fs-ext` ``): the `*/` closes the block
+  (e.g. a `.pnpm/<pkg>@*/node_modules` path): the `*/` closes the block
   comment early and the parser explodes at a random later line.
 - When a shell script embeds generated JS via heredoc, use a QUOTED delimiter
   (`<<'EOF'`) AND keep `${...}` out of the generated code — otherwise the

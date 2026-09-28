@@ -594,30 +594,7 @@ EOF
   chmod 600 "$E2E_HOME/settings.yaml" "$E2E_HOME/.credentials.yaml"
   ok "$label: deterministic mock LLM ready on 127.0.0.1:$MOCK_PORT (deepseek-official route)"
 
-  # ── 4. fs-ext native binding (write-lease prerequisite) ────────────────
-  # The master env's pnpm allowBuilds excludes fs-ext, so the native addon
-  # may be absent; build it in place so the official write-open really runs.
-  FS_EXT_DIR="$(cd "$E2E_HOME" && node -e "
-const { createRequire } = require('node:module');
-const { dirname } = require('node:path');
-const req = createRequire(require.resolve('@deepseek-ai/dsh-session-persistence-jsonl'));
-console.log(dirname(req.resolve('fs-ext')));
-")"
-  if [ ! -f "$FS_EXT_DIR/build/Release/fs_ext.node" ]; then
-    echo "== fs-ext native binding missing; building it in $FS_EXT_DIR =="
-    NODE_GYP="$(npm root -g 2>/dev/null)/npm/node_modules/node-gyp/bin/node-gyp.js"
-    if [ ! -f "$NODE_GYP" ]; then NODE_GYP="$(command -v node-gyp || true)"; fi
-    if [ -z "$NODE_GYP" ]; then
-      echo "FAIL: node-gyp not found; build fs-ext manually in $FS_EXT_DIR" >&2
-      exit 1
-    fi
-    (cd "$FS_EXT_DIR" && node "$NODE_GYP" configure build) || {
-      echo "FAIL: fs-ext native build failed" >&2
-      exit 1
-    }
-  fi
-
-  # ── 5. place the historical generation on disk (step 1) ───────────────
+  # ── 4. place the historical generation on disk (step 1) ───────────────
   # The fixture header names the session id and cwd; derive the on-disk
   # project/session layout from them (official projectKey + encodeSegment).
   SESSION_ID="$(node -e "
@@ -650,7 +627,7 @@ console.log('--' + slug.slice(0, 251) + '--');
   fi
   ok "$label: historical generation placed on disk ($source_name)"
 
-  # ── 6. official list/stat discovers it, WITHOUT migrating (step 2) ─────
+  # ── 5. official list/stat discovers it, WITHOUT migrating (step 2) ─────
   PROBE_OUT="$(node "$E2E_HOME/probe.mjs" list "$E2E_HOME/sessions" "$SESSION_ID")"
   echo "$PROBE_OUT" | sed 's/^/  /'
   if echo "$PROBE_OUT" | grep -q "LIST FOUND" && echo "$PROBE_OUT" | grep -q "STAT FOUND"; then
@@ -666,11 +643,11 @@ console.log('--' + slug.slice(0, 251) + '--');
     ok "$label: disk still holds only the historical generation after list/stat"
   fi
 
-  # ── 7. record the old generation hash (step 4) ────────────────────────
+  # ── 6. record the old generation hash (step 4) ────────────────────────
   HASH_BEFORE="$(sha256sum "$SESSION_DIR/$source_name" | cut -d' ' -f1)"
   ok "$label: recorded source hash $HASH_BEFORE"
 
-  # ── 8. TUI picker displays the session (step 3) ───────────────────────
+  # ── 7. TUI picker displays the session (step 3) ───────────────────────
   launch_tui "$WORK_DIR"
   if wait_pane_text "$PANE" "type a message to start a session" 40; then
     ok "$label: TUI home up"
@@ -709,7 +686,7 @@ console.log('--' + slug.slice(0, 251) + '--');
   fi
   quit_pane
 
-  # ── 9. TUI resume → official migration publishes the successor (5/6/7) ─
+  # ── 8. TUI resume → official migration publishes the successor (5/6/7) ─
   launch_tui "$WORK_DIR" --session "$SESSION_ID"
   if wait_pane_mounted "$PANE" "$SESSION_ID" 40; then
     ok "$label: TUI resumed the session (official Direct open)"
@@ -728,7 +705,7 @@ console.log('--' + slug.slice(0, 251) + '--');
     bad "$label: source hash CHANGED after the TUI open ($HASH_BEFORE → $HASH_AFTER_OPEN)"
   fi
 
-  # ── 10. resumed transcript renders the migrated history (step 8) ───────
+  # ── 9. resumed transcript renders the migrated history (step 8) ───────
   PANE_NOW="$(pane_text "$PANE")"
   if echo "$PANE_NOW" | grep -q "hello" && echo "$PANE_NOW" | grep -q "late" \
     && echo "$PANE_NOW" | grep -q "Compacted 4 history items"; then
@@ -737,7 +714,7 @@ console.log('--' + slug.slice(0, 251) + '--');
     bad "$label: transcript missing migrated content: $PANE_NOW"
   fi
 
-  # ── 11. REAL continuation through the live Agent loop (steps 9/10) ─────
+  # ── 10. REAL continuation through the live Agent loop (steps 9/10) ─────
   # The review gap (P1-3): the old chain proved the persistence API can
   # append after migration by quit + manual append-turn. THIS chain keeps
   # the TUI mounted and submits "continue" in the editor: the real Agent
@@ -810,7 +787,7 @@ console.log('--' + slug.slice(0, 251) + '--');
   echo "  mock llm served $MOCK_REQS chat-completion request(s):"
   grep '^REQUEST ' "$E2E_HOME/mock-llm.log" | sed 's/^/    /'
 
-  # ── 12. reopen: history + real continuation turn both render (11/12) ───
+  # ── 11. reopen: history + real continuation turn both render (11/12) ───
   launch_tui "$WORK_DIR" --session "$SESSION_ID"
   if wait_pane_mounted "$PANE" "$SESSION_ID" 40; then
     ok "$label: TUI reopened the session"
@@ -827,7 +804,7 @@ console.log('--' + slug.slice(0, 251) + '--');
   fi
   quit_pane
 
-  # ── 13. source immutability + official read of the current gen (13/14) ─
+  # ── 12. source immutability + official read of the current gen (13/14) ─
   HASH_AFTER="$(sha256sum "$SESSION_DIR/$source_name" | cut -d' ' -f1)"
   if [ "$HASH_AFTER" = "$HASH_BEFORE" ]; then
     ok "$label: source hash unchanged after the full chain (immutable source)"
