@@ -261,8 +261,9 @@ export function directAgentOf(next: unknown): unknown {
 /** Extract the Remote Client generation owner from a lifecycle result. A
  * Direct handle yields undefined. A composing Remote caller must release it
  * exactly once on retirement — including when a superseded transition discards
- * the handle. The Direct runner does not consume it yet (Remote remains
- * non-composed). */
+ * the handle. The Remote session-owner provider (`app/remote/session-owners.ts`)
+ * consumes it as the sole ownership mapping source; the Direct runner never
+ * interprets it. */
 export function clientOwnerOf(next: unknown): ClientSessionOwner | undefined {
   const handle = next as { client?: ClientSessionOwner }
   return handle.client

@@ -183,20 +183,37 @@ allowing `next` to continue forward development.
 The branch flow is:
 
 ```text
-next
-  |
-  +-- promote/next-to-main-<dsh-release>
-          |
-          +-- qualify the published DSH release
-          +-- run the promotion verification
-          |
-          +------------------------------> main
-                                             |
-                                             +-- stable release preparation
-                                             |
-                                             +------ merge resulting main ------> next
-                                                                                  |
-                                                                                  +-- continue with future DSH
+next development
+        |
+        | decide the intended release scope
+        v
+next fixed snapshot / promotion branch
+        |
+        v
+A. reserve the release identity
+        |
+        v
+B. qualify the published DSH baseline
+        |
+        v
+C. release-scoped capability development
+        |
+        v
+D. RC freeze
+        |
+        v
+E. final release qualification
+        |
+        v
+F. finalize the release metadata
+        |
+        +----------------------------->  main
+                                         |
+                                         +-- verify the merged candidate
+                                         |
+                                         +-- stable tag / publication
+                                         |
+                                         +------ merge released main ------> next
 ```
 
 Create the promotion branch from the exact `next` commit being promoted:
@@ -207,17 +224,72 @@ git pull --ff-only
 git switch -c promote/next-to-main-<dsh-release>
 ```
 
-The promotion branch is a release candidate, not another forward-development
-branch. Keep it limited to work required to make that snapshot suitable for
-`main`:
+The promotion branch is a release line, not another forward-development
+branch. Because the TUI package version is materially coupled to the
+compatibility matrix (`current.since`, the current row's `tui`), startup
+guidance, release-note pairing and the packed candidate's identity, a
+promotion MAY reserve the package version — together with every
+version-coupled field, atomically — very early, so the eventual gates
+validate the exact artifact intended for publication. An untagged version
+on the branch is a RESERVED candidate identity, not evidence the release
+exists; the identity is consumed only when the stable tag is created (see
+[docs/releasing.md](releasing.md)).
 
-- move the validated DSH target from the development/prerelease baseline to
-  the published DSH release;
-- update compatibility metadata and current installation guidance;
-- fix only compatibility failures exposed by that release;
-- run the normal build/test gates and the npm DSH compatibility lane;
-- do not add unrelated features or adaptations for later unpublished DSH
-  commits.
+**Release identity reservation is not the feature-freeze boundary.** The
+promotion branch may continue release-scoped product development after
+baseline qualification. The feature-freeze boundary is the explicit RC
+freeze before final release qualification. The branch's allowed scope is:
+
+- reserve the release identity (version + matrix `current.since` + current
+  row `tui` + DSH target/family metadata, all in one atomic change);
+- qualify the target published DSH baseline first: existing TUI behavior,
+  upstream contract changes, installation, Source Mode, Direct/Remote
+  seams, persistence/native primitives, and the old peer floor;
+- perform the compatibility migration and cleanup that baseline requires
+  (retiring local workarounds in favor of new official capabilities
+  included);
+- implement release-scoped product capabilities — especially capabilities
+  enabled by the newly qualified DSH baseline — with their feature-specific
+  tests;
+- fix regressions and blockers discovered during release development;
+- enter RC freeze once the planned scope is complete, then run the FINAL
+  full qualification against the exact candidate intended for publication
+  (baseline evidence alone is not release authority once feature work has
+  landed);
+- finalize release metadata (bilingual changelogs, release-note guidance,
+  release-specific documentation) — preferably in a dedicated final commit.
+
+Work NOT belonging to the declared scope of the reserved release stays
+prohibited on the branch: unrelated opportunistic features, work intended
+for the next release, adaptations for future unpublished DSH commits, and
+unrelated cleanup or architecture refactors.
+
+### RC freeze
+
+The freeze is declared only after baseline qualification AND the planned
+release-scoped capability work are complete. After RC freeze, normal
+product feature development stops; the branch accepts only release
+blockers, regressions, compatibility/correctness fixes, packaging and
+test/gate fixes, documentation corrections, and release metadata. If a
+significant new capability must be added after freeze, explicitly reopen
+the release scope and invalidate/restart the affected final-qualification
+evidence for the new state.
+
+### New-DSH-capability peer-floor decisions
+
+When a release feature depends on a newer DSH API, decide the peer floor
+explicitly and on evidence:
+
+- **Optional capability** — the TUI operates correctly on the old floor and
+  the new feature is an addition: the floor may stay, but the
+  implementation must use a real capability/version boundary and must not
+  unconditionally import or use an API absent from the old floor; tests
+  must prove BOTH states (old floor without the capability, new target
+  with it).
+- **Mandatory release contract** — the release cannot operate correctly
+  without the newer API: raise the peer floor with the failing seam/call
+  site as evidence. Do not keep an old floor merely for compatibility
+  optics.
 
 Merge the promotion branch into `main` with a normal merge commit. Do not
 squash the promotion. Preserving the ancestry tells Git that the promoted
@@ -225,19 +297,21 @@ squash the promotion. Preserving the ancestry tells Git that the promoted
 synchronization can rediscover equivalent changes as unrelated history and
 produce avoidable conflicts.
 
-After the promotion reaches `main`, complete any stable-release preparation
-that belongs to that promotion, then merge the resulting `main` state back
-into `next`. Follow [docs/releasing.md](releasing.md) for that release
-checklist. If `next` must resume forward development before the release commit
-is ready, an earlier back-merge is allowed, but `main` must be merged forward
-again after the release commit. Do not reset `next` to `main`: `next` remains
-the forward-integration branch.
+After the promotion reaches `main`, verify the merged state, tag the
+verified commit, publish through the tag workflow, and merge the released
+`main` state back into `next`. Follow [docs/releasing.md](releasing.md) for
+that release checklist; no second version bump is required merely because
+the candidate moved from the promotion branch to `main`. If `next` must
+resume forward development before the candidate is ready to tag, an earlier
+back-merge is allowed, but `main` must be merged forward again after the
+stable tag/publication. Do not reset `next` to `main`: `next` remains the
+forward-integration branch.
 
-The final promotion invariant is that the `main` state containing the release
-commit is merged forward into `next`.
+The final promotion invariant is that the `main` state containing the
+tagged/released candidate is merged forward into `next`.
 
 If `next` continued moving while the promotion was being qualified or before
-that release commit was ready, preserve
+the candidate was ready to tag, preserve
 the newer `next` distribution policy when resolving the back-merge. In
 particular, never replace a newer unpublished `next` source target with the
 older published target merely because it came from `main`.
@@ -436,26 +510,24 @@ These cost real debugging time once; record new ones here instead of relearning.
   index), run `tsc`, then `git stash pop`. Plain `git stash push` also resets
   the index — the typecheck then validates HEAD, not your staged commit.
 
-### DSH master source environment
+### DSH native lease environment
 
-- Master's `pnpm-workspace.yaml` `allowBuilds` does NOT include `fs-ext`, so
-  every fresh source-mode install lacks the native flock addon and the JSONL
-  backend crashes at boot (`Cannot find module .../fs-ext/build/Release/fs_ext.node`).
-  The alpha.2 npm family added `fs-ext` to `dsh-session-persistence-jsonl`,
-  so an isolated npm-mode install with `--ignore-scripts` hits the same
-  missing binding; the isolated drivers build it via `ensureFsExtBinding`
-  (idempotent) in both modes.
-  After a source install, build it with node-gyp when the binding is missing.
-  Prefer pnpm's bundled node-gyp at
-  `<pnpm-dir>/dist/node_modules/node-gyp/bin/node-gyp.js`, executing it with
-  the current `node` (`node <that node-gyp.js> configure build`). This is
-  deterministic under `pnpm/setup@v2`, whose Node runtime may omit npm. Keep
-  the `npm root -g`/PATH fallback only for ordinary local or older pnpm
-  installs; use `spawnSync` for the npm probe because `runBounded` streams
-  stdio and captures nothing. The build runs in the fs-ext package dir. Do NOT
-  run bare `node-gyp` through `node <name>` (node treats it as a script path).
+- The POSIX Session write lease is provided by the official
+  `@deepseek-ai/node-addon-system/flock` family (stable Node-API prebuilts,
+  declared by `dsh-session-persistence-jsonl`). The historical `fs-ext`
+  consumer-build workaround is retired: an isolated install with
+  `--ignore-scripts` needs no native build step in either mode, and the
+  compatibility drivers no longer patch installed distributions.
+- A distribution whose native payload is genuinely missing or unloadable
+  fails loudly through the normal package load path. Treat that as a
+  distribution/source-pack problem to report against upstream — never
+  re-introduce a consumer-side `node-gyp` repair for it.
+- The ownership E2E proves the real kernel-flock behavior through the public
+  `@deepseek-ai/node-addon-system/flock` primitive (two-descriptor contention,
+  immediate reacquire) plus the persistence integration probe; see
+  `scripts/e2e-ownership.sh` (A8.4).
 - Never write a glob containing `*/` inside a doc comment
-  (e.g. `` `.pnpm/fs-ext@*/node_modules/fs-ext` ``): the `*/` closes the block
+  (e.g. a `.pnpm/<pkg>@*/node_modules` path): the `*/` closes the block
   comment early and the parser explodes at a random later line.
 - When a shell script embeds generated JS via heredoc, use a QUOTED delimiter
   (`<<'EOF'`) AND keep `${...}` out of the generated code — otherwise the

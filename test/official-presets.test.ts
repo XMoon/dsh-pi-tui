@@ -149,6 +149,22 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
   }
 })
 
+test('the preset skill composition keeps the M3 contract fact: a skill-body path on standard/ptc/cordis, none on minimal', () => {
+  // M3 composition fact (docs/m3-entry-contract.md §2.5): every preset that
+  // exposes the TUI/Host skill-body path carries skill-filesystem AND
+  // tool-skill; minimal intentionally has no skill provider at all.
+  for (const id of ['standard', 'ptc', 'cordis'] as const) {
+    const pluginIds = parsePatch(id).config.plugins.map(plugin => (plugin as { id?: string }).id)
+    for (const required of ['skill-filesystem', 'tool-skill']) {
+      assert.ok(pluginIds.includes(required), `${id} must carry the ${required} row`)
+    }
+  }
+  const minimalPluginIds = parsePatch('minimal').config.plugins.map(plugin => (plugin as { id?: string }).id)
+  for (const absent of ['skill-filesystem', 'tool-skill']) {
+    assert.equal(minimalPluginIds.includes(absent), false, `minimal must not carry ${absent}`)
+  }
+})
+
 async function dispose(fibers: readonly { dispose(): unknown }[]): Promise<void> {
   await Promise.allSettled(fibers.map(fiber => Promise.resolve(fiber.dispose())))
 }

@@ -1,11 +1,11 @@
 /**
  * Experimental Remote implementation of the semantic SessionWriter port (D2.2),
- * generation-fenced for the alpha2 Client contract.
+ * generation-fenced for the published DSH 0.1.7-rc.2 Client contract.
  *
  * Every ordinary write is addressed by session id and resolved through the
  * official `ClientSessions.binding(id)` identity face — never through a
- * Client-global selection, and never by materializing a cold Session. Because
- * alpha2 `binding()` only BORROWS a retained generation, the adapter pins the
+ * Client-global selection, and never by materializing a cold Session. Because the
+ * published `binding()` only BORROWS a retained generation, the adapter pins the
  * borrowed generation with a temporary `tuiOperation` reference for the whole
  * operation (see `session-reference.ts`). A plain write therefore still cannot
  * make a cold/unowned Session writable, while a same-id generation replacement

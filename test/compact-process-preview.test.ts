@@ -214,6 +214,16 @@ test('classifier: orphan result callCount=0 -> orphan-tool-result', () => {
   assert.deepEqual(compactActionSourceOf(toolMessage({ callCount: 0, args: '' }))?.kind, 'orphan-tool-result')
 })
 
+test('classifier: a tool-not-started diagnostic is never an Action source or stat', () => {
+  // The recovery row carries origin='tool-not-started' and callCount=0;
+  // the existing origin exclusion already keeps it out of the collapsed
+  // Action vocabulary — it must not degrade to the generic
+  // orphan-tool-result Action either.
+  assert.equal(compactActionSourceOf(toolMessage({ origin: 'tool-not-started', callCount: 0, args: '' })), undefined)
+  assert.equal(compactActionStatsOf([toolMessage({ origin: 'tool-not-started', callCount: 0 })]).total, 0,
+    'the not-started diagnostic contributes zero action statistics')
+})
+
 test('classifier: Thinking / Context / Workflow / Compaction -> none', () => {
   assert.equal(compactActionSourceOf({ kind: 'thinking', turn: 1, text: 'reasoning' }), undefined)
   assert.equal(compactActionSourceOf({ kind: 'system', turn: 1, text: 'reminder', context: true }), undefined)

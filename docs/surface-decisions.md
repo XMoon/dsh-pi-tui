@@ -389,6 +389,27 @@ read the DURABLE descendant catalog, not the live-child list:
   badge never hangs on the footer until the new session's first listing
   lands (the fence key = session generation + id; a failed listing never
   leaves a stale badge).
+- **Catalog invalidation is coalesced by the SURFACE owner, never the
+  coordinator.** Every production trigger (the mount seed, `subagent/start`
+  / `subagent/end`, the subagent tool-call fallback, Job membership events,
+  opening the browser, the Full Task Center `R`) funnels through one
+  surface-owned single-flight gate: at most ONE `refreshCatalog()` traversal
+  is in flight per session generation, an invalidation arriving mid-flight
+  only marks the gate `dirty`, and the traversal's settle starts at most ONE
+  trailing read that observes the latest membership. A session-generation
+  bump invalidates the old gate immediately — the new session's refresh
+  starts without waiting for the old session's slow traversal — and the old
+  traversal's late settle is generation-fenced, so it neither clears the new
+  gate nor schedules a trailing read. The coordinator's request/committed
+  epoch fence stays the OVERLAP-correctness authority (`refreshCatalog()`
+  remains re-entrant and correct for any direct or future caller); this gate
+  is only the performance (single-flight) authority. The opt-in
+  `DSH_TUI_TASK_REFRESH_PROFILE=1` logs one line per REAL traversal (elapsed,
+  absorbed invalidations, trailing, outcome, superseded, and — for a
+  current-generation read — the committed durable descendant count) so a live
+  session can prove the refresh storm is flattened. A traversal superseded by a
+  session switch is still recorded, with only its own start-time facts; it never
+  reports the new session's catalog state.
 - **Jobs are a separate flat group**, sorted by their own registry
   ordering; the background one-shot duplication (job row + child row with
   no cross-reference) is contract, locked in by test.
@@ -415,7 +436,9 @@ read the DURABLE descendant catalog, not the live-child list:
   synchronously (no persistence), so the panel never flashes a
   jobs-only list that contradicts the badge, and a failed fresh listing
   cannot leave a panel/badge mismatch. The async membership refresh
-  then calibrates in the background.
+  then calibrates in the background through the SAME coalesced catalog
+  gate as every other invalidation — opening never races a second full
+  descendant traversal next to one already in flight.
 - **The interrupt verb is advertised AND fired only for a continuable
   row whose driver is running right now** — one predicate
   (`isSubagentRowInterruptible`) gates both the panel hint and the
@@ -703,7 +726,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   delegation evidence and the Action.
 - **One transcript left edge for container chrome (2026-09-22 v2 addendum
   §28; body-indent supplement).**
-  The Focus root, Activity, the pending Activity card and the ambient Context
+  The Focus root, Activity and the ambient Context
   cluster render their header/body chrome at the transcript content column
   with NO decorative two-cell outer indent, so a collapsed container header
   and its expanded canonical member rows align on one boundary (no
@@ -794,8 +817,9 @@ F4 behavior and documents the guarantees in
   deterministic race matrices. The live Preparing ownership consumes the SAME
   Work-member boundary authority as the projection, so a settled
   surfaced-interaction card (question / Plan review) closes the trailing run and
-  a following live call starts a new pending Work instead of jumping back before
-  it (Compact collapsed/expanded and expanded Focus alike). A page/window change
+  a following live call starts a new ownerless pending run — rendered fail-open
+  as ordinary Preparing rows, never jumping back before the boundary
+  (Compact collapsed/expanded and expanded Focus alike). A page/window change
   prunes the Compact Work/cluster owners the new window no longer projects (so an
   A→B→A round-trip cannot resurrect a dropped expansion), and a window never
   invents an off-window member.
@@ -1437,3 +1461,33 @@ the existing `onTranscriptJumpLatest` semantic action — so a history click
 returns to the GLOBAL latest window instead of stopping at the current history
 window's bottom. The history location gutter now says only where the window
 is; the floating label says how to get back. This vendor seam extends X028.
+
+## TOOL_NOT_STARTED is standalone Attention evidence and never an Action
+
+DSH `0.1.7-rc.2` crash-recovery and fork-seed closers settle an assistant
+tool request that never reached a durable `tool/call` with a synthetic
+`tool/result` carrying `error.code === TOOL_NOT_STARTED` (detected through
+the official exported constant, never recovery prose). The TUI presents
+that row as an explicit **tool-request-not-started diagnostic**:
+
+- the fold recovers the requested tool name from the durable
+  `assistant/message` `tool-call` block, fenced by call id + turn + step,
+  and degrades to a generic diagnostic when the identity is unproven;
+- no synthetic `tool/call` is invented (`callCount = 0`), so the row is
+  neither an executed Tool nor an orphan Action: `origin:
+  'tool-not-started'` classifies it as standalone **attention** evidence,
+  it joins no Activity/Work span, never owns the collapsed `Action:` slot,
+  and contributes zero action statistics;
+- the row is Host-owned: extension tool renderers and the normal
+  ToolPresenter call/result presentation are bypassed (no `$ command`,
+  diff, or read preview implies an execution), and the visible wording
+  literally says `Tool request not started` — with the authoritative DSH
+  recovery guidance as the expanded body;
+- Markdown export states the fact (`### Tool request not started: bash`)
+  instead of inventing a `### Tool <name>` durable-call heading.
+
+`TOOL_OUTCOME_UNKNOWN` keeps the opposite semantics: a genuine started
+tool whose outcome was not durably recorded stays a normal Tool card with
+error outcome. Pinned by `test/session-v4-tool-result.test.ts`,
+`test/transcript-semantics.test.ts`, `test/compact-process-preview.test.ts`,
+`test/compact-display.test.ts`, and `test/focus-ui.test.ts`.

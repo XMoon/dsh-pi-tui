@@ -7,16 +7,25 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
 import { Text, visibleWidth } from '@xmoon76/pi-tui'
-import { CompactPendingWorkComponent, CompactWorkComponent, type CompactWorkSummary } from '../src/compact-work.ts'
+import { CompactWorkComponent, type CompactWorkSummary } from '../src/compact-work.ts'
 import { projectCompact, type CompactWorkSpan } from '../src/compact-projection.ts'
 import { ContextClusterComponent, contextClusterSummaryParts } from '../src/context-cluster.ts'
 import { clusterAdjacentAmbientContext } from '../src/context-presentation.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/context-row.ts'
-import { UserBubbleComponent } from '../src/tui-app.ts'
+import { UserBubbleComponent, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
 import { color } from '../src/theme.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (!app.isDisposed()) app.dispose()
+  }
+})
 
 type SystemRow = Extract<TranscriptMessage, { kind: 'system' }>
 
@@ -83,7 +92,6 @@ test('the grapheme/ANSI matrix never overflows any F4 row family', () => {
       const batches: ReadonlyArray<readonly [string, string[]]> = [
         ['work collapsed', new CompactWorkComponent({ span: compactSpan(), expanded: false, summary: workSummary, action: { kind: 'tool', display: sample, rootName: 'read' }, iconStyle: 'emoji' }).render(width)],
         ['work expanded', new CompactWorkComponent({ span: compactSpan(), expanded: true, summary: workSummary, iconStyle: 'emoji' }).render(width)],
-        ['pending work', new CompactPendingWorkComponent({ preparingSummary: sample, iconStyle: 'emoji' }).render(width)],
         ['cluster collapsed', new ContextClusterComponent({ cluster: clusters[0]!, expanded: false, iconStyle: 'emoji' }).render(width)],
         ['cluster expanded', new ContextClusterComponent({ cluster: clusters[0]!, expanded: true, iconStyle: 'emoji' }).render(width)],
         ['notice collapsed', new NoticeContextRow({ message: notice(sample), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(width)],
@@ -161,5 +169,46 @@ test('an oversized Work header degrades without wrapping to extra rows', () => {
     const rows = new CompactWorkComponent({ span: compactSpan(), expanded: false, summary, action: { kind: 'tool', display: 'very long tool display '.repeat(10), rootName: 'read' }, iconStyle: 'symbols' }).render(width)
     assert.equal(rows.length <= 3, true, `width ${width}: header + at most two slot rows`)
     assertRowsWithin(rows, width, 'oversized work header')
+  }
+})
+
+// An ownerless pending-run Preparing row renders through the ordinary
+// streaming preview renderer (fail-open — no Activity card anymore), so its
+// width/grapheme coverage moves to the TuiApp integration surface.
+test('ownerless pending Preparing rows obey the framebuffer width on the live surface', async () => {
+  for (const [name, sample] of SAMPLES) {
+    for (const width of WIDTHS) {
+      const vt = new VirtualTerminal(width, 30)
+      const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset: 'compact' } })
+      app.start()
+      startedApps.add(app)
+      const preview: StreamingToolPreview = {
+        callId: `w-${name}-${width}`, turn: 1, step: 0, index: 0,
+        name: 'edit', summary: sample, argumentBytes: 1024,
+      }
+      app.setTranscript([{ kind: 'assistant', turn: 1, text: 'boundary' }], new Map(), undefined, [preview])
+      await vt.waitForRender()
+      const view = vt.getViewport().join('\n')
+      assert.ok(!/^\s*(?:▸|▾) Activity/.test(view), `${name} width ${width}: no Activity chrome for the pending run:\n${view}`)
+      // The framebuffer contract: no physical row ever exceeds the terminal
+      // width (an over-wide preview row would wrap onto the next line).
+      for (const row of vt.getViewport()) {
+        assert.ok(visibleWidth(row) <= width, `${name} width ${width}: physical row exceeds the terminal: ${JSON.stringify(row)}`)
+      }
+      // The fail-open preview stays ONE physical row whenever the width is
+      // sufficient to show the `Preparing` head at all (below that the head
+      // truncates to its icon/ellipsis prefix and is not text-identifiable:
+      // icon+space+`Preparing` needs 12 cells beside the byte-count tail).
+      if (width >= 30) {
+        const rows = view.split('\n').filter(line => line.includes('Preparing'))
+        assert.ok(rows.length === 1, `${name} width ${width}: exactly one fail-open Preparing row:\n${view}`)
+        for (const row of rows) {
+          assert.ok(visibleWidth(row) <= transcriptContentWidth(width),
+            `${name} width ${width}: Preparing row exceeds the content width: ${JSON.stringify(row)}`)
+        }
+      }
+      app.dispose()
+      startedApps.delete(app)
+    }
   }
 })

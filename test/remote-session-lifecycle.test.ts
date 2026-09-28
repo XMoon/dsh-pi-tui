@@ -42,7 +42,7 @@ function harness() {
   let refreshError: unknown
   let retainHook: (() => void) | undefined
   const sessions: RemoteLifecycleSessions = {
-    create: async options => {
+    create: async (options = {}) => {
       calls.creates.push(options)
       const id = String(options.sessionId)
       catalogued.add(id)
@@ -61,6 +61,9 @@ function harness() {
       reconcile()
     },
     retain: (target, options) => {
+      // This adapter only ever addresses plain Session ids; the structural
+      // official target union also allows a durable subagent address.
+      if (typeof target !== 'string') throw new Error('remote session lifecycle must address a plain Session id')
       calls.retains.push({ target, source: options.source })
       retainHook?.()
       options.signal?.throwIfAborted()

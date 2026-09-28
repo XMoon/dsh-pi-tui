@@ -4,11 +4,13 @@ import { join } from 'node:path'
 import semver from 'semver'
 import test from 'node:test'
 
+import { COMPAT_MATRIX } from '../scripts/lib/dsh-compat.mjs'
+
 const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
 const expectedWindow = '>=0.1.7-rc.2'
 const expectedDevVersion = Object.entries(packageJson.devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.2'
+const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? expectedDevVersion
 const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
   .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
 
@@ -47,4 +49,20 @@ test('all DSH development packages stay pinned to the exact declared target', ()
   for (const [name, version] of dshDevEntries) {
     assert.equal(version, expectedDevVersion, `${name} must stay exact`)
   }
+})
+
+test('the package version reserves one consistent release identity across manifest and matrix', () => {
+  // Version-coupled fields move ATOMICALLY: an untagged promotion candidate
+  // reserves its identity in package.json, matrix current.since, and the
+  // current compatibility row's `tui` (see docs/releasing.md — the version is
+  // only consumed when the stable tag is created). A partial move (e.g.
+  // version 0.5.1 with since 0.5.0, or a current row still naming the
+  // previous TUI) must fail here instead of shipping a mixed identity.
+  const version = packageJson.version
+  assert.equal(typeof version, 'string', 'the package must declare a version')
+  assert.equal(COMPAT_MATRIX.current.since, version, 'compat matrix current.since must equal the package version')
+  const currentRows = COMPAT_MATRIX.matrix
+    .filter(row => row.versions.includes(COMPAT_MATRIX.current.upgradeDsh))
+  assert.equal(currentRows.length, 1, 'exactly one matrix row must cover the current DSH target')
+  assert.equal(currentRows[0].tui, version, 'the current compatibility row must carry the package version as its TUI identity')
 })

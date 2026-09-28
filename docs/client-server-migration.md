@@ -12,7 +12,13 @@
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
-M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
+Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
+Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer ownership convergence, NO behavior change — A5a + A5b; see the Pre-M3 TS Architecture Convergence status section)
+M3-0 DONE          (entry contract frozen — the M3 architecture contract is docs/m3-entry-contract.md)
+M3-1 DONE          (experimental in-process wire composition spine: reusable `RemoteHostRuntime` + `RemoteClientRuntime` + `backend-loader.ts` dynamic boundary, zero product cutover — see the M3-1 status section)
+M3-2 DONE          (Remote Session owner spine: exact-`SessionBinding` `SessionOwnerAccess`/`SessionOwnerRetirement` provider, transport-neutral app/session runtime, Remote fork publication→open adoption — zero product cutover, see the M3-2 status section)
+M3-3A NEXT         (Remote backend closure: session / runtime / catalog / host-file)
+M3 product composition NOT STARTED (Direct production/default behavior unchanged; Remote composition NOT active)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -21,7 +27,7 @@ M8  NOT STARTED   (Direct ownership retirement — only after concurrency proof)
 
 Current production backend: direct
 Experimental backend:      none (no complete Backend(kind=remote))
-Experimental Remote:        reads + selected ordinary writes (adapters proven in tests/smoke)
+Experimental Remote:        reads + selected ordinary writes + Plugin Manager / Job observation (adapters proven in tests/smoke, NOT composed)
 Remote writes:              experimental/test only (no production wiring)
 Remote attach:              unsupported
 Direct rollback:           available
@@ -66,17 +72,21 @@ Agent, Session, or Context objects across the boundary.
 
 The current Direct backend owns the in-process top-level Agent and must
 quiesce/drain/dispose it during runner teardown (interactive exit, HMR
-unload, and post-commit session transitions). The retirement is a
-**Direct-only ownership escape** (`src/runtime/direct/owned-session-retirement.ts`,
-structural callbacks only — no semantic-port change, no new Host coupling)
-retained until M8 and is NOT a Remote session-close semantic. A future
-Remote client closes its client-side observation/connection state through
-official DSH client contracts; this fix does not invent a host
-session-destroy RPC, does not add `close()`/`dispose()`/`drainSubagents()`
-to the `SessionLifecycle` port, and does not expose
-`drainContinuableDescendants` as a cross-backend capability. The ownership-
-retirement portion remains pending; D1.1 does not change this Direct-only
-semantic, and Direct remains the production backend.
+unload, and post-commit session transitions). A2 put that retirement behind the
+consumer-owned `SessionOwnerRetirement` port
+(`src/app/session/owner-access.ts`); the Direct adapter that implements it
+(`src/app/direct/owner-retirement.ts` +
+`src/runtime/direct/owned-session-retirement.ts`) still uses the Direct-only
+`SessionHandle.direct` escape and is retained until M8. The port describes the
+session layer's OWN need (quiesce/pre-cancel/retire/park one owner) and leaves
+HOW an abort reaches the owner to the backend, so it is NOT a Remote
+session-close semantic: a future Remote client closes its client-side
+observation/connection state through official DSH client contracts. This work
+does not invent a host session-destroy RPC, does not add
+`close()`/`dispose()`/`drainSubagents()` to the `SessionLifecycle` port, and
+does not expose `drainContinuableDescendants` as a cross-backend capability (the
+runner injects it as a provider). The ownership-retirement portion (removing the
+`direct` escape) remains pending, and Direct remains the production backend.
 
 ### Lifecycle creation cancellation (Stage B / pre-M2)
 
@@ -264,7 +274,7 @@ in Stage D.
 | M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no physical session lock in Remote mode — DSH writer ownership stays Host-side |
 | M3 | Experimental in-process wire: separate Host/Client Cordis contexts, DSH Connection over the Semantic Port, no TCP | Wire parity on the transcript parity suite; Host composition stays experimental |
 | M4 | Local Host process / IPC split; crash semantics (TUI↔Host, Ctrl+C/D, SIGTERM, HMR, parent/child death) | IPC integration lane green; ordinary local mode: TUI owns ephemeral Host lifecycle |
-| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; remote `!` disabled until a Host-side shell seam; remote external editor unsupported | Security review; fail-closed locality checks |
+| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; user-entered `!`/`!!` bypass mode remains Client-local, while `localShellSandbox=sandbox` stays unsupported until a real Client-side sandbox carrier exists; remote external editor unsupported | Security review; fail-closed locality checks |
 | M6 | Production dual stack: `--backend wire-local` opt-in, direct default; extension CI matrix (direct × wire-local) | One stable observation cycle; no perceptible regression |
 | M7 | Default flip to wire-local; `--backend direct` rollback kept for ≥ 1 release | Rollback verified on the release train |
 | M8 | Direct ownership retirement (the SessionHandle `direct` escape — live Agent/AgentHandle; the physical lock stack is already removed legacy) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
@@ -315,11 +325,12 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   fields through one whole-document settings round-trip; it
   must not invent a callback or merge definitions into layout refs.
 - **The footer command status line (M5) is DIRECT-ONLY, client-local
-  execution.** The trusted command runs on the Client machine's shell
-  (like the local `!` shell) with a USER-layer-only trust gate. There is
-  no Remote/wire story yet: remote attach must fail closed — the command
-  mode stays disabled and the native layout applies until a Host-side
-  execution seam exists (the same blocker as remote `!`).
+  execution.** The trusted command runs on the Client machine's shell with a
+  USER-layer-only trust gate. External attach is a different security case from
+  an explicit user-entered `!`: the command text would arrive from Host-owned
+  settings and could otherwise trigger Client execution. Remote attach therefore
+  keeps command mode fail-closed until an explicit attached-Host trust model is
+  designed; the native layout applies meanwhile.
 - **The `/footer` configurator and the /settings footer rows are
   client-local UI over Host-owned settings** (the dsh-pi-tui settings
   document via the settings service).
@@ -479,9 +490,11 @@ adapter's job is transport mapping, not reimplementation.
   object; it never builds its own history RPC or transport cursor.
 - **Existing-session skills** — the official skills Remote serves the
   catalog for an existing session. The Remote adapter must not copy
-  `serviceFor` / `standingKeyFor` discovery; the sessionless staged-preset
-  catalog (`StagedPresetSkillCatalog`) stays client-side because no session
-  exists yet to attach a Remote to.
+  `serviceFor` / `standingKeyFor` discovery. There is no Session-addressable
+  carrier before a Session exists, so the sessionless staged-preset standing
+  catalog is **INTENTIONAL_UNSUPPORTED_IN_M3** on the wire; Remote completion
+  fails closed instead of running Direct `StagedPresetSkillCatalog` against
+  Client-local preset/cwd facts.
 - **Remote errors** — use the official `RemoteResult<T>` / `RemoteError.code`
   vocabulary. Do not define a `TuiRemoteError` / `SessionRemoteError` family,
   and never `instanceof RemoteError` across bundle boundaries (identity does
@@ -589,32 +602,236 @@ is the official jump loader: it pages backwards until the window covers the
 requested seq, with a shared low-water target for retargeting callers and a
 no-progress guard.
 
+M3 applies the same pair to `/rewind`. The current Direct picker derives
+candidates from a complete `Session.snapshotEvents()`; the Remote path must not
+silently shrink that product behavior to the bounded opening window. Candidate
+identity/order/preview comes from the whole-log `turnOutline` projection.
+`loadThrough(seq)` is paid only when the selected/visible candidate needs event
+detail. The operation pins the exact Session binding generation; a Session
+switch, binding replacement, reconnect-invalidated generation, close, or caller
+abort drops late candidate/detail work instead of repainting a newer picker.
+Normal transcript startup still keeps its bounded window and never prefetches the
+whole log just to support `/rewind`.
+
+The normal pi-tui Host composition does not otherwise need this Web-owned
+projection unit, so M3-1's dynamic `RemoteHostRuntime` mounts
+`@deepseek-ai/dsh-session-turn-outline` beside `dsh-session-stats`; the ordinary
+`cordis.patch.yml` remains unchanged.
+
 `transcript-window` remains only Client presentation/window state. It owns
 none of: history authority, paging cursor, reconnect, gap repair, or session
 projection folding.
 
-### Remote image submission
+### Remote image submission and durable reads
 
-A future Remote Adapter should submit images through the official
-`PromptContentPart[]` path (the same part vocabulary alpha.4's subagent
-prompt accepts):
+The Remote Adapter submits images through the official `PromptContentPart[]`
+path (the same upload-shaped vocabulary used by Session/subagent prompts):
 
 ```text
-PromptContentPart[]
+Client-local draft bytes
+→ PromptContentPart { type: 'image', mediaType, data(base64), name? }
 → Session.prompt(...)
-→ Host-side image admission
+→ Host-side image/model admission
+→ durable ImageAttachmentRef in the Session log
 ```
 
-The Client owns temporary/staged image bytes only. The Host owns:
+Ownership is deliberately split:
 
-- attachment admission (`admitPromptContent` promotes image parts to durable
-  `ImageAttachmentRef`s before any message is created),
-- durable attachment refs,
-- the final `UserMessage`.
+- `/image`, clipboard paste and image-file IO are Client-local staging. Before a
+  Session exists, only the TUI's own bounded RAM/pre-read safety caps are
+  available; the Client must not invent the Host deployment's image policy.
+- Once the first Session is created/retained, the Client re-applies the exact
+  Session's `imageLimits` projection before serialization when that projection
+  is available. This is a UX/preflight check, not the authority.
+- `session/prompt` remains authoritative. The Host serializes image admission
+  with model selection, resolves the current model metadata, refuses
+  `MODEL_DOES_NOT_SUPPORT_IMAGES` through `session/attachment-invalid`, calls
+  `admitPromptContent`, and persists the durable image references. The Remote
+  TUI therefore does **not** call Host `ctx.llm.resolveModelInfo()` or
+  `ctx.attachments.saveImages()`.
+- A durable image already referenced by Session history is read through the
+  official authorized `session/attachment({ sessionId, attachmentId })` Remote.
+  Main transcript reads use the main binding identity; a child viewer uses the
+  child Session/binding. Late bytes are fenced by that exact binding generation.
+- Recalling/re-sending an old image does not put a Host-private attachment ref
+  into a new wire prompt. When bytes are required, the Client obtains them via
+  `session/attachment` and submits ordinary image data again.
+
+This image path is separate from D4 generic files. Generic Client-local
+`/attach` content still needs the `fileUploads/upload` receipt transaction and
+remains intentionally unsupported on the M3 wire. The presence of the
+`fileUpload` composition dependency in M3-1 does not silently enable that UX.
 
 Do not treat a Direct-mode generated DSH `UserMessage` as the future
 cross-process protocol: the wire caller must never cite an attachment it did
-not upload.
+not upload/read through an authorized public carrier.
+
+### Client command execution ownership
+
+The wire split keeps two command planes distinct:
+
+```text
+Host-owned command
+  commands/list descriptor/claim
+  → TUI Client decides the route
+  → HostCommandPort
+  → commands/execute
+
+TUI built-in / TUI skill-wrapper / Extension command
+  Client-local registration
+  → Client-local handler/callback
+  → semantic ports / ordinary prompt as needed
+```
+
+The current Direct runner registers TUI handlers in Host `ctx.commands` and uses
+`ctx.commands.execute(...)` as a convenient normalizer. That is an in-process
+implementation detail, not the M3 contract. M3-4 moves those callbacks into the
+Client Context: no TUI/extension handler function is registered into or invoked
+through Host `ctx.commands`, and no callback crosses the wire. Host command
+descriptors still own Host claim/collision precedence, and an advertised Host
+command still executes exactly once through `HostCommandPort`.
+
+Skill wrappers follow the same rule, with one deliberate Direct→wire
+convergence. Direct today re-gets the live skill body and formats the TUI-owned
+`renderSkillInvocation`; rc.2 exposes no `skills/read` Remote, but it **does**
+ship the official explicit-user `/name` gesture in `dsh-tool-skill`. Remote M3
+therefore keeps the same advertised slash-command claim/trailing instructions,
+validates against the current `skills/list`, and submits the literal `/name
+[instructions]` as one ordinary user prompt. The Host pre-step performs the
+authoritative current `ctx.skills.get` + `isUserInvocable` check and body
+injection. The Direct private body renderer stays a compatibility implementation
+and is never promoted into a Client/Host protocol.
+
+### Tool-card presentation ownership
+
+The Direct TUI currently asks the Host tool registry for a scoped
+`ToolDefinition` and executes `presentCall` / `presentResult`. Those are callback
+functions and cannot be a wire contract.
+
+rc.2's Client tool UI establishes the migration direction: Client cards derive
+from raw `tool/call` / `tool/result` event fields plus persisted structured
+content/metadata; Host `presentCall` / `presentResult` values do not enter the
+Client. M3-4 follows that ownership rule:
+
+- known first-party TUI cards are derived Client-side from replay-deterministic
+  event data;
+- public TUI extension tool renderers stay in the Client Context;
+- an unknown/custom tool keeps the bounded generic/raw card rather than causing
+  a Host registry lookup;
+- the Remote branch has no `ctx.tools.get(...)`, Agent-scoped tool-definition
+  lookup, or presenter callback transport.
+
+This is presentation only. It never authorizes Client-side tool execution; all
+tool business execution remains Host-owned.
+
+### Skill catalog invalidation under rc.2
+
+`skills/list({ sessionId })` is a valid Remote read, but the Host
+`skills/change` invalidation event is **not** in rc.2's forwarded Remote-event
+allowlist. A Client `$on('skills/change')` is therefore not an available
+carrier, and M3 must not create a private forwarding event just to preserve the
+Direct hot-refresh callback.
+
+M3 classifies `SkillCatalogCapability.onSkillsChange()` as intentionally
+unsupported on the wire. The Client strongly re-reads the live skill catalog on
+binding/session entry, explicit `/reload`, and `connection/reset`. A provider
+filesystem/runtime mutation between those boundaries may temporarily leave
+autocomplete stale; execution remains safe because the Remote branch never
+injects a cached Client-side skill body and Host authority handles the actual
+gesture. A future upstream forwarded capability can remove this limitation
+without changing the semantic ownership.
+
+For M3's in-process pi-tui Host, `hostLoadsSkillBody` is a composition fact:
+M3-1 proves the generated supported presets mount `@deepseek-ai/dsh-tool-skill`.
+It is not inferred from a hidden Host service. M5/external attach must fail
+closed rather than reuse that local composition assumption when the remote Host
+cannot prove the capability.
+
+
+### Permission/access facts on the rc.2 wire
+
+Permission **preset selection** and the two underlying knobs are not the same
+wire fact. rc.2's public `permissions` Session projection contains only
+`PermissionSelection.currentValue`; the Host projection's internal
+sandbox/approval fold is not part of the public Client value.
+
+Therefore M3 freezes the split:
+
+- current permission preset: public `permissions.currentValue`;
+- selectable/default presets: `permissionPresets/catalog` + settings;
+- preset apply (including Shift+Tab cycle): the semantic
+  `ConfigPort.permissions.applyPermissionPreset()` path, which executes the
+  official Host permission command. The Client computes the next catalog entry,
+  fences the async write by the exact Session/binding generation, and refreshes
+  from authoritative projection state. The Remote branch never calls Host
+  `permissionPresets.set(session, next)`;
+- independent effective sandbox mode: no public rc.2 Client read — omit the
+  structured Remote status fact, never infer it from a preset name;
+- independent session approval override: no public rc.2 Client read, and
+  `InteractionPort.setApprovalPolicy()` is a synchronous boolean contract with
+  no exact public synchronous carrier. Remote M3 returns `undefined`/`false` as
+  *unavailable* and hides/disables the session Approval-policy settings row.
+  It must not turn an unavailable read into `?? 'ask'`, scan the whole Session
+  log to reconstruct a private Host fold, or infer the knob from the current
+  preset.
+
+Approval/question interactive waterfalls remain fully separate and continue to
+use the official forwarded events.
+
+### Local `!` / `!!` shell under a wire backend
+
+The user shell gesture is Client-local, but the current Direct implementation has
+two execution branches:
+
+```text
+localShellSandbox=bypass
+  -> Client/TUI spawn(command, cwd=session cwd)
+
+localShellSandbox=sandbox
+  -> Host ctx.shell.resolve/execute(...)
+```
+
+Only the first branch is placement-safe for M3→M4. The Host `ctx.shell`
+capability is not a Client-local wire service and must not be borrowed merely
+because M3 happens to run both Contexts in one process.
+
+Remote M3 contract:
+
+- bypass mode remains a Client-local spawn;
+- context-mode `!` sends the completed text back through the semantic
+  `SessionWriter`, while `!!` remains presentation-only;
+- currentness/cancel uses exact Session/binding generation plus
+  `SessionWriter.cancel(sessionId)`, never an exact Agent object;
+- explicit `localShellSandbox=sandbox` is
+  **INTENTIONAL_UNSUPPORTED_IN_M3**: show a visible error and execute nothing.
+  In particular, do not keep the Direct behavior that warns and silently falls
+  back to unsandboxed spawn when the requested sandbox capability is absent.
+
+A future true Client-local sandbox can remove this limitation without changing
+ownership.
+
+### Legacy TUI settings migration stays on the Host side
+
+The one-shot `migrateLegacySettings()` path reads the retired Host profile
+`$DSH_HOME/settings.yaml(.imported)`, writes Host Settings forms and validates a
+historical preset through the Host preset registry. It is profile-data migration,
+not a Client preference import and not a Remote protocol.
+
+M3 ordering is:
+
+```text
+Host profile/bootstrap
+  -> migrateLegacySettings(...)
+  -> Remote Host/Client composition readiness
+  -> first Remote settings mirror describe/commit
+  -> Session compose/resume
+```
+
+The existing no-marker-on-failure/retry semantics remain unchanged. A Remote
+Client never opens its own `$DSH_HOME` or calls a local preset registry to
+complete this migration. M3-1 owns the ordering barrier; M3-3B settings readiness
+depends on it. This keeps M4's process split a placement change rather than a
+second migration redesign.
 
 ### Connection lifecycle
 
@@ -1128,14 +1345,9 @@ Coverage note: the retired D2.3 same-Host harness also exercised real Client
 Context → Gateway → Host Session Controller integration for create/open,
 model selection, and preset selection. Those semantics remain covered by
 adapter contract/unit tests (`remote-session-lifecycle`, `remote-model-port`,
-`remote-preset-port`), but the same-Host integration lane for
-create/open/model/preset is currently absent. This is a known non-blocking
-coverage gap.
-
-Future follow-up: add a focused `smoke:remote-session-lifecycle-parity`
-covering ordinary create, explicit-preset create, open/retain, model select,
-and preset select + locked — without restoring the retired monolithic D2.3
-harness.
+`remote-preset-port`), and the same-Host integration lane for
+create/open/model/preset is now restored by the focused
+`smoke:remote-session-lifecycle-parity` (Pre-M3, see the Pre-M3 status section).
 
 - `ModelCatalog` gained one semantic directory read, `loadDirectory()`, matching
   the official `session.modelCatalog()` generation snapshot (deployment
@@ -1247,8 +1459,9 @@ preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; and
 headless model/preset/create/open presentation tests. The 0.1.6-era
 same-Host `smoke:remote-d2-lifecycle` integration smoke was retired after
 its semantic scenarios gained adapter-level replacement coverage; its
-create/open/model/preset same-Host integration layer is not currently
-replaced and remains a documented follow-up. The boundary gate stays green
+create/open/model/preset same-Host integration layer is restored by the
+focused `smoke:remote-session-lifecycle-parity` (Pre-M3, see the Pre-M3
+status section). The boundary gate stays green
 and `packages/pi-tui/**` is unchanged.
 
 ## D2.4 status (COMPLETE) — Host-owned fork / rewind convergence
@@ -1472,24 +1685,458 @@ queued-input exclusion proven through child continuation, P6 lineage,
 P7 subagent ancestor workspace, P8 activation default). The old D2.3-importing
 harness was retired with the 0.1.6-era `dsh-agent-presets` package it named.
 
+## Pre-M3 status (COMPLETE, no behavior change)
+
+Pre-M3 pinned the semantic/backend/client boundaries M3 depends on. It is a
+structural closure, deliberately NOT M3 and NOT the TypeScript architecture
+refactor: production stays Direct, there is no backend flag, no Remote attach,
+no UI/UX change, and no public Extension SDK change.
+
+- **Direct backend assembly centralized.** `src/runtime/direct/backend-direct.ts`
+  is the single owner that constructs the Direct semantic adapters from the
+  runner-supplied resolvers; `src/index.ts` no longer constructs them one by
+  one. The backend vocabulary gained `job-observation`, and the production Job
+  viewer reads `backend.jobObservation` — the Direct adapter is no longer a
+  runner-local side channel that bypasses `Backend`. The M2 shadow reads
+  (`TaskReader`, `PresentationReader`, `SurfaceAuthorityReader`) deliberately
+  stay OUT of `Backend`, and the model-selection owner plus the Direct
+  assistant-stream install stay runner-owned.
+- **P1 Remote parity (adapters only).** `RemotePluginManagerPort` maps the
+  generated `pluginManager` Remote plus its forwarded install events through the
+  SAME pure `plugin-manager-mapping.ts` the Direct adapter uses; a refused
+  `RemoteResult` becomes one thrown Error. `RemoteJobObservationPort` consumes
+  the official Client `IJobs` (`state.rows`/`state.observed`, ref-counted
+  `watchRows`/`observe`) and owns no follow/cursor/reconnect/tail state machine.
+  Neither adapter is production-composed.
+- **Published-contract gate.** `test/remote-official-contract.test.ts` proves
+  every M3-bound Remote adapter accepts the published DSH 0.1.7-rc.2 public
+  Client/Remote face with NO cast; the three structural sources the gate proved
+  narrower than the official contract were fixed rather than hidden.
+- **Same-Host integration.** `smoke:remote-session-lifecycle-parity`
+  (run inside the exact-family client lane) proves the restored D2.3 lane over a
+  real Client Context → Gateway → Host Session Controller: ordinary create,
+  explicit-preset create, open/retain, model select, and preset select + locked.
+
+Still deferred to M3 (adapter-ready, not wired): Remote backend production
+assembly; Connection ownership in the TUI process; Client Context lifetime;
+backend selection/loading; Remote main-surface owner install; the
+`retain new -> commit -> release old` transition; writer-held caller/UI
+recovery; Remote submission-presentation composition; Client-owned TUI/extension
+command execution; tool-card presentation without Host presenter callbacks;
+whole-log `/rewind` over `turnOutline`; image prompt/read wiring; permission
+preset/access convergence; Client-local-shell ownership + sandbox fail-closed
+behavior; Host-local legacy-settings-migration readiness ordering; Remote
+Task/Presentation production consumption; Remote Plugin Manager panel wiring;
+Remote Job viewer wiring.
+
+The M3 entry architecture is:
+
+```text
+TUI
+  ↓
+semantic Backend / Client-local presentation seams
+  ↓
+official Client domain services
+  ↓
+generated Remotes
+  ↓
+Connection / Gateway
+  ↓
+Host domain services
+```
+
+It is explicitly NOT a private giant RPC and NOT a re-implemented
+Session/Job/Plugin Manager reducer.
+
+## Pre-M3 TS Architecture Convergence status (DONE, no behavior change)
+
+This stage extracts the runner/composition/session/submission/surface
+ownership that M3 must touch out of the ~10.8k-line `src/index.ts`, so M3 is
+`transport + composition + lifecycle ownership wiring` instead of also a giant
+TypeScript restructure. It is structural only:
+
+- **No behavior change.** Transition order, writer/transition contract, fork
+  publication/adoption, image/model admission serialization, draft
+  restore/suppress rules, UI/UX, and the Extension public API are frozen.
+- **Production stays Direct.** `BackendKind` remains `direct`; there is no
+  `remote` backend branch, no runtime backend flag, no Remote attach, and no
+  Client Context production lifetime.
+- **M3 has NOT started.** The published semantic `Backend`, the `src/runtime/*-port.ts`
+  contracts, and the Remote adapter contract stay frozen; no new Backend verb
+  or DTO change is part of this stage.
+- **Landed slices.** A1 — `src/app/direct/runtime.ts` owns the Direct
+  application composition POLICY and facades (the ONE `DirectModelSelectionOwner`,
+  the `agentFor`/`queueAgentFor` selection logic, the semantic `Backend` call and
+  the Direct assistant-stream install); `src/index.ts` keeps the
+  `liveAgent`/`viewedQueueAgent` state and passes live getters, and in A1 still
+  supplies the concrete Host lookups (`agents.get`/`sessions.get`) for the
+  resolver callbacks. Those lookups belong to `app/direct`'s Direct composition
+  seam (A5a moved them behind it). `src/app/bootstrap.ts` is the application
+  composition root (A5a): it resolves the Host services the owners are built
+  from and connects them (plan §23/§26), while every Direct-only fact stays
+  behind `app/direct`. No second current-session truth exists.
+- **A5 status — A5 COMPLETE.** A5a landed the bootstrap/facade cutover:
+  `src/app/bootstrap.ts` owns the runner composition (`applyRunner` → the named
+  coordinator `startRunner()` → the terminal `handleStartupFailure`;
+  `registerRunnerDisposal` for the fiber disposal), `src/index.ts` is a thin
+  package facade (Cordis contract, `Config` re-export, public root re-exports,
+  the frozen `composeAgent` / `recordedPreset` declarations delegating to
+  `app/direct/composition.ts`, and `apply`), every root helper implementation
+  lives in its natural top-level module, and the Direct Host lookups live behind
+  `app/direct`'s own seam. The entry's Host coupling is now only the
+  `@deepseek-ai/dsh-agent` types its frozen `composeAgent` overloads declare.
+  A5b then extracted every application handler group into a real owner, so
+  `src/app/bootstrap.ts` (6186 → ~2.1k lines) is a composition root in the strict
+  sense: resolve Host services → construct owners → bind/connect → start →
+  dispose/fatal cleanup. Final owner locations: `app/surface/viewer-runtime.ts`
+  (child viewer state/lifecycle), `app/surface/session-presentation.ts`
+  (live-session presentation, compaction/resume/task projections),
+  `app/surface/status-runtime.ts` (status derivation + context measurement),
+  `app/surface/input-history.ts` (client-local history state AND persistence
+  policy), `app/surface/settings-runtime.ts` (footer/display settings + boot
+  display), `app/surface/application-events.ts` (the `TuiAppEvents` adapter) and
+  `app/surface/client-actions.ts` (Client-local clipboard/editor actions);
+  `app/command/surface.ts` (command authority, registration, catalog
+  coordination, the `TuiCommandRunner` facade and the runtime binding),
+  `app/command/model-selection.ts` (sessionless `/model` intent + selection
+  facade) and `app/command/artifacts.ts` (`/export` + `/transcript`);
+  `app/submission/controller.ts` (the input workflow with its FIFO/ack/
+  local-echo state, dispatch, history integration and the writer-section seam)
+  and `app/submission/local-shell.ts` (the `!`/`!!` shell + card lifecycle);
+  `app/session/**` (ownership/scope/navigation) and `app/direct/**` (Direct
+  composition) are unchanged. All extracted owners consume narrow injected
+  capabilities and the semantic ports: no owner imports `app/direct/**` /
+  `runtime/direct/**` (the protocol/DTO packages a few owners use —
+  `dsh-commands` in the submission controller, `dsh-llm` in the local shell and
+  the type-only `dsh-user-approval/types` in the surface runtime — carry no
+  Host-ownership coupling and are not tracked by the boundary gate), and every
+  write still enters through
+  `SubmissionRuntime` → `SessionRuntime.withWriter`.
+- **§23 composition-only / giant-root criterion: COMPLETE.** `src/app/bootstrap.ts`
+  no longer implements any application handler group. The plan's forbidden
+  residuals (`runLocalShell`, `dispatchViaSession`, `runLocalCommand`, `steerNow`,
+  `dispatchUserInput`, `enterView`, `exitView`, `surfaceEvents`,
+  `applyFooterSettings`, `initLiveSession`, `registerCommands`,
+  `openRewindPicker`, `refreshStatusCheap`) are absent, there is no
+  `TuiAppEvents` / `TuiCommandRunner` implementation literal, and no client-local
+  history state/policy, command claim/catalog slot, submission FIFO/ack/
+  local-echo state, viewer mutable state or footer/display state machine remains
+  in the root. `test/a5b-bootstrap-closure.test.ts` locks those categories and
+  the single-authority/construction facts; the ownership matrix
+  (`test/a5b-root-declaration-matrix.json`, regenerated by the committed
+  `scripts/a5b-root-matrix.mjs`, gated by `test/a5b-root-matrix.test.ts` and its
+  deep `--check`) classifies every remaining root declaration by the plan §7.6.1
+  categories with a per-row sweep verdict and an EMPTY `MUST_MOVE` residual.
+  The §23 criterion is therefore complete without qualification; the plan's DONE
+  conditions are unchanged.
+- **Ownership targets** (`src/app/**`): `bootstrap` (composition root),
+  `direct` (Direct application-side Host coupling + Direct-only facades),
+  `session` (session navigation/lifetime + opaque `SessionSubject` authority),
+  `submission` (TUI writer orchestration), `command` (TUI command-runner
+  facade), `surface` (TUI/backend-consumer wiring). `src/runtime/**` keeps its
+  semantic ports/adapters and must not import `src/app/**`.
+- **Machine-enforced direction.** `scripts/pre-m3-architecture-gate.mjs`
+  (`pnpm gate:architecture`) parses the TypeScript AST and rejects
+  `runtime → app`, Direct imports from any module that is not a composition
+  owner (`index.ts`, `app/bootstrap.ts`, `app/direct/**`, `runtime/**`) — the
+  §5.2 presentation boundary in enumeration-free form, with one type-only
+  historical exception allowlisted — `owner → bootstrap` (the
+  `owner-imports-bootstrap` rule: `index -> bootstrap -> owners`, never the
+  reverse), Remote composition statically reachable from `startup.ts`, and
+  Direct adapter construction in `app/surface`. It is
+  separate from `scripts/client-boundary-gate.mjs`, which remains the
+  Host-coupling authority (see `docs/client-server-coupling.md`).
+
+Every implementation move re-exports any existing package-root export from
+`src/index.ts` (guarded by `test/public-entrypoint-compat.test.ts`); removing a
+root export is a separate API PR, never a side effect of this stage.
+
+## M3 test-layer contract (T0 handoff)
+
+M3 adds production composition (Client Context, Connection/Gateway lifetime,
+backend selection, Remote main-surface ownership, the retain → commit → release
+transition). A regression test for such a fact belongs at the lowest layer that
+can actually prove it. The layer vocabulary is:
+
+```text
+L1 semantic-port contract    the src/runtime/*-port.ts contract and its pure mapping
+L2 Direct adapter contract   the Direct implementation of a semantic port
+L3 Remote adapter contract   a Remote adapter against the official Client/Remote face
+L4 Direct ↔ Remote parity    parity/shadow comparison of semantic outcomes
+L5 in-process integration    real Client Context → Gateway → Host, no TUI runner
+L6 application composition   the real runner/application owner wiring and settlement
+```
+
+Rules:
+
+- Prove behavior at the lowest sufficient layer.
+- Do not add runner (L6) tests for adapter-local (L2/L3) facts.
+- Add L5 when Connection/Client lifetime is the fact under test.
+- Add L6 when application owner wiring/settlement is the fact under test.
+- Parity tests compare semantic outcomes, not internal implementation shape.
+- Lifecycle tests assert intermediate ownership/cleanup where required
+  (creation, handoff, retirement), not only the final state.
+
+T0 (Pre-M3 Test Prep) landed the flat runner integration surface this vocabulary
+needs:
+
+- `test/runner-session-bootstrap.test.ts` — main-Session bootstrap/hydration;
+- `test/runner-session-navigation.test.ts` — `/fork`, `/rewind`, `/new`
+  navigation adoption and supersession (M3-3);
+- `test/runner-startup-lifecycle.test.ts` — Loader barrier and startup
+  process-lifecycle (M3-1);
+- `test/runner-session-retirement.test.ts` — cancel → idle → drain → flush →
+  dispose retirement ordering (M3-1 / M3-3);
+- `test/runner-viewer-task-integration.test.ts` — child viewer and Task/Job
+  surfaces bound to a Session owner (M3-5);
+- `test/support/runner-session-fixtures.ts` — shared live-stream frame builders,
+  the production-runner observer probe, and the durable model/selection event
+  builder; and `test/support/remote-generation.ts` — the observable and
+  snapshot-only Connection-generation harnesses shared by the Remote
+  adapter/parity suites.
+
+The split suites stay directly under `test/` so `test:product`
+(`test/*.test.ts`) keeps discovering them; post-M3 may move them into
+directories once the test runner is deliberately made recursive.
+
+## M3-1 status (COMPLETE, zero product cutover)
+
+M3-1 landed the reusable experimental Remote **composition spine** — it makes
+the official DSH Client runtime boring to instantiate and boring to dispose
+while changing nothing about which backend the user runs. Direct remains the
+production default; `BackendKind` stays `'direct'`; `cordis.patch.yml`,
+`src/startup.ts`, the public CLI and the entry exports are byte-for-byte
+unchanged; no production bootstrap call site exists.
+
+### Implementation owners (actual files)
+
+- `src/app/remote/host-runtime.ts` — `RemoteHostRuntime`: fail-fast Host
+  prerequisite barrier (`credentials, typert, typertGateway, agents,
+  agentDefaultModel, attachments, commands, fs, llm, sessions,
+  sessionProjections, sessionQuery, workspaceRegistry, jobController`),
+  then the exact §2.4.1 additive rows as tracked fibers
+  (client-connection → real client-file-upload → sessionStats →
+  turnOutline → api-session-controller `{nativeOpen: false}` →
+  api-settings-controller → api-remotes → session-log-export), the existing
+  `jobController` asserted (same Typert binding, never duplicated), the
+  in-process carrier (`createSharedFetchHandler('/api')` +
+  `typertGateway.wireStream.open`, `ownsHost: true`), and reverse disposal.
+- `src/app/remote/client-runtime.ts` — `RemoteClientRuntime` +
+  `loadOfficialClientModulesOnce()`: process-wide single-flight scoped
+  `window.__ModuleLoader__` capture of the exact six Web bundle entries
+  (unknown/duplicate/non-function/missing registration rejected,
+  `/client` dependencies resolved in capture order, globals restored in
+  `finally` before any plugin runs), then the exact §2.4.3 Client order
+  (typert → `installConnection` with the explicit composition transport →
+  Gateway → the ten §2.4.2 `/remote` contributions → fileUpload → Sessions
+  → Jobs), subscription-driven initial readiness (no production timeout,
+  lifecycle-signal abort), and reverse disposal.
+- `src/app/remote/runtime.ts` — `createExperimentalRemoteRuntime`:
+  `waitForHostPrerequisites()` → `signal.throwIfAborted()` → Host runtime →
+  Client runtime; failure unwinds (Host partial → no Client; Client partial →
+  Host disposed → rethrow); overall disposal is Client then Host, idempotent.
+- `src/runtime/backend-loader.ts` — the only value dynamic import of
+  `app/remote/runtime.ts`; no static type edge. The architecture gate now
+  enforces this single owner (`remote-dynamic-import-owner`) and classifies
+  `app/remote/**` plus every `@deepseek-ai/dsh-*` `/client` `/remote` face
+  as Remote composition for the startup static-graph rule.
+- `test/remote-client-runtime.test.ts` — the L5 acceptance matrix (plan
+  §22 A–L): prerequisite barrier, loader exactness/single-flight/global
+  restoration, no-browser-global connect/list, real connect + ready list,
+  real `fileUpload` dependency, `sessionStats`+`turnOutline` projection
+  surfaces, same-binding identity, real Job roster, reconnect/generation
+  reset/`connection/reset`/list recovery, `/api/session.export` through the
+  production carrier, idempotent reverse disposal with zero owned
+  refs/watchers and a surviving ordinary Host, and one Host-partial plus one
+  Client failure class with full unwind.
+- `package.json` — the nine composition peers (`dsh-api-gateway`,
+  `dsh-api-job-controller`, `dsh-api-remotes`, `dsh-api-settings-controller`,
+  `dsh-client-connection`, `dsh-client-file-upload`, `dsh-session-stats`,
+  `dsh-session-turn-outline`, `dsh-typert-registry`) at `>=0.1.7-rc.2` and
+  the four missing exact rc.2 dev pins.
+- `scripts/client-boundary-gate.mjs` — the two package-import matchers now
+  require exact package matching (`dsh-agent(?![\w-])` /
+  `dsh-session(?![\w-])`). The earlier prefix pattern classified the
+  composition owners' `dsh-session-stats` / `dsh-session-turn-outline` /
+  `dsh-session-log-export` projection rows and the
+  `dsh-agent-preset-registry/remote` contribution as the base
+  `dsh-agent`/`dsh-session` type packages, so M3-1 briefly carried two
+  `client-boundary-baseline.json` entries that were never real coupling.
+  Narrowing the matcher removed those two and three stale `runtime/direct/*`
+  entries that matched `dsh-agent-preset-registry` the same way; the
+  composition owners now carry no baseline entry and are documented in
+  `docs/client-server-coupling.md` instead.
+
+### Carrier correction (supersedes the M3-0 `transport.rpc` wording)
+
+The verified rc.2 public carrier is the explicit `installConnection(ctx,
+{ transport })` hook, not a composition-owned `ClientConnectionRpc`:
+`transport.fetch` adapts the Host `connection.createSharedFetchHandler('/api')`,
+`transport.openStream` adapts the Host `typertGateway.wireStream.open`, and
+`transport.ownsHost: true` is passed with no `location`. No global `fetch`,
+WebSocket, fake `location`, or browser `Worker` is reachable on the
+in-process path (proven by the trapped-globals L5 case). The frozen wording
+in `docs/m3-entry-contract.md` §2.4.3/§4.2 has been corrected in place; no
+ownership, stage boundary, or seam policy changed.
+
+## M3-2 status (COMPLETE, zero product cutover)
+
+M3-2 landed the Remote **Session owner spine**: `app/session`'s ownership
+orchestration is now transport-neutral, and a real Remote owner provider
+exists — but nothing about which backend the user runs changed. Direct
+remains the production default; `BackendKind` stays `'direct'`; no production
+`createRemoteSessionOwnerServices` / `createExperimentalRemoteRuntime` call
+site exists; `cordis.patch.yml`, `src/startup.ts` and the public entry exports
+are unchanged. M3-3A owns the Remote semantic backend closure; M3-3B/M3-4 own
+the composition and presentation.
+
+### Implementation owners (actual files)
+
+- `src/app/remote/session-owners.ts` — `createRemoteSessionOwnerServices`:
+  the exact-`SessionBinding` provider of `SessionOwnerAccess` +
+  `SessionOwnerRetirement` over one shared registry state (`WeakMap` keyed by
+  the exact binding object → owner; owner → record with the ONE authoritative
+  wrapper, strongly held so `retire` can `release()`; a released-wrapper
+  `WeakSet` fence; a strong parked collection per session id). Wrapper
+  replacement commits the new authority BEFORE releasing the replaced TUI
+  reference exactly once; a same-id new binding mints a NEW owner;
+  `completionIdentity` is deliberately `undefined` (never the sessionId);
+  `whenIdleOrAbort` borrows the live binding through the official
+  `ISessions.binding(id)` face, fences it by `Object.is` against the owner's
+  binding identity, and observes `SessionSnapshot.running` with a
+  subscribe-then-recheck lost-wakeup fence — abort stops the local wait only,
+  never the Host session; `flush`/`preCancel` are deliberate no-ops (Host owns
+  durability; the real Remote cancel is `SessionWriter.cancel`); `retire`
+  detaches the wrapper state before `release()` (reentrancy) and reports a
+  contained `release` phase failure, with `durabilityFailure` always
+  `undefined`.
+- `src/app/session/runtime.ts` — the ordinary transition maps the NEW owner
+  ONCE in the synchronous commit section (a transaction-local
+  `committedOwner`; the post-commit phases reuse it instead of re-wrapping the
+  Remote reference wrapper). The owner publication is the transition's COMMIT
+  POINT, and both failure classes follow from it:
+  - PRE-publication failure — the acquired NEW owner is released exactly once,
+    with that release AWAITED before the transition settles (the transition
+    gate/barrier stay closed until the released reference/lease is actually
+    gone — never a fire-and-forget retirement), the queued recalls settle
+    aborted, and OLD stays current. Every owner-metadata lookup that can
+    throw (`completionIdentity`, `sessionId`) runs BEFORE
+    `setCurrentOwner`, so the commit point itself is seamless (plain
+    assignments only);
+  - POST-publication synchronous seam failure — contained as a failed
+    post-commit step: the committed child stands, the queued recalls stay
+    committed, the OLD retirement still runs; never a rollback.
+  The fork adoption owns the SAME transaction-finally shape (`forkCommitted`
+  flipped at the child publication): every pre-publication fork exit — a
+  refused navigation inside the gate, the adoption-open failure, the
+  stale-after-retain cleanup, an invariant failure, a pre-publication commit
+  seam — restores the deferred recalls through ONE settle authority instead
+  of per-branch restores, because the gate was held and a finishing writer
+  may have deferred a queue recall against it.
+- `src/session-fork.ts` / `src/app/session/ownership-core.ts` — the fork/
+  rewind navigation identity (`RewindNavigationIdentity`, renamed from
+  `RewindLiveIdentity`) is now session id + navigation epoch ONLY: the
+  surface `generation` is removed from it at the type level. Mirroring the
+  official Client split (ClientSessions owns Session identity/references and
+  never a global current selection; view navigation belongs to the UI owner),
+  navigation supersession and presentation-generation invalidation are
+  independent axes — a commit section bumps the generation before the owner
+  publication, so a local commit-seam failure (e.g. a `resetForGeneration`
+  throw after the bump) can no longer be misclassified as user supersession.
+  The monotonic navigation epoch alone still solves A → B → A staleness
+  (locked by the rewind picker regression), the generation bump is never
+  rolled back, and the transactions follow a PRE-PUBLICATION METADATA
+  SNAPSHOT contract: every owner-metadata lookup a transaction still needs
+  (the completion identity, the NEW owner's session id, and for the fork
+  adoption also the SOURCE owner's id for its post-commit retirement)
+  resolves BEFORE `setCurrentOwner` — the sole commit point — inside the
+  pre-publication protected region, so any metadata throw is a
+  pre-publication failure with an exactly-once NEW release (including the
+  open-retained fork child). After the publication the phases consume only
+  the captured primitive values and never re-resolve the owner: a contained
+  post-publication seam failure still retires OLD, and a committed fork
+  child still retires its source.
+  The four "without a Direct owner" throws are now
+  transport-neutral owned-generation failures; `adoptFork` grew the Remote
+  publication→open adoption: an ownerless fork handle is retained through
+  `lifecycle.open(childId)` inside the existing gate/barrier (one Host fork
+  dispatch + at most one adoption open), the fence is re-checked after the
+  retain, and a stale/disposed post-open adoption releases the NEW owner
+  exactly once while OLD stays current (a pre-publication commit seam failure
+  takes the same exactly-once release plus an explicit recall restore, and the
+  fork-adoption ledger keeps the
+  error path from re-parking the already-released owner — Direct or Remote);
+  any post-publication adoption failure
+  settles as a truthful "child published but adopting it failed" outcome
+  (never a redispatch, never a fake-absent child); a Direct fork handle still
+  adopts directly with zero extra opens.
+- `src/app/bootstrap.ts` — the two Direct-attachment hard throws
+  (`initLiveSession` / `refreshLiveCatalog`) are M3-2 staging no-ops for an
+  owner without a Direct attachment; Direct behavior is byte-for-byte
+  unchanged and the real Remote presentation/catalog providers arrive with
+  the M3-4 Remote composition.
+- `src/runtime/session-lifecycle-port.ts` — the stale "Direct runner does not
+  consume it yet" note on `clientOwnerOf()` is replaced by the real ownership
+  boundary: the Remote owner provider consumes it as its sole mapping source
+  and `ClientSessionOwner` never leaves the Remote ownership implementation
+  boundary.
+
+### Evidence
+
+- L6 `test/remote-session-owners.test.ts` — R1–R12: exact-binding identity,
+  same-binding wrapper transfer with exactly-once release, released-wrapper
+  resurrection refusal, same-id new-binding owner change, unknown-owner fast
+  fail, idle fast path, running→idle settle with single unsubscribe, abort
+  local-wait-only with listener cleanup (counting signal), exactly-once
+  retire across modes, no-op flush/preCancel, parked retained-owner drain,
+  contained release failure.
+- L6 `test/session-runtime-remote-owner-handoff.test.ts` — H1–H12 over the
+  real `bindSessionRuntime` + REAL Remote owner services + a Remote-shaped
+  fake lifecycle: ordinary-switch ordering (retain NEW → commit NEW → release
+  OLD → post-handoff init; owner mapped exactly once), pre-commit
+  supersession, same-id rollover, rapid-switch A→B(superseded)→C, Remote fork
+  successful adoption (fork ×1, open ×1, source release ×1), stale-before-open
+  (open ×0), stale-after-open (NEW release ×1), failed open (no redispatch,
+  truthful outcome, no leak), same-binding reconnect identity, full-scope
+  re-materialize identity, exit-before-commit and fatal-after-commit release
+  proof, pre-publication commit-throw exactly-once release (ordinary + fork,
+  Remote publication-only AND the Direct owned-handle no-re-park lock; plus
+  the gated slow-release proof that the transition stays open until the
+  release completes), post-publication completion-seam containment (ordinary
+  + fork), the recall-commit-point boundary (pre-publication restores the
+  recalls for BOTH shapes; a post-publication contained failure keeps them
+  committed exactly once; `transitionCommitted` flips only at the
+  publication, locked through a direct `transitionTo` probe), plus the
+  Direct-shaped no-extra-open adoption lock.
+- Direct regression — `test/runner-session-retirement.test.ts` (retirement
+  order unchanged), `test/runner-session-navigation.test.ts` (a production
+  Direct `/fork` never performs the extra adoption open; resume list stays
+  exactly the startup entry), `test/a2-ownership-cutover.test.ts` (the four
+  commit shapes still publish only through the injected owner provider into
+  `SessionOwnershipCore`; the production bootstrap still injects
+  `directRuntime.owners`).
+
+
 ## Known coverage follow-ups
 
 Non-blocking coverage gaps with a named owner lane. These are not current
 merge blockers; each records what is absent and the follow-up shape.
 
-| Follow-up | Absent today | Follow-up shape |
-|---|---|---|
-| D2.3 same-Host integration lane | The retired 0.1.6-era `smoke:remote-d2-lifecycle` also proved real Client Context → Gateway → Host Session Controller integration for ordinary create, explicit-preset create, open/retain, model select, and preset select + locked. Adapter contract tests cover those semantics; the same-Host integration layer is not currently replaced. | A focused `smoke:remote-session-lifecycle-parity` covering those five flows, without restoring the retired monolithic D2.3 harness. |
+None currently for **Pre-M3**: the D2.3 same-Host integration lane is closed by
+`smoke:remote-session-lifecycle-parity` (see the Pre-M3 status section). The
+M3-only L5/L6 proofs frozen in `docs/m3-entry-contract.md` (Client command
+execution, tool presentation, image submit/read, `turnOutline` rewind and skill
+invalidation behavior) are stage acceptance tests, not missing Pre-M3 coverage.
 
 ## Known blockers
 
 | Blocker | Level | Mitigation |
 |---|---|---|
-| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M2 consumes the protocol directly; M3 validates runtime packaging |
-| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | Experimental host composition; redesign the Remote Adapter before M3; never replace the default patch |
-| Extension Cordis ownership across the split | High | Stable API untouched; ClientContext from M3 |
+| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + the in-process explicit transport carrier (`connection.createSharedFetchHandler('/api')` + `typertGateway.wireStream.open`, installed through `installConnection`) (see `docs/m3-entry-contract.md` §4.2). No product redesign required |
+| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: after the Host-local legacy-settings migration prerequisite settles, M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see `docs/m3-entry-contract.md` §2.4, §4.4, §11 M3-1) |
+| Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/m3-entry-contract.md` §8) |
 | Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
-| Shell execution on the wrong machine | Critical | Locality hard rule; remote `!` fails closed |
+| Shell execution on the wrong machine | Critical | Locality hard rule: Remote `!`/`!!` **bypass** mode executes only in the Client/TUI process; an explicitly requested sandboxed local shell has no rc.2 Client carrier and fails closed. The Remote branch never borrows Host `ctx.shell` merely because M3 is in-process |
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
 | Credentials exposure beyond loopback | Critical | Attach limited to localhost/SSH until real auth |
 | Dual-stack semantic drift | Medium | Shared backend contract test matrix |
@@ -1519,3 +2166,4 @@ confirmed break.
 - Every coupling relocation: update `docs/client-server-coupling.md` and
   the gate baseline in the same PR.
 - Every new blocker or removed blocker: update the table.
+

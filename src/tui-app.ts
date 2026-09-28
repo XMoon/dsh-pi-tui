@@ -173,7 +173,7 @@ import { compactActionPresentation, compactActionSignature, compactActionStatsSi
 import { projectCompact } from './compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './transcript-disclosure.ts'
-import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan, type CompactWorkSummary } from './compact-work.ts'
+import { CompactWorkComponent, summarizeWorkSpan, type CompactWorkSummary } from './compact-work.ts'
 import { ContextClusterComponent } from './context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './context-row.ts'
@@ -531,9 +531,10 @@ export interface StreamingToolPreview {
   readonly summary?: string
   /** Bounded partial args retained until summary is found or a known-name scan reaches the cap. */
   readonly scanPrefix?: string
-  /** The first streamed delta's time (post-F6 plan §12.14): the pending
-   * Activity card's duration and the durable call's start both read it, so
-   * the elapsed time never resets across the Preparing → durable handoff. */
+  /** The first streamed delta's time (post-F6 plan §12.14). The durable
+   * elapsed-time continuity across the Preparing → durable handoff is owned
+   * by the transcript's own preparing-start sidecar (first delta per call
+   * identity); the fail-open Preparing row renders no elapsed time. */
   readonly startedAt?: number
 }
 
@@ -3109,11 +3110,8 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
   kind: 'streaming-tool-previews'
   previews: readonly StreamingToolPreview[]
   turn?: number
-  /** Compact only: render the live call as an EPHEMERAL pending Work card
-   * (it belongs to a new Process run, not to any durable Work span). */
-  pendingWork?: true
   /** The semantic container ancestry of a live preview inserted into an open
-   * Work/Thought tail (never the globally appended pending card). */
+   * Work/Thought tail (never the globally appended pending-run block). */
   containerPath?: TranscriptContainerPath
 } | {
   kind: 'pending-user'
@@ -3178,7 +3176,6 @@ function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: Transcript
   }
   if (left.kind === 'streaming-tool-previews' && right.kind === 'streaming-tool-previews') {
     return left.turn === right.turn
-      && (left.pendingWork === true) === (right.pendingWork === true)
       && sameStreamingToolPreviewShape(left.previews, right.previews)
   }
   if (left.kind === 'pending-user' && right.kind === 'pending-user') {
@@ -9264,21 +9261,20 @@ export class TuiApp {
    * expanded (member insertion) representations can never drift onto different
    * chronology snapshots.
    *
-   * In Compact a `pending-run` call is appended as an ephemeral pending Work at
-   * the transcript tail. In expanded Focus it is placed in the owning turn's
-   * process tail, before the held-back final, and turns whose Thought is
-   * collapsed are skipped entirely (their header summarises the live call).
+   * In Compact a `pending-run` call is appended at the transcript tail; in
+   * expanded Focus it is placed in the owning turn's process tail, before the
+   * held-back final, and turns whose Thought is collapsed are skipped entirely
+   * (their header summarises the live call). A pending-run has no canonical
+   * Work owner yet, so both placements render fail-open as ordinary live
+   * Preparing rows; only a `trailing-run` call enters real Activity
+   * presentation (the collapsed Tool slot, or an inserted preview row after
+   * the durable members).
    */
   private applyWorkPreparing(
     blocks: TranscriptRenderBlock[],
     focusExpandedTurns?: ReadonlySet<number>,
   ): void {
     if (this.streamingToolPreviews.length === 0) return
-    // On a surface with no operable disclosure action the Work container is
-    // flat (materializeFocusWork / projectCompact(workHeader:false)), so a live
-    // call must render as an ordinary preview — never ephemeral `▸ Work`
-    // chrome that the durable handoff does not reproduce (plan §14/§23).
-    const workChrome = this.transcriptDisclosureActionAvailable()
     const spans: TranscriptWorkSpan[] = []
     for (const block of blocks) {
       if (block.kind === 'work') spans.push(block.span)
@@ -9301,9 +9297,6 @@ export class TuiApp {
               kind: 'streaming-tool-previews',
               turn,
               previews,
-              // A new ephemeral pending Work, exactly like Compact's tail
-              // card, so the durable Work card replaces it at the same height.
-              ...(workChrome ? { pendingWork: true as const } : {}),
               containerPath: [{ kind: 'focus-root', turn }],
             })
           }
@@ -9336,11 +9329,7 @@ export class TuiApp {
       }
     }
     if (pending.length > 0) {
-      blocks.push({
-        kind: 'streaming-tool-previews',
-        previews: pending,
-        ...(workChrome ? { pendingWork: true as const } : {}),
-      })
+      blocks.push({ kind: 'streaming-tool-previews', previews: pending })
     }
   }
 
@@ -9612,19 +9601,10 @@ export class TuiApp {
     }
     if (block.kind === 'context-cluster') return this.contextClusterComponentFor(block.cluster, block.expanded)
     if (block.kind === 'streaming-tool-previews') {
-      if (block.pendingWork === true) {
-        // The pending Activity card's elapsed time starts at the live
-        // call's earliest authoritative start (post-F6 plan §12.14).
-        const startedAt = block.previews
-          .map(preview => preview.startedAt)
-          .filter((at): at is number => at !== undefined)
-          .reduce((earliest, at) => Math.min(earliest, at), Number.POSITIVE_INFINITY)
-        return new CompactPendingWorkComponent({
-          preparingSummary: compactPreparingSummary(block.previews) ?? '',
-          iconStyle: this.iconStyle,
-          ...(Number.isFinite(startedAt) ? { startedAt } : {}),
-        })
-      }
+      // Ownerless live Preparing evidence fails open: with no canonical
+      // TranscriptWorkSpan there is no disclosure owner, so every preview —
+      // pending-run or not — renders as an ordinary standalone row through
+      // the ONE streaming preview renderer.
       return this.streamingToolPreviewComponent(block.previews, width)
     }
     if (block.kind === 'pending-user') return this.pendingUserComponentFor(block.row)
@@ -13944,6 +13924,12 @@ export class TuiApp {
       case 'system':
         return { kind: 'system', turn: message.turn, text: message.text, label: message.label, summary: message.summary }
       case 'tool': {
+        // A TOOL_NOT_STARTED recovery diagnostic is Host-owned evidence:
+        // an extension tool renderer sees a `tool` snapshot as an
+        // executed/running lifecycle, which would contradict the recovery
+        // fact (the request never started). Returning undefined keeps the
+        // row out of both the keyed tool renderers and the message chain.
+        if (message.origin === 'tool-not-started') return undefined
         return {
           kind: 'tool',
           turn: message.turn,
@@ -14363,6 +14349,10 @@ export class TuiApp {
     // summary, phase/member rows) — a resize must rebuild it at the new
     // width (PR2 plan §16.8).
     if (message.kind === 'workflow') return true
+    // A TOOL_NOT_STARTED diagnostic truncates its title row at build time
+    // in BOTH the folded and expanded layouts — a resize must rebuild it
+    // or the old truncation survives the wider terminal.
+    if (message.kind === 'tool' && message.origin === 'tool-not-started') return true
     if (expanded) {
       // An expanded Edit bakes its diff; an expanded PTC root bakes its
       // sub-call rows (truncateToWidth at build time) — both must rebuild
@@ -15045,6 +15035,25 @@ export class TuiApp {
           const previewBudget = hint === '' ? width : Math.max(2, width - visibleWidth(hint))
           const preview = truncateToWidth(`  ${outcomeColor(outcomePreview)}`, previewBudget, '…')
           card.addChild(new Text(truncateToWidth(`${preview}${hint}`, width, '…'), 0, 0))
+        }
+      }
+      return card
+    }
+    if (message.kind === 'tool' && message.origin === 'tool-not-started') {
+      // Host-owned TOOL_NOT_STARTED diagnostic: the assistant REQUESTED
+      // the tool but Harness never recorded it started. Never the
+      // executed-tool presentation — no `$ command`/diff/read preview, no
+      // [ok]/[running] pill, no ToolPresenter or extension renderer. The
+      // literal "not started" wording is the primary semantic label; the
+      // expanded body is the authoritative DSH recovery guidance.
+      const card = new Container()
+      const identity = message.name === '' || message.name === 'tool'
+        ? 'Tool request not started'
+        : `Tool request not started · ${toolTitle(message.name)}`
+      card.addChild(new Text(color.error(truncateToWidth(identity, width, '…')), 0, 0))
+      if (expanded && message.result !== '') {
+        for (const line of message.result.split('\n')) {
+          card.addChild(new Text(color.textDim(line), 0, 0))
         }
       }
       return card

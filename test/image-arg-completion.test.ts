@@ -20,6 +20,7 @@ import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -76,7 +77,8 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -116,7 +118,6 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     insertIntoEditor: (text) => app.insertIntoEditor(text),
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -125,7 +126,6 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -143,7 +143,7 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},

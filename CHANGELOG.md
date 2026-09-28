@@ -7,6 +7,41 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-28
+
+### 安装与版本对应
+
+本稳定版把开发与兼容验证使用的精确 DSH family 推进到已发布的 `0.2.0-rc.1`；
+运行时最低版本（peer floor）保持 `>=0.1.7-rc.2` 不变，旧 runtime 的升级建议与
+恢复命令现在指向 `0.2.0-rc.1`。安装 DSH 时需要显式允许其原生安装脚本，
+`--allow-scripts` 收敛为真正需要执行脚本的三项（DSH `0.2.0-rc.1` 将 Koffi
+固定为 `3.1.1`，Linux 全新安装不再依赖其余脚本白名单）：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.0
+dsh --profile pi-tui
+```
+
+仍需保留旧版 DSH 的用户：`@deepseek-ai/dsh@0.1.7-rc.2` 可继续使用已发布的
+`@xmoon76/dsh-pi-tui@0.4.9`（本版 floor 不变，升级本版亦可直接运行）；
+`@deepseek-ai/dsh@0.1.7-rc.1` 使用 `@xmoon76/dsh-pi-tui@0.4.8`；更旧的
+`@deepseek-ai/dsh@0.1.6-alpha.2` 使用 `@xmoon76/dsh-pi-tui@0.4.7-alpha.2`。
+
+- **会话写锁的官方原生实现确认为 `@deepseek-ai/node-addon-system/flock` 预编译
+  家族，仓库退休了过期的 `fs-ext` 手工编译 workaround。** 隔离安装与兼容验证
+  环境不再修改官方发行版内容；原生载荷缺失时按发行版问题直接报错，而不是在
+  consumer 侧 node-gyp 补丁式修复。DSH 的 Source Mode 验证同样推进到
+  `0.2.0-rc.1` release commit 并完整通过（上一版因上游 rc.2 源码树无法
+  self-clean 而豁免）。
+
+### 修复
+
+- Task Center 在 subagent 较多时，不再因 lifecycle/tool/job/open 等同一波
+  invalidation 并发启动多次完整 descendant traversal：已有 refresh 在飞时只记录
+  dirty，结算后合并为一次 trailing refresh，避免新 subagent 因 refresh storm
+  被长时间拖后。单次上游递归遍历本身的成本不在本次修复范围内。
+
 ## [0.4.9] - 2026-09-25
 
 ### 安装与版本对应
@@ -1211,7 +1246,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8
 [0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2

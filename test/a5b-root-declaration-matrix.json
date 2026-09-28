@@ -1,0 +1,1826 @@
+{
+  "generatedFrom": "src/app/bootstrap.ts",
+  "sourceHash": "sha256:3119195d93df6a61",
+  "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
+  "total": 71,
+  "rows": [
+    {
+      "name": "agents",
+      "kind": "const",
+      "mutable": false,
+      "lines": "252-252",
+      "refs": 12,
+      "hostDependency": true,
+      "head": "const agents = ctx.get('agents')",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "action-tool-card.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.get(agents) Host registry resolved for the Direct owner registry/attachment reads; owner-construction input (plan §7.6.4).",
+      "callers": [
+        "command",
+        "lifecycleAgents",
+        "viewer",
+        "root-statement@256",
+        "root-statement@595",
+        "root-statement@1678",
+        "root-statement@1800"
+      ]
+    },
+    {
+      "name": "defaultModel",
+      "kind": "const",
+      "mutable": false,
+      "lines": "253-253",
+      "refs": 5,
+      "hostDependency": true,
+      "head": "const defaultModel = ctx.get('agentDefaultModel')",
+      "tests": [
+        "export-command.test.ts",
+        "runner-session-bootstrap.test.ts",
+        "runner-session-retirement.test.ts",
+        "submit-hot-path.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.get(agentDefaultModel) Host model service injected into the Direct runtime; owner-construction input.",
+      "callers": [
+        "directRuntime",
+        "model",
+        "root-statement@256"
+      ]
+    },
+    {
+      "name": "sessions",
+      "kind": "const",
+      "mutable": false,
+      "lines": "254-254",
+      "refs": 11,
+      "hostDependency": true,
+      "head": "const sessions = ctx.get('sessions')",
+      "tests": [
+        "busy-enter.test.ts",
+        "export-command.test.ts",
+        "extension-registry-m5.test.ts",
+        "history.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.get(sessions) Host session registry read by the Direct/surface seams; owner-construction input.",
+      "callers": [
+        "viewer",
+        "flushTurn",
+        "root-statement@256",
+        "root-statement@1553",
+        "root-statement@1678"
+      ]
+    },
+    {
+      "name": "ownership",
+      "kind": "const",
+      "mutable": false,
+      "lines": "266-269",
+      "refs": 51,
+      "hostDependency": false,
+      "head": "const ownership = createSessionOwnershipCore({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createSessionOwnershipCore(...) — the ONE ownership authority (plan §7.6.4).",
+      "callers": [
+        "sessionScope",
+        "directRuntime",
+        "handleNow",
+        "captureMatches",
+        "isCurrentOwnerAgent",
+        "model",
+        "sessionRuntime",
+        "command",
+        "status",
+        "localShell",
+        "viewer",
+        "submission"
+      ]
+    },
+    {
+      "name": "sessionScope",
+      "kind": "const",
+      "mutable": false,
+      "lines": "275-286",
+      "refs": 7,
+      "hostDependency": false,
+      "head": "const sessionScope = createSessionScopeAuthority({",
+      "tests": [
+        "a3-command-identity.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createSessionScopeAuthority(...) — the ONE live-scope authority (plan §7.6.4).",
+      "callers": [
+        "requireLiveScope",
+        "sessionRuntime",
+        "command",
+        "submission",
+        "root-statement@1865"
+      ]
+    },
+    {
+      "name": "submissionRuntime",
+      "kind": "let",
+      "mutable": true,
+      "lines": "293-293",
+      "refs": 8,
+      "hostDependency": false,
+      "head": "let submissionRuntime!: SubmissionRuntime",
+      "tests": [
+        "a3-writer-admission.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "late-bound SubmissionRuntime slot assigned by bindSubmissionRuntime; sole writer/admission owner.",
+      "callers": [
+        "sessionRuntime",
+        "command",
+        "submission",
+        "root-statement@1865"
+      ]
+    },
+    {
+      "name": "requireLiveScope",
+      "kind": "const",
+      "mutable": false,
+      "lines": "297-301",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const requireLiveScope = (): LiveSessionScope => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "SessionScopeAuthority.captureLive/requireLive",
+      "lifecycle": "per-write admission seam (scope capture or throw)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "sessionScope.captureLive plus throw; synchronous admission connector into owners.",
+      "callers": [
+        "localShell",
+        "submission",
+        "root-statement@1800"
+      ]
+    },
+    {
+      "name": "settingsForms",
+      "kind": "const",
+      "mutable": false,
+      "lines": "317-317",
+      "refs": 5,
+      "hostDependency": true,
+      "head": "const settingsForms = ctx.get('settings') as SettingsFormsLike | undefined",
+      "tests": [
+        "rules.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.get(settings) SettingsForms service turned into the DirectTuiSettings facade and the settings owner.",
+      "callers": [
+        "tuiSettings",
+        "settings",
+        "root-statement@327",
+        "root-statement@571"
+      ]
+    },
+    {
+      "name": "tuiSettings",
+      "kind": "const",
+      "mutable": false,
+      "lines": "318-318",
+      "refs": 13,
+      "hostDependency": false,
+      "head": "const tuiSettings = new DirectTuiSettings(config, settingsForms)",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "direct-backend-assembly.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "DirectTuiSettings facade over config plus SettingsForms; process-lifetime config prerequisite.",
+      "callers": [
+        "persistedTuiSettings",
+        "surface",
+        "directRuntime",
+        "settings",
+        "command",
+        "localShell",
+        "submission",
+        "root-statement@571",
+        "root-statement@1553"
+      ]
+    },
+    {
+      "name": "persistedTuiSettings",
+      "kind": "const",
+      "mutable": false,
+      "lines": "346-346",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "const persistedTuiSettings = tuiSettings?.get() as unknown as TuiSettingsDoc | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "one boot-time settings document snapshot; drives display/progress/response resolution before the first compose.",
+      "callers": [
+        "displayResolution",
+        "progressUpdatesState",
+        "responseStyleState"
+      ]
+    },
+    {
+      "name": "displayResolution",
+      "kind": "const",
+      "mutable": false,
+      "lines": "347-349",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const displayResolution = resolveDisplayPreset({",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "resolveDisplayPreset boot result resolved before the first compose (plan §8.4 ordering).",
+      "callers": [
+        "displayState",
+        "root-statement@571"
+      ]
+    },
+    {
+      "name": "displayState",
+      "kind": "const",
+      "mutable": false,
+      "lines": "350-350",
+      "refs": 6,
+      "hostDependency": false,
+      "head": "const displayState: DisplayState = { preset: displayResolution.preset }",
+      "tests": [
+        "command-rendering.test.ts",
+        "compact-display.test.ts",
+        "compact-extension-work.test.ts",
+        "compact-performance-hardening.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "DisplayState holder constructed once and injected into Direct compose/surface/command; bootstrap does not mutate it.",
+      "callers": [
+        "directRuntime",
+        "command",
+        "root-statement@571",
+        "root-statement@1553"
+      ]
+    },
+    {
+      "name": "progressUpdatesState",
+      "kind": "const",
+      "mutable": false,
+      "lines": "352-352",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const progressUpdatesState: ProgressUpdatesState = { mode: parseProgressUpdates(persistedTuiSettings?.progressUpdates) }",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "communication-policy.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ProgressUpdatesState holder constructed once before the first compose and injected; no bootstrap state machine.",
+      "callers": [
+        "directRuntime",
+        "command"
+      ]
+    },
+    {
+      "name": "responseStyleState",
+      "kind": "const",
+      "mutable": false,
+      "lines": "353-353",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const responseStyleState: ResponseStyleState = { style: parseResponseStyle(persistedTuiSettings?.responseStyle) }",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "communication-policy.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ResponseStyleState holder constructed once before the first compose and injected; no bootstrap state machine.",
+      "callers": [
+        "directRuntime",
+        "command"
+      ]
+    },
+    {
+      "name": "surface",
+      "kind": "const",
+      "mutable": false,
+      "lines": "372-377",
+      "refs": 163,
+      "hostDependency": false,
+      "head": "const surface = createSurfaceRuntime<SessionEvent>({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createSurfaceRuntime(...) — the ONE mounted-surface owner (plan §7.6.4).",
+      "callers": [
+        "sessionRuntime",
+        "settings",
+        "resumeQuiesce",
+        "presentation",
+        "command",
+        "status",
+        "history",
+        "extensionService",
+        "disposeSurface",
+        "registerRunnerDisposal",
+        "viewer",
+        "submission"
+      ]
+    },
+    {
+      "name": "directRuntime",
+      "kind": "const",
+      "mutable": false,
+      "lines": "390-405",
+      "refs": 23,
+      "hostDependency": true,
+      "head": "const directRuntime = createDirectApplicationRuntime({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createDirectApplicationRuntime(...) — the Direct composition runtime.",
+      "callers": [
+        "agentNow",
+        "handleNow",
+        "isCurrentOwnerAgent",
+        "directAgentOfOwner",
+        "model",
+        "sessionRuntime",
+        "backend",
+        "compose",
+        "resumeQuiesce",
+        "presentation",
+        "command",
+        "submission"
+      ]
+    },
+    {
+      "name": "agentNow",
+      "kind": "const",
+      "mutable": false,
+      "lines": "412-412",
+      "refs": 24,
+      "hostDependency": true,
+      "head": "const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "session-scope.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "DirectApplicationRuntime.owners.currentDirectAttachment",
+      "lifecycle": "live read, per call (exact Direct attachment)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "directRuntime.owners.currentDirectAttachment() — exact Direct attachment read per call.",
+      "callers": [
+        "model",
+        "currentPreset",
+        "sessionBlank",
+        "command",
+        "status",
+        "present",
+        "localShell",
+        "requestExit",
+        "viewer",
+        "submission",
+        "startupAgent",
+        "currentWorkingFromLog"
+      ]
+    },
+    {
+      "name": "handleNow",
+      "kind": "const",
+      "mutable": false,
+      "lines": "414-417",
+      "refs": 2,
+      "hostDependency": true,
+      "head": "const handleNow = (): AgentHandle | undefined => {",
+      "tests": [
+        "a2-ownership-cutover.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "DirectApplicationRuntime owner attachment handle",
+      "lifecycle": "live read, per call (exact Direct handle)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ownership.owner plus directRuntime.owners.handleOf — exact owner handle read per call.",
+      "callers": [
+        "root-statement@418"
+      ]
+    },
+    {
+      "name": "captureMatches",
+      "kind": "const",
+      "mutable": false,
+      "lines": "424-425",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const captureMatches = (subject: SessionSubject | undefined): boolean =>",
+      "tests": [
+        "a2-ownership-cutover.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "SessionOwnershipCore.captureSubject",
+      "lifecycle": "live read, per call (ownership subject fence)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ownership.owner/isSubjectCurrent — ownership subject fence connector.",
+      "callers": [
+        "submission",
+        "root-statement@1800"
+      ]
+    },
+    {
+      "name": "isCurrentOwnerAgent",
+      "kind": "const",
+      "mutable": false,
+      "lines": "430-433",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const isCurrentOwnerAgent = (candidate: Agent): boolean => {",
+      "tests": [
+        "a2-ownership-cutover.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "DirectApplicationRuntime.owners.currentDirectAttachment",
+      "lifecycle": "live read, per call (currentness check)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ownership.owner plus directRuntime attachmentOf — exact identity connector.",
+      "callers": [
+        "root-statement@1678"
+      ]
+    },
+    {
+      "name": "directAgentOfOwner",
+      "kind": "const",
+      "mutable": false,
+      "lines": "438-439",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const directAgentOfOwner = (owner: SessionOwnerRef): Agent | undefined =>",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "DirectApplicationRuntime.owners.attachmentOf",
+      "lifecycle": "live read, per call (owner → attachment)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "directRuntime.owners.attachmentOf — owner-to-attachment connector.",
+      "callers": [
+        "sessionRuntime"
+      ]
+    },
+    {
+      "name": "model",
+      "kind": "const",
+      "mutable": false,
+      "lines": "450-456",
+      "refs": 30,
+      "hostDependency": true,
+      "head": "const model = createModelSelectionOwner<ModelSelection>({",
+      "tests": [
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "action-tool-card.test.ts",
+        "approval.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createModelSelectionOwner<ModelSelection>(...) — the A5b-3b model-selection owner.",
+      "callers": [
+        "directRuntime",
+        "sessionRuntime",
+        "command",
+        "status",
+        "submission",
+        "root-statement@1678"
+      ]
+    },
+    {
+      "name": "sessionRuntime",
+      "kind": "const",
+      "mutable": false,
+      "lines": "457-537",
+      "refs": 21,
+      "hostDependency": true,
+      "head": "const sessionRuntime = bindSessionRuntime(ownership, {",
+      "tests": [
+        "a3-writer-admission.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "bindSessionRuntime(...) — the bound session runtime owner.",
+      "callers": [
+        "resumeQuiesce",
+        "command",
+        "localShell",
+        "requestExit",
+        "registerRunnerDisposal",
+        "submission",
+        "root-statement@541",
+        "root-statement@1304",
+        "root-statement@1507",
+        "root-statement@1800",
+        "root-statement@1865"
+      ]
+    },
+    {
+      "name": "backend",
+      "kind": "const",
+      "mutable": false,
+      "lines": "547-547",
+      "refs": 42,
+      "hostDependency": true,
+      "head": "const backend = directRuntime.backend",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "authorization-login.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "directRuntime.backend — the semantic Backend port bundle.",
+      "callers": [
+        "sessionRuntime",
+        "settings",
+        "sessionBlank",
+        "command",
+        "status",
+        "lifecycleAgents",
+        "localShell",
+        "submission",
+        "artifacts",
+        "pluginManager",
+        "disposeCredentialSubscription",
+        "root-statement@642"
+      ]
+    },
+    {
+      "name": "settings",
+      "kind": "const",
+      "mutable": false,
+      "lines": "551-564",
+      "refs": 46,
+      "hostDependency": false,
+      "head": "const settings = createSettingsRuntime({",
+      "tests": [
+        "a3-command-identity.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createSettingsRuntime(...) — the A5b-2b settings/footer/display owner.",
+      "callers": [
+        "settingsForms",
+        "command",
+        "extensionService",
+        "disposeSurface",
+        "root-statement@324",
+        "root-statement@571",
+        "root-statement@595",
+        "root-statement@1507",
+        "root-statement@1553",
+        "root-statement@1607",
+        "root-statement@1608",
+        "root-statement@1662"
+      ]
+    },
+    {
+      "name": "compose",
+      "kind": "const",
+      "mutable": false,
+      "lines": "566-566",
+      "refs": 8,
+      "hostDependency": true,
+      "head": "const compose = (presetId?: string): Promise<DirectAgentComposition> => directRuntime.compose(presetId)",
+      "tests": [
+        "communication-policy.test.ts",
+        "direct-backend-assembly.test.ts",
+        "direct-session-fork.test.ts",
+        "footer-configurator-ui.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "DirectApplicationRuntime.compose",
+      "lifecycle": "process-lifetime: created once at startup (Direct compose wrapper)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "narrow wrapper over directRuntime.compose consumed by launchComposition; owner-to-owner connector, not a Host lookup (reclassified in the A5b-6 sweep).",
+      "callers": [
+        "directRuntime",
+        "launchComposition"
+      ]
+    },
+    {
+      "name": "launchPreset",
+      "kind": "const",
+      "mutable": false,
+      "lines": "587-587",
+      "refs": 14,
+      "hostDependency": true,
+      "head": "const launchPreset = startup.presetId ?? (process.env.DSH_PI_TUI_PRESET?.trim() || undefined)",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "startup.presetId / DSH_PI_TUI_PRESET resolution; startup input (process prerequisite).",
+      "callers": [
+        "launchComposition",
+        "command",
+        "root-statement@595",
+        "root-statement@642"
+      ]
+    },
+    {
+      "name": "pendingPreset",
+      "kind": "let",
+      "mutable": true,
+      "lines": "594-594",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "let pendingPreset: string | undefined",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "late-bound preset chosen during startup/resume; startup orchestration prerequisite.",
+      "callers": [
+        "launchComposition",
+        "command",
+        "root-statement@762"
+      ]
+    },
+    {
+      "name": "launchComposition",
+      "kind": "const",
+      "mutable": false,
+      "lines": "613-625",
+      "refs": 5,
+      "hostDependency": true,
+      "head": "const launchComposition = async (): Promise<{ composition: DirectAgentComposition; failure?: string }> => {",
+      "tests": [
+        "session-runtime-remote-owner-handoff.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "startup compose wrapper (compose plus failure capture); startup orchestration.",
+      "callers": [
+        "sessionRuntime",
+        "root-statement@762"
+      ]
+    },
+    {
+      "name": "resumeFailure",
+      "kind": "let",
+      "mutable": true,
+      "lines": "632-632",
+      "refs": 11,
+      "hostDependency": false,
+      "head": "let resumeFailure: string | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "resume failure message shown post-mount then cleared; startup/resume transaction state.",
+      "callers": [
+        "sessionRuntime",
+        "root-statement@642",
+        "root-statement@762",
+        "root-statement@1927"
+      ]
+    },
+    {
+      "name": "handle",
+      "kind": "let",
+      "mutable": true,
+      "lines": "637-637",
+      "refs": 19,
+      "hostDependency": false,
+      "head": "let handle: SessionHandle | undefined",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "advanced-cordis-lifecycle.test.ts",
+        "advanced-input.test.ts",
+        "advanced-interactive.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "resumed SessionHandle held across the resume transaction; startup/resume orchestration state.",
+      "callers": [
+        "resumeQuiesce",
+        "extensionService",
+        "disposeSurface",
+        "root-statement@245",
+        "root-statement@642",
+        "root-statement@1304"
+      ]
+    },
+    {
+      "name": "resumeResolved",
+      "kind": "let",
+      "mutable": true,
+      "lines": "641-641",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "let resumeResolved = false",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "resume transaction resolved flag; startup/resume orchestration state.",
+      "callers": [
+        "root-statement@642"
+      ]
+    },
+    {
+      "name": "resumeQuiesce",
+      "kind": "const",
+      "mutable": false,
+      "lines": "735-750",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const resumeQuiesce = sessionRuntime.publishResumedOwner(handle, (owner) => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "sessionRuntime.publishResumedOwner(...) resume transaction step; startup/resume orchestration.",
+      "callers": [
+        "root-statement@751"
+      ]
+    },
+    {
+      "name": "initialSnapshot",
+      "kind": "let",
+      "mutable": true,
+      "lines": "759-759",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "let initialSnapshot: SurfaceCatalogSnapshot | undefined",
+      "tests": [
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "prefetched catalog snapshot installed at registration; startup prefetch (plan §7.6.4).",
+      "callers": [
+        "presentation",
+        "root-statement@762",
+        "root-statement@1922"
+      ]
+    },
+    {
+      "name": "initialSkills",
+      "kind": "let",
+      "mutable": true,
+      "lines": "760-760",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "let initialSkills: HumanSkillCatalog | undefined",
+      "tests": [
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "prefetched skill catalog installed at registration; startup prefetch.",
+      "callers": [
+        "presentation",
+        "root-statement@762",
+        "root-statement@1922"
+      ]
+    },
+    {
+      "name": "surfaceNotice",
+      "kind": "let",
+      "mutable": true,
+      "lines": "761-761",
+      "refs": 6,
+      "hostDependency": false,
+      "head": "let surfaceNotice: string | undefined",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "deferred startup notice shown once post-mount then cleared; startup prerequisite.",
+      "callers": [
+        "root-statement@762",
+        "root-statement@1923"
+      ]
+    },
+    {
+      "name": "currentPreset",
+      "kind": "const",
+      "mutable": false,
+      "lines": "804-819",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const currentPreset = (): string | undefined => {",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "agentNow plus agentPresets resolve for the status projection; startup/resume read.",
+      "callers": [
+        "command",
+        "status"
+      ]
+    },
+    {
+      "name": "sessionBlank",
+      "kind": "const",
+      "mutable": false,
+      "lines": "823-830",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const sessionBlank = (): boolean | undefined => {",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "semantic Session blank read for the startup surface; startup/resume orchestration.",
+      "callers": [
+        "command"
+      ]
+    },
+    {
+      "name": "viewerRef",
+      "kind": "let",
+      "mutable": true,
+      "lines": "837-837",
+      "refs": 8,
+      "hostDependency": true,
+      "head": "let viewerRef: ViewerRuntime<SessionEvent, Agent> | undefined",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "late-binding reference to the viewer owner for the Direct queue resolver; lifetime seam, not viewer state.",
+      "callers": [
+        "directRuntime",
+        "presentation",
+        "status",
+        "root-statement@1368"
+      ]
+    },
+    {
+      "name": "presentation",
+      "kind": "const",
+      "mutable": false,
+      "lines": "838-870",
+      "refs": 37,
+      "hostDependency": true,
+      "head": "const presentation = createSessionPresentation<SessionEvent>({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createSessionPresentation(...) — the A5b-1 live-session presentation owner.",
+      "callers": [
+        "ownership",
+        "sessionRuntime",
+        "status",
+        "viewer",
+        "root-statement@1678",
+        "root-statement@1908",
+        "root-statement@2024"
+      ]
+    },
+    {
+      "name": "cwd",
+      "kind": "const",
+      "mutable": false,
+      "lines": "903-903",
+      "refs": 21,
+      "hostDependency": false,
+      "head": "const cwd = process.cwd()",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "authorization-login.test.ts",
+        "builtins.test.ts",
+        "busy-enter.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "process.cwd() client composition fact injected into owners as a value (execution-notes item 4).",
+      "callers": [
+        "sessionRuntime",
+        "presentation",
+        "command",
+        "status",
+        "history",
+        "artifacts",
+        "root-statement@595",
+        "root-statement@1553"
+      ]
+    },
+    {
+      "name": "clientActions",
+      "kind": "const",
+      "mutable": false,
+      "lines": "907-907",
+      "refs": 6,
+      "hostDependency": false,
+      "head": "const clientActions = createClientActions()",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createClientActions() — the A5b-5 client-local platform owner.",
+      "callers": [
+        "command",
+        "root-statement@1507",
+        "root-statement@1553"
+      ]
+    },
+    {
+      "name": "applicationEvents",
+      "kind": "let",
+      "mutable": true,
+      "lines": "912-912",
+      "refs": 4,
+      "hostDependency": false,
+      "head": "let applicationEvents: ApplicationEventsOwner",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "late-bound ApplicationEventsOwner slot assigned by createApplicationEvents (A5b-5 adapter).",
+      "callers": [
+        "command",
+        "root-statement@1507",
+        "root-statement@1553"
+      ]
+    },
+    {
+      "name": "command",
+      "kind": "const",
+      "mutable": false,
+      "lines": "920-1050",
+      "refs": 42,
+      "hostDependency": true,
+      "head": "const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({",
+      "tests": [
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createCommandSurface<...>(...) — the A5b-3 command authority/facade owner.",
+      "callers": [
+        "sessionRuntime",
+        "presentation",
+        "extensionService",
+        "disposeSurface",
+        "requestExit",
+        "submission",
+        "root-statement@1553",
+        "root-statement@1638",
+        "root-statement@1858",
+        "root-statement@1865",
+        "root-statement@1922"
+      ]
+    },
+    {
+      "name": "status",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1055-1079",
+      "refs": 69,
+      "hostDependency": true,
+      "head": "const status = createStatusRuntime({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createStatusRuntime(...) — the A5b-2a status/context-measurement owner.",
+      "callers": [
+        "settings",
+        "resumeQuiesce",
+        "presentation",
+        "command",
+        "history",
+        "localShell",
+        "disposeSurface",
+        "viewer",
+        "submission",
+        "root-statement@642",
+        "root-statement@762",
+        "root-statement@1507"
+      ]
+    },
+    {
+      "name": "history",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1083-1089",
+      "refs": 22,
+      "hostDependency": false,
+      "head": "const history = createInputHistory({",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "busy-enter.test.ts",
+        "child-view.test.ts",
+        "compact-performance-hardening.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createInputHistory(...) — the A5b-2c input-history owner.",
+      "callers": [
+        "presentation",
+        "submission",
+        "root-statement@1553",
+        "root-statement@1675"
+      ]
+    },
+    {
+      "name": "cleanedUp",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1093-1093",
+      "refs": 18,
+      "hostDependency": false,
+      "head": "let cleanedUp = false",
+      "tests": [
+        "runner-session-navigation.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "runner disposal flag owned by the composition root; lifetime prerequisite.",
+      "callers": [
+        "ownership",
+        "sessionRuntime",
+        "settings",
+        "presentation",
+        "status",
+        "history",
+        "localShell",
+        "disposeSurface",
+        "viewer",
+        "submission",
+        "artifacts",
+        "root-statement@1507"
+      ]
+    },
+    {
+      "name": "app",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1095-1095",
+      "refs": 55,
+      "hostDependency": false,
+      "head": "let app: TuiApp",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "the mounted TuiApp assigned once by surface.start; process-lifetime reference.",
+      "callers": [
+        "sessionRuntime",
+        "resumeQuiesce",
+        "command",
+        "history",
+        "extensionService",
+        "localShell",
+        "disposeSurface",
+        "submission",
+        "artifacts",
+        "flushTurn",
+        "root-statement@1553",
+        "root-statement@1606"
+      ]
+    },
+    {
+      "name": "extensionService",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1098-1158",
+      "refs": 16,
+      "hostDependency": false,
+      "head": "let extensionService: (PiTuiExtensionService & {",
+      "tests": [
+        "submit-hot-path.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "Host extension service resolved for surface.attachExtensionHost; process prerequisite.",
+      "callers": [
+        "settings",
+        "command",
+        "submission",
+        "root-statement@1486",
+        "root-statement@1487"
+      ]
+    },
+    {
+      "name": "tools",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1174-1174",
+      "refs": 8,
+      "hostDependency": true,
+      "head": "const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined",
+      "tests": [
+        "catalog-port.test.ts",
+        "command-catalog.test.ts",
+        "command-transcript.test.ts",
+        "compact-display.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.get(tools) Host tool registry read by the presenter connector.",
+      "callers": [
+        "present",
+        "root-statement@595"
+      ]
+    },
+    {
+      "name": "present",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1175-1179",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const present = toolPresenterFrom(name => {",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "action-tool-card.test.ts",
+        "authorization-login.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "toolPresenterFrom over the live Agent plus the tools registry; narrow Host read for presentation.",
+      "callers": [
+        "root-statement@1553"
+      ]
+    },
+    {
+      "name": "signal",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1181-1181",
+      "refs": 37,
+      "hostDependency": false,
+      "head": "const signal = lifecycleController.signal",
+      "tests": [
+        "a3-writer-admission.test.ts",
+        "a5-composition-inventory.test.ts",
+        "advanced-broker.test.ts",
+        "approval.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "lifecycleController.signal abort signal; process lifetime.",
+      "callers": [
+        "directRuntime",
+        "sessionRuntime",
+        "settings",
+        "resumeQuiesce",
+        "command",
+        "extensionService",
+        "lifecycleAgents",
+        "submission",
+        "artifacts",
+        "root-statement@245",
+        "root-statement@642",
+        "root-statement@762"
+      ]
+    },
+    {
+      "name": "draftImages",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1185-1185",
+      "refs": 7,
+      "hostDependency": false,
+      "head": "const draftImages = new DraftImageStore()",
+      "tests": [
+        "rules.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "per-TUI draft image store created once and injected; client input buffer, not a §7.6.2 named state category.",
+      "callers": [
+        "sessionRuntime",
+        "command",
+        "disposeSurface",
+        "submission",
+        "root-statement@1507",
+        "root-statement@1865"
+      ]
+    },
+    {
+      "name": "draftFiles",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1186-1186",
+      "refs": 7,
+      "hostDependency": false,
+      "head": "const draftFiles = new DraftFileStore()",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "per-TUI draft file store created once and injected; client input buffer, not a §7.6.2 named state category.",
+      "callers": [
+        "sessionRuntime",
+        "command",
+        "disposeSurface",
+        "submission",
+        "root-statement@1507",
+        "root-statement@1865"
+      ]
+    },
+    {
+      "name": "lifecycleAgents",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1189-1192",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const lifecycleAgents: TuiCommandRunner['agents'] = {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-connector",
+      "owner": "bootstrap",
+      "capabilities": "Backend.sessionLifecycle create/open through the runner signal",
+      "lifecycle": "process-lifetime: immutable create/open bridge bound to the runner signal",
+      "sweep": "verified@a5b6",
+      "sweepNote": "TuiCommandRunner agents create/open bridge over backend.sessionLifecycle; owner-to-owner connector (reclassified in the A5b-6 sweep).",
+      "callers": [
+        "command"
+      ]
+    },
+    {
+      "name": "localShell",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1197-1214",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const localShell = createLocalShell<Agent>({",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createLocalShell<Agent>(...) — the A5b-4b local-shell owner; reads the controller through late-bound withWriterSection.",
+      "callers": [
+        "disposeSurface",
+        "submission"
+      ]
+    },
+    {
+      "name": "disposeSurface",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1221-1276",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const disposeSurface = (): void => {",
+      "tests": [
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts",
+        "notification-wiring.test.ts",
+        "rules.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:mount-dispose-fatal-coordination",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "sequences owner disposal in the fixed order (plan §7.6.4); no policy of its own.",
+      "callers": [
+        "requestExit",
+        "registerRunnerDisposal"
+      ]
+    },
+    {
+      "name": "requestExit",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1286-1300",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "const { requestExit } = createExitController({",
+      "tests": [
+        "authorization-login.test.ts",
+        "busy-enter.test.ts",
+        "command-catalog.test.ts",
+        "export-command.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:mount-dispose-fatal-coordination",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createExitController(...) — the ONE exit orchestration (dispose/fatal coordination; reclassified in the A5b-6 sweep).",
+      "callers": [
+        "command",
+        "submission",
+        "root-statement@1507"
+      ]
+    },
+    {
+      "name": "registerRunnerDisposal",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1328-1343",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const registerRunnerDisposal = (): void => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:mount-dispose-fatal-coordination",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.effect cleanup registration; runner lifetime/disposal coordination.",
+      "callers": [
+        "root-statement@1344"
+      ]
+    },
+    {
+      "name": "assistantStreamBaselineFor",
+      "kind": "let",
+      "mutable": true,
+      "lines": "1348-1348",
+      "refs": 6,
+      "hostDependency": false,
+      "head": "let assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[] = () => []",
+      "tests": [
+        "remote-presentation-shadow.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "late-bound assistant-stream baseline getter installed by the Direct runtime; capability slot, not viewer state.",
+      "callers": [
+        "presentation",
+        "viewer",
+        "root-statement@1974"
+      ]
+    },
+    {
+      "name": "viewer",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1352-1367",
+      "refs": 37,
+      "hostDependency": true,
+      "head": "const viewer = createViewerRuntime<SessionEvent, Agent>({",
+      "tests": [
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts",
+        "a5b-bootstrap-closure.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createViewerRuntime<SessionEvent, Agent>(...) — the A5b-1 viewer owner; the A5b-6 move made it own the published queue authority slot.",
+      "callers": [
+        "presentation",
+        "command",
+        "status",
+        "disposeSurface",
+        "submission",
+        "root-statement@1368",
+        "root-statement@1507",
+        "root-statement@1678",
+        "root-statement@1800"
+      ]
+    },
+    {
+      "name": "submission",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1374-1466",
+      "refs": 36,
+      "hostDependency": true,
+      "head": "const submission = createSubmissionController<Agent>({",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a3-writer-admission.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5-composition-inventory.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createSubmissionController<Agent>(...) — the A5b-4a submission/input owner; the A5b-6 move made it own withWriterSection.",
+      "callers": [
+        "sessionRuntime",
+        "presentation",
+        "command",
+        "localShell",
+        "root-statement@1507",
+        "root-statement@1678",
+        "root-statement@1800",
+        "root-statement@1865"
+      ]
+    },
+    {
+      "name": "artifacts",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1471-1478",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const artifacts = createArtifactSaveOwner<Agent>({",
+      "tests": [
+        "a5b-bootstrap-closure.test.ts",
+        "advanced-input.test.ts",
+        "context-row.test.ts",
+        "focus-mode.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "createArtifactSaveOwner<Agent>(...) — the A5b-3c artifact-save owner.",
+      "callers": [
+        "submission"
+      ]
+    },
+    {
+      "name": "pluginManager",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1498-1498",
+      "refs": 5,
+      "hostDependency": false,
+      "head": "const pluginManager = surface.attachPluginManager({ port: backend.pluginManager, diag })",
+      "tests": [
+        "a4-surface-ownership.test.ts",
+        "direct-backend-assembly.test.ts",
+        "job-observation-direct.test.ts",
+        "plugin-manager-direct.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "surface.attachPluginManager(...) result — the ONE plugin-manager owner handle.",
+      "callers": [
+        "command"
+      ]
+    },
+    {
+      "name": "jobs",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1798-1798",
+      "refs": 14,
+      "hostDependency": true,
+      "head": "const jobs = ctx.get('jobs')",
+      "tests": [
+        "a2-ownership-cutover.test.ts",
+        "a4-surface-ownership.test.ts",
+        "a5b-bootstrap-closure.test.ts",
+        "disclosure-search-path.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.get(jobs) Host job registry forwarded to surface.attachTasks; narrow list/get/kill reads only.",
+      "callers": [
+        "disposeSurface",
+        "root-statement@1800"
+      ]
+    },
+    {
+      "name": "subagents",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1799-1799",
+      "refs": 4,
+      "hostDependency": true,
+      "head": "const subagents = ctx.get('subagents')",
+      "tests": [
+        "action-tool-card.test.ts",
+        "busy-enter.test.ts",
+        "preset.test.ts",
+        "remote-official-contract.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "ctx.get(subagents) Host subagent registry forwarded to surface.attachTasks; narrow descendant reads only.",
+      "callers": [
+        "root-statement@1800"
+      ]
+    },
+    {
+      "name": "startupAgent",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1907-1907",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const startupAgent = agentNow()",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "agentNow() snapshot deciding the resume vs deferred startup surface; startup orchestration.",
+      "callers": [
+        "root-statement@1908"
+      ]
+    },
+    {
+      "name": "currentWorkingFromLog",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1939-1942",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const currentWorkingFromLog = (): boolean => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:startup-resume-create-orchestration",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "workingFromLog(snapshotEvents()) read for the compaction settle; runner-owned log read.",
+      "callers": [
+        "root-statement@1678"
+      ]
+    },
+    {
+      "name": "flushTurn",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1944-1957",
+      "refs": 3,
+      "hostDependency": false,
+      "head": "const flushTurn = (): void => {",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "turn-persistence hook invoked by the surface routing; Direct/domain persistence seam.",
+      "callers": [
+        "root-statement@1678"
+      ]
+    },
+    {
+      "name": "assistantStreamHandle",
+      "kind": "const",
+      "mutable": false,
+      "lines": "1967-1973",
+      "refs": 3,
+      "hostDependency": true,
+      "head": "const assistantStreamHandle = directRuntime.installAssistantStream({",
+      "tests": [],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "Host/Direct-touching composition seam",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "directRuntime.installAssistantStream handle plus the abort listener; Direct install coordination.",
+      "callers": [
+        "root-statement@1974",
+        "root-statement@1975"
+      ]
+    },
+    {
+      "name": "disposeCredentialSubscription",
+      "kind": "const",
+      "mutable": false,
+      "lines": "2012-2012",
+      "refs": 2,
+      "hostDependency": false,
+      "head": "const disposeCredentialSubscription = backend.config.credentials.onChanged(() => surface.routeProviderRefresh())",
+      "tests": [
+        "a4-surface-ownership.test.ts"
+      ],
+      "classification": "KEEP_BOOTSTRAP:host-service-resolution",
+      "owner": "bootstrap",
+      "capabilities": "pure / owner capability",
+      "lifecycle": "n/a (category documents ownership)",
+      "sweep": "verified@a5b6",
+      "sweepNote": "credentials.onChanged subscription handle disposed on abort; Host event wiring (thin delegation).",
+      "callers": [
+        "root-statement@2013"
+      ]
+    }
+  ]
+}

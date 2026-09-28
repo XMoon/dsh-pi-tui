@@ -44,7 +44,11 @@ export function classifyTranscriptMessage(message: TranscriptMessage): Transcrip
     case 'thinking':
       return { class: 'process', origin: 'thinking' }
     case 'tool':
-      if (message.origin === 'turn-error' || message.origin === 'turn-interrupted') {
+      if (
+        message.origin === 'turn-error'
+        || message.origin === 'turn-interrupted'
+        || message.origin === 'tool-not-started'
+      ) {
         return { class: 'attention', origin: message.origin }
       }
       return message.origin === undefined

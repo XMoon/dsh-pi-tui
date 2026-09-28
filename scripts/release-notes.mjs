@@ -198,12 +198,14 @@ function containsExactGuidance(content, command) {
   return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)
 }
 
-// The install guidance each 0.4 release body must carry is derived from the
-// shared matrix (src/dsh-compat-matrix.json) through scripts/lib/dsh-compat.mjs:
-// the shipped DSH floor, this exact TUI version, and the compatible pair for
-// every fallback row the rule selects. A matrix that does not describe the
-// release is a release bug to fix there, never a reason to inherit an older pin.
-if (version.startsWith('0.4.')) {
+// The install guidance each release body from the 0.4 line onward must carry
+// is derived from the shared matrix (src/dsh-compat-matrix.json) through
+// scripts/lib/dsh-compat.mjs: the shipped DSH floor, this exact TUI version,
+// and the compatible pair for every fallback row the rule selects. A matrix
+// that does not describe the release is a release bug to fix there, never a
+// reason to inherit an older pin.
+const [major, minor] = version.split('.').map(part => Number.parseInt(part, 10))
+if (major > 0 || minor >= 4) {
   for (const command of requiredGuidance(version)) {
     if (!containsExactGuidance(zh.content, command) || !containsExactGuidance(en.content, command)) {
       throw new Error(`Version ${version} must document ${command} in both changelogs`)

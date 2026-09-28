@@ -116,10 +116,14 @@ test('human-source predicate excludes injected user messages', () => {
   assert.equal(isHumanTurnMessage(userMessage(2, 'plugin', { kind: 'plugin' })), false)
 })
 
-test('rewind identity includes navigation epoch as a separate supersession axis', () => {
-  const expected = { sessionId: 'session-a', generation: 4, navigationEpoch: 8 }
+test('rewind navigation identity is session id + navigation epoch only', () => {
+  const expected = { sessionId: 'session-a', navigationEpoch: 8 }
   assert.equal(isRewindIdentityCurrent(expected, { ...expected }), true)
-  assert.equal(isRewindIdentityCurrent(expected, { ...expected, generation: 5 }), false)
+  // The surface GENERATION is deliberately not part of the navigation
+  // identity: a commit section bumps it before publication, so a local
+  // commit-seam failure must not be misclassified as user supersession.
+  assert.equal(isRewindIdentityCurrent(expected, { sessionId: 'session-a', navigationEpoch: 8 }), true)
   assert.equal(isRewindIdentityCurrent(expected, { ...expected, navigationEpoch: 9 }), false)
-  assert.equal(isRewindIdentityCurrent(expected, { sessionId: undefined, generation: 4, navigationEpoch: 8 }), false)
+  assert.equal(isRewindIdentityCurrent(expected, { sessionId: 'session-b', navigationEpoch: 8 }), false)
+  assert.equal(isRewindIdentityCurrent(expected, { sessionId: undefined, navigationEpoch: 8 }), false)
 })

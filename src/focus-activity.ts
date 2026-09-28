@@ -734,8 +734,17 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
   // It must therefore stay VISIBLE outside the collapsed Thought — like a
   // user/steer row or a settled interaction — instead of being hidden as
   // process and/or claimed by the Thought's Action slot.
+  // A TOOL_NOT_STARTED diagnostic is the ONE attention row without a
+  // turn-level presentation of its own: the other attention origins
+  // (turn-error / turn-interrupted / turn-max-tokens) are already
+  // presented by the Focus header status label and the collapsed Error
+  // slot, so hoisting their synthetic rows would only duplicate the same
+  // fact. The not-started recovery is invisible there — it must stay a
+  // standalone visible diagnostic while collapsed and return to its raw
+  // chronology when the Thought opens.
   return message.kind === 'user' || isSurfacedContext(message) || isSurfacedInteractionTool(message)
     || message.kind === 'command'
+    || (message.kind === 'tool' && message.origin === 'tool-not-started')
 }
 
 /**

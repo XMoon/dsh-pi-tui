@@ -19,7 +19,7 @@ Stable releases are recommended for ordinary users. Install DSH first, then add
 the TUI to the `pi-tui` profile:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@latest
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@latest
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
@@ -30,7 +30,7 @@ Preview installation uses the DSH `alpha` channel and the TUI `next` channel.
 The DSH native install scripts must be explicitly allowed:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@alpha
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@alpha
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
@@ -54,16 +54,19 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.9` (stable / `@latest`) | `dsh-v0.1.7-rc.2` | Current stable line; 0.1.7-rc.2 minimum |
+| `0.5.0` (stable / `@latest`) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Current stable line; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
+| `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. The `0.4.9` line unifies its
+Do not mix the stable and `@next` prerelease lines. The `0.5.0` line unifies its
 whole DSH peer floor at `>=0.1.7-rc.2` (the rc.2 preset registry peers
 `dsh-agent` exactly, so a wider legacy floor no longer satisfies a standalone
-tarball install); older runtimes fail at the normal incompatible-runtime
-boundary, so install the paired TUI line from the table above. The startup notice
+tarball install), while its exact validation and recommended upgrade target is
+the published `0.2.0-rc.1` family; older runtimes fail at the normal
+incompatible-runtime boundary, so install the paired TUI line from the table
+above. The startup notice
 is best-effort rather than a Loader startup-order guarantee. See the [full
 historical compatibility matrix](docs/dsh-compatibility.md) for official-tag
 pairings and fallback commands, and see the [latest `next`
@@ -595,8 +598,9 @@ This section contains DSH compatibility and CI validation details only; ordinary
 ### npm mode (current `next`)
 
 The current compatibility-train line is npm mode: it targets the published
-`dsh-v0.1.7-rc.2` family declared by this checkout's `package.json` and
-resolved by its lockfile. The isolated npm driver installs that exact
+`dsh-v0.2.0-rc.1` family declared by this checkout's `package.json` and
+resolved by its lockfile (the runtime peer floor stays `>=0.1.7-rc.2`). The
+isolated npm driver installs that exact
 family from the public registry and exercises the TUI build/test/package path:
 
 ```sh

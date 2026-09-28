@@ -10,6 +10,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SessionTransitionGate } from '../src/transition-gate.ts'
+import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
 interface FakeAgent extends SteerAgentLike {
@@ -145,14 +147,14 @@ function makeDeps(options: {
   generation?: () => number
   notices?: string[]
   restored?: string[]
-  barrier?: SessionOperationBarrier
+  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
 }): SteerDeps {
   return {
     currentAgent: options.agent,
     currentGeneration: options.generation ?? (() => 1),
     pendingInputReader: pendingReaderFor(options.agent),
     writer: writerFor(options.agent),
-     barrier: options.barrier,
+     writerSection: options.writerSection,
     notify: (message, kind) => options.notices?.push(`${kind}: ${message}`),
     restoreDraft: (text) => { options.restored?.push(text); return true },
     createDraft: (text) => ({ id: `draft:${text}`, text }),
@@ -461,7 +463,7 @@ test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier t
   const events: string[] = []
   let releaseFirst!: () => void
   const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
-  const deps = makeDeps({ agent: () => agent, barrier })
+  const deps = makeDeps({ agent: () => agent, writerSection: (task) => barrier.runWriter('session-steer', task) })
   deps.writer = {
     prompt: async () => {
       events.push('draft')
@@ -493,6 +495,76 @@ test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier t
     'queued:b:end',
     'transition',
   ])
+})
+
+test('a transition that starts during an admitted steer must NOT truncate the FIFO sweep (writer-first)', async () => {
+  // REAL production-shaped race: two queued occurrences, the first write
+  // blocks, a REAL SessionTransitionGate transition starts (its task waits on
+  // the operation barrier), then the first write releases. The admitted steer
+  // writer must finish the WHOLE sweep before the transition runs.
+  //
+  // `useGateInFence` models the two wirings: `true` is the pre-fix production
+  // (`fence: () => gate.busy`), `false` is the fixed production (the main
+  // steer's fence carries only the surface lifetime). The gate/barrier are
+  // real, so the test fails if the gate creeps back into the writer's fence.
+  const runRace = async (useGateInFence: boolean): Promise<{
+    outcome: Awaited<ReturnType<typeof steerAll>>
+    steered: string[]
+    events: string[]
+    transitionRan: boolean
+  }> => {
+    const agent = fakeAgent(['a', 'b'])
+    const barrier = new SessionOperationBarrier()
+    const gate = new SessionTransitionGate()
+    const events: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+    const deps = makeDeps({
+      agent: () => agent,
+      writerSection: (task) => barrier.runWriter('session-steer', task),
+    })
+    deps.fence = useGateInFence ? () => gate.busy : () => false
+    deps.writer = {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async (_sessionId, messageId) => {
+        events.push(`${messageId}:start`)
+        if (messageId === 'a') await firstGate
+        agent.inbox.remove(messageId)
+        agent.steered.push({ id: messageId, text: '' })
+        events.push(`${messageId}:end`)
+        return { kind: 'committed' as const, value: undefined }
+      },
+    }
+    const steering = steerAll(deps, '', { draftHasPayload: false })
+    assert.equal(barrier.activeWriters, 1, 'the admitted steer owns the barrier before it yields')
+    let transitionRan = false
+    const transition = gate.run(() => barrier.runTransition(async () => {
+      transitionRan = true
+      events.push('transition')
+    }))
+    // Let the queued transition start so `gate.busy` is true while the writer
+    // is still admitted (and blocked on the first occurrence).
+    await Promise.resolve()
+    assert.equal(gate.busy, true, 'the real transition is executing while the writer is admitted')
+    releaseFirst()
+    const outcome = await steering
+    await transition
+    return { outcome, steered: agent.steered.map(message => message.id), events, transitionRan }
+  }
+
+  // Pre-fix production: the gate in the fence axis truncates the admitted
+  // sweep after the FIRST occurrence — the regression this lock guards.
+  const before = await runRace(true)
+  assert.equal(before.outcome, 'stale')
+  assert.deepEqual(before.steered, ['a'], 'the gate fence truncates the admitted FIFO sweep')
+  assert.equal(before.transitionRan, true)
+
+  // Fixed production: the WHOLE sweep is written, then the transition runs.
+  const after = await runRace(false)
+  assert.equal(after.outcome, 'ok')
+  assert.deepEqual(after.steered, ['a', 'b'], 'the admitted writer completes the whole sweep')
+  assert.deepEqual(after.events, ['a:start', 'a:end', 'b:start', 'b:end', 'transition'],
+    'the transition waits for the WHOLE writer')
 })
 
 test('a child queue sweep stops before the next occurrence after a same-id Agent rollover', async () => {
@@ -814,15 +886,30 @@ test('a TransitionInProgressError from the barrier refuses with the fence notice
   const notices: string[] = []
   const restored: string[] = []
   const deps = makeDeps({ agent: () => agent, notices, restored })
-  deps.barrier = {
-    runWriter: async () => { throw new TransitionInProgressError() },
-  } as unknown as SessionOperationBarrier
+  deps.writerSection = async () => { throw new TransitionInProgressError() }
   deps.fenceNotice = () => 'a session transition is in progress — try again in a moment'
   const outcome = await steerAll(deps, 'draft')
   assert.equal(outcome, 'stale')
   assert.deepEqual(agent.steered, [], 'no delivery during a transition')
   assert.deepEqual(restored, ['draft'], 'the draft comes back')
   assert.deepEqual(notices, ['info: a session transition is in progress — try again in a moment'])
+})
+
+test('a stale writer admission (SessionScopeSupersededError) refuses stale and restores the draft', async () => {
+  const agent = fakeAgent([])
+  const notices: string[] = []
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices, restored })
+  deps.writerSection = async () => { throw new SessionScopeSupersededError() }
+  // The PRODUCTION wiring configures a transition-specific fence notice: a stale
+  // capture must still take the STALE notice, never the transition one.
+  deps.fenceNotice = () => 'a session transition is in progress — try again in a moment'
+  const outcome = await steerAll(deps, 'draft')
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(agent.steered, [], 'no delivery for a superseded capture')
+  assert.deepEqual(restored, ['draft'], 'the draft comes back')
+  assert.deepEqual(notices, ['info: changed while sending'],
+    'a stale capture takes the refusal path (the draft is restored)')
 })
 
 test('the fence is a no-op when no transition is in flight', async () => {
@@ -1008,4 +1095,46 @@ test('semantic steer indeterminate outcome stays absent and never retries', asyn
   assert.equal(calls, 1)
   assert.deepEqual(restored, [])
   assert.deepEqual(notices, ['error: the session write outcome is indeterminate — do not retry automatically'])
+})
+
+test('P1 lock: a proven rejection reaches the owner seam with its code/message and settles nothing itself', async () => {
+  const agent = fakeAgent([])
+  const restored: string[] = []
+  const notices: string[] = []
+  const rejected: { code: string; message: string; count: number }[] = []
+  const deps = makeDeps({ agent: () => agent, restored, notices })
+  deps.onRejected = (error, steeredCount) => { rejected.push({ code: error.code, message: error.message, count: steeredCount }) }
+  deps.writer = {
+    prompt: async () => ({
+      kind: 'rejected' as const,
+      error: { code: 'session/writer-held', message: 'session is held by another writer — wait for it to release' },
+    }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'stale')
+  assert.deepEqual(rejected, [{
+    code: 'session/writer-held',
+    message: 'session is held by another writer — wait for it to release',
+    count: 0,
+  }], 'the refusal identity reaches the owner BEFORE any settlement')
+  assert.deepEqual(restored, [], 'the helper does not restore behind the owner')
+  assert.deepEqual(notices, [], 'the helper emits no user-facing notice for a proven refusal')
+})
+
+test('P1 lock: a queue-occurrence rejection carries the steered count to the owner seam', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const rejected: { code: string; count: number }[] = []
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices })
+  deps.onRejected = (error, steeredCount) => { rejected.push({ code: error.code, count: steeredCount }) }
+  deps.writer = {
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async (_sessionId, messageId) => messageId === 'a'
+      ? { kind: 'committed' as const, value: undefined }
+      : { kind: 'rejected' as const, error: { code: 'session/writer-held', message: 'session is held' } },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'stale')
+  assert.deepEqual(rejected, [{ code: 'session/writer-held', count: 1 }],
+    'the owner learns how many occurrences were steered before the refusal')
+  assert.deepEqual(notices, [], 'the helper emits no generic queue-stopped notice')
 })

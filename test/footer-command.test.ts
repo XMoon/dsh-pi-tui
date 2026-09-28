@@ -24,6 +24,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { emptyStatusSnapshot } from '../src/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -236,7 +237,8 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -262,7 +264,6 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -272,7 +273,6 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -290,7 +290,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
@@ -415,7 +415,8 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     },
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -440,7 +441,6 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -450,7 +450,6 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -468,7 +467,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
@@ -580,7 +579,8 @@ test('/footer Esc cancels without writing', async () => {
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -602,7 +602,6 @@ test('/footer Esc cancels without writing', async () => {
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -612,7 +611,6 @@ test('/footer Esc cancels without writing', async () => {
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -622,7 +620,7 @@ test('/footer Esc cancels without writing', async () => {
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (doc) => { if (doc !== undefined) applied.push({ ...doc }) },
@@ -660,7 +658,8 @@ test('/footer starts from the persisted custom layout when active', async () => 
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -682,7 +681,6 @@ test('/footer starts from the persisted custom layout when active', async () => 
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -692,7 +690,6 @@ test('/footer starts from the persisted custom layout when active', async () => 
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -702,7 +699,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: () => {},
@@ -741,7 +738,8 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -762,7 +760,6 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -772,7 +769,6 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -782,7 +778,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (doc) => {
@@ -853,7 +849,8 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -875,7 +872,6 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -885,7 +881,6 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -895,7 +890,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
@@ -946,7 +941,8 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -967,7 +963,6 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -977,7 +972,6 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -987,7 +981,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
@@ -1026,7 +1020,8 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   const runner: TuiCommandRunner = {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -1047,7 +1042,6 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -1057,7 +1051,6 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -1067,7 +1060,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
@@ -1135,7 +1128,8 @@ test('/footer save failures notify exactly once (validation and write failures)'
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
-    get liveAgent() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -1160,7 +1154,6 @@ test('/footer save failures notify exactly once (validation and write failures)'
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -1170,7 +1163,6 @@ test('/footer save failures notify exactly once (validation and write failures)'
     get pendingPreset() { return undefined },
     set pendingPreset(_id: string | undefined) {},
     get effectivePresetId() { return undefined },
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
@@ -1188,7 +1180,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
@@ -1251,7 +1243,8 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
-      get liveAgent() { return undefined },
+      ...sessionScopeFacts(() => undefined, () => 0),
+      currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -1272,7 +1265,6 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
       signal: new AbortController().signal,
-      get sessionGeneration() { return 0 },
       switchSession: async () => undefined,
       transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
         await steps.prepare?.()
@@ -1282,7 +1274,6 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       get pendingPreset() { return undefined },
       set pendingPreset(_id: string | undefined) {},
       get effectivePresetId() { return undefined },
-      refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
       awaitPendingDefaultWrite: async () => {},
       trackDefaultWrite: () => {},
       setModelSelectionPending: () => {},
@@ -1292,7 +1283,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-      withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
       withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
       enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
       applyFooterSettings: (d, savedCustomItems) => {
@@ -1375,7 +1366,8 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
-      get liveAgent() { return undefined },
+      ...sessionScopeFacts(() => undefined, () => 0),
+      currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -1396,7 +1388,6 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
       signal: new AbortController().signal,
-      get sessionGeneration() { return 0 },
       switchSession: async () => undefined,
       transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
         await steps.prepare?.()
@@ -1406,7 +1397,6 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       get pendingPreset() { return undefined },
       set pendingPreset(_id: string | undefined) {},
       get effectivePresetId() { return undefined },
-      refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
       awaitPendingDefaultWrite: async () => {},
       trackDefaultWrite: () => {},
       setModelSelectionPending: () => {},
@@ -1416,7 +1406,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-      withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
       withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
       enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
       applyFooterSettings: (d, savedCustomItems) => {
@@ -1485,7 +1475,8 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
     const runner: TuiCommandRunner = {
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
-      get liveAgent() { return undefined },
+      ...sessionScopeFacts(() => undefined, () => 0),
+      currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -1506,7 +1497,6 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
       signal: new AbortController().signal,
-      get sessionGeneration() { return 0 },
       switchSession: async () => undefined,
       transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
         await steps.prepare?.()
@@ -1516,7 +1506,6 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       get pendingPreset() { return undefined },
       set pendingPreset(_id: string | undefined) {},
       get effectivePresetId() { return undefined },
-      refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
       awaitPendingDefaultWrite: async () => {},
       trackDefaultWrite: () => {},
       setModelSelectionPending: () => {},
@@ -1526,7 +1515,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-      withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+      withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
       withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
       enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
       applyFooterSettings: (d, savedCustomItems) => {

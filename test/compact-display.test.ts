@@ -289,7 +289,8 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
   }
 
   // (b) Work A -> Assistant -> Preparing: the narration closes the run, so the
-  // call becomes a NEW pending Work after the boundary.
+  // call becomes a NEW ownerless run after the boundary — a fail-open
+  // Preparing row, never a second Activity header.
   {
     const { vt, app } = startApp('compact')
     app.setTranscript([
@@ -300,11 +301,11 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
     await vt.waitForRender()
     const lines = vt.getViewport()
     const view = lines.join('\n')
-    assert.equal(workHeaders(view).length, 2, `the narration mints a new Work run:\n${view}`)
+    assert.equal(workHeaders(view).length, 1, `the closed Work A renders alone; the pending run mints no Activity:\n${view}`)
     const narrationRow = lines.findIndex(line => line.includes('narration'))
     assert.ok(narrationRow >= 0, `the boundary row renders:\n${view}`)
     assert.ok(preparingRows(view).every(row => row > narrationRow),
-      `the pending Work must follow the closed boundary:\n${view}`)
+      `the pending Preparing row must follow the closed boundary:\n${view}`)
     app.dispose()
     startedApps.delete(app)
   }
@@ -330,7 +331,7 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
   }
 })
 
-test('an ephemeral pending Work renders Header + Tool slot with no lifecycle suffix', async () => {
+test('an ownerless pending run fails open: a full Preparing row, no Activity chrome', async () => {
   const { vt, app } = startApp('compact')
   app.setTranscript([
     { kind: 'assistant', turn: 1, text: 'narration' },
@@ -340,11 +341,10 @@ test('an ephemeral pending Work renders Header + Tool slot with no lifecycle suf
   await vt.waitForRender()
   const lines = vt.getViewport()
   const view = lines.join('\n')
-  assert.equal(workHeaders(view).length, 1, `a pending Work header renders:\n${view}`)
-  assert.ok(lines.some(line => /^\s*▸ Activity\s*$/.test(line)),
-    `the pending header carries NO lifecycle suffix (no visual jump when the durable span lands):\n${view}`)
-  assert.match(view, /Action:\s+Preparing Bash/)
-  assert.ok(!view.includes('preparing') || !lines.some(line => /▸ Activity ·/.test(line)))
+  assert.equal(workHeaders(view).length, 0, `no Activity header is minted for the pending run:\n${view}`)
+  assert.ok(!view.includes('Action:'), `no pseudo Action slot without an Activity owner:\n${view}`)
+  assert.match(view, /Preparing Bash pnpm test\.\.\. · 3 B/,
+    `the pending call renders as one full fail-open Preparing row:\n${view}`)
 })
 
 test('a live Preparing call never crosses a closed Work boundary', async () => {
@@ -1178,4 +1178,71 @@ test('internal card hierarchy keeps its indent while the outer chrome stays flat
   const childBody = indentOf(rows, '1 failed')
   assert.ok(childBody !== undefined && childBody > childHeader, `the PTC child body stays deeper than its header:\n${rows.join('\n')}`)
   app.stop()
+})
+
+// ── TOOL_NOT_STARTED standalone diagnostic (DSH 0.1.7-rc.2 compat) ────────
+
+/** A turn whose only process-plane evidence is a not-started recovery
+ * diagnostic: the assistant requested `bash` (durable tool-call block),
+ * no `tool/call` ever landed, and the official recovery closer settled it
+ * with error.code=TOOL_NOT_STARTED. */
+function notStartedFixture(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'run the checks' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{"command":"ls"}' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.' }],
+        isError: true,
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+      error: { name: 'ToolNotStartedError', code: 'TOOL_NOT_STARTED' },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'interrupted' } }, T0 + 4, 4),
+  ]
+}
+
+test('Compact keeps a TOOL_NOT_STARTED diagnostic standalone with no Activity Action', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, notStartedFixture())
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+
+  assert.ok(view.includes('Tool request not started · Bash'),
+    `the explicit not-started diagnostic is visible:\n${view}`)
+  assert.equal(workHeaders(view).length, 0,
+    `a not-started-only turn creates no Activity span:\n${view}`)
+  assert.ok(!view.includes('Action:'),
+    `the diagnostic never owns a collapsed Action slot:\n${view}`)
+  assert.ok(!/\d+ actions?/.test(view),
+    `the diagnostic contributes zero action statistics:\n${view}`)
+  assert.ok(!view.includes('[ok]') && !view.includes('[running]'),
+    `no executed-tool lifecycle pill is fabricated:\n${view}`)
+  assert.ok(!view.includes('$ {"command":"ls"}') && !view.includes('$ ls'),
+    `no shell-command execution preview is fabricated:\n${view}`)
+
+  // The expanded body is the authoritative upstream recovery guidance.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.ok(expanded.includes('interrupted before the Harness recorded it as started'),
+    `the expanded diagnostic keeps the DSH recovery guidance:\n${expanded}`)
 })

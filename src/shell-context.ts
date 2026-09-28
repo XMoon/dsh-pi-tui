@@ -18,7 +18,8 @@
 import { cancellationError } from './detached.ts'
 import { sessionUnchanged } from './steer.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
-import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
+import { TransitionInProgressError } from './session-operation-barrier.ts'
+import { SessionScopeSupersededError } from './app/session/scope.ts'
 
 /** The minimal agent surface the shell submit needs (the runner's live agent). */
 export interface ShellSubmitAgentLike {
@@ -37,21 +38,24 @@ export interface ShellSubmitDeps {
   /** Notice for a session switch detected mid-send. */
   staleNotice(): string
   /**
-   * The session-transition write fence: returns true while a session
-   * transition is in flight (quiesce → commit) — a followup in that
-   * window would target a session whose lock is about to be released
-   * (the old agent may be woken again between whenIdle and the lock
-   * handover). Optional; absent keeps the historical behavior.
+   * A post-admission LOCAL VALIDITY fence (surface lifetime / disposed). It runs
+   * only after the writer section was entered, so it MUST NOT read the session
+   * transition gate: an admitted writer is never truncated by a waiting
+   * transition — that admission belongs to `SessionRuntime.withWriter` alone.
+   * Optional; absent keeps the historical behavior.
    */
   fence?: () => boolean
   /** The fence refusal notice (defaults to {@link staleNotice}). */
   fenceNotice?: () => string
   /**
-   * The session operation barrier (convergence plan phase 3): the shell
-   * write runs inside `runWriter`, so a transition started while the
-   * shell result awaits drains it first.
+   * The submission writer admission (convergence plan phase 3): the shell
+   * write runs inside this section, so a transition started while the
+   * shell result awaits drains it first. The runner binds it to the captured
+   * live scope through `SubmissionRuntime.withWriter`, so the operation
+   * barrier has exactly ONE admission owner. Optional; absent keeps the
+   * direct/unit-call behavior.
    */
-  barrier?: SessionOperationBarrier
+  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
   /** Deliver the shell result through the semantic session writer. */
   writer: Pick<SessionWriter, 'prompt'>
   /** Build the user message (runner-side creation, keeps this module dsh-free). */
@@ -73,13 +77,21 @@ export async function submitShellResult(deps: ShellSubmitDeps, text: string): Pr
   const agent = deps.currentAgent()
   if (agent === undefined) return 'ok'
   const generation = deps.currentGeneration()
-  const barrier = deps.barrier
-  if (barrier !== undefined) {
+  const writerSection = deps.writerSection
+  if (writerSection !== undefined) {
     try {
-      return await barrier.runWriter(agent.session.id, async () => submitShellResultCore(deps, text, agent, generation))
+      return await writerSection(async () => submitShellResultCore(deps, text, agent, generation))
     } catch (error) {
+      // A frozen transition and a superseded capture are DIFFERENT refusals
+      // (both wrote NOTHING): report the refusal that actually happened and keep
+      // the card's output visible for a retry — never the transition notice for a
+      // stale capture.
       if (error instanceof TransitionInProgressError) {
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      if (error instanceof SessionScopeSupersededError) {
+        deps.notify(deps.staleNotice(), 'info')
         return 'stale'
       }
       throw error
@@ -101,11 +113,10 @@ async function submitShellResultCore(
     deps.notify(deps.staleNotice(), 'error')
     return 'stale'
   }
-  // The session-transition write fence: while a transition is in flight
-  // the old agent may be woken again — writing would target a session
-  // whose lock is about to be released (the two-writers race). The
-  // caller's card keeps the output visible; the `!` line can be re-run
-  // after the transition settles.
+  // The post-admission local validity fence (surface lifetime): the writer
+  // section was already entered, so this must never consult the session
+  // transition gate. The caller's card keeps the output visible; the `!` line
+  // can be re-run after the transition settles.
   if (deps.fence?.() === true) {
     deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'

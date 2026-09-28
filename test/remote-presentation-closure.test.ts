@@ -20,7 +20,8 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { RemotePendingInputReader } from '../src/runtime/remote/pending-input-reader-remote.ts'
 import { RemoteSubmissionPresentation } from '../src/submission-presentation.ts'
 import type { RemotePendingSubmission } from '../src/submission-presentation.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
+import type { RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
+import { createObservableGenerationHarness } from './support/remote-generation.ts'
 import { buildPendingPresentation } from '../src/pending-presentation.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -38,24 +39,6 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp } {
   app.start()
   startedApps.add(app)
   return { vt, app }
-}
-
-function generationHarness(): { source: RemoteConnectionGenerationSource; set(value: RemoteConnectionGeneration | undefined): void } {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  const listeners = new Set<() => void>()
-  return {
-    source: {
-      getSnapshot: () => current,
-      subscribe: listener => {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-    },
-    set(value) {
-      current = value
-      for (const listener of [...listeners]) listener()
-    },
-  }
 }
 
 /** One official durable inbox message shape (id + content + source). */
@@ -136,7 +119,7 @@ function presentOnce(
 test('a Remote local queued echo renders in the real queue pane marked sending', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: EMPTY_INBOX,
     running: true,
@@ -154,7 +137,7 @@ test('a Remote local queued echo renders in the real queue pane marked sending',
 test('a matching Host queue rpcId retires the Remote local duplicate in the rendered pane', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: {
       'next-turn': [{ id: 'occ-1', content: [{ type: 'text', text: 'REMOTE-QUEUED-LOCAL' }], source: { kind: 'user', rpcId: 'req-1' } }],
@@ -175,7 +158,7 @@ test('a matching Host queue rpcId retires the Remote local duplicate in the rend
 test('a Remote local steering echo renders in the steering lane and never in the queue pane', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: EMPTY_INBOX,
     running: true,
@@ -196,7 +179,7 @@ test('a Remote local steering echo renders in the steering lane and never in the
 test('a Remote local transcript echo renders in the tail lane marked sending', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: EMPTY_INBOX,
     running: false,
@@ -216,7 +199,7 @@ test('a Remote local transcript echo renders in the tail lane marked sending', a
 test('a replaced Connection generation clears the stale Remote presentation from the rendered surfaces', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: EMPTY_INBOX,
     running: true,
@@ -248,7 +231,7 @@ test('a replaced Connection generation clears the stale Remote presentation from
 test('a rendered SESSION switch clears the previous session Remote presentation', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const a = officialSession({
     inbox: EMPTY_INBOX,
     running: true,
@@ -279,7 +262,7 @@ test('a rendered SESSION switch clears the previous session Remote presentation'
 test('a Remote image-only local queued echo renders a non-empty attachment marker', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: EMPTY_INBOX,
     running: true,
@@ -303,7 +286,7 @@ test('a Remote image-only local queued echo renders a non-empty attachment marke
 test('a Remote image-only local steering echo renders in the lane, never the queue', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: EMPTY_INBOX,
     running: true,
@@ -329,7 +312,7 @@ test('a Remote image-only local steering echo renders in the lane, never the que
 test('the same authoritative occurrence is presented once even for two same-text Remote echoes', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  const generation = generationHarness()
+  const generation = createObservableGenerationHarness()
   const host = officialSession({
     inbox: {
       'next-turn': [{ id: 'occ-1', content: [{ type: 'text', text: 'SAME-TEXT' }], source: { kind: 'user', rpcId: 'req-1' } }],

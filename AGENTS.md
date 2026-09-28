@@ -131,6 +131,11 @@ extension-facing contract.
 - **Context presentation does not rewrite model input.** Keep model-facing bytes
   untouched; render parsed skill/system envelopes, never raw XML. See
   `test/rendering.test.ts`.
+- **Prove lifecycle invariants with a probe, not with intuition.** For
+  generation/lease, proxy-receiver, attachment and teardown-idempotence changes,
+  confirm the real numbers and identities (a targeted probe or test) instead of
+  reasoning from the code alone — this repository has had a double
+  `markAttachment()` inflate a generation. See `docs/concurrency.md`.
 
 ## Development
 
@@ -144,6 +149,55 @@ pnpm test
 
 Use the smallest relevant validation for the current change. Prefer targeted
 tests first; do not run expensive compatibility suites mechanically.
+
+A stage-final validation must not run the same suite twice. `pnpm verify:prepush`
+is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
+`test:fork`, `test:docs`, `test:tooling`, the architecture / boundary /
+keybinding / naming / session-event / installation-doc / pi-divergence /
+pi-vendor gates, `pnpm audit`, and finally `pnpm pack:release`. `pack:release`
+is NOT packaging-only: its `prepack` runs `clean` + `build` +
+`typecheck:bundle` + `test:product`, and its `postpack` runs the eight
+public-package smokes (tarball, extension fixture, advanced, phase4, unstable,
+vim, examples, composeAgent). So in one pass never also run `typecheck:bundle`,
+`test:product`, `scripts/tarball-smoke.mjs` or
+`scripts/compose-agent-compat-smoke.mjs` by hand, and never invoke
+`pnpm pack`/`pack:release` while a build or an artifact-dependent gate is
+running. `pnpm test` already contains `test:fork` + `test:product` +
+`test:tooling` + `test:docs`; prefer it over the individual pieces. What a
+stage-final pass still needs ON TOP of `verify:prepush`: the migration contract
+smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, the
+published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
+— `verify:prepush` does NOT contain them), `git diff --check` (unstaged and
+staged), plus whatever stage-specific validation the authority plan for the
+current stage requires (e.g. the Pre-M3 plan's §35.5/§35.6 matrix).
+
+Validation mechanics for this toolchain:
+
+* `packages/pi-tui/dist` is a build INPUT to the root bundle and to the tests:
+  run `pnpm build` before testing anything that depends on the fork, and never
+  run a build and an artifact-dependent test or gate at the same time.
+* Some bundle paths run under Node's strip-only TypeScript loader: new `src/**`
+  files must not use TypeScript parameter properties
+  (`constructor(private readonly x: T) {}`) — assign explicit fields instead.
+* `scripts/client-boundary-gate.mjs` counts a Host package import even when it is
+  TYPE-ONLY (`@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session`). Prefer a
+  local structural type or the owning port's type; see
+  `docs/client-server-coupling.md`.
+* Extending a shared interface (e.g. `TuiCommandRunner`, `TuiSettingsDoc`) also
+  reaches its test fakes and literal builders: update them with the change and
+  let `pnpm typecheck:bundle` enumerate the remainder.
+* Changing WHAT the public entry re-exports (moving or re-exporting a
+  publicly-exported type/function) changes the emitted declaration graph: the
+  bundled `dist/*.d.mts` may only carry the top-level regions allowlisted in
+  `scripts/tarball-smoke.mjs`. Run `pnpm build` and then
+  `node scripts/tarball-smoke.mjs` before pushing — the ordinary product suite
+  does NOT cover this (it is a `postpack`/CI check), and a stale `dist` makes it
+  pass locally.
+* A publicly-exported helper therefore lives in the public entry (`src/index.ts`)
+  or in an allowlisted TOP-LEVEL module that matches its natural ownership
+  (`src/compaction-presentation.ts`, `src/pending-presentation.ts`, ...), never
+  under `src/app/**` or `src/runtime/**`; the internal owner imports it (§27 of
+  the Pre-M3 convergence plan, and §5's `app/* -> presentation modules`).
 
 When entering a development worktree:
 

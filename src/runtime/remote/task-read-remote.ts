@@ -1,5 +1,5 @@
 /**
- * Read-only Task Center adapter over the official rc.1 Client model.
+ * Read-only Task Center adapter over the published DSH 0.1.7-rc.2 Client model.
  *
  * Child membership comes from the official Client Session projections
  * (`projectionsBySession[parentId].values.subagentCatalog`), parent
@@ -167,13 +167,15 @@ export class RemoteTaskReader implements TaskReader {
   private ensureWatch(parentSessionId: string): void {
     if (this.watchedSession === parentSessionId && this.releaseWatch !== undefined) return
     const previous = this.releaseWatch
-    this.releaseWatch = undefined
-    this.watchedSession = undefined
     // Acquire the successor FIRST, then release the predecessor: a watch
     // gap would drop the roster between the two calls (the official
     // release is also entry-bound, so releasing after the acquire can
-    // never tear the new stream down).
-    this.releaseWatch = this.jobs.watchRows(parentSessionId)
+    // never tear the new stream down). The predecessor stays tracked until
+    // the successor exists, so a synchronous acquire failure — defensive
+    // structural hardening; the adapter must not depend on an acquisition
+    // never throwing — cannot orphan a lease this reader still owns.
+    const successor = this.jobs.watchRows(parentSessionId)
+    this.releaseWatch = successor
     this.watchedSession = parentSessionId
     previous?.()
   }

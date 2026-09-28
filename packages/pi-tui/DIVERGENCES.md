@@ -756,7 +756,7 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - test/model-picker.test.ts: ModelPicker ownership-safe external dispose — dispose latches without close/apply/navigation, and a late write settlement after teardown makes no close/open decision
 - test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker ownership-safe external dispose — dispose latches, and a write settling after the submenu closed converges the outer row through the summarize seam without a late toast
 - test/advanced-interactive.test.ts: an approval-preserving fullscreen swap replaces (and disposes) the replaced approval frame — ownedApprovalFramesForTest stays 1 per swap and returns 0 after settle
-- test/runner-session-bootstrap.test.ts: switching sessions tears down the Job status viewer with its Task Browser (the tracked child closer)
+- test/runner-viewer-task-integration.test.ts: switching sessions tears down the Job status viewer with its Task Browser (the tracked child closer)
 
 #### Upstream comparison
 

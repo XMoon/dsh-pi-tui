@@ -1,6 +1,6 @@
 /**
  * Remote implementation of the semantic PendingInputReader port (D2.2),
- * migrated to the alpha2 durable inbox projection.
+ * migrated to the published durable inbox projection (0.1.7-rc.2).
  *
  * DSH 0.1.6-alpha.2 removed `SessionSnapshot.queue`: pending durable input is
  * only reachable through the standard projection face,

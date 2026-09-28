@@ -8,7 +8,7 @@ import {
   type RemoteTaskSessionsSource,
 } from '../src/runtime/remote/task-read-remote.ts'
 import { DirectTaskReader, type DirectTaskAgent, type DirectTaskChildEntry } from '../src/runtime/direct/task-read-direct.ts'
-import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
+import { createSnapshotGenerationHarness } from './support/remote-generation.ts'
 import type { TaskJobEntry, TaskSubagentEntry } from '../src/runtime/task-read-port.ts'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { IJobs } from '@deepseek-ai/dsh-api-job-controller/client'
@@ -16,19 +16,6 @@ import type { ConnectionGenerationState } from '@deepseek-ai/dsh-client-connecti
 
 function constructOfficialReader(sessions: ISessions, jobs: IJobs, generation: ConnectionGenerationState): RemoteTaskReader {
   return new RemoteTaskReader(sessions, jobs, generation)
-}
-
-interface GenerationHarness {
-  readonly source: RemoteConnectionGenerationSource
-  set(value: RemoteConnectionGeneration | undefined): void
-}
-
-function generationHarness(): GenerationHarness {
-  let current: RemoteConnectionGeneration | undefined = { id: 1 }
-  return {
-    source: { getSnapshot: () => current, subscribe: () => () => {} },
-    set(value) { current = value },
-  }
 }
 
 function child(
@@ -99,10 +86,12 @@ function jobsFixture(options: {
   releases: string[]
   droppedByRelease: string[]
   setRows(sessionId: string, rows: readonly RemoteJobView[] | undefined): void
+  failWatch(error: unknown): void
 } {
   const rows: Record<string, readonly RemoteJobView[]> = { ...options.rows }
   const watchCalls: string[] = []
   const releases: string[] = []
+  let watchError: unknown
   // Entry-bound releases, mirroring the official ClientJobs contract: a
   // release only drops ITS OWN acquisition, never a successor's rows.
   const droppedByRelease: string[] = []
@@ -110,6 +99,9 @@ function jobsFixture(options: {
     state: { getSnapshot: () => ({ rows: Object.fromEntries(Object.entries(rows).filter(([, value]) => value.length > 0)) }) },
     watchRows(sessionId: string) {
       watchCalls.push(sessionId)
+      // Fault injection: the structural source may fail synchronously in
+      // `watchRows`, and the reader must not orphan an owned lease.
+      if (watchError !== undefined) throw watchError
       let released = false
       return () => {
         if (released) return
@@ -124,6 +116,7 @@ function jobsFixture(options: {
     get watchCalls() { return watchCalls },
     get releases() { return releases },
     get droppedByRelease() { return droppedByRelease },
+    failWatch(error) { watchError = error },
     setRows(sessionId, value) {
       if (value === undefined || value.length === 0) delete rows[sessionId]
       else rows[sessionId] = value
@@ -136,7 +129,7 @@ test('official Client Sessions and Jobs faces satisfy the Task adapter boundary'
 })
 
 test('reads a settled projection and roster without sorting or leaking extra fields', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: {
       parent: { running: true },
@@ -168,7 +161,7 @@ test('reads a settled projection and roster without sorting or leaking extra fie
 })
 
 test('waits for a Client-owned trailing projection refresh before settling', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let refreshCalls = 0
   const jobs = jobsFixture({ rows: { parent: [jobView('trailing-job')] } })
   const reader = new RemoteTaskReader({
@@ -194,7 +187,7 @@ test('waits for a Client-owned trailing projection refresh before settling', asy
 })
 
 test('a ready projection with an empty catalog is an authoritative empty membership', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: { parent: { running: false } },
     projections: { parent: { entries: [], state: 'ready' } },
@@ -206,7 +199,7 @@ test('a ready projection with an empty catalog is an authoritative empty members
 })
 
 test('a projection error surfaces as an error, never an empty catalog', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const failure = new Error('projection unavailable')
   const client = sessionsFixture({
     byId: { parent: { running: false } },
@@ -217,7 +210,7 @@ test('a projection error surfaces as an error, never an empty catalog', async ()
 })
 
 test('an unknown official catalog mode maps to the read-only presentation', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: { parent: { running: false } },
     projections: { parent: { entries: [catalogEntry('child-unknown', 'unknown')], state: 'ready' } },
@@ -228,7 +221,7 @@ test('an unknown official catalog mode maps to the read-only presentation', asyn
 })
 
 test('membership and parent availability are separate authorities', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   // A parent ABSENT from the official list (no byId row) is unavailable
   // even though its projection is ready with children.
   const client = sessionsFixture({
@@ -241,7 +234,7 @@ test('membership and parent availability are separate authorities', async () => 
 })
 
 test('child rows never claim known children — the read faces carry no descendant fact', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   // Even a child whose own projection is loaded and non-empty keeps
   // hasChildren false: the client-side derivation would be load-dependent
   // and diverge from the Direct face (which cannot know it at all).
@@ -258,7 +251,7 @@ test('child rows never claim known children — the read faces carry no descenda
 })
 
 test('a parent present only as a retained fallback row is still known to exist', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   // `byId` includes retained subagent fallbacks beyond the Host list; a
   // parent that is itself a subagent is omitted from `ids` while still
   // existing, so availability follows byId presence, not ids membership.
@@ -272,7 +265,7 @@ test('a parent present only as a retained fallback row is still known to exist',
 })
 
 test('discards a refresh result when Connection generation changes', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let releaseRefresh!: () => void
   const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve })
   const client = sessionsFixture({
@@ -287,7 +280,7 @@ test('discards a refresh result when Connection generation changes', async () =>
 })
 
 test('honors caller cancellation before and after the official refresh', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let releaseRefresh!: () => void
   const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve })
   const client = sessionsFixture({
@@ -303,7 +296,7 @@ test('honors caller cancellation before and after the official refresh', async (
 })
 
 test('dispose during an awaited projection refresh discards the in-flight read', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let releaseRefresh!: () => void
   const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve })
   const client = sessionsFixture({
@@ -319,7 +312,7 @@ test('dispose during an awaited projection refresh discards the in-flight read',
 })
 
 test('a newer read for another parent supersedes the older in-flight read', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   let releaseA!: () => void
   const gateA = new Promise<void>(resolve => { releaseA = resolve })
   const client = sessionsFixture({
@@ -341,7 +334,7 @@ test('a newer read for another parent supersedes the older in-flight read', asyn
 })
 
 test('an absent Connection generation reads as unavailable', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   generations.set(undefined)
   const reader = new RemoteTaskReader(
     sessionsFixture({ byId: { parent: { running: false } }, projections: { parent: { entries: [], state: 'ready' } } }),
@@ -352,7 +345,7 @@ test('an absent Connection generation reads as unavailable', async () => {
 })
 
 test('the roster watch is retained across reads and switches with the parent session', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: { 'parent-a': { running: false }, 'parent-b': { running: false } },
     projections: {
@@ -387,8 +380,34 @@ test('the roster watch is retained across reads and switches with the parent ses
   assert.deepEqual(jobs.watchCalls, ['parent-a', 'parent-b', 'parent-a'])
 })
 
+test('a failed successor roster watch keeps the previous watch owned (no orphaned lease)', async () => {
+  const generations = createSnapshotGenerationHarness()
+  const client = sessionsFixture({
+    byId: { 'parent-a': { running: false }, 'parent-b': { running: false } },
+    projections: {
+      'parent-a': { entries: [], state: 'ready' },
+      'parent-b': { entries: [], state: 'ready' },
+    },
+  })
+  const jobs = jobsFixture({ rows: { 'parent-a': [jobView('a-1')], 'parent-b': [jobView('b-1')] } })
+  const reader = new RemoteTaskReader(client, jobs, generations.source)
+  await reader.readDirectChildren('parent-a')
+  assert.deepEqual(jobs.watchCalls, ['parent-a'])
+
+  // The successor acquisition fails synchronously (connection teardown). The
+  // reader must still OWN the predecessor watch, so dispose can release it.
+  jobs.failWatch(new Error('the connection is going away'))
+  await assert.rejects(() => reader.readDirectChildren('parent-b'), /connection is going away/)
+  assert.deepEqual(jobs.releases, [], 'a failed acquire must not release the predecessor early')
+
+  jobs.failWatch(undefined)
+  reader.dispose()
+  assert.deepEqual(jobs.releases, ['parent-a'],
+    'the predecessor watch must still be reachable and released by dispose')
+})
+
 test('dispose releases the retained watch exactly once and reacquisition stays safe', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: { parent: { running: false } },
     projections: { parent: { entries: [], state: 'ready' } },
@@ -410,7 +429,7 @@ test('dispose releases the retained watch exactly once and reacquisition stays s
 })
 
 test('an in-flight first roster frame reads as an empty roster, never an error', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: { parent: { running: false } },
     projections: { parent: { entries: [catalogEntry('child-a')], state: 'ready' } },
@@ -424,7 +443,7 @@ test('an in-flight first roster frame reads as an empty roster, never an error',
 })
 
 test('a roster settlement while the watch is retained updates the next read', async () => {
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const client = sessionsFixture({
     byId: { parent: { running: false } },
     projections: { parent: { entries: [catalogEntry('child-a')], state: 'ready' } },
@@ -567,7 +586,7 @@ test('Direct and Remote expose the SAME read-only DTO for an official unknown-mo
   // the official `mode: 'unknown'`. Both readers must present the identical
   // port DTO (read-only one-shot) — the parity smoke injects official
   // entries through JS, so this typed test is the contract proof.
-  const generations = generationHarness()
+  const generations = createSnapshotGenerationHarness()
   const direct = new DirectTaskReader({
     agentFor: id => id === 'parent' ? { status: 'idle' } : undefined,
     subagents: {

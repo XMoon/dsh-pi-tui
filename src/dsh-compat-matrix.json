@@ -5,19 +5,27 @@
     "`dshFrom` is the inclusive lower bound and the next row's `dshFrom` is the exclusive",
     "upper bound, so the rows are contiguous by construction. A row without `tui` has no",
     "released compatible TUI (the runtime notice offers the upgrade only). `versions`",
-    "lists the published DSH versions the row covers, oldest first.",
+    "lists the published DSH versions the row covers, oldest first. Historical rows name",
+    "PUBLISHED TUI identities; the row covering the current target may instead name the",
+    "RESERVED candidate release identity this checkout carries while a promotion line is",
+    "being developed and qualified — reservation starts that release line but does not by",
+    "itself freeze product scope, and the value becomes an ordinary published fact only",
+    "once the stable tag exists (see docs/releasing.md). There is deliberately no second",
+    "candidate matrix.",
     "`floor` is the catch-all below the oldest row. `current` describes the line this",
-    "checkout ships: the floor it imposes, the published DSH target and the recovery",
-    "wording. Consumed by src/startup.ts (inlined by the bundler) and, through",
-    "scripts/lib/dsh-compat.mjs, by the release tooling, the installation-doc gate and",
-    "the release-notes tests."
+    "checkout ships: the release line whose identity it reserves (`since`, kept equal to",
+    "package.json's version), the runtime floor it imposes, the recommended published DSH",
+    "target and the recovery wording. The floor and the target are distinct values and",
+    "must stay independently derived. Consumed by src/startup.ts (inlined by the bundler)",
+    "and, through scripts/lib/dsh-compat.mjs, by the release tooling, the",
+    "installation-doc gate and the release-notes tests."
   ],
   "current": {
-    "since": "0.4.9",
+    "since": "0.5.0",
     "requires": "DeepSeek Harness 0.1.7-rc.2 or later",
-    "upgradeDsh": "0.1.7-rc.2",
-    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.2",
-    "guidance": "This 0.4.9 line targets the published DeepSeek Harness 0.1.7-rc.2 distribution (the exact npm family is verified); see docs/dsh-compatibility.md."
+    "upgradeDsh": "0.2.0-rc.1",
+    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.1",
+    "guidance": "This 0.5.0 line runs against the published DeepSeek Harness 0.1.7-rc.2 runtime floor while the exact npm family is validated against the published 0.2.0-rc.1 distribution; see docs/dsh-compatibility.md."
   },
   "floor": {
     "below": "0.1.0-rc.8",
@@ -121,9 +129,10 @@
     },
     {
       "dshFrom": "0.1.7-rc.2",
-      "tui": "0.4.9",
+      "tui": "0.5.0",
       "versions": [
-        "0.1.7-rc.2"
+        "0.1.7-rc.2",
+        "0.2.0-rc.1"
       ]
     }
   ]

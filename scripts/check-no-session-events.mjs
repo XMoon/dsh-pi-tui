@@ -63,15 +63,27 @@ export const DEPRECATED_READER_PATTERNS = [
  * call sites; this allowlist is derived from the ACTUAL audited tree so the
  * gate passes on it (plan §4.6: the real tree must pass the baseline).
  */
+// A5-2 moved the runner body (and these call sites) from `src/index.ts` to
+// `src/app/bootstrap.ts`; the debt moved WITH them, never doubled and never
+// absorbed by the surface.
 export const DEPRECATED_READER_ALLOWLIST = [
-  { file: 'src/commands.ts', call: 'eventAt', site: 'const event = liveAgent.session.eventAt(SessionSeq(seq))', why: '/rewind candidate: one durable event by seq for the Direct in-process session' },
-  { file: 'src/commands.ts', call: 'snapshotEvents', site: 'const stats = computeStats(liveAgent.session.snapshotEvents())', why: '/status Direct stats fold over the in-process session log' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly SessionEvent[] = initialChild?.snapshotEvents() ?? []', why: 'Direct child-viewer observed history seed' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'Direct child-viewer durable history merge' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'Direct resume history branch' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: ': mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)', why: 'Direct resume history merge branch' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: 'const candidates = collectRewindCandidates(source.session.snapshotEvents())', why: 'Direct rewind candidate fold' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: "settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.snapshotEvents()))", why: 'Direct compaction-end context re-measure from the in-process log' },
+  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly Event[] = initialChild?.snapshotEvents() ?? []', why: 'child-viewer observed history seed (A5b-1 viewer owner)' },
+  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'child-viewer durable history merge (A5b-1 viewer owner)' },
+  { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'live-session resume history branch (A5b-1 presentation owner)' },
+  { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: ': mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)', why: 'live-session resume history merge branch (A5b-1 presentation owner)' },
+  { file: 'src/app/surface/application-events.ts', call: 'snapshotEvents', site: 'const candidates = collectRewindCandidates(source.session.snapshotEvents())', why: 'Direct rewind candidate fold (A5b-5 application-event owner; relocated from the composition root)' },
+  // A3-2 relocated the two command-fact reads from commands.ts into the
+  // scope-bound facade providers (the Direct implementation is now localized
+  // in the runner); the debt moved WITH the call site, never doubled. A3-5
+  // relocated the provider bodies into the runner's command-runtime surface
+  // hooks, so the same two call sites now read through `attachmentForSession`.
+  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'sessionStats: (sessionId) => computeStats(command.attachmentForSession(sessionId).session.snapshotEvents()),', why: '/status Direct stats fold over the in-process session log (A3-5 command-runtime surface hook)' },
+  { file: 'src/app/bootstrap.ts', call: 'eventAt', site: 'const event = session.eventAt(SessionSeq(seq))', why: '/copy last assistant-message read over the Direct in-process session log (A3-2 facade provider)' },
+  // A4-7 relocated the compaction-settle working read into the injected
+  // `currentWorkingFromLog` capability (the surface owns only the WHEN); the
+  // debt moved WITH the call site, never doubled. The surface never reads the
+  // live session log itself.
+  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'return agent === undefined ? false : workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability)' },
   { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },
   { file: 'src/runtime/direct/presentation-read-direct.ts', call: 'snapshotEvents', site: 'const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))', why: 'Direct presentation read fold over the in-process session log' },
   { file: 'src/transcript.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },

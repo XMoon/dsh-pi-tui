@@ -18,6 +18,57 @@ vendored build dependency and must never be published separately.
 - Never create or push a release tag until the local verification below is
   green. Never push without the user's explicit confirmation.
 
+## Version reservation and consumption
+
+A version present in Git is a **reserved candidate identity**, not proof of a
+published release. The stable tag is the boundary that commits the identity
+to the publication workflow:
+
+```text
+package.version present in Git     ≠ published release
+stable tag vX.Y.Z                  = identity committed to publication
+```
+
+When a stable release is produced through a promotion branch, the intended
+package version MAY be reserved very early whenever that identity is
+consumed by compatibility metadata (`src/dsh-compat-matrix.json`
+`current.since` and the current row's `tui`), candidate packaging, startup
+guidance, or release gates — the eventual qualification then validates the
+exact artifact intended for publication. Version-coupled metadata must move
+atomically (one partial move, e.g. a bumped version with a stale
+`current.since`, is a release bug; the peer-window tooling test rejects it).
+
+Reservation establishes IDENTITY ONLY — it is not a feature freeze. A
+promotion follows the staged model:
+
+```text
+1. Reserve release identity
+2. Qualify the target DSH baseline
+3. Complete the planned release-scoped development
+4. Enter RC freeze
+5. Run the final qualification
+6. Finalize the release metadata
+7. Merge to main
+8. Verify main
+9. Tag / publish
+```
+
+Steps 2 and 5 are DIFFERENT evidence. Baseline qualification proves the new
+DSH release does not regress the existing TUI; the final qualification —
+run after all release-scoped capability work and after RC freeze — proves
+the new DSH release × existing functionality × new release functionality ×
+the final package identity. Baseline evidence is not release authority once
+feature work has landed (see [docs/local-development.md](local-development.md)
+for the RC-freeze and peer-floor decision rules).
+
+Moving the candidate from the promotion branch to `main` does not require a
+second version bump. Before the tag, pre-freeze development and
+qualification fixes alike keep the reserved version (`0.5.0` stays `0.5.0`);
+consume a NEW version number only when (a) the previous version was already
+tagged/published, or (b) the maintainers deliberately reclassify the release
+scope — and then the whole version-coupled identity is updated atomically in
+one change.
+
 ## main / next synchronization
 
 - Shared fixes, installation guidance, and branch-neutral documentation land on
@@ -53,19 +104,33 @@ were a promised capability.
 
 ## 2. Update release metadata and documentation
 
-If a stable release is based on a mature `next` snapshot, first merge that
-snapshot from `next` into `main` as described in
-[docs/local-development.md](local-development.md). Complete this release
-checklist on `main`, then merge the resulting released `main` state back into
-`next` as the final promotion step.
+Stable release metadata may be finalized in one of two places:
+
+- **Promotion path (preferred):** when a stable release is promoted from a
+  mature `next` snapshot, the promotion branch reserves the version early
+  and finalizes the release metadata (changelogs, guidance, release-specific
+  docs) at the end of the branch, AFTER RC freeze and the final
+  qualification — preferably in a dedicated final commit. The merged
+  `main` candidate is then byte-for-byte the state intended to be tagged,
+  except for changes strictly required by the merge itself. See
+  [docs/local-development.md](local-development.md) for the staged
+  promotion flow.
+- **Direct path:** a release not using a promotion branch finalizes its
+  metadata directly on `main`.
+
+In both cases the tag is created only on the verified `main` commit; an
+untagged version is a reserved candidate identity (see "Version reservation
+and consumption" above).
 
 Choose exactly one release channel before editing metadata:
 
-- **Stable:** branch `main`, tag `vX.Y.Z`, npm dist-tag `latest`, and a stable
-  SemVer package version.
-- **Prerelease:** branch `next`, tag `next-vX.Y.Z-alpha.N` (or another
-  prerelease identifier), npm dist-tag `next`, and the same prerelease version
-  in `package.json`.
+- **Stable:** publication target `main`; stable tag `vX.Y.Z`; npm dist-tag
+  `latest`; a stable SemVer package version. Stable release metadata may be
+  prepared and finalized on the promotion branch — the stable tag itself
+  must land on the verified `main` commit.
+- **Prerelease:** publication target `next`; tag `next-vX.Y.Z-alpha.N` (or
+  another prerelease identifier); npm dist-tag `next`; and the same
+  prerelease version in `package.json`.
 
 The tag's commit must already be an ancestor of its required branch. A
 `next-v...` tag on `main`, or a stable `v...` tag on `next`, is a release error;
@@ -74,7 +139,9 @@ the CI `release-context` and ancestry gates enforce these rules again.
 For the selected package version `X.Y.Z` (including any prerelease suffix) on
 release date `YYYY-MM-DD`:
 
-1. Change the root `package.json` version to `X.Y.Z`.
+1. Ensure the root `package.json` version is reserved as `X.Y.Z` — on the
+   promotion path it is usually already reserved in Phase A, so this step is
+   a consistency confirmation, not a fresh edit.
 2. Update `src/dsh-compat-matrix.json`, the single source for the DSH/TUI
    pairing shared by `src/startup.ts`, the release tooling and the
    installation-doc gate. When the shipped DSH target changes, update `current`
@@ -118,7 +185,8 @@ release date `YYYY-MM-DD`:
 
 ## 3. Validate the release notes before tagging
 
-The release metadata script must pass before a release commit is made. It
+The release metadata script must pass before the release metadata is
+finalized and before the candidate is tagged. It
 checks the tag format, package version, both changelog sections, matching
 version/date headings, and non-empty release content:
 

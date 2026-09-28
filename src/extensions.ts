@@ -17,7 +17,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PI_TUI_EXTENSIONS_SERVICE, PiTuiExtensionServiceImpl } from './extension/service.ts'
-import { HOST_COMMAND_CATALOG } from './index.ts'
+// The host-owned command catalog lives in the command-policy module, never in
+// the package entry: the extension host and the entry must not import each
+// other (the catalog is a pure classification table).
+import { HOST_COMMAND_CATALOG } from './command-policy.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 
 /** Stable Cordis plugin name for the extension host row. */

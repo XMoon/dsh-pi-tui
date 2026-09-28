@@ -228,6 +228,34 @@ Manual acceptance under tmux:
     on` (tmux 2.9+) or use `mode=always` — the TUI never guesses, so an
     environment without forwarding under-notifies by design (safe
     default).
+13. **The inline TUI leaves the launch echo on screen** (no alternate
+    screen): a scripted pane capture sees BOTH the TUI frame and the echoed
+    launch command, so a "mounted" matcher must discriminate three states
+    that all contain the session id — the echoed `--session <id>` launch
+    line, the welcome card's padded label row (`session  <id>`, two
+    spaces), and the post-exit `To resume this session: … --session <id>`
+    banner. Route the id through a shell variable so the echo carries the
+    variable NAME, not the value: `TUI_E2E_SESSION=<id> && dsh … --session
+    $TUI_E2E_SESSION` (see `scripts/e2e-ownership.sh` `launch_tui`).
+14. **zsh does not word-split `${VAR:+--flag $VAR}`**: the composed flag
+    arrives as ONE argv element and commander reports `error: unknown
+    option '--session <id>'`. An `env VAR=x cmd ${VAR:+…}` prefix does not
+    help either — the shell expands before `env` runs, so the variable is
+    still unset. Use a separate assignment statement plus a bare `$VAR`
+    reference (safe for single-token ids).
+15. **npm and pnpm name the running dsh process differently**: an
+    npm-installed `.bin/dsh` is a shim script, so the process reads
+    `node …/node_modules/.bin/dsh …`; a pnpm symlink reads
+    `node …/@deepseek-ai/dsh/lib/bin.js …`. A pgrep anchor that only
+    accepts one layout silently finds no PID, the scripted `kill -9` kills
+    nothing, and every later case cascades with `SessionAlreadyOwnedError`
+    (hit for real in the ownership E2E). Anchor both:
+    `pgrep -f "^node .*(dsh/lib/bin\.js|\.bin/dsh) --profile <name>"`.
+16. **`pkill -f` can match the driver's own command line**: a cleanup
+    pattern that literally appears in your own shell command (the script
+    path, or the pattern text itself) kills your own run with SIGTERM and
+    looks like a mystery abort. Kill by recorded PID, or use the bracket
+    trick (`e2e-ownershi[p]`) so the pattern does not match its own text.
 
 ## Scripts
 

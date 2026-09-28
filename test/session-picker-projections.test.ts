@@ -25,6 +25,7 @@ import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -121,7 +122,8 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-        get liveAgent() { return state.agent },
+        ...sessionScopeFacts(() => state.agent, () => 1),
+        get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -157,13 +159,11 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
@@ -183,7 +183,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     extensions: undefined,

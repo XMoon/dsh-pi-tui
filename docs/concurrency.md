@@ -11,6 +11,17 @@ Session writer ownership has exactly two layers on the master baseline:
    `SessionOperationBarrier`, and generation/stale fences keep the TUI's
    own surface consistent while it switches sessions.
 
+The in-process layer lives in the session layer (A2): the ownership core
+(`src/app/session/ownership-core.ts`) owns the ONE current-owner slot, the
+session generation, the navigation epoch, the transition gate, the operation
+barrier and the owner-release ledger; the bound runtime
+(`src/app/session/runtime.ts`) runs the four commit shapes
+(`src/app/session/commit-order.ts`) plus the retirement coordination; the
+consumer-owned ports are in `src/app/session/owner-access.ts`; and
+`src/app/direct/owner-registry.ts` + `src/app/direct/owner-retirement.ts` are
+the Direct adapters. The runner keeps the surface providers and the Direct
+composition root.
+
 ## Host writer ownership: DSH SessionHandle + SessionWriteLease
 
 dsh sessions cannot be shared across processes. Two dsh processes (TUI +
@@ -123,21 +134,23 @@ On top of the gate, ordinary session transitions share ONE transaction shape
    but never deletes a persisted session, and dsh has no durable rollback
    API. A rejection is NEVER retried (no same-ID recovery): the old
    session stays current and the user may retry.
-4. COMMIT — a synchronous critical section (generation bump, live
-   handle/agent replacement) with no awaits between its steps.
-5. RETIRE — retire the old Direct owner (cancel → idle → drain
-   continuable descendants → final flush → dispose — see the Direct
-   top-level Agent retirement section); child surface/catalog work is
-   best-effort and the committed child always stands.
+4. COMMIT — a synchronous critical section: the generation reset runs BEFORE
+   the new owner is published into the ownership core
+   (`runOrdinaryCommit`, `src/app/session/commit-order.ts`), with no awaits
+   between its steps.
+5. RETIRE — retire the OLD owner through the retirement port, which owns the
+   official session-close order (see the session-owner retirement section);
+   child surface/catalog work is best-effort and the committed child always
+   stands.
 
 ### Fork dispatch and adoption
 
 `/fork` and `/rewind` are deliberately not ordinary transition transactions.
 They capture the source identity and navigation epoch, dispatch the semantic
 Host fork immediately without `whenIdle()` or the destructive transition gate,
-and keep the operation in the runner's pending-fork set through adoption or
-parking. The Host boundary fixes the completed-turn cut at admission, so a
-busy source is not waited to a later boundary.
+and keep the operation in the session runtime's pending-fork ledger through
+adoption or parking. The Host boundary fixes the completed-turn cut at
+admission, so a busy source is not waited to a later boundary.
 
 When a known child settles, the runner rechecks the captured identity. A newer
 navigation leaves the visible surface unchanged and parks the successful Direct
@@ -151,24 +164,33 @@ A rejected `create`/`open` is handled WITHOUT any publication-phase
 inference: the old session simply stays current and the user may retry.
 
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
-woken again by a prompt in `queue` or `steer` mode while the transition still awaits
-(flush, prepare, create). A write in that window would target a session
-the transition is about to retire. The transition gate therefore doubles
-as a WRITE FENCE: while a transition is in flight
-(`SessionTransitionGate.busy`), every agent-write entry point — plain
-submit, busy-Enter prompt, Ctrl+S per-occurrence queue steering, the command fallback prompt,
-Host command execution through `HostCommandPort` (a command that landed
-across a transition could write an Agent a concurrent transition is
-about to retire), the `!` shell submit, and the
-per-skill slash invocations — refuses the write, restores/keeps the draft
-or the invocation line (or keeps the shell card) and notifies "a session
-transition is in progress". The live `/preset` swap (the official
+woken again by a prompt in `queue` or `steer` mode while the transition still
+awaits (flush, prepare, create). A write in that window would target a session
+the transition is about to retire. Two mechanisms cover it, on DIFFERENT sides
+of admission:
+
+- A writer that starts BEFORE the transition has `whenIdle()` observe the
+  active turn, but the transition cannot wait for it via `whenIdle()`. The
+  `SessionOperationBarrier` is what makes the transition WAIT: every TUI-owned
+  session write runs inside `runWriter` and every transition inside
+  `runTransition`, so once a writer is ADMITTED the transition drains it before
+  quiescing the old agent. An admitted writer therefore never re-reads the
+  transition gate — doing so would truncate it mid-sweep (the writer-first
+  contract).
+- A writer that STARTS while a transition already holds the barrier is refused
+  by the barrier itself (`TransitionInProgressError`), restores/keeps the
+  draft, the invocation line or the shell card, and notifies "a session
+  transition is in progress". This is the only gate-based refusal for a
+  semantic write; there is no automatic retry.
+- The submission re-validation (agent object + session generation) covers the
+  window AFTER the transition commits.
+
+The legacy `SessionTransitionGate.busy` pre-read survives ONLY as the
+attachment-intake UX fence (`sessionTransitionPending()`); no semantic writer
+re-reads it. The live `/preset` swap (the official
 `agentPresets.select` blank check + recompose transaction + durable
 `agent-preset/selected` commit) likewise runs INSIDE the transition gate,
 so the captured Session can never be quiesced mid-swap (review round 27).
-The submission re-validation (agent object + session generation) covers
-the window AFTER the transition commits; the fence covers the window
-DURING it.
 
 ### SessionOperationBarrier — writers vs. transitions
 
@@ -179,6 +201,51 @@ inside `runWriter` and every transition inside `runTransition`: a
 transition waits for in-flight writers to drain before it quiesces the old
 agent, and writers that start while a transition holds the barrier are
 refused (`TransitionInProgressError`).
+
+### SessionRuntime.withWriter — the writer-admission owner
+
+Every TUI-owned session writer enters the barrier through the BOUND session
+runtime (`src/app/session/runtime.ts`, `SessionRuntime.withWriter(scope, task)`).
+This is the ONE writer-admission owner: the package entry and the composition
+root (`src/app/bootstrap.ts`) hold no direct `barrier.runWriter` call. No semantic writer re-checks the transition gate
+AFTER it was admitted: the submission-facing entrypoints (plain prompt, busy
+delivery, steer, queue pull-back, `HostCommandPort` submission, shell submit)
+admit through the bound runtime and, once admitted, carry only the
+surface-lifetime fence — an admitted writer is never truncated by a waiting
+transition. Reading `transitionGate.busy` is therefore NOT a writer-admission
+mechanism at all: it has exactly ONE production reader, the attachment-intake
+UX fence (`sessionTransitionPending()`, `src/commands.ts`). Every semantic
+writer — including the `HostCommandPort` submission — admits only through the
+bound runtime, and a `TransitionInProgressError` raised there is settled as a
+PROVEN pre-dispatch refusal (draft restored + the transition notice), never as
+a generic command failure.
+
+- The admission is SCOPE-BOUND and a NO-YIELD section: the scope-currentness
+  read (`SessionScopeAuthority.isCurrent`) and the barrier occupancy run in the
+  SAME synchronous call stack — there is deliberately no `await` between them,
+  so a transition started immediately after the writer returns must wait for it,
+  and a stale capture cannot be overtaken by a transition that commits in a
+  later microtask.
+- The two refusals are DISTINCT signals and must never be conflated. A STALE
+  capture (the owner/generation the scope pinned is gone) rejects with
+  `SessionScopeSupersededError` (exported from `src/app/session/scope.ts`)
+  BEFORE the task body runs; a writer arriving after a transition already FROZE
+  the barrier keeps the barrier's own `TransitionInProgressError` (no automatic
+  retry — the caller restores its draft). Collapsing them would misreport a
+  stale owner as a frozen transition.
+- The M3 `session/writer-held` caller/UI insertion point is
+  `src/app/submission/runtime.ts` (the lower-level writer admission owner):
+  it owns the submission-facing APPLICATION entrypoints (`submitPrompt`,
+  `deliverBusy`, `steer`, `pullBackQueue`, `executeHostCommandSubmission`,
+  `submitShell`) and, for each, the `WriteOutcome` classification plus the
+  draft/queue/card settlement. Since A5b the caller-side WORKFLOW (the submit
+  FIFO/ack/local-echo state, the dispatch and the shell card lifecycle) lives in
+  `src/app/submission/controller.ts` + `src/app/submission/local-shell.ts`, and
+  the one scope-fenced section helper is
+  `SubmissionController.withWriterSection` — ownership moved, the contract did
+  not. Every write they perform enters through `SessionRuntime.withWriter`, so
+  the future Remote writer-held recovery hangs off this ONE caller-side module
+  rather than every writer site.
 
 ### D2.1 write settlement
 
@@ -257,8 +324,9 @@ attachment preparation cannot let a later gesture overtake an earlier one.
 
 - A live Session model selection is a Session WRITE: `/model` dispatches
   `ModelCatalog.selectSessionModel` INSIDE the writer barrier
-  (`withSessionWriter`), so a transition that started first refuses the write
-  before dispatch and a transition that starts after waits for it. The picker
+  (`SessionRuntime.withWriter(scope, …)`), so a transition that started first
+  refuses the write before dispatch and a transition that starts after waits for
+  it. The picker
   itself enters an in-place `Selecting…` state (a duplicate apply is never a
   second commit) and the footer shows the in-flight choice as `(selecting…)`
   while keeping the authoritative current value. The
@@ -315,26 +383,46 @@ attachment preparation cannot let a later gesture overtake an earlier one.
 
 ### Generation/stale fences
 
-- The runner keeps a **monotonic session generation**, bumped on EVERY
-  session swap (switch, `/new`, `/fork`, rewind, open). Late async work
-  from the old session captures the generation it started under and
-  refuses to commit state once a newer generation owns the surface.
-- The submission re-validation checks the live agent object AND the session
-  generation before mutating visible state.
+- The ownership core (`src/app/session/ownership-core.ts`) keeps the ONE
+  **monotonic session generation**, bumped on EVERY session swap (switch,
+  `/new`, `/fork`, rewind, open) by the bound runtime. Late async work from the
+  old session captures the generation it started under and refuses to commit
+  state once a newer generation owns the surface. Session IDENTITY is the opaque
+  `SessionOwnerRef` + generation (`SessionSubject`), never a session id alone;
+  the Direct Agent object is reachable only through the Direct owner registry,
+  and the transitional `currentDirectAttachment()` projection serves Direct
+  DATA/OPERATION reads only — identity and currentness always come from the
+  core.
+- The submission re-validation checks the live owner SUBJECT (owner ref +
+  generation) before mutating visible state.
 - Rewind captures the source identity, generation and navigation epoch when the
   picker opens. Selection revalidates that full identity before dispatching the
   Host fork, so returning to the same Session id after newer navigation still
   rejects the stale picker row without creating a child.
 
-## Direct top-level Agent retirement
+## Session-owner retirement
 
-The Direct backend runs the TUI and the Host in one process and the TUI
-itself creates the top-level Agent, so closing the TUI surface must also
-retire that Direct ownership. This is a **Direct-only ownership escape**
-(`src/runtime/direct/owned-session-retirement.ts`), NOT a semantic port and
-NOT a future Remote `session.close` RPC — a future Remote client closes its
-client-side observation/connection state through official DSH client
-contracts and never destroys the Host Agent.
+The session layer drives retirement through the consumer-owned
+`SessionOwnerRetirement` port (`src/app/session/owner-access.ts`): quiesce or
+pre-cancel one owner, retire it in the official session-close order, park a
+refused fork's owner for a later claim, and report the retirement outcome: when
+a `durabilityFailure` exists the surface shows the SEMANTIC "the latest events
+may not be persisted" warning; otherwise, if any failures remain, it summarizes
+them for the user with the BACKEND-defined phase labels (diagnostic labels only
+— never a cross-backend contract). The bound runtime owns WHEN to retire and
+the control flow after an abort.
+
+The backend adapter that implements the port on the in-process path is
+`src/app/direct/owner-retirement.ts`; it owns the exactly-once shutdown cancel,
+the abort listener and the fixed-phase execution
+(`src/runtime/direct/owned-session-retirement.ts`). On the Direct backend the
+TUI and the Host share one process and the TUI created the top-level Agent, so
+the adapter's cancel/dispose really does release Agent-scoped work. That is
+NOT a future Remote `session.close` RPC — a Remote client closes its client-side
+observation/connection state through official DSH client contracts and never
+destroys the Host Agent, which is exactly why the port fixes only the
+observable contract (await quiescence and report which condition ended the
+wait) and leaves HOW an abort is reflected onto the owner to the backend.
 
 The retirement order is fixed (mirroring the official DSH ACP session
 close):

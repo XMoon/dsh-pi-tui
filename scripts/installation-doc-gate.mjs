@@ -38,9 +38,51 @@ const ACTIVE_FILES = [
   'test/dsh-runtime-boundary.test.mjs',
 ]
 const STABLE_COMMAND = 'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest'
-const DSH_ALLOW_SCRIPTS = '--allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext'
+const DSH_ALLOW_SCRIPTS_LIST = '@deepseek-ai/dsh-subprocess-local,koffi,node-pty'
+const DSH_ALLOW_SCRIPTS = `--allow-scripts=${DSH_ALLOW_SCRIPTS_LIST}`
 const DSH_TARGET_COMMAND = COMPAT_MATRIX.current.upgradeCommand
-const DSH_PEER_FLOOR = `>=${COMPAT_MATRIX.current.upgradeDsh}`
+const failures = []
+
+/** Every --allow-scripts package list appearing in a text, in order. */
+function allowScriptsLists(text) {
+  return [...text.matchAll(/--allow-scripts=(\S+)/gu)].map(match => match[1])
+}
+
+/** Every --allow-scripts package list appearing in a text must be exactly the
+ * converged policy list. A substring containment check cannot catch a
+ * silently APPENDED package (`,fs-ext` and friends), so compare the parsed
+ * lists for equality. Zero occurrences pass: files that derive the command
+ * from the matrix carry no literal, and presence is asserted separately
+ * where it is required. */
+function assertConvergedAllowLists(label, text) {
+  const lists = allowScriptsLists(text)
+  if (lists.some(list => list !== DSH_ALLOW_SCRIPTS_LIST)) {
+    failures.push(`${label}: every --allow-scripts list must be exactly ${DSH_ALLOW_SCRIPTS_LIST} (found: ${lists.join(' | ')})`)
+  }
+}
+
+/** The runtime peer floor comes from the package manifest, NOT from the
+ * compat matrix's recommended upgrade target: the minimum supported runtime
+ * and the recommended published target are deliberately distinct values, so
+ * deriving the floor from `current.upgradeDsh` would silently re-couple them.
+ * Every DSH runtime peer must declare the same range for one floor to exist. */
+const packagePeers = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).peerDependencies ?? {}
+const dshPeerRanges = [...new Set(Object.entries(packagePeers)
+  .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
+  .map(([, range]) => range))]
+if (dshPeerRanges.length !== 1) {
+  console.error(`installation-doc-gate FAILED: DSH runtime peers declare ${dshPeerRanges.length} distinct ranges: ${dshPeerRanges.join(', ')}`)
+  process.exit(1)
+}
+const DSH_PEER_FLOOR = dshPeerRanges[0]
+// The matrix's recommended command must carry the SAME converged allow list
+// the READMEs document — exactly (not as a substring, so a silently appended
+// package cannot pass), and present at all.
+assertConvergedAllowLists('src/dsh-compat-matrix.json current.upgradeCommand', COMPAT_MATRIX.current.upgradeCommand)
+if (allowScriptsLists(COMPAT_MATRIX.current.upgradeCommand).length !== 1) {
+  console.error(`installation-doc-gate FAILED: the compat matrix upgrade command must contain exactly one --allow-scripts list`)
+  process.exit(1)
+}
 const STABLE_DSH_CHANNEL = '@deepseek-ai/dsh@latest'
 const PREVIEW_COMMAND = 'pnpm compat:dsh:npm'
 const PREVIEW_DSH_CHANNEL = '@deepseek-ai/dsh@alpha'
@@ -48,7 +90,6 @@ const PREVIEW_TUI_CHANNEL = '@xmoon76/dsh-pi-tui@next'
 // Keep the exact forbidden command out of this source so the active-file scan
 // cannot accidentally flag the guard itself.
 const forbiddenGlobalTuiInstall = ['npm install -g', '@xmoon76/dsh-pi-tui'].join(' ')
-const failures = []
 
 function occurrence(text, marker) {
   return text.split(marker).length - 1
@@ -91,6 +132,9 @@ for (const definition of README_FILES) {
   check(occurrence(text, STABLE_COMMAND) === 1, `${definition.name}: stable profile command must occur exactly once`)
   check(stableSection.includes(STABLE_DSH_CHANNEL), `${definition.name}: stable install must use the DSH latest channel`)
   check(stableSection.includes(DSH_ALLOW_SCRIPTS), `${definition.name}: stable install must allow DSH native scripts`)
+  // Every allow list anywhere in the README must be the converged policy:
+  // historical commands belong to the dated changelogs, never the READMEs.
+  assertConvergedAllowLists(definition.name, text)
   // The npm compat command legitimately appears in the install section AND
   // the developer-oriented DSH compatibility section; the section-containment
   // check below keeps the install-section copy in place.
@@ -111,6 +155,8 @@ for (const relativePath of ACTIVE_FILES) {
   const path = join(ROOT, relativePath)
   const text = readFileSync(path, 'utf8')
   check(!text.includes(forbiddenGlobalTuiInstall), `${relativePath}: forbidden global TUI install command`)
+  // Any allow list that appears in an active file must be the converged one.
+  assertConvergedAllowLists(relativePath, text)
   if (relativePath === 'docs/dsh-compatibility.md') {
     check(text.includes(DSH_TARGET_COMMAND), `${relativePath}: the recommended DSH install command must remain exact`)
     check(text.includes(DSH_PEER_FLOOR), `${relativePath}: the ${DSH_PEER_FLOOR} peer floor must remain documented`)

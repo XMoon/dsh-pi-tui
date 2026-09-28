@@ -17,9 +17,10 @@
  * @module @xmoon76/dsh-pi-tui/steer
  */
 
-import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
+import { TransitionInProgressError } from './session-operation-barrier.ts'
+import { SessionScopeSupersededError } from './app/session/scope.ts'
 import { cancellationError } from './detached.ts'
-import type { SessionWriter, WriteOutcome } from './runtime/session-writer-port.ts'
+import type { SessionWriter, WriteError, WriteOutcome } from './runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
 
 /** The minimal agent surface the steer needs (the runner's live agent).
@@ -52,11 +53,11 @@ export interface SteerDeps {
    * submission changed, so no verbatim-retry promise can be made. */
   mergedNotice(): string
   /**
-   * The session-transition write fence: returns true while a session
-   * transition is in flight (quiesce → commit). The old agent may be
-   * woken again between whenIdle and the lock release, so a write in that
-   * window would target a session whose lock is about to be handed over —
-   * the two-writers race. Optional; absent keeps the historical behavior.
+   * A post-admission LOCAL VALIDITY fence (surface lifetime / disposed). It runs
+   * only after the writer section was entered, so it MUST NOT read the session
+   * transition gate: an admitted writer is never truncated by a waiting
+   * transition — that admission belongs to `SessionRuntime.withWriter` alone.
+   * Optional; absent keeps the historical behavior.
    */
   fence?: () => boolean
   /** The fence refusal notice (defaults to {@link staleNotice}). */
@@ -68,12 +69,24 @@ export interface SteerDeps {
    * queue mutations always go through the semantic SessionWriter. */
   writer: Pick<SessionWriter, 'prompt' | 'updateQueue'>
   /**
-   * The session operation barrier (convergence plan phase 3): the whole
-   * steer write runs inside `runWriter`, so a transition started while
+   * The submission writer admission (convergence plan phase 3): the whole
+   * steer write runs inside this section, so a transition started while
    * this steer awaits drains it first — the `fence` quick-refusal alone
-   * cannot stop a writer that started BEFORE the transition.
+   * cannot stop a writer that started BEFORE the transition. The runner binds
+   * it to the captured live scope through `SubmissionRuntime.withWriter`, so
+   * the operation barrier has exactly ONE admission owner. Optional; absent
+   * keeps the direct/unit-call behavior.
    */
-  barrier?: SessionOperationBarrier
+  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
+  /**
+   * The proven pre-dispatch refusal settlement (`rejected` only). The
+   * submission owner (`app/submission/runtime.ts`, the M3 `session/writer-held`
+   * insertion point) reads `error.code`/`error.message` and owns the
+   * user-facing settlement. When present, the helper invokes this INSTEAD of
+   * its historical stale restore/notice, so a proven refusal never becomes a
+   * blind "try again". Optional; absent keeps the direct/unit-call behavior.
+   */
+  onRejected?: (error: WriteError, steeredCount: number) => void
 }
 
 /** The notice for a submission refused by the session-transition fence. */
@@ -226,18 +239,27 @@ export function steerHasPayload(
  * queue write commits.
  */
 export async function steerAll(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
-  // The whole steer write runs inside the operation barrier: a transition
+  // The whole steer write runs inside the writer section: a transition
   // that starts while this steer awaits drains it first. The fence quick
   // refusal below only covers writers that START during a transition.
-  const barrier = deps.barrier
+  const writerSection = deps.writerSection
   const sessionId = deps.currentAgent()?.session.id
-  if (barrier !== undefined && sessionId !== undefined) {
+  if (writerSection !== undefined && sessionId !== undefined) {
     try {
-      return await barrier.runWriter(sessionId, () => steerAllCore(deps, text, options))
+      return await writerSection(() => steerAllCore(deps, text, options))
     } catch (error) {
+      // A frozen transition and a superseded capture are DIFFERENT refusals
+      // (both mean "this gesture did not send"): restore the draft and report the
+      // refusal that actually happened — never the transition notice for a stale
+      // capture.
       if (error instanceof TransitionInProgressError) {
         deps.restoreDraft(text)
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      if (error instanceof SessionScopeSupersededError) {
+        deps.restoreDraft(text)
+        deps.notify(deps.staleNotice(), 'info')
         return 'stale'
       }
       throw error
@@ -271,6 +293,13 @@ const handleWriteOutcome = (deps: SteerDeps, text: string, outcome: WriteOutcome
   if (outcome.kind === 'indeterminate') {
     deps.notify('the session write outcome is indeterminate — do not retry automatically', 'error')
     return 'indeterminate'
+  }
+  // A PROVEN pre-dispatch refusal (e.g. a future Remote `session/writer-held`):
+  // hand the code/message to the submission owner BEFORE any user-facing
+  // settlement — never the generic stale/retry notice.
+  if (outcome.kind === 'rejected' && deps.onRejected !== undefined) {
+    deps.onRejected(outcome.error, 0)
+    return 'stale'
   }
   const verbatim = deps.restoreDraft(text)
   deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
@@ -384,6 +413,13 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
       if (text !== '') deps.restoreDraft(text)
       deps.notify(`queue steering became indeterminate after ${steeredCount} message${steeredCount === 1 ? '' : 's'} — do not retry automatically`, 'error')
       return 'indeterminate'
+    }
+    // A PROVEN occurrence refusal: the submission owner settles it (restore +
+    // the refusal's own guidance); never the generic "queue steering stopped"
+    // retry notice.
+    if (outcome.kind === 'rejected' && deps.onRejected !== undefined) {
+      deps.onRejected(outcome.error, steeredCount)
+      return 'stale'
     }
     if (text !== '') deps.restoreDraft(text)
     deps.notify(`queue steering stopped after ${steeredCount} message${steeredCount === 1 ? '' : 's'}`, 'error')

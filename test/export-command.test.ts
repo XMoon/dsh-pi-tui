@@ -31,6 +31,7 @@ import { DirectSessionArchive } from '../src/runtime/direct/session-archive-dire
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { sessionScopeFacts } from './session-scope-facts.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -54,7 +55,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-        get liveAgent() { return state.agent },
+        ...sessionScopeFacts(() => state.agent, () => 1),
+        get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -174,7 +176,6 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -183,7 +184,6 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
-    refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
@@ -202,7 +202,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     extensions: undefined,

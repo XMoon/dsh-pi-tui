@@ -22,6 +22,33 @@ import ts from 'typescript'
 
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
+/** The runner composition source (A5-2 moved the runner body from the
+ * package entry into the composition root): these audits pin the runner
+ * SCOPE, whichever of the two files holds it. */
+const runnerSource = (): string => [
+  readFileSync(join(srcDir, 'index.ts'), 'utf8'),
+  readFileSync(join(srcDir, 'app', 'bootstrap.ts'), 'utf8'),
+].join('\n')
+
+/** The runner's lifecycle-root BLOCK: the arrow whose block declares
+ * `disposeSurface`. A5-4 named that arrow (`startRunner`) and hoisted the
+ * terminal catch out of the chained call, so the root is no longer a
+ * `void (async () => …)()` expression statement. */
+function lifecycleRootBlock(sourceFile: ts.SourceFile): ts.Block {
+  const candidates: ts.ArrowFunction[] = []
+  const findArrows = (node: ts.Node): void => {
+    if (ts.isArrowFunction(node)) candidates.push(node)
+    ts.forEachChild(node, findArrows)
+  }
+  findArrows(sourceFile)
+  const root = candidates.find(arrow => ts.isBlock(arrow.body) && arrow.body.statements.some(statement =>
+    ts.isVariableStatement(statement)
+    && statement.declarationList.declarations.some(declaration =>
+      ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface')))
+  assert.ok(root !== undefined, 'the startup lifecycle root (the arrow whose block declares disposeSurface) must exist')
+  return root.body as ts.Block
+}
+
 /** Recursively list every `.ts` file under a directory. */
 function listSourceFiles(dir: string): string[] {
   const files: string[] = []
@@ -210,8 +237,17 @@ test('no keybinding settings watch callback crosses the config port (migration b
         // `x.watch(...)` / `x?.watch(...)` — property-access callee named watch.
         if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'watch') {
           const receiver = unwrapParens(callee.expression)
-          if (ts.isIdentifier(receiver)
-            && (receiver.text === 'tuiSettings' || receiver.text === 'settings' || settingsAliases.has(receiver.text))) {
+          // A5b-2: owners receive the settings object through a deps field, so a
+          // watch call there is a QUALIFIED property receiver
+          // (`deps.tuiSettings.watch(...)`) — match those too, or the rule
+          // silently stops covering extracted settings behaviour.
+          const receiverName = ts.isIdentifier(receiver)
+            ? receiver.text
+            : ts.isPropertyAccessExpression(receiver) ? receiver.getText(sourceFile) : undefined
+          if (receiverName !== undefined
+            && (receiverName === 'tuiSettings' || receiverName === 'settings'
+              || receiverName === 'deps.tuiSettings' || receiverName === 'deps.settingsForms'
+              || settingsAliases.has(receiverName))) {
             return node
           }
         }
@@ -248,47 +284,16 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
   // handles destructuring (`const { x } = y`, `const [x] = y`), same-line
   // nested blocks and nested closures precisely — no regex/brace-depth
   // approximation.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const source = runnerSource()
   const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
   // Find the startup lifecycle root's async IIFE:
   // `void (async () => { ... })().catch(...)` — a void expression nested
   // inside the apply function. Round 31: NOT simply the first void
-  // statement — the lifecycle root is uniquely identified as the void
-  // statement whose arrow body declares `cleanup` (an earlier unrelated
-  // void expression must not hijack the anchor).
-  const candidates: ts.ExpressionStatement[] = []
-  const findVoidStatements = (node: ts.Node): void => {
-    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) candidates.push(node)
-    ts.forEachChild(node, findVoidStatements)
-  }
-  findVoidStatements(sourceFile)
-  const arrowOf = (statement: ts.ExpressionStatement): ts.ArrowFunction | undefined => {
-    let found: ts.ArrowFunction | undefined
-    const walk = (node: ts.Node): void => {
-      if (found !== undefined) return
-      if (ts.isArrowFunction(node)) {
-        found = node
-        return
-      }
-      ts.forEachChild(node, walk)
-    }
-    walk(statement.expression)
-    return found
-  }
-  const hasCleanup = (block: ts.Block): boolean =>
-    block.statements.some(statement =>
-      ts.isVariableStatement(statement)
-      && statement.declarationList.declarations.some(declaration =>
-        ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface'))
-  const lifecycleRoot = candidates.find(statement => {
-    const arrow = arrowOf(statement)
-    return arrow !== undefined && ts.isBlock(arrow.body) && hasCleanup(arrow.body)
-  })
-  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares disposeSurface) must exist')
-  const arrow = arrowOf(lifecycleRoot)!
-  const runnerBlock = arrow.body
-  assert.ok(ts.isBlock(runnerBlock), 'the lifecycle root body must be a block')
+  // statement — the lifecycle root is uniquely identified as the arrow whose
+  // block declares `disposeSurface` (A5-4 named it `startRunner`; an earlier
+  // unrelated arrow must not hijack the anchor).
+  const runnerBlock = lifecycleRootBlock(sourceFile)
 
   // Collect runner-scope `let`/`const` declarations (the arrow body's direct
   // children): name → declaration line (1-based).
@@ -378,13 +383,29 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
 })
 
 test('the restored fullscreen startup path initializes custom-item persistence before its callback can run', () => {
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
-  const helper = source.indexOf('const userFooterCustomItemsForSave =')
-  const fullscreenBoot = source.indexOf("if (tuiSettings?.get().fullscreen === 'on') app.setFullscreen(true)")
+  // A5b-2: the projection and the fullscreen boot path both moved into the
+  // settings owner, so the ordering is now structural: the owner initializes
+  // the projection in its factory body (before `applyBootDisplay` can invoke the
+  // fullscreen persistence path), and the composition root only constructs the
+  // owner before calling that boot step.
+  const owner = readFileSync(new URL('../src/app/surface/settings-runtime.ts', import.meta.url), 'utf8')
+  const helper = owner.indexOf('const userFooterCustomItemsForSave =')
+  const fullscreenBoot = owner.indexOf("if (deps.tuiSettings?.get().fullscreen === 'on') deps.surface.app.setFullscreen(true)")
   assert.ok(helper >= 0, 'the custom-item save projection must exist')
   assert.ok(fullscreenBoot >= 0, 'the restored fullscreen startup path must exist')
   assert.ok(helper < fullscreenBoot,
     'fullscreen startup can synchronously invoke its persistence callback; the custom-item save projection must be initialized first')
+  const root = runnerSource()
+  const construction = root.indexOf('const settings = createSettingsRuntime(')
+  // The FIRST path that can reach the owner is the synchronous display-preset
+  // migration callback inside `runDetached` (it calls the save projection), so
+  // the construction must precede THAT, not merely the later boot application.
+  const migrationUse = root.indexOf('settings.userFooterItemsForSave()')
+  const bootApply = root.indexOf('settings.applyBootDisplay()')
+  assert.ok(construction >= 0, 'the composition root must construct the settings owner')
+  assert.ok(migrationUse > construction,
+    'the settings owner must be constructed before the display-preset migration callback can reach it (a later construction swallows the canonicalizing write through a TDZ error)')
+  assert.ok(bootApply > construction, 'the boot display application must run after the owner is constructed')
 })
 
 test('legacy history moves to JSONL files and never re-enters Config', () => {
@@ -393,7 +414,7 @@ test('legacy history moves to JSONL files and never re-enters Config', () => {
   // way — history only ever lands in $DSH_HOME/user-history/*.jsonl files.
   // The old whole-document cleanup write (whose footerCustomItems
   // projection this guard used to pin) is gone with the old Settings store.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const source = runnerSource()
   assert.doesNotMatch(source, /settings history cleanup/u,
     'the retired whole-document history cleanup write must stay deleted')
   const migration = readFileSync(join(srcDir, 'legacy-settings-migration.ts'), 'utf8')
@@ -424,43 +445,13 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
   // TuiApp can fire it from its own startup-capable synchronous paths.
   // Non-function property values are eagerly EVALUATED during the call
   // itself, so they must never reference a later-declared binding either.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
+  const source = runnerSource()
   const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
-  // The lifecycle root IIFE (same anchor as the cleanup audit above):
-  // the void expression whose arrow body declares `cleanup`. Only
-  // bindings in THAT scope are the runner-scope slots this audit speaks
-  // about.
-  const candidates: ts.ExpressionStatement[] = []
-  const findVoidStatements = (node: ts.Node): void => {
-    if (ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression)) candidates.push(node)
-    ts.forEachChild(node, findVoidStatements)
-  }
-  findVoidStatements(sourceFile)
-  const arrowOf = (statement: ts.ExpressionStatement): ts.ArrowFunction | undefined => {
-    let found: ts.ArrowFunction | undefined
-    const walk = (node: ts.Node): void => {
-      if (found !== undefined) return
-      if (ts.isArrowFunction(node)) {
-        found = node
-        return
-      }
-      ts.forEachChild(node, walk)
-    }
-    walk(statement.expression)
-    return found
-  }
-  const hasCleanup = (block: ts.Block): boolean =>
-    block.statements.some(statement =>
-      ts.isVariableStatement(statement)
-      && statement.declarationList.declarations.some(declaration =>
-        ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface'))
-  const lifecycleRoot = candidates.find(statement => {
-    const arrow = arrowOf(statement)
-    return arrow !== undefined && ts.isBlock(arrow.body) && hasCleanup(arrow.body)
-  })
-  assert.ok(lifecycleRoot !== undefined, 'the startup lifecycle root IIFE (the void expression whose arrow declares disposeSurface) must exist')
-  const runnerBlock = arrowOf(lifecycleRoot)!.body as ts.Block
+  // The lifecycle root (same anchor as the cleanup audit above): the arrow
+  // whose block declares `disposeSurface`. Only bindings in THAT scope are the
+  // runner-scope slots this audit speaks about.
+  const runnerBlock = lifecycleRootBlock(sourceFile)
 
   /** Collect every bound name of a binding pattern. */
   const boundNames = (pattern: ts.BindingName, out: string[]): void => {
@@ -489,23 +480,33 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
     }
   }
 
-  // The single startProcessTui call inside the lifecycle root and its
-  // object-literal arguments (the options object). Scoped to the runner
-  // block: the audit speaks about RUNNER-scope bindings only.
+  // The single mount call inside the lifecycle root and its object-literal
+  // arguments (the mount deps object). A4: the call moved behind the surface
+  // owner, so the runner's anchor is `surface.start({...})`; its deps object is
+  // still evaluated in the runner's startup window, so the eager-read audit is
+  // unchanged in meaning. Scoped to the runner block: the audit speaks about
+  // RUNNER-scope bindings only.
   let appCall: ts.CallExpression | undefined
   const findCall = (node: ts.Node): void => {
     if (appCall !== undefined) return
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'startProcessTui') {
+    const isMountCall = ts.isCallExpression(node) && (
+      (ts.isIdentifier(node.expression) && node.expression.text === 'startProcessTui')
+      || (ts.isPropertyAccessExpression(node.expression)
+        && ts.isIdentifier(node.expression.expression)
+        && node.expression.expression.text === 'surface'
+        && node.expression.name.text === 'start')
+    )
+    if (isMountCall) {
       appCall = node
       return
     }
     ts.forEachChild(node, findCall)
   }
   findCall(runnerBlock)
-  assert.ok(appCall !== undefined, 'the startProcessTui call must exist in the runner scope')
+  assert.ok(appCall !== undefined, 'the mount call (startProcessTui / surface.start) must exist in the runner scope')
   const callLine = sourceFile.getLineAndCharacterOfPosition(appCall.getStart()).line + 1
   const objectArgs = appCall.arguments.filter(argument => ts.isObjectLiteralExpression(argument))
-  assert.ok(objectArgs.length > 0, 'startProcessTui must receive its options as object-literal arguments')
+  assert.ok(objectArgs.length > 0, 'the mount call must receive its deps as object-literal arguments')
 
   /** Callbacks TuiApp can invoke SYNCHRONOUSLY from its own
    * startup-capable paths: the requestRender → syncSurfaceGeometry chain
@@ -678,32 +679,32 @@ test('steerNow calls the empty-Ctrl+S gate BEFORE any runOwned/ensureSession wor
   // This audit pins the ORDER: someone moving the gate below the owned
   // workflow (or in front of the payload computation) breaks the deferred
   // no-creation contract even if every behavior test still passes.
-  const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
-  const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  // The steer body now lives in the submission runtime; the runner's
+  // `steerNow` is a thin hook-supplying delegation.
+  const source = readFileSync(join(srcDir, 'app', 'submission', 'runtime.ts'), 'utf8')
+  const sourceFile = ts.createSourceFile('runtime.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
-  // Locate the steerNow arrow function BY DECLARATION NAME: the runner
-  // scope declares `const steerNow = (text, onlyDraft, persistHistory)
-  // => { ... }` — the only arrow named steerNow.
-  let steerNow: ts.ArrowFunction | undefined
-  const findSteerNow = (node: ts.Node): void => {
-    if (steerNow !== undefined) return
-    if (ts.isVariableDeclaration(node)
-      && node.name.getText(sourceFile) === 'steerNow'
-      && node.initializer !== undefined
-      && ts.isArrowFunction(node.initializer)) {
-      steerNow = node.initializer
+  // Locate the steer body BY DECLARATION NAME.
+  let steerBody: ts.Block | undefined
+  const findSteerBody = (node: ts.Node): void => {
+    if (steerBody !== undefined) return
+    if (ts.isFunctionDeclaration(node)
+      && node.name !== undefined
+      && node.name.getText(sourceFile) === 'steerSubmission'
+      && node.body !== undefined) {
+      steerBody = node.body
       return
     }
-    ts.forEachChild(node, findSteerNow)
+    ts.forEachChild(node, findSteerBody)
   }
-  findSteerNow(sourceFile)
-  assert.ok(steerNow !== undefined, 'the steerNow arrow must exist in the runner')
-  const body = steerNow.body as ts.Block
+  findSteerBody(sourceFile)
+  assert.ok(steerBody !== undefined, 'the steerSubmission body must exist in the submission runtime')
+  const body = steerBody
 
   const gateLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes('steerHasPayload'))
   const ownedLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes("runOwned('steer'"))
   const ensureLine = body.statements.findIndex(statement => statement.getText(sourceFile).includes('ensureSession'))
-  assert.ok(gateLine !== -1, 'the steerHasPayload gate must be a direct statement in steerNow')
+  assert.ok(gateLine !== -1, 'the steerHasPayload gate must be a direct statement in the steer body')
   // The gate must run before the owned workflow starts (a reorder that
   // puts runOwned/ensureSession first would allow session creation).
   assert.ok(gateLine !== -1 && (ownedLine === -1 || gateLine < ownedLine),

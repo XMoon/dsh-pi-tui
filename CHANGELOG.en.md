@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-28
+
+### Installation and version pairing
+
+This stable release moves the exact DSH family used for development and
+compatibility validation to the published `0.2.0-rc.1`; the runtime peer floor
+stays `>=0.1.7-rc.2`, and the upgrade advice plus recovery command for old
+runtimes now point at `0.2.0-rc.1`. Installing DSH requires explicitly
+allowing its native install scripts, and `--allow-scripts` converges to the
+three packages that genuinely run scripts (DSH `0.2.0-rc.1` pins Koffi to
+`3.1.1`, so fresh Linux installs no longer need the remaining allowlist
+entries):
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.0
+dsh --profile pi-tui
+```
+
+Users who must keep an older DSH: `@deepseek-ai/dsh@0.1.7-rc.2` can keep the
+released `@xmoon76/dsh-pi-tui@0.4.9` (this release keeps the same floor, so
+upgrading to this version also runs); `@deepseek-ai/dsh@0.1.7-rc.1` uses
+`@xmoon76/dsh-pi-tui@0.4.8`; the older `@deepseek-ai/dsh@0.1.6-alpha.2` uses
+`@xmoon76/dsh-pi-tui@0.4.7-alpha.2`.
+
+- **The official native implementation of the session write lease is confirmed
+  as the `@deepseek-ai/node-addon-system/flock` prebuilt family, and this
+  repository retires the obsolete `fs-ext` manual-build workaround.** Isolated
+  install and compatibility environments no longer modify the official
+  distribution; a missing native payload fails loudly as a distribution
+  problem instead of a consumer-side node-gyp patch. DSH Source Mode
+  validation likewise moved to the `0.2.0-rc.1` release commit and fully
+  passed (the previous release waived it because the upstream rc.2 source
+  tree could not self-clean).
+
+### Fixed
+
+- When many subagents are tracked, the Task Center no longer starts several full
+  descendant traversals for one burst of lifecycle/tool/job/open invalidations:
+  invalidations arriving while a refresh is in flight are coalesced into a single
+  trailing refresh, so a new subagent is no longer pushed back by a refresh
+  storm. The cost of one upstream recursive traversal is unchanged by this fix.
+
 ## [0.4.9] - 2026-09-25
 
 ### Installation and version pairing
@@ -1523,7 +1566,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8
 [0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2

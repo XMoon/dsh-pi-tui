@@ -1,0 +1,825 @@
+/**
+ * CommandSurface (A5b-3, plan §A5b-3): the ONE owner of the command authority
+ * and its registration/catalog state machine, and of the TuiCommandRunner
+ * facade it registers.
+ *
+ * Ownership:
+ *
+ * - the claim tests installed by TUI command registration (the advertised
+ *   completion claim, the effective Host command-line claim + attachment
+ *   declaration, the live skill-wrapper test, the delivery binding and the
+ *   command draft disposition);
+ * - the catalog refresh coordinator + the late completion re-synthesis, the
+ *   `skills/change` coalescing gate and its one-shot subscription;
+ * - the exact-Agent admission helpers for a fenced live scope;
+ * - `registerCommands` (the one registration entry) and the live-session
+ *   catalog refresh;
+ * - the TuiCommandRunner facade (`buildRunner`), assembled from the bound
+ *   CommandRuntime plus the injected presentation/port capabilities.
+ *
+ * The module is deliberately neutral: the exact Agent, model-selection and
+ * session-id types are generic parameters, and the Cordis context, the semantic
+ * backend slices, the command registry lookup and the model/viewer/preset
+ * capabilities all arrive as narrow injected capabilities.
+ * @module @xmoon76/dsh-pi-tui/app/command/surface
+ */
+
+import type { Diag } from '../../diag.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
+import { runOwned } from '../../detached.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
+import { normalizeSkillInvocation } from '../../command-policy.ts'
+import { readSurfaceCatalog, type SurfaceCatalogContext } from '../../surface-catalog.ts'
+import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
+import type { SessionScopeAuthority } from '../session/scope.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from '../../skill-catalog-refresh.ts'
+import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
+import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
+import { copyToClipboard } from '../../clipboard.ts'
+import { isFocusDisplayPreset, type DisplayState } from '../../display-preset.ts'
+import { draftHasImages, prepareUserMessage } from '../../image/submit.ts'
+import type { ModelSelectionValue } from '../../model-selection.ts'
+import type { SessionScope } from '../session/scope.ts'
+import type { TuiApp } from '../../tui-app.ts'
+import type { CommandRuntime } from './runtime.ts'
+import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
+
+/** The catalog capability slice the command surface subscribes to. */
+export interface CommandCatalogCapability {
+  readonly skills: SkillCatalogCapability
+}
+
+/** One catalog refresh target (the semantic target, no Host type). */
+export type CommandCatalogTarget =
+  | { readonly kind: 'preset'; readonly presetId: string | undefined }
+  | { readonly kind: 'agent'; readonly key: number }
+
+/** One catalog refresh request as this owner builds it. The composition root
+ *  adapts it onto the port's request shape. */
+export interface CommandCatalogRequest<ExactAgent> {
+  readonly source: 'invalidation' | 'live-session'
+  readonly target: CommandCatalogTarget
+  readonly agent?: ExactAgent
+}
+
+/** One extension-registry settlement ref (the frozen runner shape). */
+type ExtensionHealthRef = Parameters<NonNullable<TuiCommandRunner['recordExtensionError']>>[0]
+
+/**
+ * The frozen TuiCommandRunner with the Host-typed model-selection / session-id
+ * members rebound to this owner's generic parameters. The composition
+ * instantiates the generics with the Host types; this module never names them,
+ * and `buildRunner` bridges the facade back onto the frozen contract.
+ */
+type RunnerFacade<Selection extends ModelSelectionValue, Id extends string> =
+  Omit<TuiCommandRunner, 'selected' | 'defaultSelection' | 'defaultIntent' | 'setDefaultIntent' | 'setModelSelectionPending' | 'enterView'> & {
+    readonly selected: SelectionRef<Selection>
+    defaultSelection(): Selection | undefined
+    readonly defaultIntent: Selection | undefined
+    setDefaultIntent(selection: Selection | undefined): void
+    setModelSelectionPending(selection: Selection | undefined, token?: number, status?: 'pending' | 'unresolved'): void
+    enterView(
+      childId: Id,
+      label: string | undefined,
+      mode: 'one-shot' | 'continuable',
+      parentSessionId: Id,
+      activity: 'running' | 'inactive',
+    ): Promise<void>
+  }
+
+/** The structural minimum of the exact live Agent this owner reads (the
+ *  session identity/header, the launch routing and the live status). */
+export interface CommandAgentShape {
+  readonly session: {
+    readonly id: string
+    readonly header: { readonly cwd?: string }
+  }
+  readonly options: { readonly provider?: string; readonly model?: string }
+  readonly status: string
+}
+
+/** The narrow capabilities the command surface consumes. */
+export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, ExactAgent extends CommandAgentShape> {
+  /** The Cordis context: carried ONLY as the frozen `TuiCommandRunner.ctx`
+   *  member (the composition root also uses it for service lookups on its own
+   *  side of the seam). */
+  readonly ctx: TuiCommandRunner['ctx']
+  /** The surface-catalog read context (a narrow view of the Cordis context,
+   *  cast once by the composition root). */
+  readonly surfaceCatalogContext: SurfaceCatalogContext
+  /** The diagnostic sink for command registration failures. */
+  readonly logError: (message: string) => void
+  readonly diag: Diag
+  /** The runner lifetime signal (the catalog coordinator). */
+  readonly signal: AbortSignal
+  /** The mounted app, read live (the mount precedes every command path). */
+  readonly app: () => TuiApp
+  /** The exact live Agent of the current owner, or undefined. */
+  readonly liveAgent: () => ExactAgent | undefined
+  /** The session scope authority (the ONLY currentness source). */
+  readonly sessionScope: SessionScopeAuthority
+  /** The ownership core (generation fence + session id). */
+  readonly ownership: {
+    readonly generation: () => number
+    currentSessionId(): string | undefined
+  }
+  /** The single-writer session-transition gate (the runner's withSessionTransition
+   *  and sessionTransitionPending seams). */
+  readonly transition: {
+    pending(): boolean
+    run<T>(task: () => Promise<T> | T): Promise<T>
+  }
+  /** The command registry lookup (the Host commands service), or undefined. */
+  readonly commandsRegistry: () => CommandRegistryLike | undefined
+  /** The narrow Direct seams the command runtime binding needs. These stay in
+   *  the composition root: they read the in-process Host session log and the
+   *  Host command registry. */
+  readonly direct: {
+    listScopedCommands: CommandRuntimeSurface['listScopedCommands']
+    sessionStats: CommandRuntimeSurface['sessionStats']
+    lastAssistantText: CommandRuntimeSurface['lastAssistantText']
+    promptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T> | T): Promise<T>
+  }
+  /** The semantic catalog capability (skills/change + standing read). */
+  readonly catalog: CommandCatalogCapability
+  /** Map one exact Agent onto the semantic catalog port's agent field. The
+   *  composition root owns the mapping (the port type stays out of this
+   *  module's contract). */
+  readonly toCatalogAgent: (agent: ExactAgent) => CatalogRefreshRequest['agent']
+  /** The preset facts (launch/pending/effective/blank), read live. */
+  readonly presets: {
+    readonly launch: string | undefined
+    pending(): string | undefined
+    setPending(id: string | undefined): void
+    current(): string | undefined
+    blank(): boolean | undefined
+  }
+  /** The resolved CLIENT working directory (the standing read scope). */
+  readonly clientCwd: string
+  /** The mounted-surface seams the runner facade delegates to. */
+  readonly surface: {
+    setNotificationMode(mode: string): void
+    setNotificationMethod(method: string): void
+    openJobView(jobId: string): void
+    openTasksBrowser(viewMode: 'quick' | 'full'): void
+  }
+  /** The semantic backend port slices the runner exposes unchanged. */
+  readonly backend: {
+    readonly sessionReader: TuiCommandRunner['sessionReader']
+    readonly sessionWriter: TuiCommandRunner['sessionWriter']
+    readonly interaction: TuiCommandRunner['interaction']
+    readonly catalog: TuiCommandRunner['catalog']
+    readonly config: TuiCommandRunner['config']
+    readonly hostFile: TuiCommandRunner['hostFile']
+  }
+  /** The bound session runtime entries the runner drives. */
+  readonly session: {
+    ensureSession(): Promise<void>
+    withWriter: CommandSessionRuntime['withWriter']
+    switchSession(sessionId: string): Promise<string | undefined>
+    forkSession: NonNullable<TuiCommandRunner['forkSession']>
+    transitionTo: TuiCommandRunner['transitionTo']
+  }
+  /** The status owner seams the runner delegates to. */
+  readonly status: {
+    forceContextMeasurement(): number | undefined
+    sessionCwd(): string
+    refresh(): void
+    updateWelcomeCard(): void
+  }
+  /** The settings owner seams the runner delegates to. */
+  readonly settings: {
+    applyFooterSettings: TuiCommandRunner['applyFooterSettings']
+    setDisplayPreset: NonNullable<TuiCommandRunner['setDisplayPreset']>
+  }
+  /** The model-selection owner (the generic selection type). */
+  readonly model: ModelSelectionOwner<Selection>
+  /** The viewer owner's enter seam (session ids stay strings). */
+  readonly viewer: {
+    enterView(
+      childId: string,
+      label: string | undefined,
+      mode: 'one-shot' | 'continuable',
+      parentSessionId: string,
+      activity: 'running' | 'inactive',
+    ): Promise<void>
+  }
+  /** The per-TUI draft stores. */
+  readonly drafts: {
+    readonly images: TuiCommandRunner['imageStore']
+    readonly files: NonNullable<TuiCommandRunner['fileStore']>
+  }
+  /** The extension registries (the runner's narrow read surface). */
+  readonly extensions: {
+    current(): TuiCommandRunner['extensions']
+    recordError(ref: ExtensionHealthRef, error: unknown): void
+    clearError(ref: ExtensionHealthRef): void
+  }
+  /** The profile-wide Plugin Manager controller (never session-owned). */
+  readonly pluginManager: {
+    open(): void
+    submenu(done: (selected?: string) => void): ReturnType<TuiCommandRunner['createPluginManagerSubmenu']>
+  }
+  /** The shared client clipboard delivery policy. */
+  readonly client: {
+    readonly runCopyCommand: Parameters<typeof copyToClipboard>[1]
+    readonly copyEnv: Parameters<typeof copyToClipboard>[2]
+  }
+  /** The late-bound submission seams (A5b-4 owns the controller): both are read
+   *  at call time, so neither can go stale. */
+  readonly submission: {
+    prepareDeps: () => Parameters<typeof prepareUserMessage>[2]
+    settleQueueRecalls(committed: boolean): void
+  }
+  /** The shared prompt-assembly state objects. */
+  readonly promptState: {
+    readonly progressUpdates: TuiCommandRunner['progressUpdatesState']
+    readonly responseStyle: TuiCommandRunner['responseStyleState']
+  }
+  /** The Direct TUI-settings facade (a Host value forwarded opaquely). */
+  readonly tuiSettings: TuiCommandRunner['tuiSettings']
+  /** The shared display state (read live by /display and the focus facade). */
+  readonly displayState: DisplayState
+  /** The session lifecycle port (/new and /fork). */
+  readonly agents: TuiCommandRunner['agents']
+  /** The deployment image policy, re-read dynamically. */
+  readonly imageLimits: TuiCommandRunner['imageLimits']
+  /** The rewind-picker entry (the runner's /rewind + double-Esc seam). */
+  readonly openRewindPicker: () => void
+  /** The ONE exit orchestration. */
+  readonly requestExit: () => void
+  /** The launcher's appExit. */
+  readonly exit: TuiCommandRunner['exit']
+}
+
+/** The command authority as the rest of the application consumes it. */
+export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgent extends CommandAgentShape> {
+  /** Register the TUI command surface once. */
+  register(initial?: InitialCommandCatalog): void
+  /** Refresh the live owner's scoped catalog through the coordinator. */
+  refreshLiveCatalog(agent: ExactAgent): Promise<void>
+  /** Is a slash name advertised by the CURRENT completion list? */
+  wasAdvertisedClaim(name: string): boolean
+  /** Does the CURRENT effective host catalog claim this line? */
+  hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** Is a slash name a LIVE TUI-owned skill wrapper? */
+  isSkillWrapperName(name: string): boolean
+  /** Consume one TUI-local command draft disposition. */
+  takeCommandDraftDisposition(commandId?: string): 'restored' | 'suppressed' | undefined
+  /** Re-synthesize the completion list (a late client contribution). */
+  refreshCompletions(): void
+  /** Bind one submission's resolved delivery for its launch window. */
+  withCommandDelivery<T>(delivery: SubmitDelivery, run: () => T): T
+  /** Request one catalog refresh through the coordinator. */
+  requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
+  /** Whether the catalog coordinator is registered yet. */
+  catalogRefreshAvailable(): boolean
+  /** Whether one submission is a TUI-owned skill invocation. */
+  isSkillInvocation(parsed: { name: string } | undefined, text: string): boolean
+  /** The exact Direct attachment of a fenced live scope. */
+  agentForLiveScope(scope: SessionScope): ExactAgent
+  /** The exact Direct attachment of an already-fenced live session id. */
+  attachmentForSession(sessionId: string): ExactAgent
+  /** Release the catalog coordinator (disposal orchestration). */
+  disposeCatalog(): void
+  /** Bind the semantic command runtime AND build the facade: the composition
+   *  root's single command-wiring step (plan §A5b-3, "Move together"). */
+  attachRuntime(): void
+  /** Build + store the TuiCommandRunner facade from a bound runtime. */
+  buildRunner(runtime: CommandRuntime): TuiCommandRunner
+  /** The stored TuiCommandRunner facade. */
+  runner(): TuiCommandRunner
+}
+
+/** Create the command authority owner (plan §A5b-3). */
+export function createCommandSurface<Selection extends ModelSelectionValue, Id extends string, ExactAgent extends CommandAgentShape>(
+  deps: CommandSurfaceDeps<Selection, ExactAgent>,
+): CommandSurface<Selection, ExactAgent> {
+  let runnerFacade: TuiCommandRunner | undefined
+  /** The stored facade accessor; the delivery binding and `registerCommands`
+   *  read it at call time, never as a construction-time capture. */
+  const runner = (): TuiCommandRunner => {
+    if (runnerFacade === undefined) throw new Error('the command runner is not built')
+    return runnerFacade
+  }
+  // M2: the plugin keybinding-sync unsubscribe slot is A4-5 surface-owned
+  // (`surface.bindPluginKeybinds` / `surface.dispose`); the runner no longer
+  // holds it.
+  // The catalog refresh coordinator: the ONE post-mount refresh owner
+  // (first session, switches, /preset, /reload). Declared here (before
+  // cleanup) for the same TDZ guard — cleanup disposes it, and a
+  // mid-startup HMR unload must never reference it while it is still in
+  // the temporal dead zone; it is assigned during command registration.
+  
+  let catalogCoordinator: CatalogRefreshCoordinator | undefined
+
+  /**
+   * Whether one submission is a TUI-owned skill invocation: a LIVE skill
+   * wrapper, or the explicit `/skill <name>` form. Skill delivery belongs
+   * to loadSkill in BOTH modes — it builds the normalized `/name` line,
+   * steers or queues it with the resolved mode, and injects the body
+   * whenever the host's dsh-tool-skill pre-step does not (a composition
+   * without that loader). A bare steered line would silently skip the
+   * skill body, and a missing skill registry is reported there too.
+   * @param parsed - the parsed slash command, undefined for a plain prompt.
+   * @param text - the submitted line.
+   */
+  
+  const isSkillInvocation = (parsed: { name: string } | undefined, text: string): boolean =>
+    parsed !== undefined && (parsed.name === 'skill'
+      ? normalizeSkillInvocation(text) !== undefined
+      : isSkillWrapperName?.(parsed.name) === true)
+
+  // The TUI-owned slash commands live on the commands service's global
+  // layer, which needs no agent — register them up front so the whole
+  // surface (including Tab completion) works before the first session
+  // exists. Session-backed handlers call runner.ensureSession() first;
+  // `refreshSkills` rebuilds the agent-scoped per-skill commands once a
+  // session becomes live.
+  
+  let commandsRegistered = false
+
+  /** The claim test installed by registerTuiCommands: is a slash name
+   * advertised by the CURRENT completion list? The dispatch captures it
+   * BEFORE any session creation (see dispatchViaSession). */
+  
+  let wasAdvertisedClaim: ((name: string) => boolean) | undefined
+
+  /** The claim test installed by registerTuiCommands: does the CURRENT
+   * effective host catalog claim THIS LINE (and does the claiming
+   * descriptor declare `input.attachments`)? The dispatch consults it
+   * BEFORE the busy queue/steer policy and for every attachment decision
+   * (PR115-fix problem 1). */
+  
+  let hostClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
+
+  /** The skill-wrapper test installed by registerTuiCommands: is a slash
+   * name a LIVE TUI-owned skill wrapper? The steer path consults it to
+   * decide whether a composition without the host skill-body loader must
+   * deliver through loadSkill instead of steering a bare line. */
+  
+  let isSkillWrapperName: ((name: string) => boolean) | undefined
+
+  /** The completion re-synthesis installed by registerTuiCommands: a late
+   * CLIENT command contribution must join the `/` menu without waiting for
+   * a session refresh (the extension-invalidate hook calls it). */
+  
+  let refreshCommandCompletions: (() => void) | undefined
+
+  /** The delivery binding installed by registerTuiCommands: bind one
+   * submission's resolved queue/steer mode for the synchronous window that
+   * launches a command execution (the TUI skill handlers consume it).
+   * Before the command surface is wired nothing can consume a binding, so
+   * the unwired default simply runs the launch. */
+  
+  let withCommandDelivery = <T>(_delivery: SubmitDelivery, run: () => T): T => run()
+
+  /** Consume TUI-local command draft dispositions after DSH normalizes the
+   * public CommandResult. A missing id is used only for a thrown command
+   * execution, which cannot return its generated id to this sink. */
+  
+  let takeCommandDraftDisposition: ((commandId?: string) => 'restored' | 'suppressed' | undefined) | undefined
+
+  /** The catalog refresh coordinator: the ONE post-mount refresh owner
+   * (first session, switches, /preset, /reload). Built inside
+   * registerCommands once the surface hooks exist. (Declared before
+   * cleanup — see the hoisted slot above.) */
+  
+  let catalogRefreshRequest: ((request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>) | undefined
+
+  /** `skills/change` coalescing: bursts of invalidation notifications cost
+   * at most two reads, and the follow-up re-read observes the CURRENT
+   * ownership (live agent vs standing preset). */
+  
+  let skillsChangeSubscribed = false
+
+  const skillsChangeGate = new CoalescingRefreshGate(() => {
+    runOwned('skills/change refresh', async () => {
+      const refresh = catalogRefreshRequest
+      if (refresh === undefined) return undefined
+      const liveAgent = deps.liveAgent()
+      const target = liveAgent === undefined
+        ? { kind: 'preset', presetId: deps.presets.pending() ?? deps.presets.launch } as const
+        : { kind: 'agent', key: deps.ownership.generation() } as const
+      return refresh({
+        source: 'invalidation',
+        target,
+        ...target.kind === 'agent' ? { agent: deps.toCatalogAgent(liveAgent!) } : {},
+      })
+    }, {
+      diag: deps.diag,
+      sessionId: () => deps.liveAgent()?.session.id,
+      onResult: (outcome) => {
+        // NOTIFY BEFORE settled(): if app.notify throws, runOwned routes
+        // to onError, whose settled() is then the ONLY settle — a dirty
+        // follow-up cannot be double-settled (a second settle would clear
+        // the follow-up's in-flight flag while it is still running).
+        if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
+          deps.app().notify(outcome.notice, 'error')
+        }
+        skillsChangeGate.settled()
+      },
+      onCancel: () => { skillsChangeGate.settled() },
+      onError: (error) => {
+        skillsChangeGate.settled()
+        deps.app().notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
+      },
+    })
+  })
+
+  /** Subscribe to the dsh-skill invalidation notification once, through
+   * the catalog capability (migration M1.8). The event carries no
+   * scope or cwd, so the refresh target follows the CURRENT ownership; an
+   * unavailable or throwing subscription degrades to no subscription —
+   * owner switches and /reload still refresh. The flag is set only after
+   * a successful subscribe, so a throwing subscribe can retry on a later
+   * registration attempt. */
+  
+  const subscribeSkillsChangeEvents = (): void => {
+    if (skillsChangeSubscribed) return
+    try {
+      deps.catalog.skills.onSkillsChange(() => skillsChangeGate.notify())
+      skillsChangeSubscribed = true
+    } catch (error) {
+      deps.diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
+    }
+  }
+
+  /**
+   * The exact Direct attachment of a scope, validated in ONE synchronous
+   * admission step: a stale scope throws `SupersededReadError` (never
+   * retargets to the current owner), a sessionless scope has no live read,
+   * and a current live scope that cannot resolve its matching Direct
+   * attachment breaks an internal invariant loudly.
+   */
+  
+  const agentForLiveScope = (scope: SessionScope): ExactAgent => {
+    if (!deps.sessionScope.isCurrent(scope)) {
+      throw new SupersededReadError('the session changed before the read')
+    }
+    const sessionId = scope.sessionId
+    if (sessionId === undefined) throw new Error('a live read requires a Session scope')
+    const agent = deps.liveAgent()
+    if (agent === undefined || agent.session.id !== sessionId) {
+      throw new Error('a current live scope must resolve its exact Direct owner')
+    }
+    return agent
+  }
+
+  /**
+   * The exact Direct attachment of an already-fenced live session id: the
+   * command runtime's synchronous `liveSessionId` fence proved the scope
+   * current in the SAME stack, so this only resolves the attachment and
+   * asserts the exact-owner invariant loudly.
+   */
+  
+  const attachmentForSession = (sessionId: string): ExactAgent => {
+    const agent = deps.liveAgent()
+    if (agent === undefined || agent.session.id !== sessionId) {
+      throw new Error('a current live scope must resolve its exact Direct owner')
+    }
+    return agent
+  }
+
+  /** Await one live-owner catalog refresh through the coordinator (the
+   * first deferred create and every session switch): the refresh attempt
+   * settles before the caller continues, and its outcome is an outcome —
+   * provider issues degrade fields, failures warn, the submission or the
+   * switch proceeds either way. */
+  
+  const refreshLiveCatalog = async (agent: ExactAgent): Promise<void> => {
+    const refresh = catalogRefreshRequest
+    if (refresh === undefined) return
+    await refresh({
+      source: 'live-session',
+      target: { kind: 'agent', key: deps.ownership.generation() },
+      agent: deps.toCatalogAgent(agent),
+    })
+  }
+
+  const registerCommands = (initial?: InitialCommandCatalog): void => {
+    if (commandsRegistered) return
+    const commands = deps.commandsRegistry()
+    if (commands === undefined) return
+    commandsRegistered = true
+    try {
+      const installed = registerTuiCommands(runner(), initial)
+      wasAdvertisedClaim = installed.wasAdvertised
+      hostClaimOf = installed.hostClaimOf
+      isSkillWrapperName = installed.isSkillWrapper
+      refreshCommandCompletions = installed.refreshCommandCompletions
+      withCommandDelivery = installed.withDelivery
+      takeCommandDraftDisposition = installed.takeCommandDraftDisposition
+      // The coordinator's surface hooks point INTO the command surface;
+      // the command runtime's refresh facades (and the switch/first-session
+      // path) route every post-mount refresh through `catalogRefreshRequest`.
+      catalogCoordinator = new CatalogRefreshCoordinator({
+        readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, deps.surfaceCatalogContext),
+        // The sessionless (preset) target reads the STANDING skill catalog
+        // through the catalog capability (migration M1.8) — the
+        // capability-gated cold path (standing key → global → degraded
+        // global with a notice), never an Agent probe: probes emit
+        // durable session events in this deployment (see
+        // docs/surface-catalog.md).
+        readStanding: (presetId, readSignal) =>
+          deps.catalog.skills.standing(presetId, deps.clientCwd, readSignal),
+        installSnapshot: (next) => installed.installSnapshot(next),
+        enterCatalogTransition: () => installed.enterTransition(),
+      }, deps.signal, deps.diag)
+      catalogRefreshRequest = (request) => catalogCoordinator!.refresh(request)
+      subscribeSkillsChangeEvents()
+    } catch (error) {
+      // A failed registration must not lock the surface forever (a locked
+      // flag would leave every later command resolving to a plain message
+      // silently): reset the flag for a later retry and surface the
+      // failure visibly instead of swallowing it.
+      commandsRegistered = false
+      const message = safeErrorMessage(error)
+      deps.logError(`tui-runner: command registration failed: ${message}`)
+      deps.diag.error('command registration failed', { error: message })
+      deps.app().notify(`command registration failed: ${message}`, 'error')
+    }
+  }
+
+
+  /**
+   * Build + store the TuiCommandRunner facade. Late-built on purpose: the
+   * facade consumes the submission deps (A5b-4) and, through them, the whole
+   * presentation surface. The composition calls this right after binding the
+   * semantic command runtime, before any registration. Every moved `let` slot
+   * that registration rebinds (`withCommandDelivery`) is read through the
+   * local accessor at call time, never captured by value.
+   */
+  /** The BOUND semantic command runtime (A3-5): it owns the scope/currentness
+   *  fence and the facade shapes; every Direct fact is injected here as a
+   *  narrow surface hook, and the Host skill catalog reads go through the
+   *  semantic capability. The binding is command-owned; only the Host-session
+   *  reads it needs stay in the composition root (`deps.direct`). */
+  const attachRuntime = (): void => {
+    const runtime = bindCommandRuntime({
+      scope: deps.sessionScope,
+      session: {
+        ensureSession: () => deps.session.ensureSession(),
+        withWriter: (scope, task) => deps.session.withWriter(scope, task),
+      },
+      skills: deps.catalog.skills,
+      surface: {
+        listScopedCommands: () => deps.direct.listScopedCommands(),
+        sessionRunning: (sessionId) => attachmentForSession(sessionId).status === 'running',
+        sessionRouting: (sessionId) => {
+          const agent = attachmentForSession(sessionId)
+          // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
+          // the Direct composition may leave them unset: their absence is real
+          // semantic optionality, never an invariant break.
+          return {
+            provider: agent.options.provider,
+            model: agent.options.model,
+            cwd: agent.session.header.cwd ?? deps.clientCwd,
+          }
+        },
+        approvalOverride: (sessionId) =>
+          deps.backend.config.permissions.approvalOverrideOf(sessionId),
+        sessionStats: (sessionId) => deps.direct.sessionStats(sessionId),
+        lastAssistantText: (sessionId) => deps.direct.lastAssistantText(sessionId),
+        refreshLiveCatalog: async (sessionId, source) => {
+          // SYNC admission: the exact Direct owner is captured HERE, before the
+          // read awaits (§10.2).
+          const agent = attachmentForSession(sessionId)
+          if (!catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
+          return requestCatalogRefresh({
+            source,
+            target: { kind: 'agent', key: deps.ownership.generation() },
+            agent: deps.toCatalogAgent(agent),
+          })
+        },
+        refreshStandingCatalog: (presetId, source) =>
+          catalogRefreshAvailable()
+            ? requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
+            : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' }),
+        promptAdmission: (sessionId, line, task) =>
+          deps.direct.promptAdmission(attachmentForSession(sessionId), draftHasImages(line, deps.drafts.images), async () => task()),
+      },
+    })
+    buildRunner(runtime)
+  }
+
+  const buildRunner = (runtime: CommandRuntime): TuiCommandRunner => {
+    const facade: RunnerFacade<Selection, Id> = {
+      ctx: deps.ctx,
+      app: deps.app(),
+      diag: deps.diag,
+      get currentSessionId() { return deps.ownership.currentSessionId() },
+      // The A3-5 semantic command runtime (scope/currentness, scoped catalog,
+      // skill execution, stats/read, catalog refresh, prompt admission and the
+      // writer exposure) — the runner delegates these members to it.
+      ...runtime,
+      // Completion-notification preference setters (the /settings panel
+      // writes): the controller applies the parsed value immediately and
+      // the panel persists the raw string through the config port.
+      setNotificationMode: (mode) => deps.surface.setNotificationMode(mode),
+      setNotificationMethod: (method) => deps.surface.setNotificationMethod(method),
+      ensureSession: () => deps.session.ensureSession(),
+      get selected() { return deps.model.selected },
+      // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
+      // or unresolved) falling back to the persisted global default. A fresh
+      // create never seeds from it — the Direct adapter captures the persisted
+      // Host default at admission.
+      defaultSelection: () => deps.model.defaultIntent.intent ?? deps.model.currentDefault(),
+      get defaultIntent() { return deps.model.defaultIntent.intent },
+      get defaultIntentRecord() { return deps.model.defaultIntent.record },
+      get defaultIntentOutcome() { return deps.model.defaultIntent.outcome },
+      awaitPendingDefaultWrite: (signal) => deps.model.awaitPendingDefaultWrite(signal),
+      trackDefaultWrite: (write) => deps.model.trackDefaultWrite(write),
+      setModelSelectionPending: (selection, token, status) => deps.model.setPending(selection, token, status),
+      reconcileDefaultIntent: (persisted) => deps.model.reconcileDefaultIntent(persisted),
+      setDefaultIntent: (next) => deps.model.setDefaultIntent(next),
+      settleIntent: (id, outcome) => deps.model.settleIntent(id, outcome),
+      get tuiSettings() { return deps.tuiSettings },
+      // /new and /fork create through the session lifecycle port (semantic
+      // requests — the Direct adapter resolves the preset composition).
+      agents: deps.agents,
+// M2: apply the persisted footer mode + layout (shared by /settings,
+      // /reload and the startup path).
+      applyFooterSettings: (doc, saved) => deps.settings.applyFooterSettings(doc, saved),
+      // The session READ port (migration M1.3): /sessions, /resume, /search,
+      // the title batches, the context measurement and the export read go
+      // through the port, never ctx directly.
+      sessionReader: deps.backend.sessionReader,
+      // PR D2: the /status explicit force — measure NOW through the
+      // coordinator (mark dirty + semantic reader), repaint the footer
+      // cheaply, and return the fresh (or last-good) value for the panel.
+      // Panel and footer share ONE cached measurement: no duplicate reads
+      // against the coordinator's cache, no stale footer after an explicit
+      // status (round-8 finding).
+      forceContextMeasurement: () => deps.status.forceContextMeasurement(),
+      // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
+      // delivery, exact queue removal, cancel and title ops go through the port.
+      sessionWriter: deps.backend.sessionWriter,
+      // The interaction port (migration M1.6): approval/question authority.
+      interaction: deps.backend.interaction,
+      // The catalog port (migration M1.8): models/providers, presets and
+      // skills — commands read Host catalogs through semantic DTOs.
+      catalog: deps.backend.catalog,
+      // The config port (migration M1.9): settings, provider profiles,
+      // credentials, authorization, permissions and the preset default.
+      config: deps.backend.config,
+      // The Host-file port (migration M1.10): `@`-mention discovery and
+      // send-time canonicalization against the Host filesystem.
+      hostFile: deps.backend.hostFile,
+      // The minimal commands registry for the TUI's OWN registrations
+      // (migration M1.11) — the runner assembly dependency, never a Host
+      // capability exposed to command handlers.
+      commandRegistry: deps.commandsRegistry(),
+      cwd: deps.clientCwd,
+      imageStore: deps.drafts.images,
+      fileStore: deps.drafts.files,
+      // Issue #7: `/copy` uses the SAME shared user-clipboard delivery
+      // policy as the fullscreen selection (see copySelection above).
+      copyToClipboard: (text) => copyToClipboard(text, deps.client.runCopyCommand, deps.client.copyEnv),
+      // The deployment image policy, re-read dynamically so a runtime
+      // reconfiguration is picked up (plan §10.1: never a cached copy).
+      imageLimits: () => deps.imageLimits(),
+      insertIntoEditor: (text) => deps.app().insertIntoEditor(text),
+      // The shared prepared-input pipeline (skills build their message
+      // through this — review finding 4).
+      prepareDraftMessage: (text) => prepareUserMessage(text, deps.drafts.images, deps.submission.prepareDeps()),
+      // M5: the extension registries (commands/themes/settings/autocomplete/
+      // keybindings), when the extension service is mounted. The /settings
+      // and /theme pickers read them; undefined degrades to the host-only
+      // panel.
+      get extensions() { return deps.extensions.current() },
+      recordExtensionError: (ref, error) => deps.extensions.recordError(ref, error),
+      clearExtensionError: (ref) => deps.extensions.clearError(ref),
+      /** The live session's workspace cwd (header), falling back to the
+       * process cwd before any session exists; the footer/welcome/
+       * completions/history follow it so a session switch updates the
+       * whole surface. */
+      sessionCwd: () => deps.status.sessionCwd(),
+      signal: deps.signal,
+      progressUpdatesState: deps.promptState.progressUpdates,
+      responseStyleState: deps.promptState.responseStyle,
+      /** Canonical display surface: /display and /focus compatibility both
+       * read and mutate the shared DisplayState through one setter. */
+      displayPreset: () => deps.displayState.preset,
+      setDisplayPreset: (preset) => deps.settings.setDisplayPreset(preset),
+      /** @deprecated Focus compatibility facade. */
+      focusEnabled: () => isFocusDisplayPreset(deps.displayState.preset),
+      setFocusMode: (enabled) => { deps.settings.setDisplayPreset(enabled ? 'focus' : 'full') },
+      get pendingPreset() { return deps.presets.pending() },
+      set pendingPreset(id: string | undefined) { deps.presets.setPending(id) },
+      /** The effective preset id for COLD (sessionless) reads: the run-local
+       * pending override ahead of the launch-time --preset (the SAME
+       * precedence ensureSession uses); undefined = the saved/default
+       * preset applies. */
+      get effectivePresetId() { return deps.presets.pending() ?? deps.presets.launch },
+      applyPermissionPreset: async (scope, presetId, presetSignal) => {
+        // A stale scope BEFORE the dispatch proves nothing ran: report `refused`.
+        if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }
+        agentForLiveScope(scope)
+        const outcome = await deps.backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
+        // The operation WAS dispatched. Losing the surface after the fact must NOT
+        // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and
+        // settlement are independent axes) — the caller may not claim "not applied".
+        if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
+        return { ownership: 'current' as const, outcome }
+      },
+      setSessionApprovalPolicy: (scope, value) => {
+        // Same contract for the synchronous write: validate, then dispatch in
+        // the SAME stack — the exact owner, never `sessionId` re-resolved later.
+        if (!deps.sessionScope.isCurrent(scope)) return 'superseded' as const
+        agentForLiveScope(scope)
+        deps.backend.interaction.setApprovalPolicy(scope.sessionId, value)
+        return 'applied' as const
+      },
+      switchSession: (sessionId) => deps.session.switchSession(sessionId),
+      forkSession: (sourceSessionId) => deps.session.forkSession(sourceSessionId),
+      transitionTo: (steps) => deps.session.transitionTo(steps),
+      currentPreset: deps.presets.current,
+      sessionBlank: deps.presets.blank,
+      // PR D2: the command surface's generic refresh is UI-only (a
+      // measurement-triggering command uses refreshContextMeasurement or
+      // the /status port call directly).
+      refreshStatus: () => deps.status.refresh(),
+      updateWelcomeCard: () => deps.status.updateWelcomeCard(),
+      openJobView: (jobId) => deps.surface.openJobView(jobId),
+      // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
+      // it opens the FULL browser explicitly.
+      openTasksBrowser: () => deps.surface.openTasksBrowser('full'),
+      openRewindPicker: deps.openRewindPicker,
+      // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
+      // NOT session-owned: it never creates or switches a Session.
+      openPluginManager: () => deps.pluginManager.open(),
+      createPluginManagerSubmenu: (done) => deps.pluginManager.submenu(done),
+      // The attachment-intake UX fence: the ONE production reader of the
+      // transition gate. Staging an attachment while a transition is in flight
+      // (quiesce → commit) would inject a draft into a session about to be
+      // retired. Semantic session writes never read this flag — they admit
+      // through the operation barrier (SessionRuntime.withWriter).
+      sessionTransitionPending: () => deps.transition.pending(),
+      // The single-writer session-transition gate: ordinary /new and
+      // command-side switches run create AND commit inside one exclusive
+      // section via this seam. Host fork dispatch is outside this FIFO;
+      // forked-child adoption and rewind navigation use their own gated
+      // adoption path.
+      withSessionTransition: <T>(task: () => Promise<T> | T) =>
+        deps.transition.run(async () => {
+          try {
+            return await task()
+          } finally {
+            // A command may fail during preflight before it calls
+            // transitionTo; do not leave a deferred recall unresolved.
+            deps.submission.settleQueueRecalls(false)
+          }
+        }),
+      enterView: (childId: Id, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: Id, activity: 'running' | 'inactive') =>
+        deps.viewer.enterView(childId, label, mode, parentSessionId, activity),
+      requestExit: deps.requestExit,
+      exit: deps.exit,
+    }
+    // The ONE generic→concrete bridge of this owner: the frozen
+    // `TuiCommandRunner` contract names the Host selection/session-id types,
+    // which cannot be imported here (boundary rule). The composition root
+    // instantiates the generics with exactly those Host types, so this cast is
+    // an identity at every instantiation; the facade itself is fully
+    // type-checked against `RunnerFacade<Selection, Id>` above.
+    runnerFacade = facade as unknown as TuiCommandRunner
+    return runnerFacade
+  }
+
+  const catalogRefreshAvailable = (): boolean => catalogRefreshRequest !== undefined
+  const requestCatalogRefresh = (request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome> => {
+    if (catalogRefreshRequest === undefined) return Promise.reject(new Error('the command catalog is not registered'))
+    return catalogRefreshRequest(request)
+  }
+  const disposeCatalog = (): void => {
+    catalogCoordinator?.dispose()
+    catalogCoordinator = undefined
+    // The Direct `skills/change` capability offers no unsubscribe, so a late
+    // event can still reach the coalescing gate after teardown. Clearing the
+    // request slot makes both refresh paths no-ops (they guard on undefined)
+    // instead of touching the disposed coordinator.
+    catalogRefreshRequest = undefined
+  }
+
+  return {
+    attachRuntime,
+    register: registerCommands,
+    refreshLiveCatalog,
+    wasAdvertisedClaim: (name) => wasAdvertisedClaim?.(name) === true,
+    hostClaimOf: (parsed) => hostClaimOf?.(parsed),
+    isSkillWrapperName: (name) => isSkillWrapperName?.(name) === true,
+    takeCommandDraftDisposition: (commandId) => takeCommandDraftDisposition?.(commandId),
+    refreshCompletions: () => refreshCommandCompletions?.(),
+    // The delivery binding is a LATE-REBOUND slot: read it on every call, or the
+    // owner would hand out the pre-registration default forever.
+    withCommandDelivery: (delivery, run) => withCommandDelivery(delivery, run),
+    requestCatalogRefresh,
+    catalogRefreshAvailable,
+    isSkillInvocation,
+    agentForLiveScope,
+    attachmentForSession,
+    disposeCatalog,
+    buildRunner,
+    runner,
+  }
+}

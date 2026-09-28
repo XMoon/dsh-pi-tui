@@ -56,6 +56,13 @@ export interface RetirementFailure {
 /** The retirement outcome: every phase failure, never a throw. */
 export interface RetirementReport {
   failures: readonly RetirementFailure[]
+  /**
+   * The contained failure that broke FINAL DURABILITY (this implementation's
+   * `flush` phase), when there was one — the surface must warn that the latest
+   * events may not be persisted. `undefined` when durability held. The consumer
+   * contract carries this SEMANTIC outcome; the phase names stay local.
+   */
+  durabilityFailure: RetirementFailure | undefined
 }
 
 /** Run one phase, recording (never throwing on) its failure. */
@@ -94,5 +101,7 @@ export async function retireDirectOwnedSession(
   await runPhase('descendants', deps.drainDescendants, failures)
   await runPhase('flush', deps.flush, failures)
   await runPhase('dispose', deps.disposeOwner, failures)
-  return { failures }
+  // The semantic outcome the consumer needs: which failure (if any) broke final
+  // durability. The consumer never has to know this implementation's phases.
+  return { failures, durabilityFailure: failures.find(failure => failure.phase === 'flush') }
 }

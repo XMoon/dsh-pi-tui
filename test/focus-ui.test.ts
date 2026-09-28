@@ -271,13 +271,17 @@ test('Focus expanded places Preparing rows after the process tail and before the
   const view = vt.getViewport()
   const joined = view.join('\n')
   const processRow = findRow(view, 'Read src/transcript.ts')
-  const preparingRow = findRow(view, 'Preparing Edit +1')
+  const preparingRow = findRow(view, 'Preparing Edit')
   const finalRow = findRow(view, 'The transcript folds events incrementally.')
   assert.ok(hasFocusHeader(joined, true), `expanded Thought missing:\n${joined}`)
   assert.ok(processRow >= 0 && preparingRow >= 0 && finalRow >= 0, `expanded ordering rows missing:\n${joined}`)
   assert.ok(processRow < preparingRow && preparingRow < finalRow,
-    `the pending Work card must sit at the process tail before the final:\n${joined}`)
-  assert.equal((joined.match(/Preparing Edit \+1/g) ?? []).length, 1, `the pending Work summary must render once:\n${joined}`)
+    `the fail-open Preparing rows must sit at the process tail before the final:\n${joined}`)
+  // The ownerless pending run renders one FULL row per live preview (edit at
+  // index 0, bash at index 1) — never an aggregated `+N` Activity card.
+  assert.equal((joined.match(/Preparing Edit/g) ?? []).length, 1, `the edit preview renders once:\n${joined}`)
+  assert.equal((joined.match(/Preparing Bash/g) ?? []).length, 1, `the bash preview renders once:\n${joined}`)
+  assert.ok(!joined.includes('+1'), `no aggregated pending Activity summary:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -3751,5 +3755,197 @@ test('collapsed Focus repaints the Action line and action stats when synthetic e
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('3 actions'), `the retry counts:\n${joined}`)
   assert.ok(joined.includes('Action:  Retry 2 in 4s · X: y'), `the latest retry owns the Action line:\n${joined}`)
+  app.stop()
+})
+
+// ── TOOL_NOT_STARTED standalone diagnostic (DSH 0.1.7-rc.2 compat) ────────
+
+/** A settled turn whose only process-plane evidence is a not-started
+ * recovery diagnostic for a requested `bash` call. */
+function notStartedTurn(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'run the checks' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'text', text: 'checking.' },
+          { type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{"command":"ls"}' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.' }],
+        isError: true,
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+      error: { name: 'ToolNotStartedError', code: 'TOOL_NOT_STARTED' },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'interrupted' } }, T0 + 4, 4),
+  ]
+}
+
+test('Focus keeps a TOOL_NOT_STARTED diagnostic standalone: no Action slot, no action count, no plugin renderer', async () => {
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerToolRenderer({
+    id: 'probe', toolName: 'bash',
+    render: () => ({ kind: 'text', spans: [{ text: 'PLUGIN_TOOL_RENDERER_SHOULD_NOT_RUN' }] }),
+  }, 'plugin')
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, notStartedTurn())
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+
+  assert.ok(!view.includes('PLUGIN_TOOL_RENDERER_SHOULD_NOT_RUN'),
+    `the keyed extension tool renderer must never present a not-started row:\n${view}`)
+  assert.ok(view.includes('Tool request not started · Bash'),
+    `the diagnostic is visible in the DEFAULT collapsed Focus view:\n${view}`)
+  assert.ok(!view.includes('Action:'),
+    `the diagnostic never becomes the collapsed Action owner:\n${view}`)
+  assert.ok(!/\d+ actions?/.test(view),
+    `the diagnostic is not counted in the action stats:\n${view}`)
+  assert.ok(!view.includes('[ok]') && !view.includes('[running]'),
+    `no executed-tool lifecycle pill is fabricated:\n${view}`)
+
+  // Opening the turn root reveals the diagnostic as a STANDALONE attention
+  // row (the shared classification already provides this — no Focus-specific
+  // predicate): never inside a Work span, never an executed tool card.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.ok(expanded.includes('Tool request not started · Bash'),
+    `the expanded Thought shows the standalone not-started diagnostic:\n${expanded}`)
+  assert.ok(expanded.includes('interrupted before the Harness recorded it as started'),
+    `the expanded diagnostic keeps the DSH recovery guidance:\n${expanded}`)
+  assert.ok(!expanded.includes('PLUGIN_TOOL_RENDERER_SHOULD_NOT_RUN'),
+    `the plugin tool renderer stays bypassed when expanded:\n${expanded}`)
+  assert.ok(!expanded.includes('Action:'),
+    `the expanded turn owns no Action slot:\n${expanded}`)
+  app.stop()
+})
+
+// ── Collapsed-Focus controls: the OTHER attention origins keep their
+// turn-level presentation and are NOT hoisted standalone (P1 fix) ────────
+
+/** A turn closed with the given end reason, carrying one real tool call so
+ * the turn has ordinary work beside the terminal fact. */
+function closedReasonTurn(reason: Record<string, unknown>): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'do work' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'ls' }) }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason }, T0 + 4, 4),
+  ]
+}
+
+test('collapsed Focus keeps turn-error/interrupted/max-tokens inside the Thought (no standalone duplicates)', async () => {
+  // Each case: the Focus header keeps its turn-level status label, and the
+  // synthetic terminal row's text appears ONLY inside the Thought's own
+  // labeled slots — never as a standalone hoisted card duplicating the fact.
+  const cases: ReadonlyArray<{ name: string; reason: Record<string, unknown>; label: RegExp; synthetic: RegExp; allowedOn: RegExp }> = [
+    {
+      name: 'turn-error',
+      reason: { kind: 'error', error: { code: 'E', message: 'boom' } },
+      label: /Failed/,
+      synthetic: /E: boom/,
+      allowedOn: /^Error:/,
+    },
+    {
+      name: 'turn-interrupted',
+      reason: { kind: 'aborted' },
+      label: /Interrupted/,
+      synthetic: /cancelled by user/,
+      allowedOn: /^Error:/,
+    },
+    {
+      name: 'turn-max-tokens',
+      reason: { kind: 'max-tokens' },
+      label: /Max tokens/,
+      synthetic: /max tokens reached/,
+      allowedOn: /^Error:/,
+    },
+  ]
+  for (const testCase of cases) {
+    const { vt, app } = startApp()
+    const folder = new TranscriptFolder()
+    applyMixed(folder, closedReasonTurn(testCase.reason))
+    app.setFocusMode(true)
+    show(app, folder)
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(testCase.label.test(view), `${testCase.name}: the Focus header keeps its turn-level status label:\n${view}`)
+    const occurrences = view.split('\n').filter(line => testCase.synthetic.test(line))
+    assert.ok(occurrences.every(line => testCase.allowedOn.test(line)),
+      `${testCase.name}: the synthetic terminal fact stays inside the Thought's labeled slots, never a standalone duplicate:\n${view}`)
+    // The process allows ONE live TuiApp: dispose before the next case.
+    startedApps.delete(app)
+    if (!app.isDisposed()) app.dispose()
+  }
+})
+
+test('a TOOL_NOT_STARTED diagnostic title never keeps a stale truncation after a resize', async () => {
+  const vt = new VirtualTerminal(24, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, notStartedTurn())
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  const narrow = vt.getViewport().join('\n')
+  assert.ok(narrow.includes('Tool request not sta'), `the narrow terminal truncates the diagnostic title:\n${narrow}`)
+  assert.ok(!narrow.includes('· Bash'), `the narrow terminal cuts the tool identity:\n${narrow}`)
+
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  const wide = vt.getViewport().join('\n')
+  assert.ok(wide.includes('Tool request not started · Bash'),
+    `the wide terminal rebuilds the title without the stale truncation (collapsed):\n${wide}`)
+
+  // The expanded layout bakes the title row too.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  vt.resize(24, 24)
+  await vt.waitForRender()
+  const narrowExpanded = vt.getViewport().join('\n')
+  assert.ok(!narrowExpanded.includes('· Bash'), `the narrow EXPANDED terminal cuts the identity again:\n${narrowExpanded}`)
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  const wideExpanded = vt.getViewport().join('\n')
+  assert.ok(wideExpanded.includes('Tool request not started · Bash'),
+    `the wide EXPANDED terminal rebuilds the title (no stale truncation):\n${wideExpanded}`)
   app.stop()
 })

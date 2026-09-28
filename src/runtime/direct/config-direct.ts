@@ -875,11 +875,15 @@ export class DirectPermissionConfig implements PermissionConfig {
     ])
   }
 
-  approvalOverrideOf(session: unknown): 'ask' | 'never' | undefined {
+  approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined {
     const approval = this.ctx.get('approval') as ApprovalServiceLike | undefined
     if (approval === undefined) return undefined
+    // The semantic port resolves the session id to the EXACT live Agent
+    // internally; the session object never crosses the boundary.
+    const agent = this.agentFor(sessionId) as { readonly session: unknown } | undefined
+    if (agent === undefined) return undefined
     try {
-      return approval.overrideOf(session)
+      return approval.overrideOf(agent.session)
     } catch {
       // A throwing approval service degrades to "no override", never
       // breaks the settings read.

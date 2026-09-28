@@ -23,6 +23,7 @@ import type { HostFilePort } from './host-file-port.ts'
 import type { SessionArchivePort } from './session-archive-port.ts'
 import type { HostCommandPort } from './host-command-port.ts'
 import type { PluginManagerPort } from './plugin-manager-port.ts'
+import type { JobObservationPort } from './job-observation-port.ts'
 
 /** The transport backends the TUI can run on. `direct` is the only one
  * today; the migration adds opt-in backends milestone by milestone. */
@@ -60,6 +61,9 @@ export interface Backend {
   readonly hostCommand: HostCommandPort
   /** The Plugin Manager domain port (P1-A): bundles, plugins, installs. */
   readonly pluginManager: PluginManagerPort
+  /** The selected-Job observation domain port (P1-B): one non-consuming
+   * observation stream for the Job the user opened. */
+  readonly jobObservation: JobObservationPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -78,6 +82,7 @@ export function createDirectBackend(
   sessionArchive: SessionArchivePort,
   hostCommand: HostCommandPort,
   pluginManager: PluginManagerPort,
+  jobObservation: JobObservationPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -94,5 +99,6 @@ export function createDirectBackend(
     sessionArchive,
     hostCommand,
     pluginManager,
+    jobObservation,
   }
 }
