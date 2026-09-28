@@ -222,55 +222,62 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // the handle (each `fromHandle` of a Remote reference wrapper is an
     // ownership transfer, never a free re-read).
     let committedOwner: SessionOwnerRef | undefined
+    // The exactly-once release of a NEW owner that was acquired but never
+    // published, STARTED synchronously in the commit section and AWAITED
+    // before this transition settles (so the gate/barrier it holds stay
+    // closed until the released reference/lease is actually gone — never a
+    // fire-and-forget retirement).
+    let preCommitRelease: Promise<void> | undefined
     let transitionCommitted = false
-    return runTransitionTo<T>({
-      quiesceOld: async () => {
-        const owner = core.owner()
-        if (owner === undefined) return
-        // QUIESCE first: after whenIdle the old owner can no longer produce turn
-        // events, so the final flush below is truly final. The wait is
-        // abort-aware: an exit during the quiesce cancels the CURRENT owner
-        // (which may be a NEW owner committed by an earlier queued transition),
-        // so the transition settles instead of hanging past the appExit
-        // watchdog.
-        await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
-        // Final flush before the switch. The owner is re-read AFTER the quiesce
-        // (the abort path may have swapped it), matching the pre-cutover read.
-        const flushOwner = core.owner()
-        if (flushOwner === undefined) return
-        await deps.retirement.flush(flushOwner)
-      },
-      commit: (next) => {
-        transitionCommitted = true
-        // Map the NEW owner BEFORE the commit section can throw: the commit
-        // ORDER stays fixed by `runOrdinaryCommit` (the generation reset runs
-        // BEFORE the new owner is published, so it observes the OLD owner),
-        // but a pre-publication seam failure must be able to release the
-        // acquired NEW owner exactly once instead of leaking its reference.
-        const nextOwner = deps.owners.fromHandle(next as SessionHandle)
-        if (nextOwner === undefined) throw new Error('ordinary transition published a handle without an owned Session generation')
-        try {
-          runOrdinaryCommit({
-            isSurfaceDisposed: deps.surface.isSurfaceDisposed,
-            settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
-            settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
-            resetSubmitLatency: deps.surface.resetSubmitLatency,
-            bumpGeneration: core.bumpGeneration,
-            publishOwner: () => {
-              committedOwner = nextOwner
-              core.setCurrentOwner(nextOwner, deps.owners.sessionId(nextOwner))
-              return deps.owners.completionIdentity(nextOwner)
-            },
-            setCompletionOwner: deps.surface.setCompletionOwner,
-          }, next)
-        } catch (error) {
-          if (core.owner() !== nextOwner) {
-            // Pre-publication failure: the NEW owner was acquired (its
-            // reference retained) but never committed. Release it exactly
-            // once through the owned-task model; OLD stays current and the
-            // original failure propagates unchanged.
-            runOwned('transition pre-commit owner release', () =>
-              deps.retirement.retire(nextOwner, 'transition').then(report => {
+    try {
+      return await runTransitionTo<T>({
+        quiesceOld: async () => {
+          const owner = core.owner()
+          if (owner === undefined) return
+          // QUIESCE first: after whenIdle the old owner can no longer produce turn
+          // events, so the final flush below is truly final. The wait is
+          // abort-aware: an exit during the quiesce cancels the CURRENT owner
+          // (which may be a NEW owner committed by an earlier queued transition),
+          // so the transition settles instead of hanging past the appExit
+          // watchdog.
+          await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
+          // Final flush before the switch. The owner is re-read AFTER the quiesce
+          // (the abort path may have swapped it), matching the pre-cutover read.
+          const flushOwner = core.owner()
+          if (flushOwner === undefined) return
+          await deps.retirement.flush(flushOwner)
+        },
+        commit: (next) => {
+          transitionCommitted = true
+          // Map the NEW owner BEFORE the commit section can throw: the commit
+          // ORDER stays fixed by `runOrdinaryCommit` (the generation reset runs
+          // BEFORE the new owner is published, so it observes the OLD owner),
+          // but a pre-publication seam failure must be able to release the
+          // acquired NEW owner exactly once instead of leaking its reference.
+          const nextOwner = deps.owners.fromHandle(next as SessionHandle)
+          if (nextOwner === undefined) throw new Error('ordinary transition published a handle without an owned Session generation')
+          try {
+            runOrdinaryCommit({
+              isSurfaceDisposed: deps.surface.isSurfaceDisposed,
+              settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
+              settleLocalSubmitAck: deps.surface.settleLocalSubmitAck,
+              resetSubmitLatency: deps.surface.resetSubmitLatency,
+              bumpGeneration: core.bumpGeneration,
+              publishOwner: () => {
+                committedOwner = nextOwner
+                core.setCurrentOwner(nextOwner, deps.owners.sessionId(nextOwner))
+                return deps.owners.completionIdentity(nextOwner)
+              },
+              setCompletionOwner: deps.surface.setCompletionOwner,
+            }, next)
+          } catch (error) {
+            if (core.owner() !== nextOwner) {
+              // PRE-publication failure: the NEW owner was acquired (its
+              // reference retained) but never committed. Release it exactly
+              // once; OLD stays current and the original failure propagates
+              // unchanged. The release is awaited before the transition
+              // settles (see the catch below).
+              preCommitRelease = deps.retirement.retire(nextOwner, 'transition').then(report => {
                 for (const failure of report.failures) {
                   deps.diag.error('pre-commit NEW owner release failed', {
                     session: deps.owners.sessionId(nextOwner),
@@ -278,11 +285,22 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                     error: failure.error,
                   })
                 }
-              }), { diag: deps.diag, sessionId: () => undefined })
+              })
+              throw error
+            } else {
+              // POST-publication failure (a synchronous seam after
+              // `publishOwner`): the child IS committed — `core.setCurrentOwner`
+              // already succeeded. Contain it as a failed post-commit step and
+              // let the transition proceed to the OLD retirement: the
+              // committed child stands, never a rollback and never a skipped
+              // OLD release.
+              deps.diag.error('transition commit seam failed after publication (child committed)', {
+                to: deps.owners.sessionId(nextOwner),
+                error: safeErrorMessage(error),
+              })
+            }
           }
-          throw error
-        }
-      },
+        },
       retireOld: async () => {
         const retired: string[] = []
         // Retire the OLD owner through the retirement port (which owns the
@@ -349,10 +367,20 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         deps.diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
         deps.surface.clearOpening(opening)
       },
-    }, steps).finally(() => {
+      }, steps)
+    } catch (error) {
+      // The commit section started the exactly-once release of an acquired
+      // but never-published NEW owner: AWAIT it before this transition
+      // settles, so the transition gate/barrier it still holds stay closed
+      // until the released reference/lease is actually gone. A concurrent
+      // exit retirement or a same-session reopen is thereby serialized behind
+      // the release instead of racing it.
+      if (preCommitRelease !== undefined) await preCommitRelease
+      throw error
+    } finally {
       if (!transitionCommitted) deps.surface.settlePendingQueueRecalls(false)
       deps.surface.clearOpening(opening)
-    })
+    }
   }
 
   /**
@@ -608,7 +636,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // The fork-adoption commit ORDER is fixed by `runForkCommit` (plan §4B):
         // the generation reset runs BEFORE the child is published, exactly like
         // the ordinary transition. A pre-publication seam failure must release
-        // the acquired child owner exactly once instead of leaking it.
+        // the acquired child owner exactly once instead of leaking it; a
+        // post-publication seam failure is CONTAINED (the committed child
+        // stands — the same contract as the ordinary transition).
         try {
           runForkCommit({
             settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
@@ -623,17 +653,28 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           }, commitHandle)
         } catch (error) {
           if (core.owner() !== nextOwner) {
-            // The child owner was retained (possibly through the adoption
-            // open) but never committed: release it exactly once and keep OLD
-            // current; the child stays a published catalog identity. Mark the
-            // ledger so the fork error path never parks this released owner.
+            // PRE-publication failure: the child owner was retained (possibly
+            // through the adoption open) but never committed: release it
+            // exactly once and keep OLD current; the child stays a published
+            // catalog identity. Mark the ledger so the fork error path never
+            // parks this released owner.
             ledger.released = true
             const report = await deps.retirement.retire(nextOwner, 'transition')
             for (const failure of report.failures) {
               deps.diag.error('fork pre-commit owner release failed', { session: handle.session.id, phase: failure.phase, error: failure.error })
             }
+            throw error
+          } else {
+            // POST-publication failure (a synchronous seam after
+            // `publishOwner`): the child IS committed — `core.setCurrentOwner`
+            // already succeeded. Contain it as a failed post-commit step and
+            // continue with the adoption (source retirement + surface work):
+            // the committed child stands, never a rollback, never a re-park.
+            deps.diag.error('fork commit seam failed after publication (child committed)', {
+              session: handle.session.id,
+              error: safeErrorMessage(error),
+            })
           }
-          throw error
         }
         adopted = true
         try {

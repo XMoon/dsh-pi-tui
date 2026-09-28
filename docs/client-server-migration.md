@@ -2014,8 +2014,13 @@ the composition and presentation.
   ONCE in the synchronous commit section (a transaction-local
   `committedOwner`; the post-commit phases reuse it instead of re-wrapping the
   Remote reference wrapper); a pre-publication commit seam failure releases
-  the acquired NEW owner exactly once through the owned-task model and OLD
-  stays current; the four "without a Direct owner" throws are now
+  the acquired NEW owner exactly once — with that release AWAITED before the
+  transition settles, so the transition gate/barrier stay closed until the
+  released reference/lease is actually gone (never a fire-and-forget
+  retirement) — and a POST-publication synchronous seam failure is contained
+  as a failed post-commit step (the committed child stands; the OLD
+  retirement still runs; never a rollback); OLD stays current; the four
+  "without a Direct owner" throws are now
   transport-neutral owned-generation failures; `adoptFork` grew the Remote
   publication→open adoption: an ownerless fork handle is retained through
   `lifecycle.open(childId)` inside the existing gate/barrier (one Host fork
@@ -2058,8 +2063,10 @@ the composition and presentation.
   truthful outcome, no leak), same-binding reconnect identity, full-scope
   re-materialize identity, exit-before-commit and fatal-after-commit release
   proof, pre-publication commit-throw exactly-once release (ordinary + fork,
-  Remote publication-only AND the Direct owned-handle no-re-park lock),
-  plus the Direct-shaped no-extra-open adoption lock.
+  Remote publication-only AND the Direct owned-handle no-re-park lock; plus
+  the gated slow-release proof that the transition stays open until the
+  release completes), post-publication completion-seam containment (ordinary
+  + fork), plus the Direct-shaped no-extra-open adoption lock.
 - Direct regression — `test/runner-session-retirement.test.ts` (retirement
   order unchanged), `test/runner-session-navigation.test.ts` (a production
   Direct `/fork` never performs the extra adoption open; resume list stays
