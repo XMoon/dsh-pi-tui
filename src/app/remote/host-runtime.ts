@@ -174,24 +174,41 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     //    No HTTP surface is composed, so the row's browser-authentication
     //    side is deliberately absent (the proven in-process fixture form);
     //    the M3-4 product bootstrap owns the server-backed composition.
-    fibers.push(await hostContext.plugin(connectionContext => {
+    const connFiber = hostContext.plugin(connectionContext => {
       new HostConnectionService(connectionContext, [], {} as never)
-    }))
-    // 2. Real Host file uploads — the Session controller injects `fileUploads`.
-    fibers.push(await hostContext.plugin(FileUploads))
+    })
+    fibers.push(connFiber)
+    await connFiber
+    // 2. Real Host file uploads - the Session controller injects `fileUploads`.
+    const uploadFiber = hostContext.plugin(FileUploads)
+    fibers.push(uploadFiber)
+    await uploadFiber
     // 3./4. Whole-log projection units before the Session controller.
-    fibers.push(await hostContext.plugin(sessionStats))
-    fibers.push(await hostContext.plugin(sessionTurnOutline))
-    // 5. Session controller — M3/local-wire-safe: never native desktop open.
-    fibers.push(await hostContext.inject(SessionController.inject, controllerContext => {
+    const statsFiber = hostContext.plugin(sessionStats)
+    fibers.push(statsFiber)
+    await statsFiber
+    const outlineFiber = hostContext.plugin(sessionTurnOutline)
+    fibers.push(outlineFiber)
+    await outlineFiber
+    // 5. Session controller - M3/local-wire-safe: never native desktop open.
+    const sessionCtrlFiber = hostContext.inject(SessionController.inject, controllerContext => {
       new SessionController(controllerContext, { nativeOpen: false })
-    }))
+    })
+    fibers.push(sessionCtrlFiber)
+    await sessionCtrlFiber
     // 6. Settings + credentials Remote owner.
-    fibers.push(await hostContext.plugin(SettingsController))
+    const settingsFiber = hostContext.plugin(SettingsController)
+    fibers.push(settingsFiber)
+    await settingsFiber
     // 7. Forwarded-event source over the existing gateway.
-    fibers.push(await hostContext.plugin({ inject: apiRemotesInject, apply: applyApiRemotes }))
-    // 8. Archive route — registers `/api/session.export` on Host `connection.fetch`.
-    fibers.push(await hostContext.plugin(sessionLogExport))
+    const remotesFiber = hostContext.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
+    fibers.push(remotesFiber)
+    await remotesFiber
+    // 8. Archive route - registers `/api/session.export` on Host `connection.fetch`.
+    const exportFiber = hostContext.plugin(sessionLogExport)
+    fibers.push(exportFiber)
+    await exportFiber
+
 
     // The Cordis reflect read wraps services in a per-call traceable proxy, so
     // the same-instance check compares the service's stable Typert binding
