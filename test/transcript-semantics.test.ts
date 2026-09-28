@@ -5,9 +5,10 @@ import test from 'node:test'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import { classifyTranscriptMessage, isSurfacedContext } from '../src/transcript-semantics.ts'
+import { isTranscriptWorkMember } from '../src/transcript-projection.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
-const tool = (origin?: 'turn-error' | 'turn-interrupted'): TranscriptMessage => ({
+const tool = (origin?: 'turn-error' | 'turn-interrupted' | 'tool-not-started'): TranscriptMessage => ({
   kind: 'tool', turn: 1, name: 'synthetic', args: '', result: '', status: 'ok', ...(origin === undefined ? {} : { origin }),
 })
 
@@ -43,6 +44,12 @@ test('classifies synthetic origins by source semantics', () => {
   assert.deepEqual(classifyTranscriptMessage({ kind: 'system', turn: 1, text: 'limit', origin: 'turn-max-tokens' }), { class: 'attention', origin: 'turn-max-tokens' })
   assert.deepEqual(classifyTranscriptMessage(tool('turn-error')), { class: 'attention', origin: 'turn-error' })
   assert.deepEqual(classifyTranscriptMessage(tool('turn-interrupted')), { class: 'attention', origin: 'turn-interrupted' })
+})
+
+test('a tool-not-started diagnostic is standalone attention evidence, never Work', () => {
+  assert.deepEqual(classifyTranscriptMessage(tool('tool-not-started')), { class: 'attention', origin: 'tool-not-started' })
+  assert.equal(isTranscriptWorkMember(tool('tool-not-started')), false,
+    'the not-started diagnostic never joins an Activity/Work span and so never disappears into collapsed process evidence')
 })
 
 test('classification follows source semantics, not status or display wording', () => {

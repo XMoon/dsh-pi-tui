@@ -13944,6 +13944,12 @@ export class TuiApp {
       case 'system':
         return { kind: 'system', turn: message.turn, text: message.text, label: message.label, summary: message.summary }
       case 'tool': {
+        // A TOOL_NOT_STARTED recovery diagnostic is Host-owned evidence:
+        // an extension tool renderer sees a `tool` snapshot as an
+        // executed/running lifecycle, which would contradict the recovery
+        // fact (the request never started). Returning undefined keeps the
+        // row out of both the keyed tool renderers and the message chain.
+        if (message.origin === 'tool-not-started') return undefined
         return {
           kind: 'tool',
           turn: message.turn,
@@ -15045,6 +15051,25 @@ export class TuiApp {
           const previewBudget = hint === '' ? width : Math.max(2, width - visibleWidth(hint))
           const preview = truncateToWidth(`  ${outcomeColor(outcomePreview)}`, previewBudget, '…')
           card.addChild(new Text(truncateToWidth(`${preview}${hint}`, width, '…'), 0, 0))
+        }
+      }
+      return card
+    }
+    if (message.kind === 'tool' && message.origin === 'tool-not-started') {
+      // Host-owned TOOL_NOT_STARTED diagnostic: the assistant REQUESTED
+      // the tool but Harness never recorded it started. Never the
+      // executed-tool presentation — no `$ command`/diff/read preview, no
+      // [ok]/[running] pill, no ToolPresenter or extension renderer. The
+      // literal "not started" wording is the primary semantic label; the
+      // expanded body is the authoritative DSH recovery guidance.
+      const card = new Container()
+      const identity = message.name === '' || message.name === 'tool'
+        ? 'Tool request not started'
+        : `Tool request not started · ${toolTitle(message.name)}`
+      card.addChild(new Text(color.error(truncateToWidth(identity, width, '…')), 0, 0))
+      if (expanded && message.result !== '') {
+        for (const line of message.result.split('\n')) {
+          card.addChild(new Text(color.textDim(line), 0, 0))
         }
       }
       return card

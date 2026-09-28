@@ -3753,3 +3753,88 @@ test('collapsed Focus repaints the Action line and action stats when synthetic e
   assert.ok(joined.includes('Action:  Retry 2 in 4s · X: y'), `the latest retry owns the Action line:\n${joined}`)
   app.stop()
 })
+
+// ── TOOL_NOT_STARTED standalone diagnostic (DSH 0.1.7-rc.2 compat) ────────
+
+/** A settled turn whose only process-plane evidence is a not-started
+ * recovery diagnostic for a requested `bash` call. */
+function notStartedTurn(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'run the checks' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'text', text: 'checking.' },
+          { type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{"command":"ls"}' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.' }],
+        isError: true,
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+      error: { name: 'ToolNotStartedError', code: 'TOOL_NOT_STARTED' },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'interrupted' } }, T0 + 4, 4),
+  ]
+}
+
+test('Focus keeps a TOOL_NOT_STARTED diagnostic standalone: no Action slot, no action count, no plugin renderer', async () => {
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerToolRenderer({
+    id: 'probe', toolName: 'bash',
+    render: () => ({ kind: 'text', spans: [{ text: 'PLUGIN_TOOL_RENDERER_SHOULD_NOT_RUN' }] }),
+  }, 'plugin')
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, notStartedTurn())
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+
+  assert.ok(!view.includes('PLUGIN_TOOL_RENDERER_SHOULD_NOT_RUN'),
+    `the keyed extension tool renderer must never present a not-started row:\n${view}`)
+  assert.ok(view.includes('Tool request not started · Bash'),
+    `the diagnostic is visible in the DEFAULT collapsed Focus view:\n${view}`)
+  assert.ok(!view.includes('Action:'),
+    `the diagnostic never becomes the collapsed Action owner:\n${view}`)
+  assert.ok(!/\d+ actions?/.test(view),
+    `the diagnostic is not counted in the action stats:\n${view}`)
+  assert.ok(!view.includes('[ok]') && !view.includes('[running]'),
+    `no executed-tool lifecycle pill is fabricated:\n${view}`)
+
+  // Opening the turn root reveals the diagnostic as a STANDALONE attention
+  // row (the shared classification already provides this — no Focus-specific
+  // predicate): never inside a Work span, never an executed tool card.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.ok(expanded.includes('Tool request not started · Bash'),
+    `the expanded Thought shows the standalone not-started diagnostic:\n${expanded}`)
+  assert.ok(expanded.includes('interrupted before the Harness recorded it as started'),
+    `the expanded diagnostic keeps the DSH recovery guidance:\n${expanded}`)
+  assert.ok(!expanded.includes('PLUGIN_TOOL_RENDERER_SHOULD_NOT_RUN'),
+    `the plugin tool renderer stays bypassed when expanded:\n${expanded}`)
+  assert.ok(!expanded.includes('Action:'),
+    `the expanded turn owns no Action slot:\n${expanded}`)
+  app.stop()
+})
