@@ -3,9 +3,11 @@
  *
  * One live Preparing call belongs to the turn's still-open trailing Process
  * run only while that run is open; once a Conversation / Context / Attention /
- * turn boundary closes it, the call becomes an EPHEMERAL pending Work that
- * must never move backward. No race may duplicate the call, leave a ghost
- * card, or leak an owner across a session / preset / surface switch.
+ * turn boundary closes it, the call belongs to an EPHEMERAL pending Process
+ * run that must never move backward — and, having no canonical WorkSpan, it
+ * fails open as an ordinary live Preparing row (never a fake `▸ Activity`
+ * disclosure). No race may duplicate the call, leave a ghost row, or leak an
+ * owner across a session / preset / surface switch.
  * @module @xmoon76/dsh-pi-tui/compact-streaming-races.test
  */
 
@@ -95,7 +97,7 @@ test('S5: a durable Process row replaces the ephemeral preview without duplicati
 
 // --- S6: Preparing disappears / cancels -----------------------------------
 
-test('S6: a cancelled preview leaves no pending Work card and no ghost row', async () => {
+test('S6: a cancelled preview leaves no ghost row and no fake pending Activity', async () => {
   const { vt, app } = startApp()
   app.setTranscript([
     { kind: 'thinking', turn: 1, text: 'closed run' },
@@ -103,8 +105,8 @@ test('S6: a cancelled preview leaves no pending Work card and no ghost row', asy
   ], new Map(), undefined, [preview('p-cancel')])
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.equal(preparingRows(view).length, 1, `precondition: the pending Work is visible:\n${view}`)
-  assert.equal(workHeaders(view).length, 2, `precondition: the boundary minted a pending Work:\n${view}`)
+  assert.equal(preparingRows(view).length, 1, `precondition: the pending Preparing row is visible:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the old durable Activity header renders alone:\n${view}`)
 
   app.setTranscript([
     { kind: 'thinking', turn: 1, text: 'closed run' },
@@ -118,7 +120,7 @@ test('S6: a cancelled preview leaves no pending Work card and no ghost row', asy
 
 // --- S7: multiple Preparing calls -----------------------------------------
 
-test('S7: multiple previews stay deterministic and never duplicate the pending Work root', async () => {
+test('S7: multiple ownerless previews fail open as one full Preparing row each', async () => {
   const { vt, app } = startApp()
   const previews = [
     preview('p-a', { index: 0, name: 'read', summary: 'src/a.ts' }),
@@ -128,20 +130,25 @@ test('S7: multiple previews stay deterministic and never duplicate the pending W
   app.setTranscript([{ kind: 'assistant', turn: 1, text: 'boundary' }], new Map(), undefined, previews)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  // ONE pending Work root; the collapsed Tool slot names the deterministic
-  // latest meaningful preview, never one row per call.
-  assert.equal(workHeaders(view).length, 1, `exactly one pending Work root:\n${view}`)
-  const toolRows = view.split('\n').filter(line => /Action:\s/.test(line))
-  assert.equal(toolRows.length, 1, `the collapsed slot is one row:\n${view}`)
-  assert.ok(!view.includes('Preparing Bash'), 'the collapsed slot names the deterministic first known preview')
-  assert.match(view, /Preparing Read \+2/)
+  // No durable WorkSpan exists, so the pending run owns NO Activity header and
+  // NO collapsed Tool slot: every live preview renders as its own full
+  // fail-open row, in the stable streamingToolPreviewsForTurn() order.
+  assert.equal(workHeaders(view).length, 0, `an ownerless pending run never mints an Activity header:\n${view}`)
+  const rows = view.split('\n').filter(line => line.includes('Preparing'))
+  assert.equal(rows.length, 3, `three previews render three full rows, never an aggregated card:\n${view}`)
+  assert.ok(rows[0]!.includes('src/a.ts'), `row order follows the preview index:\n${view}`)
+  assert.ok(rows[1]!.includes('pnpm test'), `row order follows the preview index:\n${view}`)
+  assert.ok(rows[2]!.includes('src/c.ts'), `row order follows the preview index:\n${view}`)
+  assert.ok(!rows.some(row => /\+\d/.test(row)), `no first-row +N aggregation summary:\n${view}`)
 
-  // One settles while another remains: still ONE pending root, no residue.
+  // One settles while the others remain: only the still-live full rows stay.
   app.setTranscript([{ kind: 'assistant', turn: 1, text: 'boundary' }], new Map(), undefined, [previews[0]!])
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
-  assert.equal(workHeaders(after).length, 1, `one pending Work after a partial settle:\n${after}`)
-  assert.match(after, /Preparing Read/)
+  assert.equal(workHeaders(after).length, 0, `no ghost Activity header after a partial settle:\n${after}`)
+  const afterRows = after.split('\n').filter(line => line.includes('Preparing'))
+  assert.equal(afterRows.length, 1, `only the still-live preview row remains:\n${after}`)
+  assert.ok(afterRows[0]!.includes('src/a.ts'), `the surviving row is the still-live preview:\n${after}`)
 })
 
 // --- S8: turn boundary ----------------------------------------------------
@@ -160,19 +167,19 @@ test('S8: no Preparing owner leaks from turn N to turn N+1', async () => {
   assert.equal(preparingRows(view).length, 1, `exactly one call:\n${view}`)
   assert.ok(preparingRows(view)[0]! > turnTwoPrompt,
     `the turn 2 call must not attach to the closed turn 1 run:\n${view}`)
-  assert.equal(workHeaders(view).length, 2, `the closed turn 1 Work and the pending Work stay distinct:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the closed turn 1 durable Activity renders alone:\n${view}`)
 })
 
 // --- S9: session switch ---------------------------------------------------
 
-test('S9: a session switch drops the stale pending Work and its owner state', async () => {
+test('S9: a session switch drops the stale pending Preparing row and all owner state', async () => {
   const { vt, app } = startApp()
   app.setTranscript([
     { kind: 'thinking', turn: 1, text: 'session A run' },
     { kind: 'assistant', turn: 1, text: 'session A boundary' },
   ], new Map(), undefined, [preview('p-session-a')])
   await vt.waitForRender()
-  assert.equal(preparingRows(vt.getViewport().join('\n')).length, 1, 'precondition: session A pending Work is visible')
+  assert.equal(preparingRows(vt.getViewport().join('\n')).length, 1, 'precondition: session A pending Preparing row is visible')
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
   // A different session's transcript arrives with no live preview.
@@ -180,7 +187,7 @@ test('S9: a session switch drops the stale pending Work and its owner state', as
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('session A'), 'no stale session A row survives')
-  assert.equal(preparingRows(view).length, 0, 'no stale pending Work survives the session switch')
+  assert.equal(preparingRows(view).length, 0, 'no stale pending Preparing row survives the session switch')
   assert.equal(workHeaders(view).length, 0, 'no stale Work owner survives')
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
   assert.equal(app.expandedContextClusterOwnersForTest().size, 0)
@@ -248,6 +255,64 @@ test('durableToolTurn fixture folds a tool row for the expanded-run path', () =>
   assert.ok(messages.some(message => message.kind === 'tool'), 'the fixture yields a durable tool row')
 })
 
+// --- ownerless pending-run has no disclosure affordance ---------------------
+
+/** SGR click on one viewport cell (the fork converts to 0-based). */
+function click(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}M`)
+  vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
+test('an ownerless pending-run preview renders no Activity affordance and mints no Work owner', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'boundary' }], new Map(), undefined, [preview('p-ownerless')])
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(preparingRows(view).length, 1, `the Preparing row is visible:\n${view}`)
+  assert.equal(workHeaders(view).length, 0, `no Activity header is minted for the pending run:\n${view}`)
+  assert.ok(!view.includes('Action:'), `no pseudo Action summary without an Activity owner:\n${view}`)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'no Work disclosure owner exists')
+
+  // Fullscreen mouse: clicking the fail-open row must neither crash nor
+  // toggle any container — it is an ordinary row, not an Activity header.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  const rows = preparingRows(view)
+  assert.equal(rows.length, 1, `the fail-open row survives the fullscreen switch:\n${view}`)
+  assert.equal(workHeaders(view).length, 0, `fullscreen keeps the pending run free of Activity chrome:\n${view}`)
+  click(vt, 5, rows[0]! + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'a click on the fail-open row mints no Work owner')
+  assert.equal(workHeaders(view).length, 0, `the click triggers no pseudo disclosure toggle:\n${view}`)
+  assert.equal(preparingRows(view).length, 1, `the ordinary row presentation is unchanged:\n${view}`)
+})
+
+// --- trailing real WorkSpan keeps real Activity presentation ----------------
+
+test('a live Preparing of an open trailing WorkSpan keeps the real Activity disclosure', async () => {
+  const { vt, app } = startApp()
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'trailing reasoning' }
+  app.setTranscript([
+    owner,
+    { kind: 'tool', turn: 1, name: 'bash', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map(), undefined, [preview('p-trail')])
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view).length, 1, `exactly one real Activity:\n${view}`)
+  assert.match(view, /Action:\s+Preparing/, `the live call still owns the Activity preview slot:\n${view}`)
+
+  app.toggleWorkSpan(owner)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view).length, 1, `expanding keeps the one real Activity:\n${view}`)
+  assert.equal(preparingRows(view).length, 1, `the live call renders as a full row after the durable members:\n${view}`)
+  assert.ok(!/Action:\s+Preparing/.test(view),
+    `an expanded span renders the standalone preview, not a Tool slot:\n${view}`)
+  assert.ok(app.expandedWorkOwnersForTest().has(owner), 'the expanded owner is the canonical span owner')
+})
+
 // --- Surfaced-interaction boundary closes the trailing run ----------------
 
 /** A live turn: user, read tool, then a SETTLED surfaced-interaction card.
@@ -278,19 +343,20 @@ function interactionTurn(name: 'ask_user_question' | 'exit_plan_mode'): {
 }
 
 for (const name of ['ask_user_question', 'exit_plan_mode'] as const) {
-  test(`a settled ${name} closes the trailing run: Preparing starts a NEW pending Work, never the prior span`, async () => {
+  test(`a settled ${name} closes the trailing run: Preparing starts a NEW fail-open run, never the prior span`, async () => {
     const { folder, interactionMarker } = interactionTurn(name)
     const previews = [preview('pB', { step: 2, summary: 'bash B' })]
 
     // Compact collapsed: the durable projection is Work(read) | interaction, so
-    // the live call is a NEW pending Work AFTER the interaction — never the
-    // previous span's Tool slot.
+    // the live call is a NEW ownerless run AFTER the interaction — never the
+    // previous span's Tool slot, and never a second fake Activity header.
     {
       const { vt, app } = startApp('compact')
       app.setTranscript(folder.messages(), folder.turnActivities(), undefined, previews)
       await vt.waitForRender()
       const view = vt.getViewport().join('\n')
-      assert.equal(workHeaders(view).length, 2, `Work(read) + pending Work: the interaction closed the run:\n${view}`)
+      assert.equal(workHeaders(view).length, 1, `only Work(read) renders an Activity; the pending run fails open:\n${view}`)
+      assert.equal(preparingRows(view).length, 1, `the pending run renders one fail-open Preparing row:\n${view}`)
       const interactionRow = view.split('\n').findIndex(line => line.includes(interactionMarker))
       assert.ok(interactionRow >= 0, `the settled interaction renders:\n${view}`)
       assert.ok(preparingRows(view).every(row => row > interactionRow),

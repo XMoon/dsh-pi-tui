@@ -289,7 +289,8 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
   }
 
   // (b) Work A -> Assistant -> Preparing: the narration closes the run, so the
-  // call becomes a NEW pending Work after the boundary.
+  // call becomes a NEW ownerless run after the boundary — a fail-open
+  // Preparing row, never a second Activity header.
   {
     const { vt, app } = startApp('compact')
     app.setTranscript([
@@ -300,11 +301,11 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
     await vt.waitForRender()
     const lines = vt.getViewport()
     const view = lines.join('\n')
-    assert.equal(workHeaders(view).length, 2, `the narration mints a new Work run:\n${view}`)
+    assert.equal(workHeaders(view).length, 1, `the closed Work A renders alone; the pending run mints no Activity:\n${view}`)
     const narrationRow = lines.findIndex(line => line.includes('narration'))
     assert.ok(narrationRow >= 0, `the boundary row renders:\n${view}`)
     assert.ok(preparingRows(view).every(row => row > narrationRow),
-      `the pending Work must follow the closed boundary:\n${view}`)
+      `the pending Preparing row must follow the closed boundary:\n${view}`)
     app.dispose()
     startedApps.delete(app)
   }
@@ -330,7 +331,7 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
   }
 })
 
-test('an ephemeral pending Work renders Header + Tool slot with no lifecycle suffix', async () => {
+test('an ownerless pending run fails open: a full Preparing row, no Activity chrome', async () => {
   const { vt, app } = startApp('compact')
   app.setTranscript([
     { kind: 'assistant', turn: 1, text: 'narration' },
@@ -340,11 +341,10 @@ test('an ephemeral pending Work renders Header + Tool slot with no lifecycle suf
   await vt.waitForRender()
   const lines = vt.getViewport()
   const view = lines.join('\n')
-  assert.equal(workHeaders(view).length, 1, `a pending Work header renders:\n${view}`)
-  assert.ok(lines.some(line => /^\s*▸ Activity\s*$/.test(line)),
-    `the pending header carries NO lifecycle suffix (no visual jump when the durable span lands):\n${view}`)
-  assert.match(view, /Action:\s+Preparing Bash/)
-  assert.ok(!view.includes('preparing') || !lines.some(line => /▸ Activity ·/.test(line)))
+  assert.equal(workHeaders(view).length, 0, `no Activity header is minted for the pending run:\n${view}`)
+  assert.ok(!view.includes('Action:'), `no pseudo Action slot without an Activity owner:\n${view}`)
+  assert.match(view, /Preparing Bash pnpm test\.\.\. · 3 B/,
+    `the pending call renders as one full fail-open Preparing row:\n${view}`)
 })
 
 test('a live Preparing call never crosses a closed Work boundary', async () => {

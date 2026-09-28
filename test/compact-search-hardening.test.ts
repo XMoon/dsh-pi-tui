@@ -261,7 +261,7 @@ test('7.5 a Preparing-to-pending transition during search leaves no stale owner 
   await vt.waitForRender()
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the reveal opens exactly the owning span')
 
-  // The live call becomes a PENDING Work after the boundary: the search target
+  // The live call becomes a PENDING run after the boundary: the search target
   // stays durable, the structural rebuild refreshes geometry, no crash.
   app.setTranscript([
     owner,
@@ -273,6 +273,6 @@ test('7.5 a Preparing-to-pending transition during search leaves no stale owner 
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('run reasoning'), `the durable search target stays reachable:\n${view}`)
   assert.equal(view.split('\n').filter(line => line.includes('Preparing')).length, 1,
-    `the pending Work renders exactly once:\n${view}`)
+    `the pending Preparing row renders exactly once:\n${view}`)
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'no stale owner is written by the rebuild')
 })
