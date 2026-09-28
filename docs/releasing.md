@@ -124,11 +124,13 @@ and consumption" above).
 
 Choose exactly one release channel before editing metadata:
 
-- **Stable:** branch `main`, tag `vX.Y.Z`, npm dist-tag `latest`, and a stable
-  SemVer package version.
-- **Prerelease:** branch `next`, tag `next-vX.Y.Z-alpha.N` (or another
-  prerelease identifier), npm dist-tag `next`, and the same prerelease version
-  in `package.json`.
+- **Stable:** publication target `main`; stable tag `vX.Y.Z`; npm dist-tag
+  `latest`; a stable SemVer package version. Stable release metadata may be
+  prepared and finalized on the promotion branch — the stable tag itself
+  must land on the verified `main` commit.
+- **Prerelease:** publication target `next`; tag `next-vX.Y.Z-alpha.N` (or
+  another prerelease identifier); npm dist-tag `next`; and the same
+  prerelease version in `package.json`.
 
 The tag's commit must already be an ancestor of its required branch. A
 `next-v...` tag on `main`, or a stable `v...` tag on `next`, is a release error;
@@ -137,7 +139,9 @@ the CI `release-context` and ancestry gates enforce these rules again.
 For the selected package version `X.Y.Z` (including any prerelease suffix) on
 release date `YYYY-MM-DD`:
 
-1. Change the root `package.json` version to `X.Y.Z`.
+1. Ensure the root `package.json` version is reserved as `X.Y.Z` — on the
+   promotion path it is usually already reserved in Phase A, so this step is
+   a consistency confirmation, not a fresh edit.
 2. Update `src/dsh-compat-matrix.json`, the single source for the DSH/TUI
    pairing shared by `src/startup.ts`, the release tooling and the
    installation-doc gate. When the shipped DSH target changes, update `current`
@@ -181,7 +185,8 @@ release date `YYYY-MM-DD`:
 
 ## 3. Validate the release notes before tagging
 
-The release metadata script must pass before a release commit is made. It
+The release metadata script must pass before the release metadata is
+finalized and before the candidate is tagged. It
 checks the tag format, package version, both changelog sections, matching
 version/date headings, and non-empty release content:
 

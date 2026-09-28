@@ -302,16 +302,16 @@ verified commit, publish through the tag workflow, and merge the released
 `main` state back into `next`. Follow [docs/releasing.md](releasing.md) for
 that release checklist; no second version bump is required merely because
 the candidate moved from the promotion branch to `main`. If `next` must
-resume forward development before the release commit is ready, an earlier
+resume forward development before the candidate is ready to tag, an earlier
 back-merge is allowed, but `main` must be merged forward again after the
-release commit. Do not reset `next` to `main`: `next` remains the
+stable tag/publication. Do not reset `next` to `main`: `next` remains the
 forward-integration branch.
 
-The final promotion invariant is that the `main` state containing the release
-commit is merged forward into `next`.
+The final promotion invariant is that the `main` state containing the
+tagged/released candidate is merged forward into `next`.
 
 If `next` continued moving while the promotion was being qualified or before
-that release commit was ready, preserve
+the candidate was ready to tag, preserve
 the newer `next` distribution policy when resolving the back-merge. In
 particular, never replace a newer unpublished `next` source target with the
 older published target merely because it came from `main`.
