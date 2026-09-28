@@ -37,6 +37,48 @@
 The audited `next` had not advanced, so no re-inventory against a newer HEAD was
 required. DSH `master` was not used to redefine any conclusion.
 
+### 1.1 M3-3A requalification against DSH 0.2.0-rc.1
+
+M3-0 was frozen against the 0.1.7-rc.2 evidence baseline above. M3-3A
+requalified the exact public API evidence against the then-current published
+line **dsh-v0.2.0-rc.1** (`next @ fa7116876e50d298947b2544902ed3f4631feb5a`,
+package `0.5.0`, npm mode, source qualification commit
+`4878cdabd87d4041bdaff61d04c966883b9fd07a`). The rule applied:
+
+- **M3-0 architecture decisions remain frozen** (owners, locality, capability
+  vocabulary, unsupported classes, the M3 PR train). No decision was reopened
+  merely because the DSH line advanced.
+- **Exact API / Remote / projection evidence was re-derived from the installed
+  0.2.0-rc.1 public types** wherever M3-3A builds an adapter on it. Where
+  0.2.0-rc.1 corrects an rc.2-era evidence row, the correction is recorded
+  here and the M3-3A implementation follows 0.2.0-rc.1 — never the stale rc.2
+  shape.
+
+Requalified facts (0.2.0-rc.1, generated
+`dsh-llm/lib/typert.remote-client.d.ts` and
+`dsh-api-session-controller/lib/typert.remote-client.d.ts`):
+
+| Capability | 0.2.0-rc.1 public Remote | Consequence |
+|---|---|---|
+| `session.modelCatalog()` | YES | the official grouped selectable model directory (`default` + `routableProviders` + `groups` + `failures`); dsh-web's subagent model settings consume it |
+| `llm.listProviders()` | YES | provider registry discovery |
+| `llm.listConfigurableProviders()` | YES | configurable-provider directory (config-schema knowledge stays with ConfigPort/M3-3B) |
+| `llm.discoverModels(settingsNs, request, signal)` | YES | the add-provider wizard probe |
+| `llm.listModels(provider)` | **NO public Remote** | Host method only — §2.2's rc.2-era row implying a Remote source for `listModels` is corrected: the subagent allowlist picker converges on the official `session.modelCatalog` directory; no private `llm/listModels` RPC may be invented |
+| `skills/list({sessionId}, signal)` | YES | Session-addressed human-skill catalog, list-only |
+| `fileReferences/list(agentId, query, signal)` | YES | Session-scoped `@`-file discovery only |
+| `contextPressure` / `contextBreakdown` / `tokenUsage` projections | YES (`dsh-token-meter/lib/types/projection.d.ts`) | official context occupancy: `projectedTokens ?? pressureTokens` (+ `contextWindow`), the same fields dsh-web's ContextMeter reads |
+| `turnOutline` projection + `Session.loadThrough(seq)` | YES (`dsh-session-turn-outline`, Client `Session.loadThrough`) | the only Remote deep-history path |
+
+Rechecked unsupported rows (§10) against 0.2.0-rc.1 — all remain unsupported,
+with unchanged reasons: sessionless/workspace-scoped `@file` discovery (every
+file endpoint is Session-scoped), `@file` existence/canonicalization (no
+canonicalization verb), sessionless standing skill catalog and Client skill
+body read (`skills/list` is Session-addressed and list-only; no `skills/read`),
+`onSkillsChange` hot invalidation (no `skills/*` entry in the forwarded
+Remote-event selection), and `refreshTitle` (no official Client verb;
+`session/rename` is a distinct explicit rename, not regeneration).
+
 ## 2. Backend capability matrix
 
 ### 2.1 The 13 semantic `Backend` properties
@@ -72,7 +114,8 @@ assembly that advertises exactly the capabilities it serves
 | Sub-domain | Port methods | Exact rc.2 public source | Status | Gap / owner |
 |---|---|---|---|---|
 | `ModelCatalog` | `loadDirectory`, `defaultSelection`, `sessionSelection`, `selectSessionModel` | `session/modelCatalog`, `session/selectModel` Remotes; `modelSelection` projection (`dsh-api-session-controller/lib/types/types.d.ts:20-27`) | READY (adapter exists) | — |
-| `ModelCatalog` | `listProviders`, `listModels`, `discoverModels` | `llm/listProviders`, `llm/listConfigurableProviders`, `llm/discoverModels` (`dsh-llm/lib/typert.remote-client.d.ts:15-17`) | NEEDS_ADAPTER | the current adapter returns UNAVAILABLE; the official namespace **does** exist, so this is adapter work for M3-3A, not a gap |
+| `ModelCatalog` | `discoverModels` | `llm/discoverModels(settingsNs, request, signal)` (`dsh-llm/lib/typert.remote-client.d.ts`) | READY (M3-3A adapter) | the add-provider wizard probe maps to the official Remote; a Host failure must surface, never an empty list |
+| `ModelCatalog` | `listProviders`, `listModels` | `llm/listProviders` exists, but `llm.listModels(provider)` is a **Host method with NO public Remote** (0.2.0-rc.1, §1.1 correction) | RETIRED_CROSS_BACKEND_API (M3-3A) | the subagent allowlist picker — the only consumer — now consumes the official `session/modelCatalog()` grouped directory (`loadDirectory`); the port-level per-provider discovery pair was removed rather than kept as a Direct-only shape. No private `llm/listModels` RPC may ever back it |
 | `ModelCatalog` | `saveDefaultSelection` | no dedicated Remote; the global default lives in settings | NEEDS_ADAPTER | map onto `settings/update\|replace` on the adapter-owned default-model namespace, or classify `unsupported` (today's behavior) for M3-3A |
 | `PresetCatalog` | `available`, `roster`, `defaultId`, `resolve`, `selectSessionPreset` | `agentPresets/list\|read\|select` (`dsh-agent-preset-registry/lib/typert.remote-client.d.ts:16-18`); `agentPreset` projection (`lib/types/types.d.ts:57-60`) | READY (adapter exists; verify `resolve` coverage) | — |
 | `SkillCatalogCapability` | `listHumanSkills` | `skills/list({sessionId}, signal)` (`dsh-api-session-controller/lib/typert.remote-client.d.ts:37,60`; `lib/types/types.d.ts:245-258`) | NEEDS_ADAPTER | one mapping; `RemoteSurfaceAuthorityReader` already proves the shape |
