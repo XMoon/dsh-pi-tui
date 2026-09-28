@@ -29,10 +29,12 @@ export interface SessionOwnershipCoreDeps {
   resetForGeneration(): void
 }
 
-/** One atomic navigation identity capture (session id + generation + epoch). */
+/** One atomic navigation identity capture (session id + navigation epoch).
+ *  The surface `generation` is deliberately NOT part of it: navigation
+ *  supersession and presentation-generation invalidation are independent
+ *  axes (see `RewindNavigationIdentity`). */
 export interface NavigationIdentity {
   readonly sessionId: string | undefined
-  readonly generation: number
   readonly navigationEpoch: number
 }
 
@@ -143,7 +145,7 @@ export function createSessionOwnershipCore(deps: SessionOwnershipCoreDeps): Sess
     },
     navigationEpoch: () => navigationEpoch,
     bumpNavigationEpoch: () => (navigationEpoch += 1),
-    captureNavigationIdentity: () => ({ sessionId: currentSessionId, generation, navigationEpoch }),
+    captureNavigationIdentity: () => ({ sessionId: currentSessionId, navigationEpoch }),
     subjectAuthority,
     subject: () => subjectAuthority.current(),
     captureSubject: () => subjectAuthority.capture(),

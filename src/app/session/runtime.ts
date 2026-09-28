@@ -23,7 +23,7 @@ import {
   type SessionHandle,
   type SessionLifecycle,
 } from '../../runtime/session-lifecycle-port.ts'
-import { isRewindIdentityCurrent, type RewindLiveIdentity } from '../../session-fork.ts'
+import { isRewindIdentityCurrent, type RewindNavigationIdentity } from '../../session-fork.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
   SessionOwnerAccess,
@@ -143,7 +143,7 @@ export interface SessionRuntime {
   /** Adopt one forked child inside the gate (plan §4B). */
   adoptFork(
     handle: SessionHandle,
-    expected: RewindLiveIdentity,
+    expected: RewindNavigationIdentity,
     onAdopted?: () => void,
     pin?: ForkSourcePin,
   ): Promise<boolean>
@@ -153,12 +153,12 @@ export interface SessionRuntime {
     sourceSessionId: string,
     atSeq?: number,
     onAdopted?: () => void,
-    pickerIdentity?: RewindLiveIdentity,
+    pickerIdentity?: RewindNavigationIdentity,
   ): Promise<SessionForkOutcome>
   /** Park one refused fork's owner for a later claim. */
   parkForkOwner(handle: SessionHandle | undefined): void
   /** Whether a captured fork/rewind identity still owns the visible surface. */
-  isNavigationCurrent(expected: RewindLiveIdentity): boolean
+  isNavigationCurrent(expected: RewindNavigationIdentity): boolean
   /** Track one in-flight fork (the exit retirement drains them first). */
   trackFork(promise: Promise<unknown>): void
   hasPendingForks(): boolean
@@ -263,13 +263,19 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               resetSubmitLatency: deps.surface.resetSubmitLatency,
               bumpGeneration: core.bumpGeneration,
               publishOwner: () => {
+                // Every owner-metadata lookup that can throw runs BEFORE the
+                // publication; after `setCurrentOwner` the commit point is
+                // seamless (plain assignments only), so `runOrdinaryCommit`'s
+                // recall commit directly follows the true publication.
+                const identity = deps.owners.completionIdentity(nextOwner)
+                const sessionId = deps.owners.sessionId(nextOwner)
                 committedOwner = nextOwner
-                core.setCurrentOwner(nextOwner, deps.owners.sessionId(nextOwner))
+                core.setCurrentOwner(nextOwner, sessionId)
                 // The publication is the transition's COMMIT POINT: only from
                 // here on does the `finally` below stop restoring the queued
                 // recalls (a pre-publication failure settles them aborted).
                 transitionCommitted = true
-                return deps.owners.completionIdentity(nextOwner)
+                return identity
               },
               setCompletionOwner: deps.surface.setCompletionOwner,
             }, next)
@@ -279,7 +285,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // reference retained) but never committed. Release it exactly
               // once; OLD stays current and the original failure propagates
               // unchanged. The release is awaited before the transition
-              // settles (see the catch below).
+              // settles (see the catch below), and the transition's `finally`
+              // restores the queued recalls when this throw unwinds.
               preCommitRelease = deps.retirement.retire(nextOwner, 'transition').then(report => {
                 for (const failure of report.failures) {
                   deps.diag.error('pre-commit NEW owner release failed', {
@@ -291,12 +298,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               })
               throw error
             } else {
-              // POST-publication failure (a synchronous seam after
-              // `publishOwner`): the child IS committed — `core.setCurrentOwner`
-              // already succeeded. Contain it as a failed post-commit step and
-              // let the transition proceed to the OLD retirement: the
-              // committed child stands, never a rollback and never a skipped
-              // OLD release.
+              // POST-publication failure (a synchronous seam after the
+              // publication): the child IS committed. Contain it as a failed
+              // post-commit step and let the transition proceed to the OLD
+              // retirement: the committed child stands, never a rollback
+              // and never a skipped OLD release. The recalls were already
+              // settled committed by the commit section.
               deps.diag.error('transition commit seam failed after publication (child committed)', {
                 to: deps.owners.sessionId(nextOwner),
                 error: safeErrorMessage(error),
@@ -493,7 +500,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   /** Whether a captured fork/rewind identity still owns the visible surface. */
-  const isNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
+  const isNavigationCurrent = (expected: RewindNavigationIdentity): boolean =>
     isRewindIdentityCurrent(core.captureNavigationIdentity(), expected)
 
   /** Park one refused fork's owner for a later claim (an ownerless
@@ -592,15 +599,25 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * re-checked fence refuses the commit. `ledger` (plan §8.5) tells the fork
    * error path when that exactly-once release already happened, so it never
    * parks an owner the adoption cleanup already released.
+   *
+   * The transaction-finally mirrors `transitionTo`: the fork holds the
+   * transition gate from `gate.run`, so a writer finishing in that window may
+   * DEFER a queue recall against it. EVERY pre-publication exit (refused
+   * navigation, adoption-open failure, stale-after-retain, an invariant
+   * failure, a pre-publication commit seam) therefore restores the deferred
+   * recalls through ONE settle authority — the `finally` below — instead of
+   * per-branch restores; the child publication is the commit point that turns
+   * the settlement into `committed`.
    */
   const adoptFork = async (
     handle: SessionHandle,
-    expected: RewindLiveIdentity,
+    expected: RewindNavigationIdentity,
     onAdopted?: () => void,
     pin?: ForkSourcePin,
     ledger: ForkAdoptionLedger = { released: false },
   ): Promise<boolean> => {
     let adopted = false
+    let forkCommitted = false
     try {
       await core.gate.run(() => core.barrier.runTransition(async () => {
         if (deps.surface.isSurfaceDisposed() || !isNavigationCurrent(expected)) {
@@ -641,7 +658,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // the ordinary transition. A pre-publication seam failure must release
         // the acquired child owner exactly once instead of leaking it; a
         // post-publication seam failure is CONTAINED (the committed child
-        // stands — the same contract as the ordinary transition).
+        // stands — the same contract as the ordinary transition). The recall
+        // restore for EVERY pre-publication exit is owned by the single
+        // transaction-finally below, never by this catch.
         try {
           runForkCommit({
             settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
@@ -649,8 +668,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             resetSubmitLatency: deps.surface.resetSubmitLatency,
             bumpGeneration: core.bumpGeneration,
             publishOwner: () => {
+              // Every owner-metadata lookup that can throw runs BEFORE the
+              // publication; after `setCurrentOwner` the commit point is
+              // seamless (plain assignments only).
+              const identity = deps.owners.completionIdentity(nextOwner)
               core.setCurrentOwner(nextOwner, nextSessionId)
-              return deps.owners.completionIdentity(nextOwner)
+              forkCommitted = true
+              return identity
             },
             setCompletionOwner: deps.surface.setCompletionOwner,
           }, commitHandle)
@@ -658,23 +682,22 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           if (core.owner() !== nextOwner) {
             // PRE-publication failure: the child owner was retained (possibly
             // through the adoption open) but never committed: release it
-            // exactly once, restore the queued recalls (the fork path has no
-            // unified transition `finally` to do it), and keep OLD current;
-            // the child stays a published catalog identity. Mark the ledger
-            // so the fork error path never parks this released owner.
+            // exactly once and keep OLD current; the child stays a published
+            // catalog identity. Mark the ledger so the fork error path never
+            // parks this released owner. The deferred recalls are restored by
+            // the transaction-finally when this throw unwinds.
             ledger.released = true
-            deps.surface.settlePendingQueueRecalls(false)
             const report = await deps.retirement.retire(nextOwner, 'transition')
             for (const failure of report.failures) {
               deps.diag.error('fork pre-commit owner release failed', { session: handle.session.id, phase: failure.phase, error: failure.error })
             }
             throw error
           } else {
-            // POST-publication failure (a synchronous seam after
-            // `publishOwner`): the child IS committed — `core.setCurrentOwner`
-            // already succeeded. Contain it as a failed post-commit step and
-            // continue with the adoption (source retirement + surface work):
-            // the committed child stands, never a rollback, never a re-park.
+            // POST-publication failure (a synchronous seam after the
+            // publication): the child IS committed. Contain it as a failed
+            // post-commit step and continue with the adoption (source
+            // retirement + surface work): the committed child stands, never a
+            // rollback, never a re-park.
             deps.diag.error('fork commit seam failed after publication (child committed)', {
               session: handle.session.id,
               error: safeErrorMessage(error),
@@ -727,6 +750,15 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     } catch (error) {
       if (!adopted) throw error
       deps.diag.error('fork post-commit handoff failed', { error: safeErrorMessage(error), session: handle.session.id })
+    } finally {
+      // The ONE recall-restore authority for every pre-publication fork exit:
+      // the gate was held (a finishing writer may have deferred a queue recall
+      // against it), so an un-committed adoption must restore those recalls —
+      // whether it exited through the refused-navigation return, the adoption
+      // open failure, the stale-after-retain cleanup, an invariant failure or
+      // a pre-publication commit seam. A committed child keeps its committed
+      // recalls (post-publication failures are contained, never restored).
+      if (!forkCommitted) deps.surface.settlePendingQueueRecalls(false)
     }
     return adopted
   }
@@ -741,7 +773,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     sourceSessionId: string,
     atSeq?: number,
     onAdopted?: () => void,
-    pickerIdentity?: RewindLiveIdentity,
+    pickerIdentity?: RewindNavigationIdentity,
   ): Promise<SessionForkOutcome> => {
     // A rewind picker captures identity BEFORE its overlay can yield to a newer
     // navigation. Validate that capture against the live surface before claiming
@@ -754,9 +786,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     if (deps.surface.isSurfaceDisposed() || !pickerCurrent || expectedSessionId !== sourceSessionId) {
       return { kind: 'error' as const, text: 'the session changed before fork dispatch' }
     }
-    const expected: RewindLiveIdentity = {
+    const expected: RewindNavigationIdentity = {
       sessionId: expectedSessionId,
-      generation: pickerIdentity?.generation ?? before.generation,
       navigationEpoch: core.bumpNavigationEpoch(),
     }
     // Pin the source for the WHOLE fork (from admission, before the child is

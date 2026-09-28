@@ -2019,10 +2019,34 @@ the composition and presentation.
     with that release AWAITED before the transition settles (the transition
     gate/barrier stay closed until the released reference/lease is actually
     gone — never a fire-and-forget retirement), the queued recalls settle
-    aborted, and OLD stays current;
+    aborted, and OLD stays current. Every owner-metadata lookup that can
+    throw (`completionIdentity`, `sessionId`) runs BEFORE
+    `setCurrentOwner`, so the commit point itself is seamless (plain
+    assignments only);
   - POST-publication synchronous seam failure — contained as a failed
     post-commit step: the committed child stands, the queued recalls stay
     committed, the OLD retirement still runs; never a rollback.
+  The fork adoption owns the SAME transaction-finally shape (`forkCommitted`
+  flipped at the child publication): every pre-publication fork exit — a
+  refused navigation inside the gate, the adoption-open failure, the
+  stale-after-retain cleanup, an invariant failure, a pre-publication commit
+  seam — restores the deferred recalls through ONE settle authority instead
+  of per-branch restores, because the gate was held and a finishing writer
+  may have deferred a queue recall against it.
+- `src/session-fork.ts` / `src/app/session/ownership-core.ts` — the fork/
+  rewind navigation identity (`RewindNavigationIdentity`, renamed from
+  `RewindLiveIdentity`) is now session id + navigation epoch ONLY: the
+  surface `generation` is removed from it at the type level. Mirroring the
+  official Client split (ClientSessions owns Session identity/references and
+  never a global current selection; view navigation belongs to the UI owner),
+  navigation supersession and presentation-generation invalidation are
+  independent axes — a commit section bumps the generation before the owner
+  publication, so a local commit-seam failure (e.g. a `resetForGeneration`
+  throw after the bump) can no longer be misclassified as user supersession.
+  The monotonic navigation epoch alone still solves A → B → A staleness
+  (locked by the rewind picker regression), the generation bump is never
+  rolled back, and every owner-metadata lookup that can throw runs before
+  `setCurrentOwner` so the commit point is seamless.
   The four "without a Direct owner" throws are now
   transport-neutral owned-generation failures; `adoptFork` grew the Remote
   publication→open adoption: an ownerless fork handle is retained through
