@@ -370,7 +370,7 @@ test('B. the scoped loader capture is exact, single-flight, and restores the pro
 // C - no browser/global carrier dependency
 // ---------------------------------------------------------------------------
 
-test('C. compose/connect/list run with every browser global trapped or absent', async (t) => {
+test('C. compose/connect/list/reconnect run with every browser global trapped or absent', async (t) => {
   const life = testLifecycle(t)
   const globalScope = globalThis as Record<string, unknown>
   const trapped = ['fetch', 'WebSocket', 'Worker', 'document', 'navigator', 'location']
@@ -395,6 +395,16 @@ test('C. compose/connect/list run with every browser global trapped or absent', 
     await waitFor('client readiness under trapped globals', () =>
       runtime.client.sessions.list.getSnapshot().phase === 'ready')
     assert.ok(runtime.client.sessions.list.getSnapshot().ids.map(String).includes(SEED_SESSION_ID))
+    // Reconnect is part of the plan §13 globals prohibition: the reset and its
+    // recovery must not fall back to a browser transport either.
+    const generationBefore = runtime.client.connection.generation.getSnapshot()
+    runtime.client.connection.reconnect()
+    await waitFor('a new generation under trapped globals', () => {
+      const generation = runtime.client.connection.generation.getSnapshot()
+      return generation !== undefined && generation.id !== generationBefore?.id
+    })
+    await waitFor('the Session list to recover under trapped globals', () =>
+      runtime.client.sessions.list.getSnapshot().phase === 'ready')
     await runtime.dispose()
   } finally {
     await host?.dispose()
@@ -731,6 +741,123 @@ test('L2. a Client-side readiness failure unwinds the partial Client cleanly', a
     await hostRuntime.dispose()
     assert.equal(host.ctx.reflect.get('connection'), undefined, 'the Host runtime disposal removes its rows')
   } finally {
+    await host.dispose()
+  }
+})
+
+test('L3. a Client plugin startup rejection unwinds its fiber at its frozen §16 position', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  seedHostSession(host)
+  let hostRuntime: RemoteHostRuntime | undefined
+  try {
+    hostRuntime = await createRemoteHostRuntime(host.ctx)
+    const modules = await loadOfficialClientModulesOnce()
+    const induced = new Error('induced client plugin startup failure')
+
+    // §16 disposes the Client rows in reverse acquisition (Jobs -> Session ->
+    // fileUpload -> contributions -> Gateway -> Connection -> Typert -> root).
+    // A fiber whose startup rejects must still unwind at its own position.
+    // Cordis reports every plugin mount/teardown as `internal/plugin`; a
+    // disposed fiber has already dropped its uid. Under the previous
+    // assign-after-await shape the failed Jobs fiber had no stage variable and
+    // was swept LAST by the Client root disposal instead.
+    let clientRoot: Context | undefined
+    const disposed: Fiber[] = []
+    let failedFiber: Fiber | undefined
+    const originalPlugin = RegistryService.prototype.plugin as unknown as (...args: unknown[]) => Fiber & PromiseLike<Fiber>
+    RegistryService.prototype.plugin = function (this: { ctx: Context }, plugin: unknown, ...args: unknown[]) {
+      if (clientRoot === undefined) {
+        clientRoot = this.ctx
+        // Cordis types do not declare the internal lifecycle event.
+        ;(clientRoot as unknown as { on(name: string, listener: (fiber: Fiber) => void): void })
+          .on('internal/plugin', fiber => { if (fiber.uid === null) disposed.push(fiber) })
+      }
+      const poison = plugin === modules.jobs
+      const fiber = originalPlugin.apply(this, [poison ? { apply() { throw induced } } : plugin, ...args])
+      if (poison) failedFiber = Object.getPrototypeOf(fiber) as Fiber
+      return fiber
+    }
+    let rejected = false
+    let rejection: unknown
+    try {
+      await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
+    } catch (error) {
+      rejected = true
+      rejection = error
+    } finally {
+      RegistryService.prototype.plugin = originalPlugin
+    }
+
+    assert.equal(rejected, true, 'the induced client plugin startup failure must fail the Client composition')
+    assert.equal(rejection, induced, 'the original startup error must surface')
+    assert.notEqual(failedFiber, undefined, 'the failing Jobs fiber must have been created')
+    assert.equal(disposed[0], failedFiber,
+      'the failed fiber must unwind at its §16 position, not be swept last by the Client root')
+    assert.equal(failedFiber?.uid, null, 'the failed fiber must be disposed')
+    assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
+  } finally {
+    await hostRuntime?.dispose()
+    await host.dispose()
+  }
+})
+
+test('L4. an aborted lifecycle signal outranks the already-ready readiness fast path', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  seedHostSession(host)
+  let hostRuntime: RemoteHostRuntime | undefined
+  try {
+    hostRuntime = await createRemoteHostRuntime(host.ctx)
+    const modules = await loadOfficialClientModulesOnce()
+    const controller = new AbortController()
+    const induced = new Error('lifecycle cancelled after readiness')
+    let clientRoot: Context | undefined
+    const originalPlugin = RegistryService.prototype.plugin as unknown as (...args: unknown[]) => Fiber & PromiseLike<Fiber>
+    RegistryService.prototype.plugin = function (this: { ctx: Context }, plugin: unknown, ...args: unknown[]) {
+      if (clientRoot === undefined) clientRoot = this.ctx
+      // Jobs is the LAST mount, so its startup is the final chance to cancel
+      // before `waitForInitialReadiness`. Wait until readiness is genuinely
+      // satisfied (a defined generation AND a ready list), then abort: the
+      // fast path then sees already-ready AND already-aborted in one instant.
+      if (plugin === modules.jobs) {
+        const root = clientRoot
+        return originalPlugin.apply(this, [{ async apply() {
+          const connection = root.get('connection') as unknown as { generation: { getSnapshot(): unknown } }
+          const sessions = root.get('sessions') as unknown as { list: { getSnapshot(): { phase: string } } }
+          const ready = (): boolean =>
+            connection.generation.getSnapshot() !== undefined
+            && sessions.list.getSnapshot().phase === 'ready'
+          const deadline = Date.now() + 15_000
+          while (!ready()) {
+            if (Date.now() > deadline) throw new Error('L4: readiness never landed')
+            await new Promise(resolve => setTimeout(resolve, 5))
+          }
+          controller.abort(induced)
+        } }, ...args])
+      }
+      return originalPlugin.apply(this, [plugin, ...args])
+    }
+    let client: RemoteClientRuntime | undefined
+    let rejected = false
+    let rejection: unknown
+    try {
+      client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier, signal: controller.signal })
+    } catch (error) {
+      rejected = true
+      rejection = error
+    } finally {
+      RegistryService.prototype.plugin = originalPlugin
+    }
+    // A wrongly-ready composition would otherwise leave a live Client loop.
+    if (client !== undefined) await client.dispose()
+
+    assert.equal(rejected, true, 'a cancelled lifecycle must not be reported as a ready composition')
+    assert.match(rejection instanceof Error ? rejection.message : String(rejection), /aborted/,
+      'the abort must surface even though readiness was already satisfied')
+    assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
+  } finally {
+    await hostRuntime?.dispose()
     await host.dispose()
   }
 })

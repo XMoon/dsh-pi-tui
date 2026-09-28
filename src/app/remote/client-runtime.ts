@@ -315,7 +315,6 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
   const { carrier } = options
 
   const context = new Context()
-  const mountedFibers: Fiber[] = []
   let typertFiber: Fiber | undefined
   let connectionFiber: Fiber | undefined
   let gatewayFiber: Fiber | undefined
@@ -330,7 +329,9 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
    * The frozen §16 shutdown sequence: domain Clients (reverse), the explicit
    * `/remote` contributions (reverse), Gateway/Connection/Typert (reverse),
    * then the Client root. Unwinding a partial composition runs the SAME
-   * order over whatever subset exists (unset fibers are skipped).
+   * order over whatever subset exists: a fiber whose startup rejected is
+   * already assigned, so it unwinds at its own position; only stages that
+   * were never reached are skipped.
    *
    * Contribution-disposer failures are isolated (collected, never allowed to
    * truncate the remaining cleanup). Cordis contains unload-disposer failures
@@ -348,7 +349,6 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     for (const fiber of [gatewayFiber, connectionFiber, typertFiber]) {
       await fiber?.dispose()
     }
-    mountedFibers.length = 0
     await context.fiber.dispose()
     return contributionErrors
   }
@@ -358,17 +358,19 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     return shutdown()
   }
 
-  const mount = async (fiber: Fiber & PromiseLike<Fiber>): Promise<Fiber> => {
-    mountedFibers.push(fiber)
-    return fiber
-  }
-
   try {
+    // Each fiber is assigned to its named stage variable BEFORE awaiting
+    // startup: a plugin whose startup rejects is still owned by `shutdown()`
+    // and unwinds at its frozen §16 position. Assigning after the await (the
+    // previous shape) left the failed fiber to the Client root sweep, which
+    // disposed it late and out of order.
+
     // 1. Typert registry.
-    typertFiber = await mount(context.plugin(modules.typert))
+    typertFiber = context.plugin(modules.typert)
+    await typertFiber
     // 2. Connection as a Cordis-owned fiber: explicit composition transport,
     //    never the bundle's page-global default adapter, no location.
-    connectionFiber = await mount(context.plugin(connectionContext => {
+    connectionFiber = context.plugin(connectionContext => {
       modules.connection.installConnection(connectionContext, {
         transport: {
           ownsHost: true,
@@ -376,18 +378,23 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
           openStream: carrier.openStream,
         },
       })
-    }))
+    })
+    await connectionFiber
     // 3. API Gateway.
-    gatewayFiber = await mount(context.plugin(modules.gateway))
+    gatewayFiber = context.plugin(modules.gateway)
+    await gatewayFiber
     // 4. Explicit generated /remote contributions, in mount order.
     for (const contribution of REMOTE_CONTRIBUTIONS) {
       contributionDisposers.push(await context.remote.$mount(contribution))
     }
     // 5./6./7. Domain Clients - fileUpload before Sessions is contractual
     // (the Session Client injects `fileUpload`).
-    fileUploadFiber = await mount(context.plugin(modules.fileUpload))
-    sessionFiber = await mount(context.plugin(modules.session))
-    jobsFiber = await mount(context.plugin(modules.jobs))
+    fileUploadFiber = context.plugin(modules.fileUpload)
+    await fileUploadFiber
+    sessionFiber = context.plugin(modules.session)
+    await sessionFiber
+    jobsFiber = context.plugin(modules.jobs)
+    await jobsFiber
 
     // The Client and Host packages augment the same Cordis `Context` service
     // names, so the augmented property types resolve to the Direct Host faces
@@ -459,6 +466,12 @@ async function waitForInitialReadiness(
   const isReady = (): boolean =>
     connection.generation.getSnapshot() !== undefined
     && sessions.list.getSnapshot().phase === 'ready'
+  // The already-aborted case outranks the already-ready fast path: a cancelled
+  // lifecycle may not be reported as a successful composition merely because
+  // readiness landed during the Host/Client mount sequence.
+  if (signal?.aborted) {
+    throw new Error('remote client runtime: aborted before initial readiness', { cause: signal.reason })
+  }
   if (isReady()) return
 
   await new Promise<void>((resolve, reject) => {
