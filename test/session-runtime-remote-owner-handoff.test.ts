@@ -160,7 +160,7 @@ function harness() {
     isSurfaceDisposed: (): boolean => disposed,
     beginOpening: (sessionId) => ({ sessionId }),
     clearOpening: () => {},
-    settlePendingQueueRecalls: () => {},
+    settlePendingQueueRecalls: (committed) => { events.push(`recalls:${committed}`) },
     settleLocalSubmitAck: () => {},
     resetSubmitLatency: () => {},
     setCompletionOwner: (identity) => { events.push(`completion:${String(identity)}`) },
@@ -235,6 +235,7 @@ function harness() {
     controller,
     arms,
     publishRetained,
+    retain,
     bindingOf: (id: string): FakeBinding | undefined => live.get(id)?.binding,
     isLive: (id: string): boolean => live.has(id),
     countRefs: (id: string): number => live.get(id)?.refs ?? 0,
@@ -529,12 +530,33 @@ test('a pre-publication commit throw releases the acquired NEW owner; OLD stays 
   assert.equal(h.core.currentSessionId(), 'session-a', 'OLD remains current')
   assert.ok(!h.events.some(entry => entry.startsWith('init:session-b')), 'no NEW surface init ran')
   assert.ok(!h.events.some(entry => entry.startsWith('switch:')), 'no switch was reported')
-  // The acquired NEW reference is released exactly once (the detached
-  // retirement completes asynchronously — settle the microtask queue).
-  await new Promise(resolve => setImmediate(resolve))
-  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(!h.events.includes('recalls:true'),
+    'a pre-publication failure must NOT commit the queued recalls')
+  assert.ok(h.events.includes('recalls:false'),
+    'a pre-publication failure restores the queued recalls')
+  // The transition awaits the exactly-once release of the acquired NEW owner
+  // before it settles, so the reference count is already zero here.
   assert.equal(h.countRefs('session-b'), 0, 'the pre-commit NEW owner is released exactly once')
   assert.ok(!h.isLive('session-b'))
+  // Direct-transitionTo probe (no switchSession wrapper): the recall restore
+  // must come from the transition's OWN finally — `transitionCommitted` flips
+  // only at the publication, so a pre-publication failure restores the
+  // recalls even for callers without an outer settle(false) backstop.
+  h.failNextCommitBeforePublication()
+  let directError: unknown
+  await h.runtime.transitionTo<SessionHandle>({
+    target: { id: 'session-c' },
+    create: async () => ({ session: { id: 'session-c' }, client: h.retain('session-c') }),
+  }).catch(error => { directError = error })
+  assert.match(String(directError), /commit seam exploded before publication/,
+    'a direct transitionTo caller sees the original failure as a rejection')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'OLD remains current after the direct transition failure')
+  assert.equal(h.countRefs('session-c'), 0, 'the direct transition released its acquired owner too')
+  const falseCount = h.events.filter(entry => entry === 'recalls:false').length
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0,
+    'neither failed transition committed the recalls')
+  assert.equal(falseCount, 3,
+    'each failure restored the recalls (transitionTo finally + the switch wrapper no-op + the direct transitionTo finally)')
 })
 
 test('a pre-publication commit throw after the adoption open releases the retained child exactly once', async () => {
@@ -554,6 +576,8 @@ test('a pre-publication commit throw after the adoption open releases the retain
   assert.equal(h.core.currentSessionId(), 'session-a', 'the source remains current')
   assert.equal(h.countRefs('child-1'), 0, 'the retained child owner is released exactly once')
   assert.ok(!h.events.some(entry => entry.startsWith('init:child')), 'no child surface init ran')
+  assert.ok(!h.events.includes('recalls:true'), 'a pre-publication fork failure must NOT commit the queued recalls')
+  assert.ok(h.events.includes('recalls:false'), 'a pre-publication fork failure restores the queued recalls')
 })
 
 test('a Direct pre-publication commit throw releases the child once and never re-parks the released handle', async () => {
@@ -607,7 +631,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
       isSurfaceDisposed: () => false,
       beginOpening: (sessionId) => ({ sessionId }),
       clearOpening: () => {},
-      settlePendingQueueRecalls: () => {},
+      settlePendingQueueRecalls: (committed) => { retirementCalls.push(`recalls:` + String(committed)) },
       settleLocalSubmitAck: () => {},
       resetSubmitLatency: (): void => {
         if (explodeCommit) {
@@ -641,8 +665,8 @@ test('a Direct pre-publication commit throw releases the child once and never re
     assert.match(outcome.text, /session-direct-child/, 'the truthful outcome names the published child')
     assert.match(outcome.text, /commit seam exploded/, 'the seam failure is preserved')
   }
-  assert.deepEqual(retirementCalls, ['retire:child:transition'],
-    'the child owner is released exactly once and NEVER re-parked')
+  assert.deepEqual(retirementCalls, ['recalls:false', 'retire:child:transition'],
+    'the queued recalls are restored, the child owner is released exactly once, and it is NEVER re-parked')
   assert.equal(core.currentSessionId(), 'session-direct-source', 'the source remains current')
 })
 
@@ -662,6 +686,10 @@ test('a post-publication completion-seam throw is contained: the transition comp
     'the OLD release happens with the core already committed to NEW')
   assert.ok(h.events.includes('init:session-b'), 'the post-handoff surface init still runs')
   assert.ok(h.events.includes('switch:session-a->session-b'), 'the switch is still reported')
+  assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 1,
+    'the queued recalls are committed exactly once (the publication is the commit point)')
+  assert.ok(h.events.indexOf('recalls:true') < h.events.indexOf('recalls:false'),
+    'no recall restore may precede the commit (the trailing empty-list settle(false) from the switch wrapper is a harmless no-op)')
 })
 
 test('a Direct fork post-publication completion-seam throw never rolls back or re-parks the committed child', async () => {
@@ -714,7 +742,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       isSurfaceDisposed: () => false,
       beginOpening: (sessionId) => ({ sessionId }),
       clearOpening: () => {},
-      settlePendingQueueRecalls: () => {},
+      settlePendingQueueRecalls: (committed) => { retirementCalls.push(`recalls:` + String(committed)) },
       settleLocalSubmitAck: () => {},
       resetSubmitLatency: () => {},
       setCompletionOwner: (): void => {
@@ -744,8 +772,8 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
   explodeCompletion = true
   const outcome = await runtime.forkSession('session-direct-source')
   assert.equal(outcome.kind, 'success', 'the committed fork stands')
-  assert.deepEqual(retirementCalls, ['retire:source:transition'],
-    'the SOURCE is retired post-commit; the committed child is neither retired nor parked')
+  assert.deepEqual(retirementCalls, ['recalls:true', 'retire:source:transition'],
+    "the recalls stay committed exactly once and the SOURCE is retired post-commit; the committed child is neither retired nor parked")
   assert.equal(core.currentSessionId(), 'session-direct-child', 'the child stays current — no rollback')
 })
 
@@ -795,7 +823,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       isSurfaceDisposed: () => false,
       beginOpening: (sessionId) => ({ sessionId }),
       clearOpening: () => {},
-      settlePendingQueueRecalls: () => {},
+      settlePendingQueueRecalls: (committed) => { retirementCalls.push(`recalls:` + String(committed)) },
       settleLocalSubmitAck: () => {},
       resetSubmitLatency: (): void => {
         if (explodeCommit) {
@@ -828,10 +856,14 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
   await new Promise(resolve => setImmediate(resolve))
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(settled, false, 'the transition must stay open while the NEW owner release is in flight')
-  assert.deepEqual(retirementCalls, ['retire:new:transition'], 'the exactly-once release started')
+  assert.deepEqual(retirementCalls, ['retire:new:transition'], 'the exactly-once release started (recall restore follows in the transition finally)')
   releaseRetire()
   const result = await pending
   assert.match(String(result), /commit seam exploded before publication/, 'the original failure still surfaces')
   assert.equal(core.currentSessionId(), 'session-old', 'OLD stays current')
-  assert.deepEqual(retirementCalls, ['retire:new:transition'], 'no second release of the NEW owner')
+  assert.deepEqual(retirementCalls.filter(entry => entry.startsWith('retire:')), ['retire:new:transition'],
+    'no second release of the NEW owner')
+  assert.ok(retirementCalls.indexOf('recalls:false') > retirementCalls.indexOf('retire:new:transition'),
+    'the recalls are restored only AFTER the awaited release (the second empty-list settle(false) is the pre-existing switch-wrapper no-op)')
+  assert.ok(!retirementCalls.includes('recalls:true'), 'a pre-publication failure never commits the recalls')
 })

@@ -8,11 +8,16 @@
  * the shapes differ and must NOT be unified:
  *
  * ```text
- * A ordinary transition: bump(reset) → publish owner → completion
- * B fork adoption:       settle → bump(reset) → publish owner → completion
+ * A ordinary transition: bump(reset) → publish owner → recall commit → completion
+ * B fork adoption:       bump(reset) → publish owner → recall commit → completion
  * C first session:       publish owner → completion → await idle → bump(reset) → init
  * D startup resume:      publish owner → completion → pre-mount quiesce
  * ```
+ *
+ * In A/B the queued recalls settle as committed only AFTER the owner
+ * publication — the publication is the commit point of a session transition;
+ * everything before it is restorable, everything after it is a contained
+ * post-commit failure.
  *
  * `bumpGeneration` runs its synchronous surface reset, so in A/B the reset
  * necessarily observes the NEW generation while the OLD owner is still current.
@@ -64,25 +69,29 @@ export interface ResumeCommitSeams extends OwnerPublicationSeams {
 
 /**
  * A — the ordinary transition commit. Returns nothing; the caller owns
- * `transitionCommitted`.
+ * `transitionCommitted`. The queued recalls settle as COMMITTED only after the
+ * owner publication succeeded — the publication is the transition's commit
+ * point, so a pre-publication seam failure leaves the recalls restorable.
  */
 export function runOrdinaryCommit(seams: OrdinaryCommitSeams, next: unknown): void {
-  seams.settlePendingQueueRecalls(true)
   if (!seams.isSurfaceDisposed()) seams.settleLocalSubmitAck('session switched')
   if (!seams.isSurfaceDisposed()) seams.resetSubmitLatency()
   if (!seams.isSurfaceDisposed()) seams.bumpGeneration()
   const identity = seams.publishOwner(next)
+  seams.settlePendingQueueRecalls(true)
   if (seams.isSurfaceDisposed()) return
   seams.setCompletionOwner(identity)
 }
 
-/** B — the fork-adoption commit (the navigation fence ran before it). */
+/** B — the fork-adoption commit (the navigation fence ran before it). The
+ *  queued recalls settle as COMMITTED only after the owner publication
+ *  succeeded, exactly like the ordinary transition. */
 export function runForkCommit(seams: ForkCommitSeams, next: unknown): void {
-  seams.settlePendingQueueRecalls(true)
   seams.settleLocalSubmitAck('session forked')
   seams.resetSubmitLatency()
   seams.bumpGeneration()
   const identity = seams.publishOwner(next)
+  seams.settlePendingQueueRecalls(true)
   seams.setCompletionOwner(identity)
 }
 

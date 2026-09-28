@@ -248,7 +248,6 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           await deps.retirement.flush(flushOwner)
         },
         commit: (next) => {
-          transitionCommitted = true
           // Map the NEW owner BEFORE the commit section can throw: the commit
           // ORDER stays fixed by `runOrdinaryCommit` (the generation reset runs
           // BEFORE the new owner is published, so it observes the OLD owner),
@@ -266,6 +265,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               publishOwner: () => {
                 committedOwner = nextOwner
                 core.setCurrentOwner(nextOwner, deps.owners.sessionId(nextOwner))
+                // The publication is the transition's COMMIT POINT: only from
+                // here on does the `finally` below stop restoring the queued
+                // recalls (a pre-publication failure settles them aborted).
+                transitionCommitted = true
                 return deps.owners.completionIdentity(nextOwner)
               },
               setCompletionOwner: deps.surface.setCompletionOwner,
@@ -655,10 +658,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           if (core.owner() !== nextOwner) {
             // PRE-publication failure: the child owner was retained (possibly
             // through the adoption open) but never committed: release it
-            // exactly once and keep OLD current; the child stays a published
-            // catalog identity. Mark the ledger so the fork error path never
-            // parks this released owner.
+            // exactly once, restore the queued recalls (the fork path has no
+            // unified transition `finally` to do it), and keep OLD current;
+            // the child stays a published catalog identity. Mark the ledger
+            // so the fork error path never parks this released owner.
             ledger.released = true
+            deps.surface.settlePendingQueueRecalls(false)
             const report = await deps.retirement.retire(nextOwner, 'transition')
             for (const failure of report.failures) {
               deps.diag.error('fork pre-commit owner release failed', { session: handle.session.id, phase: failure.phase, error: failure.error })
