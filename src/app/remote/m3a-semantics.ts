@@ -160,6 +160,11 @@ export function createRemoteM3ASemantics(
   const forwardedEvents = remote.$on.bind(remote) as unknown as
     RemoteInteractionRuntimeSource['remote']['$on'] & RemotePluginManagerSource['$on']
   const modelCatalog = new RemoteModelCatalog(remote.session, sessions, generation, remote.llm)
+  const interaction = new RemoteInteractionPort({
+    sessions,
+    remote: { userQuestions: remote.userQuestions, $on: forwardedEvents },
+    connection: { generation },
+  })
   const presetCatalog = new RemotePresetCatalog(remote.agentPresets, generation)
   let disposed = false
   return {
@@ -176,21 +181,17 @@ export function createRemoteM3ASemantics(
     hostFile: new RemoteHostFilePort(remote.fileReferences, generation),
     hostCommand: new RemoteHostCommandPort(remote.commands),
     presentationReader: new RemotePresentationReader(sessions, generation),
-    interaction: new RemoteInteractionPort({
-      sessions,
-      remote: { userQuestions: remote.userQuestions, $on: forwardedEvents },
-      connection: { generation },
-    }),
+    interaction,
     pluginManager: new RemotePluginManagerPort({ pluginManager: remote.pluginManager, $on: forwardedEvents }),
     jobObservation: new RemoteJobObservationPort(runtime.jobs),
     dispose(): void {
       if (disposed) return
       disposed = true
-      // Adapter-owned caches ahead of the Client Context disposal. Neither
-      // catalog adapter holds a subscription today; keeping the seam exact
-      // documents the frozen ordering for the adapters that will.
+      // Adapter-owned caches and subscriptions ahead of the Client Context
+      // disposal (the frozen adapter-disposal order).
       modelCatalog.disposeCache()
       presetCatalog.disposeCache()
+      interaction.dispose()
     },
   }
 }

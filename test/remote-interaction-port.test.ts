@@ -356,3 +356,34 @@ test('claimTimedWait resolves undefined when the caller aborts during the openin
   controller.abort()
   assert.equal(await pending, undefined, 'a caller abort is a normal absent claim')
 })
+
+test('dispose releases every forwarded-event subscription exactly once', () => {
+  // The adapter OWNS its subscriptions (the established Remote convention):
+  // the assembly runs dispose() BEFORE the Client Context disposal, so a
+  // forwarded-event listener never outlives its owner.
+  const offs: string[] = []
+  const remote = fakeRemote()
+  const subscriptions = new Map<string, () => void>()
+  const remoteWithDisposers = {
+    ...remote,
+    $on: (event: string, listener: unknown) => {
+      const off = remote.$on(event, listener as never)
+      subscriptions.set(event, off)
+      return () => { offs.push(event); off() }
+    },
+  }
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  const port = new RemoteInteractionPort({
+    sessions: { scopeOf: () => undefined, binding: () => undefined },
+    remote: remoteWithDisposers as never,
+    connection: { generation: generation.source },
+  })
+  port.questions.onRequest(async () => ({ answers: [] }))
+  port.onApprovalRequest(() => 'ok')
+  assert.deepEqual([...subscriptions.keys()].sort(), ['approval/request', 'user-questions/request'])
+
+  port.dispose()
+  port.dispose()
+  assert.deepEqual(offs.sort(), ['approval/request', 'user-questions/request'],
+    'each subscription is released exactly once')
+})

@@ -178,6 +178,8 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
   private readonly sessions: RemoteQuestionSessionsSource
   private readonly remote: RemoteUserQuestionRemotes & RemoteInteractionEventsSource
   private readonly generation: RemoteConnectionGenerationSource
+  /** Every subscription this adapter owns, released exactly once. */
+  private readonly owned: Array<() => void> = []
 
   constructor(source: RemoteInteractionRuntimeSource) {
     this.sessions = source.sessions
@@ -189,7 +191,7 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     // The official Client scope is the ONLY Session identity source on the
     // wire: the forwarded request's Agent became the resolved owner Context.
     const sessions = this.sessions
-    this.remote.$on('user-questions/request', function (this: unknown, request, next) {
+    this.owned.push(this.remote.$on('user-questions/request', function (this: unknown, request, next) {
       const sessionId = sessions.scopeOf(this)
       // A request with no owned Session cannot be keyed by a durable card.
       if (sessionId === undefined) return next()
@@ -201,8 +203,13 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
         questions: request.questions,
         ...request.signal === undefined ? {} : { signal: request.signal },
       }, next)
-    })
+    }))
     return true
+  }
+
+  /** Release this sub-domain's subscriptions exactly once. */
+  dispose(): void {
+    for (const off of this.owned.splice(0)) off()
   }
 
   snapshot(sessionId: string): QuestionSurfaceSnapshot | undefined {
@@ -340,18 +347,32 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
 export class RemoteInteractionPort implements InteractionPort {
   readonly questions: QuestionInteractionPort
   private readonly remote: RemoteInteractionEventsSource
+  /** Every subscription this port owns, released exactly once. */
+  private readonly owned: Array<() => void> = []
+  private readonly questionsPort: RemoteQuestionInteractionPort
 
   constructor(source: RemoteInteractionRuntimeSource) {
     this.remote = source.remote
-    this.questions = new RemoteQuestionInteractionPort(source)
+    this.questionsPort = new RemoteQuestionInteractionPort(source)
+    this.questions = this.questionsPort
   }
 
   onApprovalRequest(listener: ApprovalRequestListener): void {
     // Approval rides the forwarded `approval/request` waterfall; the
     // transport-neutral listener receives the same Agent-free shape.
-    this.remote.$on('approval/request', function (this: unknown, request: unknown, next: unknown) {
+    this.owned.push(this.remote.$on('approval/request', function (this: unknown, request: unknown, next: unknown) {
       return listener(request as Parameters<ApprovalRequestListener>[0], next)
-    })
+    }))
+  }
+
+  /**
+   * Release every subscription this adapter owns. The assembly runs it BEFORE
+   * the Client Context disposal (the frozen adapter-disposal order), so a
+   * forwarded-event listener never outlives its owner.
+   */
+  dispose(): void {
+    this.questionsPort.dispose()
+    for (const off of this.owned.splice(0)) off()
   }
 
   setApprovalPolicy(_sessionId: string, _policy: ApprovalPolicy): boolean {
