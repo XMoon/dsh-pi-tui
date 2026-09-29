@@ -2146,9 +2146,14 @@ the final complete Remote Backend assembly.
   only, absent fields stay absent, no parent fallback, no StatsFolder.
 - `src/subagent-model-menu.ts` — the allowlist picker consumes the official
   grouped model directory (`ModelCatalog.loadDirectory()`, the
-  `session.modelCatalog()` semantic) in ONE async read; saved routes absent
-  from the current directory stay representable/removable as trailing rows;
-  per-provider failure isolation renders from `directory.failures`; the
+  `session.modelCatalog()` semantic) in ONE async read; saved routes stay
+  representable/removable as trailing rows, and ABSENCE is a claim only a
+  READY directory that loaded the route's provider can make
+  (`AllowlistCatalogState`: while the catalog is loading, after a
+  whole-directory read failure, or for a provider in `directory.failures`,
+  the saved row renders "saved route (…)" — never "not in the current
+  catalog"); per-provider failure isolation renders from
+  `directory.failures`; the
   historical `listProviders()` + `listModels(provider)` cross-backend pair is
   RETIRED from `ModelCatalog` (Direct keeps it only as the in-process
   `ctx.llm` face its own directory read uses). `llm.listModels` has no public
@@ -2172,7 +2177,9 @@ the final complete Remote Backend assembly.
   scope to the official `fileReferences/list(agentId, query, signal)` with
   generation fencing; the workspace scope and existence/canonicalization are
   explicit `unavailable` (no Client fs, no cwd guess, no fake empty), so
-  relative `@`-mentions stay literal.
+  relative `@`-mentions stay literal. Cancellation is its own outcome on
+  BOTH adapters: an aborted signal REJECTS (`throwIfAborted`), never folded
+  into `unavailable`.
 - `src/runtime/presentation-read-port.ts` + readers —
   `PresentationReader.loadThrough(sessionId, seq)` maps the official Client
   `Session.loadThrough` jump (borrow → pin exact generation → ONE official

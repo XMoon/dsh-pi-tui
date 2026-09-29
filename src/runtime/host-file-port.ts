@@ -72,7 +72,9 @@ export interface HostFilePort {
    * the current Host filesystem discovery offers (fd whole-tree fuzzy
    * when fd is on the Host PATH, the bounded recursive scan otherwise)
    * as an authoritative `ok` — `[]` when nothing matches — or
-   * `unavailable` when the capability cannot answer. */
+   * `unavailable` when the capability cannot answer. Cancellation is its
+   * own outcome: an aborted signal REJECTS (both adapters), it is never
+   * folded into `unavailable`. */
   listReferences(
     scope: HostFileScope,
     query: string,
@@ -81,7 +83,7 @@ export interface HostFilePort {
   /** Probe one raw mention path (`src/foo.ts`, `~/x`, `/abs/x`) for
    * existence in the scope, resolving it to the absolute Host path
    * (`~` expansion; relative against the scope workspace; absolute kept;
-   * symlinks absolutized, never realpath'd). */
+   * symlinks absolutized, never realpath'd). An aborted signal rejects. */
   resolveReference(
     scope: HostFileScope,
     path: string,

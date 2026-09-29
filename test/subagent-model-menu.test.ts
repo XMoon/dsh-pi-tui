@@ -18,6 +18,7 @@ import {
   allowlistSummary,
   lastRouteWhileEnabled,
   projectSubagentAllowlist,
+  type AllowlistCatalogState,
   type SubagentAllowlistPickerDeps,
 } from '../src/subagent-model-menu.ts'
 import type { ModelDirectoryDto } from '../src/runtime/catalog-port.ts'
@@ -194,12 +195,12 @@ test('allowlistSummary and lastRouteWhileEnabled are pure', () => {
 
 test('projection flattens directory groups in catalog order with full-identity allowed markers', () => {
   const projection = projectSubagentAllowlist({
-    directory: directoryOf({
+    catalog: { state: 'ready', directory: directoryOf({
       groups: [
         { id: 'p1', name: 'One', models: [{ id: 'shared' }] },
         { id: 'p2', name: 'Two', models: [{ id: 'shared' }] },
       ],
-    }),
+    }) },
     allowed: [{ provider: 'p2', model: 'shared' }],
   })
   assert.deepEqual(projection.models.map(row => allowlistRouteKey(row.providerId, row.modelId)), [
@@ -211,34 +212,72 @@ test('projection flattens directory groups in catalog order with full-identity a
 
 test('projection keeps a failed provider as an inert failure row beside the loaded groups', () => {
   const projection = projectSubagentAllowlist({
-    directory: directoryOf({
+    catalog: { state: 'ready', directory: directoryOf({
       groups: [{ id: 'a', models: [{ id: 'm' }] }],
       failures: [{ id: 'b', name: 'Bad', message: 'boom' }],
-    }),
+    }) },
     allowed: [],
   })
   assert.deepEqual(projection.models.map(row => row.providerId), ['a'])
   assert.deepEqual(projection.failures, [{ providerId: 'b', providerName: 'Bad', message: 'boom' }])
 })
 
-test('projection keeps saved routes absent from the directory representable', () => {
-  const projection = projectSubagentAllowlist({
+test('only a READY directory can claim a saved route absent', () => {
+  const ready: AllowlistCatalogState = {
+    state: 'ready',
     directory: directoryOf({ groups: [{ id: 'p', name: 'P', models: [{ id: 'm1' }] }] }),
-    allowed: [{ provider: 'p', model: 'm1' }, { provider: 'gone', model: 'old-model' }],
-  })
+  }
+  const allowed = [{ provider: 'p', model: 'm1' }, { provider: 'gone', model: 'old-model' }] as const
+  const projection = projectSubagentAllowlist({ catalog: ready, allowed })
   assert.deepEqual(projection.models.map(row => allowlistRouteKey(row.providerId, row.modelId)), [
     'p\u0000m1',
     'gone\u0000old-model',
   ])
-  assert.equal(projection.models[0]!.absentFromCatalog, undefined)
-  assert.equal(projection.models[1]!.absentFromCatalog, true)
+  assert.equal(projection.models[0]!.savedRoute, undefined, 'a listed route is a normal row')
+  assert.equal(projection.models[1]!.savedRoute, 'absent', 'the ready directory provably omits it')
   assert.equal(projection.models[1]!.allowed, true)
 })
 
-test('a still-loading directory contributes no rows yet', () => {
-  const projection = projectSubagentAllowlist({ directory: undefined, allowed: [] })
-  assert.deepEqual(projection.models, [])
+test('a loading catalog never claims absence — saved routes stay saved, unverified', () => {
+  const projection = projectSubagentAllowlist({
+    catalog: { state: 'loading' },
+    allowed: [{ provider: 'gone', model: 'old-model' }],
+  })
+  assert.equal(projection.models.length, 1, 'the saved route stays representable and removable')
+  assert.equal(projection.models[0]!.savedRoute, 'catalog-loading', 'absence is never claimed while loading')
   assert.deepEqual(projection.failures, [])
+})
+
+test('a failed whole-directory read never claims absence', () => {
+  const projection = projectSubagentAllowlist({
+    catalog: { state: 'failed', reason: 'remote connection is not connected' },
+    allowed: [{ provider: 'p', model: 'm1' }],
+  })
+  assert.equal(projection.models[0]!.savedRoute, 'catalog-unavailable')
+  assert.deepEqual(projection.failures, [{
+    providerId: 'model-directory',
+    providerName: 'Model directory',
+    message: 'remote connection is not connected',
+  }])
+})
+
+test('a provider-side failure never claims that provider\'s saved routes absent', () => {
+  const projection = projectSubagentAllowlist({
+    catalog: { state: 'ready', directory: directoryOf({
+      groups: [{ id: 'ok', name: 'Ok', models: [{ id: 'm' }] }],
+      failures: [{ id: 'anthropic', name: 'Anthropic', message: 'lookup failed' }],
+    }) },
+    allowed: [
+      { provider: 'anthropic', model: 'claude-x' },
+      { provider: 'ok', model: 'really-gone' },
+    ],
+  })
+  const anthropic = projection.models.find(row => row.providerId === 'anthropic')!
+  const okGone = projection.models.find(row => row.providerId === 'ok' && row.modelId === 'really-gone')!
+  assert.equal(anthropic.savedRoute, 'provider-unavailable',
+    'the failed provider\'s catalog could not answer — absence is not a fact')
+  assert.equal(okGone.savedRoute, 'absent',
+    'the loaded provider\'s omission IS provable')
 })
 
 test('toggling a model writes the WHOLE official section and Esc returns to /settings once', async () => {
@@ -403,6 +442,16 @@ test('a whole-directory failure renders one inert failure and keeps saved routes
   let view = menu.render(60).map(strip).join('\n')
   assert.ok(view.includes('Model directory'), `the directory failure row must render:\n${view}`)
   assert.ok(view.includes('m1'), `the saved route must stay visible:\n${view}`)
+  assert.ok(!view.includes('not in the current catalog'),
+    `a failed catalog read must never claim absence:\n${view}`)
+  // Filter to the saved route: its note says the catalog is unavailable —
+  // absence is NOT claimed from a failed read.
+  menu.handleInput('m1')
+  await flush()
+  view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('saved route (catalog unavailable)'),
+    `the saved route carries the truthful unverified note:\n${view}`)
+  for (let i = 0; i < 2; i += 1) menu.handleInput('\x7f')
   // Filter to the failure row: its reason renders as the selected detail and
   // Enter stays inert.
   menu.handleInput('directory')
@@ -420,6 +469,50 @@ test('a whole-directory failure renders one inert failure and keeps saved routes
   menu.handleInput(ENTER) // cursor on the saved route -> refused while enabled
   await settle(harness, 0)
   assert.deepEqual(harness.store.writes, [], 'the last-route rule still applies on a failed directory')
+})
+
+test('a loading catalog shows saved routes WITHOUT the absence claim', async () => {
+  const harness = rig({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] }, { defer: true })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  const view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('m1'), `the saved route stays visible while loading:\n${view}`)
+  assert.ok(!view.includes('not in the current catalog'),
+    `a still-loading catalog must never claim absence:\n${view}`)
+  assert.ok(view.includes('catalog still loading'),
+    `the saved route carries the truthful loading note:\n${view}`)
+  harness.resolveDirectory(directoryOf({ groups: [{ id: 'p', name: 'P', models: [{ id: 'm1' }] }] }))
+  await flush()
+  // Once the directory arrives and lists the route, the saved-note disappears.
+  const settled = menu.render(60).map(strip).join('\n')
+  assert.ok(!settled.includes('Saved routes'), `a listed route is a normal row:\n${settled}`)
+})
+
+test('a provider-side failure keeps that provider\'s saved route unverified — never absent', async () => {
+  const harness = rig({ enabled: true, allowedModels: [{ provider: 'bad', model: 'b1' }, { provider: 'ok', model: 'gone' }] }, {
+    directory: directoryOf({
+      groups: [{ id: 'ok', name: 'Ok', models: [{ id: 'here' }] }],
+      failures: [{ id: 'bad', name: 'Bad', message: 'bad exploded' }],
+    }),
+  })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+  const view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('Unavailable'), `the provider failure row must render:\n${view}`)
+  // Both saved routes render under Saved routes with their own provable facts:
+  // 'gone' IS absent (ok loaded and omits it); 'b1' is NOT claimed absent.
+  menu.handleInput('b1')
+  await flush()
+  let filtered = menu.render(60).map(strip).join('\n')
+  assert.ok(filtered.includes('provider catalog unavailable'),
+    `the failed provider\'s saved route stays unverified:\n${filtered}`)
+  assert.ok(!filtered.includes('not in the current catalog'),
+    `the failed provider\'s saved route is never claimed absent:\n${filtered}`)
+  for (let i = 0; i < 2; i += 1) menu.handleInput('\x7f')
+  menu.handleInput('gone')
+  await flush()
+  filtered = menu.render(60).map(strip).join('\n')
+  assert.ok(filtered.includes('not in the current catalog'),
+    `the loaded provider\'s omission IS provable:\n${filtered}`)
 })
 
 test('search covers model name/id and provider name/id without changing allowed state', async () => {

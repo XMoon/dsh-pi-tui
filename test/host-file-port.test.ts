@@ -97,22 +97,28 @@ test('the fallback returns RAW paths — quoting and filtering are client-side',
     `paths must be bare:\n${JSON.stringify(result.map(item => item.path))}`)
 })
 
-test('resolveReference honors an already-aborted request (fail closed, no filesystem access)', async (t) => {
+test('resolveReference honors an already-aborted request as CANCELLATION (no filesystem access)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const controller = new AbortController()
   controller.abort()
-  const cancelled = await fallbackPort(root).resolveReference({ kind: 'workspace', cwd: root }, 'file-one.txt', { signal: controller.signal })
-  assert.equal(cancelled.kind, 'unavailable', 'a cancelled probe never asserts missing')
+  // Cancellation is its own outcome (the M3-3A failure vocabulary): the
+  // probe rejects, never reporting unavailable or asserting missing.
+  await assert.rejects(
+    fallbackPort(root).resolveReference({ kind: 'workspace', cwd: root }, 'file-one.txt', { signal: controller.signal }),
+    /aborted/u,
+  )
 })
 
-test('an abort mid-scan cancels the fallback discovery', async (t) => {
+test('an abort mid-scan cancels the fallback discovery (a rejection, never unavailable)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const controller = new AbortController()
   controller.abort()
-  const cancelled = await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file', { signal: controller.signal })
-  assert.equal(cancelled.kind, 'unavailable', 'a cancelled discovery is unavailable, never an authoritative empty list')
+  await assert.rejects(
+    fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file', { signal: controller.signal }),
+    /aborted/u,
+    'a cancelled discovery rejects — Direct and Remote share the one cancellation semantic')
 })
 
 test('the session scope resolves through the live-agent resolver; unresolvable scopes fail closed', async (t) => {
@@ -220,7 +226,7 @@ test('the fd branch returns RAW paths — quoting is client-side', async (t) => 
     `a spaced fd candidate must flow through as a RAW path:\n${JSON.stringify(hits.map(h => h.path))}`)
 })
 
-test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', async (t) => {
+test('an abort mid-fd-query cancels as a REJECTION (the port re-checks AFTER the await)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   // A fake fd that would answer eventually but sleeps past the abort.
@@ -228,7 +234,7 @@ test('an abort mid-fd-query fails closed (the port re-checks AFTER the await)', 
   const controller = new AbortController()
   const pending = port.listReferences({ kind: 'workspace', cwd: root } as const, '@file', { signal: controller.signal })
   controller.abort()
-  assert.equal((await pending).kind, 'unavailable', 'a cancelled fd query must never serve a late result')
+  await assert.rejects(pending, /aborted/u, 'a cancelled fd query never serves a late result and never reports unavailable')
 })
 
 test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)', async (t) => {
