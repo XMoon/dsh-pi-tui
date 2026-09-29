@@ -2266,7 +2266,7 @@ export function registerTuiCommands(
           {
             id: 'git-attribution',
             label: 'Git attribution',
-            description: 'Off (default): no guidance; Product: instruct the Agent to add the official Co-Authored-By trailer; Product+model: also add Assisted-By provider/model. Prompt guidance only — no Git hooks',
+            description: 'Off (default): no guidance; Product: instruct the Agent to add the official Co-Authored-By trailer; Product+model: also add Assisted-By provider/model. Prompt guidance only — no Git hooks, and presets with a complete persona (minimal) receive no TUI prompt guidance',
             currentValue: runner.gitAttributionState.mode,
             values: ['off', 'product', 'product-model'],
           },

@@ -291,6 +291,9 @@ Boundaries:
 
 - `!` / `!!` local shell commands and commits from your own terminal are completely untouched;
 - no `prepare-commit-msg` hook is installed and existing hooks are never modified;
+- **not effective under the `minimal` preset**: its persona is a complete system prompt
+  (`complete: true`) that replaces every other section — the same existing behavior for the
+  other TUI guidance (progress updates, response style, focus);
 - no GitHub credentials or API are required; the Author/Committer identity is never modified;
 - a model may in theory ignore or mis-transcribe the instruction — this is the accepted tradeoff: low-intrusion guidance instead of a full Git lifecycle subsystem.
 
