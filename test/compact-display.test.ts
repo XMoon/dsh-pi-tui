@@ -61,9 +61,11 @@ function show(app: TuiApp, folder: TranscriptFolder): void {
 }
 
 /** The authoritative same-id assistant settlement carrying a settled
- * reasoning block (plus an optional narration text block), which replaces
- * the live reasoning row with the same text — the settle-a-Work fixture
- * shape shared by the compaction and timing tests. */
+ * reasoning block (plus an optional narration text block WITH its stream
+ * chunks), which replaces the live reasoning row with the same text — the
+ * settle-a-Work fixture shape shared by the compaction tests. (The timing
+ * test keeps its own narration-chunk-free variant: the text chunks would
+ * alter the reasoning row's timing sidecar it corrects.) */
 function settlementEvent(options: {
   id: string
   step: number
@@ -498,21 +500,10 @@ test('a Work header stays inspectable while a Question owns the modal', async ()
 })
 
 // ── Compact historical compaction (2026-09-29 plan §7.3/§7.4/§7.6/§7.7) ────
-
-test('the latest settled Work keeps its preview even after the final assistant reply', async () => {
-  const { vt, app } = startApp('compact')
-  const folder = new TranscriptFolder()
-  applyMixed(folder, workFixture())
-  show(app, folder)
-  await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  // Work B is settled (the turn ended) but is still the TRUE latest Work:
-  // its previews must survive — "settled => hide preview" is the forbidden
-  // regression (plan §7.3).
-  assert.match(view, /Think:\s+checking the current mount transaction/)
-  assert.match(view, /Action:\s+Bash pnpm test transcript-search/)
-  assert.ok(view.includes('final answer'))
-})
+// §7.3 (the latest SETTLED Work keeps its previews after the final reply —
+// "settled => hide preview" is the forbidden regression) is pinned by the
+// workFixture assertions in the first test: its turn has ended, yet Work B's
+// Think/Action previews and the final answer are asserted there.
 
 test('a newer Work makes the previous one header-only without changing its summary', async () => {
   // §7.4 — the cache-invalidation core regression: Work A's own summary is
@@ -520,14 +511,12 @@ test('a newer Work makes the previous one header-only without changing its summa
   // same-id authoritative replacement BEFORE B arrives.
   const { vt, app } = startApp('compact')
   const folder = new TranscriptFolder()
-  const settleA = (seq: number): SessionEvent =>
-    settlementEvent({ id: 'as1', step: 0, reasoning: 'A reasoning', startedAt: T0 + 1, endedAt: T0 + 3, seq })
   applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'A reasoning' } }, T0 + 1, 1),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('a1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 2, 2),
     toolResultEvent('a1', T0 + 3, 3),
-    settleA(4),
+    settlementEvent({ id: 'as1', step: 0, reasoning: 'A reasoning', startedAt: T0 + 1, endedAt: T0 + 3, seq: 4 }),
   ])
   show(app, folder)
   await vt.waitForRender()
@@ -1266,7 +1255,10 @@ test('a same-step timing replacement refreshes the mounted Activity duration', a
   // §12.6/§25: a durable replacement that corrects the Thinking timing
   // while keeping the SAME text and topology must still refresh the
   // mounted card — the span timing is part of the content signature (the
-  // stale component kept rendering the old duration).
+  // stale component kept rendering the old duration). This settlement is
+  // deliberately NOT the shared `settlementEvent` helper: it carries a
+  // narration content block WITHOUT its stream chunks, which keeps the
+  // reasoning row's timing sidecar the test corrects.
   const { vt, app } = startApp('compact')
   const folder = new TranscriptFolder()
   const settlement = (reasoningStart: number, reasoningEnd: number, seq: number): SessionEvent =>
@@ -1289,15 +1281,7 @@ test('a same-step timing replacement refreshes the mounted Activity duration', a
   applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 3_000, 1),
-    eventAt('tool/result', {
-      turn: 1, step: 0,
-      message: {
-        id: MessageId('r1'), role: 'tool',
-        toolCallId: ToolCallId('c1'),
-        content: [{ type: 'text', text: 'ok' }],
-        source: { kind: 'tool', callId: ToolCallId('c1') },
-      },
-    }, T0 + 9_000, 2),
+    toolResultEvent('c1', T0 + 9_000, 2),
     settlement(T0 + 2_000, T0 + 2_500, 3),
   ])
   show(app, folder)

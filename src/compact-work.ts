@@ -152,9 +152,8 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
  * 2026-09-29 compact historical compaction plan §2.2): a settled Work with
  * reasoning and zero actions whose collapsed preview is hidden renders
  * `Thought <duration>` instead of a semantically empty `Activity` — a
- * presentation-only identity over the SAME `TranscriptWorkSpan`, never a
- * semantic class, a stat or a persisted state. The width ladder is
- * unchanged: `Thought` reuses the exact Activity degradation contract.
+ * presentation-only identity over the SAME `TranscriptWorkSpan`, reusing the
+ * exact Activity width-degradation ladder (§5.1D: no second algorithm).
  */
 export type CompactWorkHeaderIdentity = 'activity' | 'thought'
 

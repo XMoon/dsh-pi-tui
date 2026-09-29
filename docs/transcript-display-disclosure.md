@@ -190,7 +190,10 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   the latest think-only span stays `Activity` so the identity never flips
   while streaming). The "true latest" test is the window authority
   (`transcriptWindow.hasNewer !== true` AND the span is the projected tail):
-  a history page's last Work is that page's tail, not the global latest.
+  a history page's last Work is that page's tail, not the global latest. The
+  policy bit (`showPreview`) joins the Compact Work component-cache signature,
+  so the latest → historical transition repaints even when the span's own
+  summary is unchanged, in both window-paging directions.
   Compact current work is observable; historical work is scannable; detail
   remains available on demand.
 - Counts and previews describe the SPAN, never the whole turn. Span-local
