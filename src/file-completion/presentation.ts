@@ -5,9 +5,10 @@
  * the OFFICIAL shared grammar's (`formatFileMention` — quoting rules and
  * safety refusals are its authority), while the `/attach` + `/image`
  * argument values have no official grammar and keep this layer's own
- * dialect-aware quoting (an explicitly opened quote is preserved,
- * whitespace quotes). The label/directory-continuation path math is
- * shared.
+ * dialect-aware quoting (an explicitly opened quote is preserved; a
+ * SPACE in the value quotes — the local rule checks a literal space,
+ * unlike the official grammar's wider /\s/). The
+ * label/directory-continuation path math is shared.
  *
  * The SOURCE is responsible for reattaching the query's display base
  * (see {@link displayPathOf}): candidates reach this layer as FINAL
