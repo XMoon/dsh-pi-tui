@@ -24,8 +24,10 @@ const HEADER_LABEL = 'Work|Wait|Turn c|Compl|Fail|Interr|Block|Max'
  * so the label stem alone would misclassify it. Exclude the Activity header
  * SHAPE explicitly instead of relying on a brittle lookahead on the label
  * stem (post-F6 plan §6: the visible container is `Activity`; the internal
- * owner kind stays `work`). */
-const WORK_CONTAINER_HEADER = /^\s*[▸▾] Activity(?:\s*(?:\S.*|…|\.\.\.)?)?\s*$/u
+ * owner kind stays `work`). A historical think-only span renders the
+ * presentation-only `Thought` identity (the 2026-09-29 compact historical
+ * compaction) with the same shape, so both identities are excluded. */
+const WORK_CONTAINER_HEADER = /^\s*[▸▾] (?:Activity|Thought)(?:\s*(?:\S.*|…|\.\.\.)?)?\s*$/u
 
 function headerPattern(expanded: boolean | undefined): RegExp {
   const collapsed = '(?:🐋|▸)'

@@ -24,7 +24,9 @@ afterEach(() => {
 
 function workHeaderCount(view: string, expanded?: boolean): number {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Activity(?: | ·|$)`).test(line)).length
+  // A Work header is `Activity`, or `Thought` for a historical think-only
+  // span (the 2026-09-29 compact historical compaction).
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:Activity|Thought)(?: | ·|$)`).test(line)).length
 }
 
 test('a custom tool is extension-owned only inside an expanded Work span', async () => {
