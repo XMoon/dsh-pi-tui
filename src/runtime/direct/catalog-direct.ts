@@ -276,11 +276,16 @@ export class DirectModelCatalog implements ModelCatalog {
     }))
     // Fence AFTER the batch await: a cancellation mid-read never publishes.
     signal?.throwIfAborted()
+    // The official `buildModelCatalog` semantics: routableProviders are the
+    // NON-EMPTY successfully loaded groups' ids (a provider whose lookup
+    // failed or loaded zero models is not "currently able to serve a
+    // catalog model").
+    const groups = loaded.flatMap(item => item.kind === 'group' ? [item.group] : [])
+      .filter(group => group.models.length > 0)
     return {
       default: fallback,
-      routableProviders: providers.map(provider => provider.id),
-      groups: loaded.flatMap(item => item.kind === 'group' ? [item.group] : [])
-        .filter(group => group.models.length > 0),
+      routableProviders: groups.map(group => group.id),
+      groups,
       failures: loaded.flatMap(item => item.kind === 'failure' ? [item.failure] : []),
     }
   }

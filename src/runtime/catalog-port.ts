@@ -63,8 +63,10 @@ export interface ModelDirectoryFailureDto {
 export interface ModelDirectoryDto {
   /** The selection an unconfigured Session observes. */
   readonly default: ModelSelectionDto
-  /** Provider routes currently able to serve a request, including empty
-   * catalogs (advisory: a route may serve a model it stopped advertising). */
+  /** Provider routes with at least one currently available catalog model
+   * (the official `buildModelCatalog` derivation: the non-empty successfully
+   * loaded groups' ids; advisory — a route may serve a model it stopped
+   * advertising). */
   readonly routableProviders: readonly string[]
   readonly groups: readonly ModelDirectoryGroupDto[]
   readonly failures: readonly ModelDirectoryFailureDto[]

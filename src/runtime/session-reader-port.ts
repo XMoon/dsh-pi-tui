@@ -163,7 +163,12 @@ export interface SessionStatusProjection {
    *  `modelSelection` projection). */
   readonly model?: ModelSelectionFact
   readonly context?: SessionStatusContextProjection
-  readonly todos?: readonly SessionStatusTodoItem[]
+  /** The official `todos` projection value: the whole list snapshot, or
+   *  `null` = the projection exists but no `todo/write` has landed yet (a
+   *  LEGAL business value, distinct from the field being ABSENT = the
+   *  projection/capability is unavailable). Presentation decides how to
+   *  render the null state (the official Web shows an empty panel). */
+  readonly todos?: readonly SessionStatusTodoItem[] | null
   readonly usage?: SessionStatusUsageProjection
 }
 

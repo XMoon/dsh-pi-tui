@@ -13,7 +13,7 @@
  * TuiApp (Enter / accelerated / explicit queue in a continuable viewer)
  *   ↓ onSubagentSubmit({ parentSessionId, childSessionId, text, gesture })
  * submitSubagentPrompt(...)
- *   ↓ canonicalize the TUI @-mention grammar (client-owned, Host-neutral)
+ *   ↓ pass the TUI @-mention grammar through (client-owned, Host-neutral)
  *   ↓ ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
  *                           mode: 'continuable', delivery, content }, signal)
  *   ↓ child Agent inbox (queue or steer, according to the resolved delivery)
@@ -90,13 +90,13 @@ export interface SubagentViewerSubmitDeps {
    * every retry that represents a NEW human submit mints a fresh id (the
    * Host persists it on the accepted message). */
   mintRequestId(): string
-  /** Canonicalize the final user text BEFORE delivery (the main session's
-   * `@`-file mention expansion — `@src/foo.ts` → the absolute path — must
-   * apply to viewer prompts too, or the model would see the concise
-   * relative form it cannot resolve; this is TUI input grammar, the
-   * official subagent prompt does not own it). MAY be async (migration
-   * M1.10: the Host-file port's canonicalization); the default passes the
-   * text through untouched. */
+  /** The send seam for the final user text BEFORE delivery (the official
+   * `@`-mention semantics keep it LITERAL — the Host's
+   * FILE_REFERENCE_PROMPT resolves relative paths from the workspace
+   * root, on the main surface and in viewer prompts alike). MAY be async;
+   * the default passes the text through untouched.
+   * (Migration M1.10 → M3-3A: this used to absolute-rewrite mentions; the
+   * rewrite is retired, the seam remains the one routing point.) */
   canonicalizeText?(text: string): string | Promise<string>
 }
 
@@ -210,12 +210,12 @@ export function resolveSubagentSettleTarget(
 }
 
 /**
- * The Host-file scope one viewer prompt canonicalizes against: the VIEWED
- * CHILD's workspace when the viewer knows it (the child may have been born
- * in another directory — rewriting its mentions against the PARENT cwd
- * would resolve them to the wrong tree), the live parent session
- * otherwise (an unknown cold-child cwd). Pure so the race is
- * unit-testable (review finding: parent cwd ≠ child cwd).
+ * The Host-file scope one viewer prompt's send seam addresses: the VIEWED
+ * CHILD's workspace when the viewer knows it, the live parent session
+ * otherwise (an unknown cold-child cwd). Pure so the race is unit-testable
+ * (review finding: parent cwd ≠ child cwd). (The official mention
+ * semantics keep the text literal; the scope is bookkeeping for the seam —
+ * a future official carrier, if one ever exists, would be the consumer.)
  */
 export function viewerCanonicalizeScope(
   viewingCwd: string | undefined,
@@ -255,15 +255,14 @@ export async function submitSubagentPrompt(
     }
     subagents = resolved
     signal = deps.makeSignal()
-    // 2. The TUI's own @-mention grammar is canonicalized BEFORE delivery
-    //    (the editor keeps `@src/foo.ts`, the child model receives the
-    //    absolute path). The canonicalization MAY be async (migration
-    //    M1.10 — the Host-file port), so the caller signal is re-checked
-    //    after the await: an implementation that does not synchronously
-    //    reject an already-aborted signal must never accept the message
-    //    while the UI already treats the send as stale (the draft is
-    //    restored by the caller). Parent/child authority itself is the
-    //    Host's job — the official prompt() rejects it authoritatively.
+    // 2. The send seam passes the text BEFORE delivery (the official
+    //    mention semantics keep it literal). The seam MAY be async, so the
+    //    caller signal is re-checked after the await: an implementation
+    //    that does not synchronously reject an already-aborted signal must
+    //    never accept the message while the UI already treats the send as
+    //    stale (the draft is restored by the caller). Parent/child
+    //    authority itself is the Host's job — the official prompt()
+    //    rejects it authoritatively.
     canonical = []
     for (const part of request.content) {
       if (part.type === 'text') {

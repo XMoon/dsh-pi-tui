@@ -111,7 +111,10 @@ test('loadDirectory keeps a failing provider as an isolated failure beside usabl
   const directory = await models.loadDirectory()
   assert.deepEqual(directory.groups.map(group => group.id), ['good'])
   assert.deepEqual(directory.failures, [{ id: 'bad', name: 'Bad', message: 'route unavailable' }])
-  assert.deepEqual(directory.routableProviders, ['good', 'bad'])
+  // Official `buildModelCatalog` semantics: only NON-EMPTY loaded groups are
+  // routable — a provider whose lookup failed is not currently serving a
+  // catalog model.
+  assert.deepEqual(directory.routableProviders, ['good'])
 })
 
 test('model catalog separates global default from live Session selection', async () => {

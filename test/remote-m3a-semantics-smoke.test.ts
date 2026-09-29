@@ -354,13 +354,16 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
     assert.equal(childStatus.cwd, join(host.anchorDir, 'child'))
     // The bare session's official projection units are REGISTERED but empty:
     // their truthful zero-value wire views (usage totals, breakdown) cross —
-    // they are the Host fold's real values, not inventions.
+    // they are the Host fold's real values, not inventions. The todos
+    // projection's LEGAL null (present, no todo/write yet) stays null —
+    // distinct from an absent (capability-unavailable) field.
     assert.deepEqual(semantics.sessionReader.sessionStatus(BARE), {
       sessionId: BARE,
       cwd: join(host.anchorDir, 'bare'),
       context: { breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 } },
+      todos: null,
       usage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    }, 'the bare session reads its own cwd fact and its official zero-valued folds')
+    }, 'the bare session reads its own cwd fact and its official zero-valued folds (todos legally null)')
     assert.equal(semantics.sessionReader.sessionStatus('never-created'), undefined,
       'an unretained session has no facts')
 

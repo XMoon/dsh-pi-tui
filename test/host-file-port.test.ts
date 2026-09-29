@@ -1,19 +1,19 @@
 /**
  * Adapter contract tests for the Direct Host-file port
  * (runtime/direct/host-file-direct.ts, migration M1.10): the port is the
- * locality boundary — `@`-reference discovery and canonicalization run
- * against the HOST filesystem through the port, never a client fs
- * assumption. These tests pin the pre-migration behavior (fd whole-tree
- * fuzzy via the fork when fd is present, the bounded recursive fallback
- * otherwise, stat existence checks, the canonicalization rules) with the
- * Direct adapter: detached path-only DTOs, abort propagation, session
- * scope resolution, and fail-closed degradation.
+ * locality boundary — `@`-reference DISCOVERY runs against the HOST
+ * filesystem through the port, never a client fs assumption. These tests
+ * pin the behavior (fd whole-tree fuzzy via the fork when fd is present,
+ * the bounded recursive fallback otherwise, stat existence checks on the
+ * Direct-only seam, and the M3-3A official literal mention semantics)
+ * with the Direct adapter: detached path-only DTOs, cancellation
+ * semantics, session scope resolution, and fail-closed degradation.
  * @module @xmoon76/dsh-pi-tui/host-file-port.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -162,35 +162,33 @@ test('resolveReference probes existence with the mention resolution rules', asyn
   assert.deepEqual(await port.resolveReference(scope, '~/definitely-not-a-dir-xyz'), { kind: 'missing' })
 })
 
-test('canonicalizeMentions rewrites relative, ~ and absolute mentions; missing paths stay verbatim', async (t) => {
+test('canonicalizeMentions returns the text VERBATIM (the official mention semantics)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
   const scope = { kind: 'workspace', cwd: root } as const
+  // The official client codec is `serialize: ref => ref` and the Host's
+  // FILE_REFERENCE_PROMPT resolves relative paths from the workspace root:
+  // the submitted text stays literal — on BOTH backends — with no
+  // existence probe or absolute rewrite at send time.
   assert.equal(
     await port.canonicalizeMentions(scope, 'look at @file-one.txt'),
-    `look at @${join(root, 'file-one.txt')}`,
+    'look at @file-one.txt',
   )
   assert.equal(
-    await port.canonicalizeMentions(scope, 'see @missing-file.ts and @src/missing.ts'),
-    'see @missing-file.ts and @src/missing.ts',
+    await port.canonicalizeMentions(scope, 'see @"my file.txt" and @src/deep-nested.ts'),
+    'see @"my file.txt" and @src/deep-nested.ts',
+    'quoted and relative forms stay exactly as typed',
   )
   assert.equal(
     await port.canonicalizeMentions(scope, 'mail user@example.com and pkg@1.0.0 stay'),
     'mail user@example.com and pkg@1.0.0 stay',
-    'non-mention @ words are never touched',
   )
-})
-
-test('canonicalizeMentions absolutizes a symlink without realpath-ing it', async (t) => {
-  const life = testLifecycle(t)
-  const root = fixtureWorkspace(life)
-  const target = join(root, 'file-one.txt')
-  const link = join(root, 'link.ts')
-  symlinkSync(target, link)
-  const port = fallbackPort(root)
-  const out = await port.canonicalizeMentions({ kind: 'workspace', cwd: root }, 'see @link.ts')
-  assert.equal(out, `see @${link}`, 'the LINK path is the intent, never the realpath')
+  // The unresolvable scope behaves identically: literal on every path.
+  assert.equal(
+    await port.canonicalizeMentions({ kind: 'session', sessionId: 'no-such-agent' }, '@file-one.txt'),
+    '@file-one.txt',
+  )
 })
 
 test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileReferenceCandidate shape)', async (t) => {

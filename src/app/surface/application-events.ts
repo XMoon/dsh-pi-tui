@@ -585,12 +585,10 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
         makeSignal: () => promptViewerAbort === undefined
           ? deps.lifecycle.signal()
           : AbortSignal.any([deps.lifecycle.signal(), promptViewerAbort]),
-        // Same `@`-file mention canonicalization as the main session's
-        // submissions (the editor keeps `@src/foo.ts`, the child model receives
-        // the absolute path). The scope is the VIEWED CHILD's workspace when the
-        // viewer knows it (the child may have been born in another directory —
-        // canonicalizing against the parent cwd would rewrite the child's
-        // mentions to the wrong tree); an unknown cold-child cwd falls back to
+        // Same `@`-mention send seam as the main session's submissions
+        // (the official semantics keep the text literal; the seam remains
+        // the one routing point). The scope is the VIEWED CHILD's workspace
+        // when the viewer knows it; an unknown cold-child cwd falls back to
         // the live parent.
         canonicalizeText: (text) => deps.subagentDelivery.hostFile.canonicalizeMentions(
           viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),

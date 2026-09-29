@@ -152,6 +152,15 @@ test('W6 child correctness: each session reads only ITS OWN facts', () => {
   assert.equal(direct.sessionStatus('child-cold'), undefined)
 })
 
+test('W6: the official todos null (no write yet) stays null — distinct from capability-absent', () => {
+  const { direct } = reader({ s: { todos: null } })
+  assert.equal(direct.sessionStatus('s')?.todos, null,
+    'null is the legal "projection present, no todo yet" business value')
+  const { direct: bare } = reader({ s: {} })
+  assert.equal(bare.sessionStatus('s')?.todos, undefined,
+    'an absent projection value reads capability-unavailable')
+})
+
 test('W6 (Direct): malformed projection values stay absent — never coerced', () => {
   const { direct } = reader({
     s: {

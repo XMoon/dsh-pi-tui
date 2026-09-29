@@ -64,6 +64,19 @@
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
 
+    # The OFFICIAL Host `@`-file reference authority (M3-3A): this row is
+    # the same one the official web bundle mounts. It provides
+    # `ctx.fileReferences` (the discovery service the Session Controller's
+    # `fileReferences/list` Remote already forwards to) AND installs the
+    # official per-agent `context:file-reference` system prompt — the model
+    # guidance that relative `@` paths resolve from the workspace root.
+    # Mounting it aligns the TUI's `@`-mention semantics with the official
+    # client contract: the selected mention text goes to the prompt
+    # LITERALLY (`@src/foo.ts`), and the Host/model resolves it; the TUI's
+    # historical send-time absolute-path rewrite is retired with it.
+    - id: file-reference-local
+      name: '@deepseek-ai/dsh-file-reference-local'
+
     # The authorization seam (`ctx.authorization`): plugin-owned credential-
     # obtaining flows, one attempt per key, transport-neutral notices and
     # prompts. The dsh host does NOT mount it anywhere (the base layer ships
