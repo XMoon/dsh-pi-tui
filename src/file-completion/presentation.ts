@@ -1,9 +1,13 @@
 /**
  * The shared path presentation (plan §8): how one path-only candidate
- * becomes an `AutocompleteItem`. The `@` mention shape and the `/attach` +
- * `/image` argument shapes differ ONLY in the value prefix (`@` + quoting vs
- * bare) — the path math (trailing `/` for continuation, quoting, and labels)
- * is shared.
+ * becomes an `AutocompleteItem`. Since the M3-3A realignment the two
+ * forms differ in AUTHORITY, not just prefix: the `@` mention VALUE is
+ * the OFFICIAL shared grammar's (`formatFileMention` — quoting rules and
+ * safety refusals are its authority), while the `/attach` + `/image`
+ * argument values have no official grammar and keep this layer's own
+ * dialect-aware quoting (an explicitly opened quote is preserved,
+ * whitespace quotes). The label/directory-continuation path math is
+ * shared.
  *
  * The SOURCE is responsible for reattaching the query's display base
  * (see {@link displayPathOf}): candidates reach this layer as FINAL
@@ -69,7 +73,10 @@ export function presentPathCandidate(
   }
   const sep = context.sep ?? '/'
   const pathValue = candidate.kind === 'directory' ? `${displayPath}${sep}` : displayPath
-  const needsQuotes = pathValue.includes(' ')
+  // An EXPLICITLY opened quote is preserved even without spaces (the
+  // user's `/image "file` continuation stays quoted), like the old local
+  // behavior this layer keeps owning for the non-@ forms.
+  const needsQuotes = context.quoted || pathValue.includes(' ')
   const value = needsQuotes ? `"${pathValue}"` : pathValue
   return {
     value,

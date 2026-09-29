@@ -524,6 +524,21 @@ test('the @ mention value is the OFFICIAL grammar: non-space whitespace quotes, 
   assert.equal(dir.value, '@"my dir/', 'the official grammar keeps a quoted directory open')
 })
 
+test('the NON-@ forms preserve an explicitly opened quote (and quote whitespace) — local policy', () => {
+  // An explicitly opened quote stays quoted even without spaces.
+  const quotedNoSpace = presentPathCandidate({ path: 'file.ts', kind: 'file' }, { at: false, quoted: true })
+  assert.ok(quotedNoSpace !== undefined)
+  assert.equal(quotedNoSpace.value, '"file.ts"', 'an explicitly opened quote is preserved')
+  // A whitespace-bearing path quotes regardless.
+  const spaced = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(spaced !== undefined)
+  assert.equal(spaced.value, '"my file.txt"')
+  // Unquoted, space-free stays bare.
+  const bare = presentPathCandidate({ path: 'file.ts', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(bare !== undefined)
+  assert.equal(bare.value, 'file.ts')
+})
+
 test('the presentation layer quotes spaced values for /image; @ quoting is the official grammar', () => {
   const item = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: false, quoted: false })
   assert.ok(item !== undefined)

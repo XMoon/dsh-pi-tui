@@ -29,8 +29,6 @@ function fixtureWorkspace(life: TestLifecycle): string {
 
 const abort = new AbortController().signal
 
-/** The fallback-only seam: the real Direct adapter with fd FORCED absent,
- * so the bounded recursive scan is what the completion exercises. */
 /** A Direct adapter whose SESSION scope runs the OFFICIAL search over the
  * fixture tree (`WorkspaceFileSearch`: path text after `@`, deterministic
  * ranked path-only candidates — the Host authority's own order). `queries`
