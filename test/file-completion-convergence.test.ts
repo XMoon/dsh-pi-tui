@@ -842,6 +842,19 @@ test('review finding 2: a Windows-dialect directory keeps the backslash separato
   assert.equal(posix.value, 'src/foo/')
 })
 
+test('trigger grammar: quote and = boundaries are TUI extensions over the official baseline', () => {
+  const set = new Set(['attach', 'image'])
+  // The OFFICIAL activeAtToken accepts @ only at start-of-line/whitespace;
+  // a mention after an UNCLOSED quote (the editor keeps the quote open
+  // while typing) and after `=` are INTENTIONAL TUI trigger extensions.
+  assert.equal(classifyFileCompletionContext('x"@foo', set).kind, 'mention',
+    'a mention after an opening double quote triggers (TUI extension)')
+  assert.equal(classifyFileCompletionContext("x'@foo", set).kind, 'mention',
+    'a mention after an opening single quote triggers (TUI extension)')
+  assert.equal(classifyFileCompletionContext('key=@foo', set).kind, 'mention',
+    'a mention after = triggers (TUI extension)')
+})
+
 test('extractAtPrefix keeps the CJK-glue rule and rejects emails', () => {
   assert.equal(extractAtPrefix('看看@foo'), '@foo')
   assert.equal(extractAtPrefix('a@b.c'), null)
