@@ -17,6 +17,13 @@
 
 ### 变更
 
+- DSH 依赖基线整体升级到已发布的 `0.2.0-rc.2` family：全部
+  `@deepseek-ai/dsh-*` peer floor 提升到 `>=0.2.0-rc.2`，开发/源码验证
+  目标精确锁定 `0.2.0-rc.2`。本线的 Question 生命周期依赖 rc.2 才发布
+  的公开契约（`userQuestions` Remote 与 Session projection），因此
+  rc.1 及更早 family 不再属于本线声明的兼容范围；旧 runtime 请继续
+  使用配对的 `0.5.0` TUI 线。
+
 - Question 工具的输入语义收敛为「选择 / 编辑 / 前进」三层:多选题用
   `Space`(或数字键/单击)切换勾选框,`Enter` 与 `→` 一样只负责前进
   (未答则跳过);数字键与鼠标点击在多选中仍是切换,单选中仍是选择并
