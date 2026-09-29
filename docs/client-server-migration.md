@@ -2459,7 +2459,17 @@ still reaches the Remote graph only through the dynamic
 - Explicit unsupported (docs/m3-entry-contract.md §10): `listRecords()` /
   `deleteRecord()` REJECT with a truthful unavailable error (never an empty
   record list), and the whole authorization sub-domain fails closed
-  (`available()===false`, no fake targets, no private auth RPC).
+  (`available()===false`, no fake targets, no private auth RPC). UI
+  consequence (§9.4): the no-argument `/logout` picker still opens with the
+  clearable references and its outcome says plainly that stored credential
+  records cannot be enumerated or removed on this backend — no fabricated
+  record row and no failed picker.
+- Credential operations (`setReference`/`unsetReference`/`describeReference`)
+  re-check the Connection generation before reporting their outcome, so a call
+  that completed against a replaced Host is never presented as a success on
+  the new one (`/login` reports it as unconfirmed instead of "login
+  cancelled"; the `/logout` picker degrades a superseded describe to "not
+  configured").
 
 ### Remote session archive
 

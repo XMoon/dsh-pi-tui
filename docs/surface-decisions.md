@@ -1577,3 +1577,20 @@ Decisions (all terminal-native; none of them copies a Web button):
    repaint, because the answer no longer describes the live surface (the new
    generation re-derives its own truth). A disconnected Connection likewise
    presents no answerable card from a last-known binding.
+
+## A credential backend that cannot enumerate records still has a usable /logout
+
+Remote rc.2 publishes no record-read Remote, so the Remote credential adapter
+REJECTS `listRecords()` rather than reporting an empty list (an empty list
+would assert "you have no stored records").
+
+The terminal-native consequence: the no-argument `/logout` picker opens with
+the references it CAN clear (`describeReference`), offers no fabricated record
+row, and the outcome text states that stored credential records cannot be
+enumerated or removed on this backend. Clearing a reference never implies that
+stored records were cleaned up. `/logout <ref>` remains the direct path.
+
+Credential operations also re-check the Connection generation before reporting
+their outcome: a `setReference` that completed against a replaced Host is
+reported as unconfirmed (never as a new-Host success), and a superseded
+`describeReference` degrades to "not configured" in the picker.
