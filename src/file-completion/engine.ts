@@ -54,7 +54,10 @@ export function presentDiscovery(
     .filter(entry => entry.score > 0)
     .sort(compareScoredPaths)
     .slice(0, MAX_SUGGESTIONS)
+    // The official mention grammar may refuse a path it cannot represent
+    // safely (`undefined`); such a candidate is filtered, never coerced.
     .map(entry => presentPathCandidate(entry.candidate, context))
+    .filter((item): item is AutocompleteItem => item !== undefined)
 }
 
 /** Resolve one raw token to the pure query (exported so tests pin the

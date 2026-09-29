@@ -470,18 +470,21 @@ test('candidates present one full display path independently of host path dialec
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   const rootFile = presentPathCandidate({ path: 'package.json', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(rootFile !== undefined)
   assert.equal(rootFile.label, 'package.json')
   assert.equal(rootFile.description, undefined)
   const nestedFile = presentPathCandidate(
     { path: 'src/file-completion/presentation.ts', kind: 'file' },
     { at: false, quoted: false },
   )
+  assert.ok(nestedFile !== undefined)
   assert.equal(nestedFile.label, 'src/file-completion/presentation.ts')
   assert.equal(nestedFile.description, undefined)
   const directory = presentPathCandidate(
     { path: 'C:\\Users\\Pictures', kind: 'directory' },
     { at: false, quoted: false, sep: '\\' },
   )
+  assert.ok(directory !== undefined)
   assert.equal(directory.value, 'C:\\Users\\Pictures\\')
   assert.equal(directory.label, 'C:\\Users\\Pictures/')
   assert.ok(directory.label.endsWith('/'))
@@ -490,17 +493,46 @@ test('candidates present one full display path independently of host path dialec
     { path: 'C:/Users\\Pictures', kind: 'directory' },
     { at: true, quoted: false, sep: '\\' },
   )
-  assert.equal(mixed.value, '@C:/Users\\Pictures\\')
+  assert.ok(mixed !== undefined)
+  // The OFFICIAL mention grammar (formatFileMention): the value uses the
+  // grammar's own separator and quoting, not the local dialect note.
+  assert.equal(mixed.value, '@C:/Users\\Pictures/')
   assert.equal(mixed.label, 'C:/Users\\Pictures/')
   assert.equal(mixed.description, undefined)
 })
 
-test('the presentation layer quotes spaced values for /image and keeps @ quoting', () => {
+test('the @ mention value is the OFFICIAL grammar: non-space whitespace quotes, unsafe paths refuse', () => {
+  // The official `formatFileMention` quoting rule is /\s/ (any regex
+  // whitespace) — e.g. a NON-BREAKING space quotes, wider than the old
+  // local `includes(' ')` check.
+  const nbsp = presentPathCandidate({ path: 'a\u00a0b.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.ok(nbsp !== undefined)
+  assert.equal(nbsp.value, '@"a\u00a0b.ts"', 'the official grammar quotes non-space whitespace')
+  // A path the grammar cannot represent safely returns `undefined` — the
+  // candidate is refused, never presented with a broken token. TAB is a
+  // control character to the official grammar (refused), and `"` and C0
+  // controls are refused outright.
+  const tabbed = presentPathCandidate({ path: 'foo\tbar.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.equal(tabbed, undefined, 'the official grammar refuses a tab (control character)')
+  const quotedPath = presentPathCandidate({ path: 'foo"bar.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.equal(quotedPath, undefined, 'a `"` in the path is refused by the official grammar')
+  const control = presentPathCandidate({ path: 'foo\u0001bar.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.equal(control, undefined, 'a control character is refused by the official grammar')
+  // A quoted DIRECTORY keeps the quote open for continuation (official).
+  const dir = presentPathCandidate({ path: 'my dir', kind: 'directory' }, { at: true, quoted: true })
+  assert.ok(dir !== undefined)
+  assert.equal(dir.value, '@"my dir/', 'the official grammar keeps a quoted directory open')
+})
+
+test('the presentation layer quotes spaced values for /image; @ quoting is the official grammar', () => {
   const item = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(item !== undefined)
   assert.equal(item.value, '"my file.txt"')
   const atItem = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: true, quoted: false })
-  assert.equal(atItem.value, '@"my file.txt"')
+  assert.ok(atItem !== undefined)
+  assert.equal(atItem.value, '@"my file.txt"', 'the official grammar quotes whitespace')
   const atQuoted = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: true, quoted: true })
+  assert.ok(atQuoted !== undefined)
   assert.equal(atQuoted.value, '@"my file.txt"')
 })
 
@@ -786,8 +818,10 @@ test('review finding (round 6): a scope switch mid-flight fences the old session
 
 test('review finding 2: a Windows-dialect directory keeps the backslash separator', () => {
   const item = presentPathCandidate({ path: 'C:\\Users\\foo', kind: 'directory' }, { at: false, quoted: false, sep: '\\' })
+  assert.ok(item !== undefined)
   assert.equal(item.value, 'C:\\Users\\foo\\', 'a Windows directory completes with \\ — never a mixed /')
   const posix = presentPathCandidate({ path: 'src/foo', kind: 'directory' }, { at: false, quoted: false, sep: '/' })
+  assert.ok(posix !== undefined)
   assert.equal(posix.value, 'src/foo/')
 })
 

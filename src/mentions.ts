@@ -600,6 +600,10 @@ export class MentionProvider implements AutocompleteProvider {
         { path: candidate.path, kind: candidate.kind },
         { at: true, quoted, sep: separatorOfRaw(raw, query.winAbsolute || raw.includes('\\')) },
       ))
+      // The OFFICIAL grammar's refusal (a path it cannot represent safely)
+      // is the grammar's authority — the candidate is filtered, exactly as
+      // the official client does; this is not a second relevance judgment.
+      .filter((item): item is AutocompleteItem => item !== undefined)
     if (items.length === 0) return null
     return { prefix: atPrefix, items }
   }
