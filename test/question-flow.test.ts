@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { setKittyProtocolActive } from '@xmoon76/pi-tui'
 import { QuestionFlow, type QuestionFlowQuestion } from '../src/question.ts'
 
 const BUDGETS = [8, 12, 22, 24]
@@ -2123,4 +2124,81 @@ test('choosing an ordinary single-select option replaces the custom answer', () 
   render(g, 100)
   g.handleInput('\r') // submit
   assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }], 'the mouse click must replace the custom answer')
+})
+
+test('a synchronous Input submit never pollutes the next question (Kitty shift+enter seam)', () => {
+  // Input.handleInput is NOT pure: data === "\\n" (Ghostty's Kitty-mode
+  // shift+enter text mapping) fires onSubmit → commitOther → advance
+  // SYNCHRONOUSLY inside the delivery. The post-delivery sync must not
+  // then write the OLD question's live text into the NEW question's
+  // draft — the owner (tab + input identity) must be re-checked after
+  // the Input callback returns.
+  const setKitty = setKittyProtocolActive
+  setKitty(true)
+  try {
+    // In Kitty mode \\n is shift+enter (NOT question.confirm's enter), so
+    // QuestionFlow hands it to the Input — whose submit seam commits.
+    let done: unknown
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'Name?', options: [{ label: 'A' }] },
+      { id: 'q2', question: 'Second?', options: [{ label: 'B' }, { label: 'C' }] },
+    ], (answers) => { done = answers }, () => {})
+    f.setMaxRows(24)
+    render(f, 100)
+    f.handleInput('\x1b[B')
+    render(f, 100)
+    f.handleInput('\r') // enter Q1's OTHER edit
+    f.handleInput('alice')
+    f.handleInput('\n') // synchronous submit seam → advance to Q2 (choices)
+    const q2View = render(f, 100).join('\n')
+    assert.ok(q2View.includes('Second?'), `the seam must advance to Q2:\n${q2View}`)
+    // Q2's OTHER row must NOT show Q1's text.
+    assert.ok(!q2View.includes('alice'), `Q1's live text must never pollute Q2:\n${q2View}`)
+    // And the submitted payload keeps each question's own answer.
+    f.handleInput('\x1b[C') // skip blank Q2 → review
+    render(f, 100)
+    f.handleInput('\r') // submit
+    assert.deepEqual(done, [
+      { id: 'q1', selected: [], custom: 'alice' },
+      { id: 'q2', selected: [] },
+    ])
+  } finally {
+    setKitty(false)
+  }
+})
+
+test('read-only Input operations never clear the skipped state', () => {
+  // A skipped blank question revisited: cursor movements and the Input's
+  // generic cancel must NOT resurrect the question as answered — only a
+  // real VALUE change may touch the answer semantics.
+  const make = (): QuestionFlow => new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  // Cursor movement (Ctrl+A — value unchanged).
+  const f = make()
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('\x1b') // navigation
+  f.handleInput('\x1b[C') // skip blank Q1
+  render(f, 100)
+  f.handleInput('\x1b[D') // back to Q1 (skipped, edit layer)
+  assert.ok(render(f, 100).join('\n').includes('(skipped)'), 'precondition — skipped note visible')
+  f.handleInput('\x01') // Ctrl+A — cursor to line start, no value change
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('(skipped)'), `a cursor move must keep the skipped mark:\n${view}`)
+  assert.ok(view.includes('✓ Q1'), `the tab must stay answered:\n${view}`)
+  // The Input's generic cancel (Ctrl+C) exits the edit without typing —
+  // same invariant.
+  const g = make()
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('\x1b')
+  g.handleInput('\x1b[C')
+  render(g, 100)
+  g.handleInput('\x1b[D')
+  render(g, 100)
+  g.handleInput('\x03') // Ctrl+C → exit the edit (no cancel from edit layer)
+  view = render(g, 100).join('\n')
+  assert.ok(view.includes('(skipped)'), `Ctrl+C without typing must keep the skipped mark:\n${view}`)
 })
