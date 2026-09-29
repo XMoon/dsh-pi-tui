@@ -393,6 +393,67 @@ test('the Work component renders one header row and, collapsed, the slot rows', 
   assert.equal(expanded.length, 1, 'expanded Work renders only the header — children render after it')
 })
 
+// ── Compact historical compaction (2026-09-29 plan §7.1/§7.2) ──────────────
+
+test('showPreview=false renders exactly one header row for a historical span', () => {
+  const span = projectCompact([thinking(0, 'historical reasoning'), tool(0)], noOptions)[0]
+  assert.ok(span !== undefined && span.kind === 'work')
+  const rows = new CompactWorkComponent({
+    span: span.span,
+    expanded: false,
+    action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' },
+    showPreview: false,
+    iconStyle: 'symbols',
+  }).render(80)
+  assert.equal(rows.length, 1, 'a historical span collapses to its header only')
+  assert.match(rows[0]!, /▸ Activity/)
+  assert.ok(!rows[0]!.includes('Think:'), 'the Think preview is hidden')
+})
+
+test('a historical think-only header reads Thought and keeps it when expanded', () => {
+  const span = projectCompact([thinking(0, 'only reasoning')], noOptions)[0]
+  assert.ok(span !== undefined && span.kind === 'work')
+  const summary = summarizeWorkSpan(span.span)
+  assert.equal(summary.actionStats.total, 0)
+  assert.ok(summary.think !== undefined, 'fixture: think-only span')
+  const collapsed = new CompactWorkComponent({ span: span.span, expanded: false, showPreview: false, iconStyle: 'symbols' }).render(80)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.equal(collapsed.length, 1, 'header only — the reasoning text never leaks as a preview')
+  assert.match(strip(collapsed[0]!), /^▸ Thought(?: |$)/)
+  assert.ok(!collapsed[0]!.includes('only reasoning'), 'the collapsed history shows no Think preview')
+  // §2.4: expanding keeps the Thought identity — no Thought → Activity jump.
+  const expanded = new CompactWorkComponent({ span: span.span, expanded: true, showPreview: false, iconStyle: 'symbols' }).render(80)
+  assert.equal(expanded.length, 1)
+  assert.match(strip(expanded[0]!), /^▾ Thought(?: |$)/)
+})
+
+test('a historical think-only Thought header degrades to width like Activity', () => {
+  const span = projectCompact([thinking(0, 'only reasoning')], noOptions)[0]
+  assert.ok(span !== undefined && span.kind === 'work')
+  const summary = summarizeWorkSpan(span.span)
+  // `Thought 8s` → `Thought` → hard truncate: the SAME ladder, no separate
+  // width algorithm (plan §5.1D).
+  assert.equal(formatWorkHeaderLine(summary, false, 120, 'symbols', '8s', 'thought'), '▸ Thought 8s')
+  assert.equal(formatWorkHeaderLine(summary, false, 10, 'symbols', '8s', 'thought'), '▸ Thought')
+  const narrow = formatWorkHeaderLine(summary, false, 6, 'symbols', '8s', 'thought')
+  assert.ok(visibleWidth(narrow) <= 6, `the narrow Thought header never overflows: ${JSON.stringify(narrow)}`)
+  // The forbidden shapes (plan §7.2): no invented stat, no thinking marker.
+  for (const width of [8, 12, 40, 120]) {
+    const header = formatWorkHeaderLine(summary, false, width, 'symbols', '8s', 'thought')
+    assert.ok(!/action|thinking|analysis/.test(header), `width ${width} invented semantics: ${header}`)
+  }
+})
+
+test('a latest think-only span defaults to Activity + Think (identity is not baked by summary)', () => {
+  const span = projectCompact([thinking(0, 'only reasoning')], noOptions)[0]
+  assert.ok(span !== undefined && span.kind === 'work')
+  // showPreview defaults to true: the component alone never decides
+  // historical — the presentation authority does.
+  const rows = new CompactWorkComponent({ span: span.span, expanded: false, iconStyle: 'symbols' }).render(80)
+  assert.match(rows[0]!.replace(/\x1b\[[0-9;]*m/g, ''), /^▸ Activity(?: |$)/)
+  assert.match(rows[1] ?? '', /Think:/, 'the latest think-only span keeps its Think preview')
+})
+
 test('the cluster component renders the header and a width-aware summary', () => {
   const a = contextRow(0, 'instructions', 'AGENTS.md')
   const b = contextRow(0, 'catalog', 'skill catalog')

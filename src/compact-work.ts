@@ -147,15 +147,26 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
  * span has no trustworthy token authority — addendum v2 §25). Degradation
  * drops the LAST stat first and keeps the duration with the identity to
  * the end, so the header NEVER wraps.
+ *
+ * The identity is `Thought` ONLY for the historical think-only span (the
+ * 2026-09-29 compact historical compaction plan §2.2): a settled Work with
+ * reasoning and zero actions whose collapsed preview is hidden renders
+ * `Thought <duration>` instead of a semantically empty `Activity` — a
+ * presentation-only identity over the SAME `TranscriptWorkSpan`, never a
+ * semantic class, a stat or a persisted state. The width ladder is
+ * unchanged: `Thought` reuses the exact Activity degradation contract.
  */
+export type CompactWorkHeaderIdentity = 'activity' | 'thought'
+
 export function formatWorkHeaderLine(
   summary: CompactWorkSummary,
   expanded: boolean,
   width: number,
   iconStyle: IconStyle = 'emoji',
   durationText?: string,
+  identity: CompactWorkHeaderIdentity = 'activity',
 ): string {
-  const head = `${iconLead(sectionDisclosureSemantic(expanded), iconStyle)}Activity`
+  const head = `${iconLead(sectionDisclosureSemantic(expanded), iconStyle)}${identity === 'thought' ? 'Thought' : 'Activity'}`
   const parts = compactActionStatParts(summary.actionStats)
   // The degradation ladder: full → … → action total → identity + duration
   // → identity.
@@ -237,6 +248,7 @@ export class CompactWorkComponent implements Component {
   private readonly expanded: boolean
   private readonly action: CompactActionPresentation | undefined
   private readonly preparingSummary: string | undefined
+  private readonly showPreview: boolean
   private readonly iconStyle: IconStyle
   private readonly now: () => number
 
@@ -246,6 +258,7 @@ export class CompactWorkComponent implements Component {
     summary?: CompactWorkSummary
     action?: CompactActionPresentation
     preparingSummary?: string
+    showPreview?: boolean
     iconStyle?: IconStyle
     now?: () => number
   }) {
@@ -253,6 +266,10 @@ export class CompactWorkComponent implements Component {
     this.expanded = options.expanded
     this.action = options.action
     this.preparingSummary = options.preparingSummary
+    // The presentation authority (TuiApp) owns the latest/live policy; the
+    // dumb renderer defaults to showing the preview so unit tests and
+    // non-TuiApp callers keep the original contract.
+    this.showPreview = options.showPreview ?? true
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.now = options.now ?? (() => Date.now())
   }
@@ -261,15 +278,24 @@ export class CompactWorkComponent implements Component {
 
   render(width: number): string[] {
     const contentWidth = Math.max(1, width)
+    // `Thought` is derived from the SAME facts that hide the preview (the
+    // 2026-09-29 plan §2.2): historical + think present + zero actions. It
+    // never depends on `expanded` — a manually opened historical span keeps
+    // the `Thought` identity (no Thought → Activity jump, §2.4).
+    const historicalThinkOnly =
+      !this.showPreview
+      && this.summary.think !== undefined
+      && this.summary.actionStats.total === 0
     const header = formatWorkHeaderLine(
       this.summary,
       this.expanded,
       contentWidth,
       this.iconStyle,
       activityDurationText(this.summary, this.now),
+      historicalThinkOnly ? 'thought' : 'activity',
     )
     const lines = [color.textDim(header)]
-    if (!this.expanded) {
+    if (!this.expanded && this.showPreview) {
       for (const line of compactWorkBody(this.summary, contentWidth, this.action, this.preparingSummary)) {
         lines.push(color.textDim(line))
       }

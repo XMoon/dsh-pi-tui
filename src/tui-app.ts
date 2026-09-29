@@ -9520,15 +9520,20 @@ export class TuiApp {
    * child starting/stopping, a corrected durable timing (a same-step
    * replacement with identical text), or a NEW synthetic Action (a
    * subagent/command/retry landing) must refresh the collapsed Activity
-   * even when nothing else changes. All inputs stay bounded — the Think
-   * text is the span's bounded tail and the Action signature is the same
-   * one-line presentation the slot renders, never a raw payload (post-F6
-   * plan §20). Takes the ALREADY-SUMMARIZED span so one Activity refresh
-   * walks its members exactly once. */
+   * even when nothing else changes. `showPreview` is part of the signature
+   * (the 2026-09-29 compact historical compaction plan §5.2B): the
+   * latest → historical transition changes ONLY this flag while the span's
+   * own summary stays identical, so without it the cached component would
+   * keep rendering the stale Think/Action preview. All inputs stay bounded —
+   * the Think text is the span's bounded tail and the Action signature is
+   * the same one-line presentation the slot renders, never a raw payload
+   * (post-F6 plan §20). Takes the ALREADY-SUMMARIZED span so one Activity
+   * refresh walks its members exactly once. */
   private compactWorkSignature(
     summary: CompactWorkSummary,
     action: CompactActionPresentation | undefined,
     preparingSummary: string | undefined,
+    showPreview: boolean,
   ): string {
     const timing = summary.timing
     return [
@@ -9538,6 +9543,7 @@ export class TuiApp {
       compactActionSignature(action),
       preparingSummary ?? '',
       timing === undefined ? '' : `${timing.startedAt}\u0000${timing.endedAt ?? ''}\u0000${timing.running ? '1' : '0'}`,
+      showPreview ? '1' : '0',
     ].join('\u0000')
   }
 
@@ -9547,7 +9553,14 @@ export class TuiApp {
    * Preparing summary arrives from the BLOCK (only the newest span of a turn
    * carries it) and is consumed by a collapsed span's Action slot. The span
    * is summarized ONCE and the summary feeds the signature, the shared
-   * Action bridge and the component (never a second member walk). */
+   * Action bridge and the component (never a second member walk).
+   *
+   * The latest/live preview policy (the 2026-09-29 compact historical
+   * compaction plan §4) is derived HERE, from the existing facts only: a
+   * live Preparing, a still-running span, or the TRUE latest Work of the
+   * current window (`hasNewer !== true` — a history page's tail is not the
+   * global latest, §4.1/§4.2). Every other settled span hides its collapsed
+   * preview; a historical think-only span renders `Thought` instead. */
   private compactWorkComponentFor(span: TranscriptWorkSpan, blockPreparingSummary: string | undefined): CompactWorkComponent {
     const expanded = this.workSpanExpanded(span)
     const summary = summarizeWorkSpan(span)
@@ -9555,7 +9568,18 @@ export class TuiApp {
     // An EXPANDED span renders the standalone Preparing preview block instead
     // of the Action slot, so the block's summary never reaches its card.
     const preparingSummary = expanded ? undefined : blockPreparingSummary
-    const signature = this.compactWorkSignature(summary, action, preparingSummary)
+    // Live wins, then the true latest Work, then historical compaction. The
+    // live check reads the RAW block input; `preparingSummary` above follows
+    // the existing expanded contract. Expanding a historical span never
+    // re-promotes it to live/latest (§5.2A).
+    const latestWorkSpan = this.canonicalStructureIndex().workSpans.at(-1)
+    const windowHasNewer = this.transcriptWindow?.hasNewer === true
+    const isTrueLatestWork = !windowHasNewer && latestWorkSpan?.owner === span.owner
+    const showPreview =
+      blockPreparingSummary !== undefined
+      || summary.timing?.running === true
+      || isTrueLatestWork
+    const signature = this.compactWorkSignature(summary, action, preparingSummary, showPreview)
     const entry = this.workComponents.get(span.owner)
     if (entry !== undefined && sameWorkSpanShape(entry.span, span)
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
@@ -9568,6 +9592,7 @@ export class TuiApp {
       summary,
       ...(action === undefined ? {} : { action }),
       ...(preparingSummary === undefined ? {} : { preparingSummary }),
+      showPreview,
       iconStyle: this.iconStyle,
     })
     this.workComponents.set(span.owner, {
