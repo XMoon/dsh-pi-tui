@@ -1,11 +1,24 @@
 /**
  * The file-completion context classifier (plan §4): the ONLY place that
- * decides whether the cursor sits in a file-completion context. File
- * completion is allowed in exactly two contexts:
+ * decides whether the cursor sits in a file-completion context.
+ *
+ * TRIGGER GRAMMAR OWNERSHIP (M3-3A note): the OFFICIAL shared grammar
+ * (`activeAtToken` in @deepseek-ai/dsh-file-reference/grammar) accepts
+ * an `@` at the start of a line or after whitespace. The rules below
+ * are the OFFICIAL BASELINE plus INTENTIONAL TUI TRIGGER EXTENSIONS —
+ * a mention may additionally sit glued to CJK text (CJK sentences glue
+ * the mention to the previous character) and after a `=` boundary
+ * (`key=@src/foo`). These extensions only WIDEN when the terminal
+ * opens its completion dropdown; they do not change the query sent to
+ * the Host (already the official form) nor the mention serialization
+ * (already the official `formatFileMention`). They are TUI UX policy,
+ * not the dsh official grammar.
+ *
+ * File completion is allowed in exactly two contexts:
  *
  * - `mention` — an `@` token at a real token boundary (start of text, after
- *   a delimiter, or glued to CJK text — so emails `a@b.com` and `pkg@1.0.0`
- *   never qualify);
+ *   a delimiter, or one of the documented TUI extensions above — so emails
+ *   `a@b.com` and `pkg@1.0.0` never qualify);
  * - `path-argument` — the argument of a command EXPLICITLY declared as
  *   file-argument (`/attach`, `/image`), never `getArgumentCompletions !== undefined`
  *   (plan §4.2: file commands must be explicit).
@@ -25,7 +38,9 @@ import type { FileCompletionContext } from './types.ts'
  * getArgumentCompletions wiring. */
 export const FILE_ARGUMENT_COMMANDS: ReadonlySet<string> = new Set(['attach', 'image'])
 
-/** Token separators: `@` must sit at the start of the current token. */
+/** Token separators: `@` must sit at the start of the current token.
+ * The whitespace/newline/quote entries are the OFFICIAL baseline; `=` is
+ * an INTENTIONAL TUI trigger extension (see the module header). */
 const PATH_DELIMITERS = new Set([' ', '\t', '\n', '\r', '"', "'", '='])
 
 /** Whether the char is CJK (ideographs, kana, hangul, CJK punctuation,

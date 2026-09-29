@@ -36,6 +36,24 @@ export function reattachDisplayBase(candidate: PathCandidate, query: PathComplet
   return { ...candidate, path: `${query.displayBase}${candidate.path}` }
 }
 
+/** Rank, filter and bound one discovery set (the local scoring model,
+ * the SOURCE's own order for its Client-fs/workspace-compat consumers —
+ * NOT the SESSION `@` mention path, whose ranking is the official Host
+ * authority's). PURE: path candidates in, ranked path candidates out —
+ * no UI DTOs, so a semantic adapter can own its ranking end-to-end. */
+export function rankDiscovery(
+  candidates: readonly PathCandidate[],
+  term: string,
+): readonly PathCandidate[] {
+  const lowerQuery = term.toLowerCase()
+  return candidates
+    .map(candidate => ({ candidate, score: scorePathCandidate(candidate, lowerQuery) }))
+    .filter(entry => entry.score > 0)
+    .sort(compareScoredPaths)
+    .slice(0, MAX_SUGGESTIONS)
+    .map(entry => entry.candidate)
+}
+
 /** Rank, slice and present one discovery set for one query (the
  * Client-fs command paths and the Direct WORKSPACE compatibility
  * scanner; the SESSION `@` mention does NOT flow through here — its
@@ -51,15 +69,10 @@ export function presentDiscovery(
   term: string,
   context: { at: boolean; quoted: boolean; sep?: string },
 ): AutocompleteItem[] {
-  const lowerQuery = term.toLowerCase()
-  return candidates
-    .map(candidate => ({ candidate, score: scorePathCandidate(candidate, lowerQuery) }))
-    .filter(entry => entry.score > 0)
-    .sort(compareScoredPaths)
-    .slice(0, MAX_SUGGESTIONS)
+  return rankDiscovery(candidates, term)
     // The official mention grammar may refuse a path it cannot represent
     // safely (`undefined`); such a candidate is filtered, never coerced.
-    .map(entry => presentPathCandidate(entry.candidate, context))
+    .map(candidate => presentPathCandidate(candidate, context))
     .filter((item): item is AutocompleteItem => item !== undefined)
 }
 

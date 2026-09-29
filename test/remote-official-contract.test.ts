@@ -3,9 +3,12 @@
  *
  * The centralized compile-time compatibility gate for every Remote adapter the
  * TUI intends to bring into M3. Each `officialX` function below is a REAL
- * structural assignability proof: the pinned DSH 0.1.7-rc.2 PUBLIC Client /
+ * structural assignability proof: the pinned installed DSH PUBLIC Client /
  * generated Remote face must satisfy the adapter's declared source type with NO
- * cast. The functions are never called at runtime; `assert.equal(typeof …, 'function')`
+ * cast. The pre-existing adapter proofs were frozen against 0.1.7-rc.2 and
+ * carry over unchanged; the M3-3A additions (context below) are proven
+ * against 0.2.0-rc.1 — the M3-3A requalification record
+ * (docs/m3-entry-contract.md §1.1) names the per-stage version for each. The functions are never called at runtime; `assert.equal(typeof …, 'function')`
  * keeps them referenced so the compiler must keep checking them.
  *
  * Contract matrix (adapter -> official face):
@@ -228,7 +231,7 @@ function officialM3ASemanticSurfaces(
   }
 }
 
-test('every Remote adapter accepts the published DSH 0.1.7-rc.2 public Client/Remote face', () => {
+test('every Remote adapter accepts the published DSH public Client/Remote face (0.1.7-rc.2 proofs carried, M3-3A additions on 0.2.0-rc.1)', () => {
   // A compile-time proof only runs when the compiler keeps the function in the
   // program; this reference is that keep-alive.
   for (const proof of [
