@@ -601,17 +601,22 @@ test('manual expand/collapse of a historical Thought keeps its identity and hide
   let view = vt.getViewport().join('\n')
   assert.equal(thoughtHeaders(view, false).length, 1, `the historical think-only span reads Thought:\n${view}`)
 
-  // §7.11: expand reveals the raw Thinking row; the header stays Thought.
-  app.toggleWorkSpan(owner)
+  // §7.11 via the real mouse path: the Thought header row is the same
+  // Work hit target Activity uses, so a click toggles exactly this span.
+  const headerRow = rowOf(vt.getViewport(), /▸ Thought/)
+  assert.ok(headerRow >= 0, `precondition: the Thought header row is visible:\n${view}`)
+  click(vt, 2, headerRow + 1)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
+  assert.equal(app.expandedWorkOwnersForTest().size, 1, 'the Thought header click opens exactly its own span')
   assert.equal(thoughtHeaders(view, true).length, 1, `the opened span keeps the Thought identity (no jump to Activity):\n${view}`)
   assert.ok(view.includes('historical reasoning body'), 'the raw Thinking row renders when open')
 
   // Collapse: header-only again, the preview never resurrects.
-  app.toggleWorkSpan(owner)
+  click(vt, 3, rowOf(vt.getViewport(), /▾ Thought/) + 1)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'a second Thought header click collapses the span')
   assert.equal(thoughtHeaders(view, false).length, 1)
   assert.ok(!view.includes('historical reasoning body'), `collapsing returns to the header-only compaction:\n${view}`)
 })

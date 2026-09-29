@@ -617,9 +617,13 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   the latest reasoning tail (one visual row, following the tail while
   streaming); the Action row is the latest meaningful non-Thinking Process
   evidence (one visual row — see the collapsed Action slot decision below).
-  Counts describe the span, not the turn; no fact renders a placeholder
-  row; span-local duration is omitted rather than faked from whole-turn timing.
-  Expanding the span re-uses the ordinary message renderers for its members.
+  This full preview body belongs to the live/Preparing/true-latest Work; a
+  settled historical Work collapses to its header only (the 2026-09-29
+  compact historical compaction, below). Counts describe the span, not the
+  turn; no fact renders a placeholder row; span-local duration is omitted
+  when no per-span timing evidence exists, never faked from whole-turn
+  timing. Expanding the span re-uses the ordinary message renderers for its
+  members.
 - **The Work header keeps the plain triangle** (`▸`/`▾`, the
   `section-collapsed`/`section-expanded` semantics in every icon style) — the
   Focus root keeps its whale identity. The Context CLUSTER header composes the
