@@ -95,9 +95,10 @@ export class DirectHostFilePort implements HostFilePort {
       return { kind: 'unavailable', reason: 'the session scope has no resolvable Host workspace' }
     }
     const signal = options?.signal
-    if (signal?.aborted === true) {
-      return { kind: 'unavailable', reason: 'the discovery request was cancelled before it started' }
-    }
+    // Cancellation is CANCELLATION (the M3-3A failure vocabulary: an
+    // aborted request rejects, it is never reported as a capability being
+    // unavailable) — exactly the Remote adapter's `throwIfAborted` shape.
+    signal?.throwIfAborted()
     // `query` is the editor's at-prefix INCLUDING the leading `@` (and an
     // unclosed `"` for the quoted form). The engine strips the `@` and any
     // trailing quote, resolves the scope and answers discovery with path
@@ -106,10 +107,9 @@ export class DirectHostFilePort implements HostFilePort {
     try {
       const resolved = resolveQuery(raw, workDir)
       const candidates = await discoverForQuery(resolved, this.discoverySource, signal ?? new AbortController().signal)
-      // `signal` is possibly-undefined: a request without one never aborts.
-      if ((signal?.aborted ?? false)) {
-        return { kind: 'unavailable', reason: 'the discovery request was cancelled' }
-      }
+      // A cancellation landing mid-discovery outranks any result or local
+      // failure the engine reported alongside it.
+      signal?.throwIfAborted()
       // THE PORT CONTRACT: paths are USER-FACING — the display base the
       // user typed (`../`, `~/pics/`, `/tmp/`, `src/`) is reattached here
       // (the engine's pure reattachment), so the client's presentation
@@ -122,8 +122,10 @@ export class DirectHostFilePort implements HostFilePort {
         }),
       }
     } catch {
-      // The local discovery engine failing is an unavailable answer here
-      // (never an authoritative "nothing matches").
+      // A cancellation that surfaced through the engine stays a
+      // cancellation; only a genuine local discovery failure is an
+      // unavailable answer here (never an authoritative "nothing matches").
+      signal?.throwIfAborted()
       return { kind: 'unavailable', reason: 'local file discovery failed' }
     }
   }
@@ -133,11 +135,9 @@ export class DirectHostFilePort implements HostFilePort {
     path: string,
     options?: { signal?: AbortSignal },
   ): Promise<HostFileResolveResult> {
-    // An already-aborted request is a cancelled probe: fail closed before
-    // any filesystem access (the caller never consumes a cancelled result).
-    if (options?.signal?.aborted === true) {
-      return { kind: 'unavailable', reason: 'the existence probe was cancelled before it started' }
-    }
+    // A cancelled probe rejects before any filesystem access — cancellation
+    // is never folded into the unavailable state (M3-3A failure vocabulary).
+    options?.signal?.throwIfAborted()
     const cwd = this.scopeCwd(scope)
     if (cwd === undefined) {
       return { kind: 'unavailable', reason: 'the session scope has no resolvable Host workspace' }
