@@ -22,7 +22,10 @@ import {
 } from '../src/git-attribution.ts'
 import { PROGRESS_UPDATES_SECTION_NAME, RESPONSE_STYLE_SECTION_NAME, installProgressUpdatesPrompt, installResponseStylePrompt, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
 import type { DisplayState } from '../src/display-preset.ts'
-import { composeAgent } from '../src/index.ts'
+// The attribution state is a Direct-application internal concern: it is NOT part
+// of the public composeAgent() surface, so the composition regressions exercise
+// the internal owner directly (same pattern as direct-owner-registry.test.ts).
+import { composeDirectAgent } from '../src/app/direct/composition.ts'
 
 const OFFICIAL_TRAILER = 'Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>'
 
@@ -150,7 +153,7 @@ test('a composed TUI Agent receives the attribution section beside the existing 
   const gitAttributionState: GitAttributionState = { mode: 'product' }
   const sections = new Map<string, Parameters<SystemPromptLike['section']>[0]>()
   let installSelectionCalls = 0
-  const composition = await composeAgent(
+  const composition = await composeDirectAgent(
     ctx,
     (agentCtx: Context) => {
       installSelectionCalls += 1
@@ -192,7 +195,7 @@ test('omitting the attribution state installs no section', async () => {
   const ctx = new Context()
   const display: DisplayState = { preset: 'full' }
   const sections = new Map<string, Parameters<SystemPromptLike['section']>[0]>()
-  const composition = await composeAgent(
+  const composition = await composeDirectAgent(
     ctx,
     (agentCtx: Context) => {
       ;(agentCtx as unknown as { get(name: string): unknown }).get = (name: string): unknown => {
@@ -213,10 +216,6 @@ test('omitting the attribution state installs no section', async () => {
   composition.setup(ctx, {} as never)
   assert.equal(sections.has(GIT_ATTRIBUTION_SECTION_NAME), false, 'no attribution section without the state')
 })
-
-// Keep the unused policy imports meaningful for the composition assertions.
-void installProgressUpdatesPrompt
-void installResponseStylePrompt
 
 test('product-model renders through the REAL SystemPrompt + model selection end to end', async () => {
   // The full production chain: the REAL dsh SystemPrompt service owns the
@@ -251,4 +250,56 @@ test('product-model renders through the REAL SystemPrompt + model selection end 
   const second = await render()
   assert.ok(second.includes('Assisted-By: deepseek-official/deepseek-v4'), `the next assembly uses the new route:\n${second}`)
   dispose()
+})
+
+test('the `minimal` preset contract: a COMPLETE persona suppresses every TUI prompt policy, attribution included', async () => {
+  // The shipped `minimal` preset declares its persona with `complete: true`
+  // (a parity-gated mirror of the official DSH preset asset, so the semantics
+  // are upstream-owned): the system-prompt service restores that section as
+  // the SOLE prompt after the waterfall. Every TUI prompt policy — the
+  // pre-existing progress/response-style sections AND the attribution
+  // section — is therefore absent under `minimal`. This test pins that
+  // contract with the REAL SystemPrompt + REAL dsh-persona, and includes a
+  // positive control so it can never pass vacuously.
+  const { Context: RealContext } = await import('@deepseek-ai/cordis')
+  const { default: SystemPrompt, renderPrompt } = await import('@deepseek-ai/dsh-system-prompt')
+  const { createScope } = await import('@deepseek-ai/dsh-scope')
+  const { apply: applyPersona } = await import('@deepseek-ai/dsh-persona')
+
+  const renderWithPersona = async (persona: { prefix: string, complete: boolean }): Promise<string> => {
+    const ctx = new RealContext()
+    await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
+    const systemPrompt = ctx.get('systemPrompt') as unknown as {
+      assemble(options?: unknown): Promise<Parameters<typeof renderPrompt>[0]>
+    }
+    const scopeKey = {}
+    const scoped = createScope(ctx, scopeKey)
+    // The minimal preset's persona row, mounted in an agent scope exactly as
+    // the preset composition does.
+    await scoped.ctx.plugin({
+      name: 'persona',
+      inject: ['systemPrompt'],
+      apply: (c: never) => applyPersona(c, { ...persona, includeRuntimeContext: false }),
+    })
+    const scopedPrompt = scoped.ctx.get('systemPrompt') as unknown as SystemPromptLike
+    installGitAttributionPrompt(scopedPrompt, { mode: 'product' })
+    installProgressUpdatesPrompt(scopedPrompt, { preset: 'full' } as DisplayState, { mode: 'frequent' })
+    installResponseStylePrompt(scopedPrompt, { style: 'concise' })
+    return renderPrompt(await systemPrompt.assemble({ scope: scopeKey }))
+  }
+
+  // minimal: the complete persona IS the whole prompt.
+  const minimal = await renderWithPersona({ prefix: 'You are a helpful software engineer assistant.', complete: true })
+  assert.ok(minimal.includes('You are a helpful software engineer assistant.'), `the persona is the prompt:\n${minimal}`)
+  assert.ok(!minimal.includes(OFFICIAL_TRAILER), 'no attribution guidance reaches a complete-persona preset')
+  assert.ok(!minimal.includes('# Progress updates'), 'the pre-existing progress policy is suppressed identically')
+  assert.ok(!minimal.includes('# Response style'), 'the pre-existing response-style policy is suppressed identically')
+
+  // Positive control: the same sections DO render under a non-complete
+  // persona (so the assertions above are about `complete`, not about the
+  // sections silently failing to register).
+  const nonComplete = await renderWithPersona({ prefix: 'You are a helpful software engineer assistant.', complete: false })
+  assert.ok(nonComplete.includes(OFFICIAL_TRAILER), `attribution renders without a complete persona:\n${nonComplete}`)
+  assert.ok(nonComplete.includes('# Progress updates'), 'the progress policy renders too')
+  assert.ok(nonComplete.includes('# Response style'), 'the response-style policy renders too')
 })

@@ -254,6 +254,9 @@ product-model  官方署名 + Assisted-By: <provider>/<model>
 
 - `!` / `!!` 本地 Shell 和你自己终端里的手动提交完全不受影响；
 - 不安装任何 `prepare-commit-msg` 钩子，不修改已有钩子；
+- **使用 `minimal` preset 时不生效**：该 preset 的 persona 是完整 system prompt
+  （`complete: true`），会替换掉其它全部 section；既有的 TUI 指引（Progress updates、
+  Response style、Focus）在该 preset 下同样是这种既有行为；
 - 不需要 GitHub 凭证/API；不修改 Author/Committer 身份；
 - 模型理论上可能忽略或写错指引——这是有意的取舍：用低侵入的指引替代一整套
   Git 生命周期子系统。
