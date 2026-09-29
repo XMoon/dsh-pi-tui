@@ -207,10 +207,8 @@ test('a history window tail never impersonates the global latest (hasNewer=true)
   const { vt, app } = startApp()
   // The window's LAST Work is only this page's tail — the transcript has
   // newer content, so it must compact like any other historical span.
-  const actionTail = thinking(2, 'page tail action run')
-  const thinkOnlyTail = thinking(3, 'page tail think-only run')
   app.setTranscript(
-    [actionTail, tool(2, 'ok'), thinking(3, 'tail reasoning')],
+    [thinking(2, 'page tail action run'), tool(2, 'ok'), thinking(3, 'tail reasoning')],
     new Map(),
     { mode: 'history', endTurn: 3, firstTurn: 2, lastTurn: 3, hasNewer: true },
   )

@@ -799,14 +799,10 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   collapses to its header. A historical Work with Thinking but zero Action
   evidence uses `Thought` as a presentation-only identity so header-only
   compaction does not erase its semantic meaning. Canonical Work
-  ownership/projection is unchanged. The preview policy derives from existing
-  facts only — a live Preparing, `summarizeWorkSpan`'s `timing.running`, or the
-  TRUE latest Work of the current window (`transcriptWindow.hasNewer !== true`
-  and the span is the projected tail — a history page's tail never impersonates
-  the global latest); `showPreview` joins the component-cache signature so the
-  latest → historical transition repaints even when the span's own summary is
-  unchanged, and the latest think-only span stays `Activity` (with its `Think:`
-  preview) so the identity never flips while evidence streams.
+  ownership/projection is unchanged. The full behavior matrix, the
+  window-authority (`hasNewer`) true-latest rule and the component-cache
+  invalidation contract are owned by
+  `docs/transcript-display-disclosure.md`.
 
 ## F4 hardening (2026-09-21 PR4)
 

@@ -79,6 +79,9 @@ const attention = (turn: number): TranscriptMessage => ({
 
 const noOptions = { expandedWorkOwners: new Set<TranscriptMessage>(), expandedClusters: new Set<TranscriptMessage>(), forcedExpanded: new Set<TranscriptMessage>() }
 
+/** The settled Read Action presentation the CompactWorkComponent tests share. */
+const READ_ACTION = { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' } as const
+
 /** Strip ANSI styling from one rendered row (per-file assertion idiom). */
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
@@ -390,15 +393,13 @@ test('a live Preparing summary owns the Action slot over the settled display', (
 test('the Work component renders one header row and, collapsed, the slot rows', () => {
   const span = projectCompact([thinking(0), tool(0)], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
-  const collapsed = new CompactWorkComponent({ span: span.span, expanded: false, action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' }, iconStyle: 'symbols' }).render(80)
+  const collapsed = new CompactWorkComponent({ span: span.span, expanded: false, action: READ_ACTION, iconStyle: 'symbols' }).render(80)
   assert.equal(collapsed.length, 3, 'header + Think + Action')
-  const expanded = new CompactWorkComponent({ span: span.span, expanded: true, action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' }, iconStyle: 'symbols' }).render(80)
+  const expanded = new CompactWorkComponent({ span: span.span, expanded: true, action: READ_ACTION, iconStyle: 'symbols' }).render(80)
   assert.equal(expanded.length, 1, 'expanded Work renders only the header — children render after it')
 })
 
 // ── Compact historical compaction (2026-09-29 plan §7.1/§7.2) ──────────────
-
-const READ_ACTION = { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' } as const
 
 test('showPreview=false renders exactly one header row for a historical span', () => {
   const span = projectCompact([thinking(0, 'historical reasoning'), tool(0)], noOptions)[0]
@@ -531,7 +532,7 @@ test('container chrome shares the transcript left edge; internal card structure 
   for (const row of new CompactWorkComponent({
     span: span.span,
     expanded: false,
-    action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' },
+    action: READ_ACTION,
     iconStyle: 'symbols',
   }).render(80)) {
     assert.ok(!row.startsWith(' '), `outer chrome row must not indent:\n${row}`)
