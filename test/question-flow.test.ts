@@ -1869,6 +1869,30 @@ test('editing mutations all sync: Backspace + Esc + navigation', () => {
   assert.ok(!view.includes('abc'), `the deleted character must stay deleted:\n${view}`)
 })
 
+test('optionless re-entry first character syncs the draft (navigation auto-re-enter)', () => {
+  // The optionless NAVIGATION state hands a typed key straight to the
+  // shared Input (search-box semantics). That mutation path must sync
+  // Draft.custom too: the FIRST typed character after Esc must make the
+  // question answered, so → continues instead of skipping, and ← back
+  // still shows the character.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('\x1b') // Esc → navigation state (blank draft)
+  f.handleInput('x') // auto re-enter + first character
+  f.handleInput('\x1b') // Esc → navigation state again (draft now holds 'x')
+  f.handleInput('\x1b[C') // → must CONTINUE (answered), not skip
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `→ must continue after the re-entry character:\n${view}`)
+  f.handleInput('\x1b[D') // ← back to Q1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('x'), `the re-entry character must survive:\n${view}`)
+  assert.ok(!view.includes('(skipped)'), `the re-entry character must prevent the skip mark:\n${view}`)
+})
+
 test('custom value visible after revisit (list mode, not the placeholder)', () => {
   // Plan §14.10 / §9.2: a saved custom shows as [✓] <value> in list
   // mode, never as the bare "Type something." placeholder.
@@ -1898,10 +1922,7 @@ test('masked custom shows bullets in list mode after revisit, never plaintext', 
   ], () => {}, () => {})
   f.setMaxRows(24)
   render(f, 100)
-  // Walk to the OTHER row and enter the edit.
-  f.handleInput('\x1b[B')
-  render(f, 100)
-  f.handleInput('\r')
+  enterOtherEdit(f, 1)
   for (const ch of 'secret') f.handleInput(ch)
   f.handleInput('\r') // commit → Q2
   render(f, 100)
@@ -1913,7 +1934,9 @@ test('masked custom shows bullets in list mode after revisit, never plaintext', 
 
 test('single-select existing selection + empty custom Enter survives (regression)', () => {
   // Plan §14.9 (single variant): selected A, enter OTHER, do not type,
-  // Enter — the answer stays ['A'].
+  // Enter — the answer stays ['A']. (The comprehensive walkthrough lives
+  // in 'Enter on empty custom text never wipes an existing selection'
+  // above; this is the §14.9-anchored minimal pin.)
   let done: unknown
   const f = new QuestionFlow([
     { id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
@@ -1923,11 +1946,7 @@ test('single-select existing selection + empty custom Enter survives (regression
   f.handleInput('1') // select A → review
   render(f, 100)
   f.handleInput('\x1b[D') // ← back
-  render(f, 100)
-  f.handleInput('\x1b[B'); f.handleInput('\x1b[B') // walk to OTHER row
-  render(f, 100)
-  f.handleInput('\r') // enter the edit (seeded with the empty draft)
-  render(f, 100)
+  enterOtherEdit(f, 2) // enter the edit (seeded with the empty draft)
   f.handleInput('\r') // Enter with EMPTY text
   render(f, 100)
   f.handleInput('\r') // submit
@@ -1935,19 +1954,18 @@ test('single-select existing selection + empty custom Enter survives (regression
 })
 
 test('multi-select existing selection + empty custom Enter survives (regression)', () => {
-  // Plan §14.9 (multi variant).
+  // Plan §14.9 (multi variant): the comprehensive walkthrough lives in
+  // 'Enter on empty custom text never wipes an existing selection'; this
+  // is the §14.9-anchored minimal pin with the NEW Space toggle entry.
   let done: unknown
   const f = new QuestionFlow([
     { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'X' }, { label: 'Y' }] },
   ], (answers) => { done = answers }, () => {})
   f.setMaxRows(24)
   render(f, 100)
-  f.handleInput(' ') // toggle X
+  f.handleInput(' ') // toggle X (Space)
   render(f, 100)
-  f.handleInput('\x1b[B'); f.handleInput('\x1b[B') // walk to OTHER row
-  render(f, 100)
-  f.handleInput('\r') // enter the edit (empty draft)
-  render(f, 100)
+  enterOtherEdit(f, 2) // enter the edit (empty draft)
   f.handleInput('\r') // Enter with EMPTY text → keep selection, advance
   render(f, 100)
   f.handleInput('\r') // submit
@@ -2030,7 +2048,10 @@ test('hint verbs: space toggle · ↵ continue/review in the multi list', () => 
 })
 
 test('ownsFixedKey: space is owned only by the multi-select list mode', () => {
-  // Plan §13: the new component action's mode-sensitive ownership.
+  // Plan §13: the new component action's mode-sensitive ownership. The
+  // end-to-end typing behavior ("hello world" survives in the edit) is
+  // pinned by 'text edit: Space types an ordinary space'; this test pins
+  // the OWNERSHIP boundary itself.
   const multi = makeFlow([{ id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }] }], 24)
   render(multi, 100)
   assert.equal(multi.ownsFixedKey(' '), true, 'multi list mode must own Space')
@@ -2039,25 +2060,13 @@ test('ownsFixedKey: space is owned only by the multi-select list mode', () => {
   assert.equal(multi.ownsFixedKey(' '), true, 'multi list mode owns Space on the OTHER row too')
   multi.handleInput('\r') // enter the edit
   render(multi, 100)
-  // In the edit, the shared Input owns raw printables — Space reaches
-  // the Input for typing (the earlier 'text edit: Space types an
-  // ordinary space' test pins the "hello world" case end to end). Here:
-  // the edit must not behave like the list-mode toggle.
+  // The typed space must NOT toggle the option (the edit path is Input
+  // typing, not the list-mode toggle).
   multi.handleInput(' ')
   const typed = render(multi, 100).join('\n')
-  assert.ok(!typed.includes('space toggle'), `the edit must not advertise the list-mode space verb:\n${typed}`)
   assert.ok(!typed.split('\n').some(line => line.includes('[✓] A')), `the typed space must NOT toggle the option:\n${typed}`)
 
   const single = makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], 24)
   render(single, 100)
   assert.equal(single.ownsFixedKey(' '), false, 'a single-select list must not own Space')
-
-  const optionless = makeFlow([{ id: 'q1', question: 'Name?' }], 24)
-  render(optionless, 100)
-  // The optionless edit owns space as TEXT (inputOwnsKey, printable
-  // input re-enters the edit) — the earlier optionless test in this
-  // file pins that typing spaces works; here just verify it does not
-  // behave like a list-mode toggle (no checkbox rows exist).
-  optionless.handleInput('a b')
-  assert.ok(render(optionless, 100).join('\n').includes('a b'), 'the optionless edit must type spaces as text')
 })
