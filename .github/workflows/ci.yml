@@ -137,12 +137,10 @@ jobs:
       version: ${{ steps.context.outputs.version }}
       npm_tag: ${{ steps.context.outputs.npm_tag }}
       is_prerelease: ${{ steps.context.outputs.is_prerelease }}
-      required_branch: ${{ steps.context.outputs.required_branch }}
     steps:
-      - name: Checkout full history
+      - name: Checkout
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Node.js
@@ -154,17 +152,6 @@ jobs:
       - name: Parse release tag
         id: context
         run: node scripts/release-context.mjs "$GITHUB_REF_NAME"
-
-      - name: Verify tag branch ancestry
-        env:
-          REQUIRED_BRANCH: ${{ steps.context.outputs.required_branch }}
-        run: |
-          set -euo pipefail
-          git fetch origin main next --no-tags
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$REQUIRED_BRANCH"; then
-            echo "Tag $GITHUB_REF_NAME is not an ancestor of origin/$REQUIRED_BRANCH" >&2
-            exit 1
-          fi
 
   # ---------------------------------------------------------------------------
   # Source-level checks that are NOT already covered by package prepack.

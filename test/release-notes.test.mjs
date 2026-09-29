@@ -11,10 +11,10 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** The version this checkout ships. The gate only ever validates the current
  * line, so the expectations below are generated from the shared matrix
- * instead of being re-written by hand for every release. */
+ * instead of being re-written by hand for every release. The tag prefix is
+ * chosen explicitly per test: a version string alone cannot encode the
+ * publication channel. */
 const CURRENT_VERSION = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')).version
-const CURRENT_CHANNEL = CURRENT_VERSION.includes('-') ? 'next' : 'stable'
-const CURRENT_TAG = `${CURRENT_CHANNEL === 'next' ? 'next-' : ''}v${CURRENT_VERSION}`
 
 function currentGuidance(omit) {
   const entries = requiredGuidance(CURRENT_VERSION).filter(command => command !== omit)
@@ -32,7 +32,7 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = undefined, channel = 'stable' }) {
+function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = undefined, channel = 'latest' }) {
   const root = life.tempDir('dsh-pi-tui-release-notes-')
   const comparePrefix = channel === 'next' ? 'next-v' : 'v'
   const output = join(root, 'release-notes.md')
@@ -61,19 +61,45 @@ function run(fixture, input) {
   )
 }
 
-test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
+test('release-notes accepts both channels with stable and prerelease SemVer', (t) => {
   const life = testLifecycle(t)
-  const stable = createFixture(life, { version: '1.2.3' })
-  const result = run(stable, 'v1.2.3')
-  assert.equal(result.status, 0, result.stderr)
-  const body = readFileSync(stable.output, 'utf8')
+
+  // The four prefix × maturity combinations: the tag prefix selects the
+  // channel; the SemVer suffix never does.
+  const stableLatest = createFixture(life, { version: '1.2.3', channel: 'latest' })
+  const stableLatestResult = run(stableLatest, 'v1.2.3')
+  assert.equal(stableLatestResult.status, 0, stableLatestResult.stderr)
+  const body = readFileSync(stableLatest.output, 'utf8')
   assert.match(body, /^## 中文/m)
   assert.match(body, /^## English/m)
 
-  const next = createFixture(life, { version: '1.2.3-alpha.1', channel: 'next' })
-  const nextResult = run(next, 'next-v1.2.3-alpha.1')
-  assert.equal(nextResult.status, 0, nextResult.stderr)
-  assert.match(readFileSync(next.output, 'utf8'), /English migration note\./)
+  const rcLatest = createFixture(life, { version: '1.2.3-rc.1', channel: 'latest' })
+  const rcLatestResult = run(rcLatest, 'v1.2.3-rc.1')
+  assert.equal(rcLatestResult.status, 0, rcLatestResult.stderr)
+  assert.match(readFileSync(rcLatest.output, 'utf8'), /English migration note\./)
+
+  const stableNext = createFixture(life, { version: '1.2.3', channel: 'next' })
+  const stableNextResult = run(stableNext, 'next-v1.2.3')
+  assert.equal(stableNextResult.status, 0, stableNextResult.stderr)
+  assert.match(readFileSync(stableNext.output, 'utf8'), /English migration note\./)
+
+  const alphaNext = createFixture(life, { version: '1.2.3-alpha.1', channel: 'next' })
+  const alphaNextResult = run(alphaNext, 'next-v1.2.3-alpha.1')
+  assert.equal(alphaNextResult.status, 0, alphaNextResult.stderr)
+  assert.match(readFileSync(alphaNext.output, 'utf8'), /English migration note\./)
+})
+
+test('release-notes rejects bare versions: a version cannot encode a channel', (t) => {
+  const life = testLifecycle(t)
+  const stable = createFixture(life, { version: '1.2.3' })
+  const stableResult = run(stable, '1.2.3')
+  assert.notEqual(stableResult.status, 0, 'a bare stable version unexpectedly passed')
+  assert.match(stableResult.stderr, /unsupported release tag 1\.2\.3/u)
+
+  const prerelease = createFixture(life, { version: '1.2.3-rc.1' })
+  const prereleaseResult = run(prerelease, '1.2.3-rc.1')
+  assert.notEqual(prereleaseResult.status, 0, 'a bare prerelease version unexpectedly passed')
+  assert.match(prereleaseResult.stderr, /unsupported release tag 1\.2\.3-rc\.1/u)
 })
 
 test('release-notes requires a dated current section directly after Unreleased and reference links', (t) => {
@@ -116,8 +142,8 @@ test('release-notes requires a dated current section directly after Unreleased a
   assert.notEqual(missingReferencesResult.status, 0)
   assert.match(missingReferencesResult.stderr, /release reference links/u)
 
-  const wrongChannel = createFixture(life, { version: '1.2.3-alpha.1' })
-  const wrongChannelResult = run(wrongChannel, 'next-v1.2.3-alpha.1')
+  const wrongChannel = createFixture(life, { version: '1.2.3-rc.1' })
+  const wrongChannelResult = run(wrongChannel, 'next-v1.2.3-rc.1')
   assert.notEqual(wrongChannelResult.status, 0)
   assert.match(wrongChannelResult.stderr, /matching next release reference links/u)
 
@@ -127,7 +153,7 @@ test('release-notes requires a dated current section directly after Unreleased a
   }
   const wrongRepositoryResult = run(wrongRepository, 'v1.2.3')
   assert.notEqual(wrongRepositoryResult.status, 0)
-  assert.match(wrongRepositoryResult.stderr, /matching stable release reference links/u)
+  assert.match(wrongRepositoryResult.stderr, /matching latest release reference links/u)
 
   const lookalikeRepository = createFixture(life, { version: '1.2.3' })
   for (const path of [lookalikeRepository.chinese, lookalikeRepository.english]) {
@@ -135,26 +161,33 @@ test('release-notes requires a dated current section directly after Unreleased a
   }
   const lookalikeRepositoryResult = run(lookalikeRepository, 'v1.2.3')
   assert.notEqual(lookalikeRepositoryResult.status, 0)
-  assert.match(lookalikeRepositoryResult.stderr, /matching stable release reference links/u)
+  assert.match(lookalikeRepositoryResult.stderr, /matching latest release reference links/u)
 })
 
-test('the current release body documents every matrix install pairing', (t) => {
+test('the current release body documents every matrix install pairing under either tag prefix', (t) => {
   const life = testLifecycle(t)
-  const fixture = createFixture(life, { version: CURRENT_VERSION, guidance: currentGuidance(), channel: CURRENT_CHANNEL })
-  const result = run(fixture, CURRENT_TAG)
-  assert.equal(result.status, 0, result.stderr)
-  const body = readFileSync(fixture.output, 'utf8')
-  for (const command of requiredGuidance(CURRENT_VERSION)) {
-    assert.ok(body.includes(command), `release body is missing ${command}`)
+  // The channel cannot be derived from CURRENT_VERSION (a -rc.* package
+  // version must not silently select the next channel), so the current
+  // release body gate is exercised explicitly under both tag prefixes.
+  for (const channel of ['latest', 'next']) {
+    const tag = `${channel === 'next' ? 'next-' : ''}v${CURRENT_VERSION}`
+    const fixture = createFixture(life, { version: CURRENT_VERSION, guidance: currentGuidance(), channel })
+    const result = run(fixture, tag)
+    assert.equal(result.status, 0, result.stderr)
+    const body = readFileSync(fixture.output, 'utf8')
+    for (const command of requiredGuidance(CURRENT_VERSION)) {
+      assert.ok(body.includes(command), `release body is missing ${command}`)
+    }
+    assert.doesNotMatch(body, /@xmoon76\/dsh-pi-tui@(latest|next)/u)
   }
-  assert.doesNotMatch(body, /@xmoon76\/dsh-pi-tui@(latest|next)/u)
 })
 
 test('the release-notes gate rejects a body missing any matrix pairing', (t) => {
   const life = testLifecycle(t)
+  const tag = `v${CURRENT_VERSION}`
   for (const omitted of requiredGuidance(CURRENT_VERSION)) {
-    const fixture = createFixture(life, { version: CURRENT_VERSION, guidance: currentGuidance(omitted), channel: CURRENT_CHANNEL })
-    const result = run(fixture, CURRENT_TAG)
+    const fixture = createFixture(life, { version: CURRENT_VERSION, guidance: currentGuidance(omitted), channel: 'latest' })
+    const result = run(fixture, tag)
     assert.notEqual(result.status, 0, `omitting ${omitted} unexpectedly passed`)
     assert.match(result.stderr, new RegExp(`must document ${escapeRegExp(omitted)}`, 'u'))
   }
@@ -168,10 +201,10 @@ test('release-notes rejects bilingual heading/date mismatch', (t) => {
   assert.match(result.stderr, /Changelog headings do not match/)
 })
 
-test('release-notes rejects malformed or channel-inconsistent tags', (t) => {
+test('release-notes rejects malformed tags', (t) => {
   const life = testLifecycle(t)
   const fixture = createFixture(life, { version: '1.2.3' })
-  for (const input of ['next-v1.2.3', 'v1.2.3-alpha.1', 'release-v1.2.3']) {
+  for (const input of ['release-v1.2.3', 'next-v1.2.3!']) {
     const result = run(fixture, input)
     assert.notEqual(result.status, 0, `${input} unexpectedly passed`)
   }
