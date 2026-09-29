@@ -1025,25 +1025,28 @@ class RemoteCredentialConfig implements CredentialConfig {
   async setReference(ref: string, secret: string): Promise<void> {
     const captured = this.generation.getSnapshot()
     const result = await settledResult(this.credentials.set(ref, secret))
-    if (!result.ok) throw new Error(`credentials.set(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    // The fence runs BEFORE the outcome is classified: a failure that belongs
+    // to a REPLACED connection (including a transport rejection folded by
+    // `settledResult`) is a superseded outcome, not this Host's error.
     this.fence(captured)
+    if (!result.ok) throw new Error(`credentials.set(${ref}) failed: ${remoteFailureMessage(result.error)}`)
   }
 
   async unsetReference(ref: string): Promise<void> {
     const captured = this.generation.getSnapshot()
     const result = await settledResult(this.credentials.unset(ref))
-    if (!result.ok) throw new Error(`credentials.unset(${ref}) failed: ${remoteFailureMessage(result.error)}`)
     this.fence(captured)
+    if (!result.ok) throw new Error(`credentials.unset(${ref}) failed: ${remoteFailureMessage(result.error)}`)
   }
 
   async describeReference(ref: string): Promise<{ configured: boolean; source?: string }> {
     const captured = this.generation.getSnapshot()
     const result = await settledResult(this.credentials.describe([ref]))
-    if (!result.ok) throw new Error(`credentials.describe(${ref}) failed: ${remoteFailureMessage(result.error)}`)
     // A read from a replaced Host must not be presented as the current
     // configuration (the /logout picker degrades a throwing describe to
     // "not configured" — fail closed, never a stale row).
     this.fence(captured)
+    if (!result.ok) throw new Error(`credentials.describe(${ref}) failed: ${remoteFailureMessage(result.error)}`)
     const info = result.value?.[ref]
     if (info === undefined) return { configured: false }
     return {
@@ -1056,11 +1059,11 @@ class RemoteCredentialConfig implements CredentialConfig {
    * Unsupported on the wire (docs/m3-entry-contract.md §2.3/§10): rc.2
    * publishes no credentials record read Remote and no record delete Remote
    * (`credentials/describe|set|unset` address REFERENCE names only, and the
-   * two key grammars are disjoint). The port's `CredentialConfig` shape has
-   * no availability marker for the record subset, so the correction is
-   * deferred to a port-level change (out of this task's two-file scope);
-   * this adapter instead REJECTS with a truthful message rather than faking
-   * an empty list or a silent successful delete.
+   * two key grammars are disjoint). `recordsSupported()` (below) is the
+   * port-level availability marker the consumer asks instead of inferring a
+   * capability gap from a rejection; this method still REJECTS with a
+   * truthful message rather than faking an empty list or a silent successful
+   * delete.
    */
   listRecords(): Promise<readonly { key: string; kind?: string }[]> {
     return Promise.reject(new Error(

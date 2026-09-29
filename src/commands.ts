@@ -5158,9 +5158,21 @@ export function registerTuiCommands(
       const option = route === undefined ? undefined : options.find(candidate => candidate.route === route)
       const targetRef = ref ?? option?.ref ?? deriveKeyRef(route ?? '')
       const label = option?.label ?? route ?? targetRef
+      // §9.3: the backend's provider-auth sub-capability must never be
+      // SILENTLY unavailable. When the authorization surface is absent here
+      // (Remote rc.2 publishes none) and the route's profile names no
+      // credential reference, the API-key path below is still the supported
+      // one — but the user has to be told that OAuth/device sign-in is not
+      // offered on this backend, because the wire cannot say whether this
+      // particular keyless route is OAuth-only or uses the conventional
+      // env-var reference. A hard block would hide provider login entirely,
+      // which §9.3 also forbids.
+      const providerSignInNote = runner.config.authorization.available() || option === undefined || option.namesCredential
+        ? ''
+        : ' — provider sign-in (OAuth/device) is unavailable on this backend'
       try {
         const answers = await app.askQuestions([
-          { id: 'key', question: `Enter the API key for ${label}:`, masked: true },
+          { id: 'key', question: `Enter the API key for ${label}${providerSignInNote}:`, masked: true },
         ])
         const key = answers[0]?.custom ?? ''
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }

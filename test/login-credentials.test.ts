@@ -582,3 +582,61 @@ test('/logout surfaces a real record-read failure on a backend that CAN enumerat
   await assert.rejects(() => t.run(t.logout, ''), /cannot enumerate stored credential records/u)
   t.app.stop()
 })
+
+test('/login never presents provider-native sign-in as silently available', async () => {
+  // §9.3: the backend's provider-auth sub-capability must never be SILENTLY
+  // unavailable. Remote rc.2 publishes no authorization surface and the wire
+  // cannot say whether a keyless route is OAuth-only or uses the conventional
+  // env-var reference, so the supported reference prompt carries an explicit
+  // note instead of a hard block (which would hide provider login entirely).
+  const t = setup()
+  ;(t.runnerConfig.providers as unknown as { listCredentialOptions: () => unknown[] }).listCredentialOptions = () => [{
+    route: 'anthropic',
+    label: 'Anthropic (native sign-in)',
+    ref: 'ANTHROPIC_API_KEY',
+    configured: true,
+    declared: false,
+    namesCredential: false,
+    group: 'available',
+    canProvisionProfile: true,
+  }]
+  ;(t.runnerConfig.authorization as unknown as { available: () => boolean }).available = () => false
+
+  const questions: string[] = []
+  t.app.askQuestions = (async (asked: readonly { question: string }[]) => {
+    questions.push(...asked.map(entry => entry.question))
+    return [{ id: 'key', selected: [], custom: 'sk-ant' }]
+  }) as never
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
+  assert.equal(result.kind, 'success')
+  assert.match(questions.join('\n'), /provider sign-in \(OAuth\/device\) is unavailable on this backend/u,
+    'the prompt states the unavailable sign-in capability instead of hiding it')
+  assert.deepEqual(t.credentials.sets, ['ANTHROPIC_API_KEY=sk-ant'])
+  t.app.stop()
+})
+
+test('/login names no sign-in limitation when the route uses an explicit reference', async () => {
+  const t = setup()
+  ;(t.runnerConfig.providers as unknown as { listCredentialOptions: () => unknown[] }).listCredentialOptions = () => [{
+    route: 'acme',
+    label: 'Acme',
+    ref: 'ACME_GATEWAY_API_KEY',
+    configured: true,
+    declared: false,
+    namesCredential: true,
+    group: 'configured',
+    canProvisionProfile: true,
+  }]
+  ;(t.runnerConfig.authorization as unknown as { available: () => boolean }).available = () => false
+
+  const questions: string[] = []
+  t.app.askQuestions = (async (asked: readonly { question: string }[]) => {
+    questions.push(...asked.map(entry => entry.question))
+    return [{ id: 'key', selected: [], custom: 'sk-test' }]
+  }) as never
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme')
+  assert.equal(result.kind, 'success')
+  assert.doesNotMatch(questions.join('\n'), /provider sign-in/u, 'a named-reference route carries no auth note')
+  assert.deepEqual(t.credentials.sets, ['ACME_GATEWAY_API_KEY=sk-test'])
+  t.app.stop()
+})

@@ -2456,6 +2456,12 @@ still reaches the Remote graph only through the dynamic
   credentials reference read/write, permissions (catalog/default/apply
   through `/permission <preset>`, `approvalOverrideOf` ALWAYS `undefined` —
   no `?? 'ask'`), preset default, and subagent model selection.
+- `/login` (§9.3): the reference/API-key path IS supported, and the absent
+  provider sign-in sub-capability is never silent — when this backend publishes
+  no authorization surface, a keyless route's prompt states that OAuth/device
+  sign-in is unavailable here. The wire cannot say whether a keyless route is
+  OAuth-only or uses the conventional env-var reference, so a hard block would
+  hide provider login entirely (which §9.3 also forbids).
 - Explicit unsupported (docs/m3-entry-contract.md §10): `listRecords()` /
   `deleteRecord()` REJECT with a truthful unavailable error (never an empty
   record list), and the whole authorization sub-domain fails closed

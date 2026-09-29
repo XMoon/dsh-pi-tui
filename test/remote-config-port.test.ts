@@ -55,6 +55,8 @@ interface FakeState {
   readonly credentialStore: Map<string, { configured: boolean; source?: string }>
   /** Runs INSIDE a credential RPC so a test can replace the generation mid-call. */
   credentialGate: (() => void | Promise<void>) | undefined
+  /** Makes the next credential RPC fail (a real failure result). */
+  credentialFailure: { code: string; message: string } | undefined
   readonly executeCalls: { sessionId: string; line: string; attachments: readonly unknown[]; signal?: AbortSignal }[]
   executeResult: { ok: true; value: unknown } | { ok: false; error: unknown }
   readonly order: string[]
@@ -142,6 +144,7 @@ function createBackend(seed?: (state: FakeState) => void) {
     mutateApplies: true,
     credentialStore: new Map(),
     credentialGate: undefined,
+    credentialFailure: undefined,
     executeCalls: [],
     executeResult: { ok: true, value: { commandId: 'c' } },
     order: [],
@@ -206,6 +209,7 @@ function createBackend(seed?: (state: FakeState) => void) {
     credentials: {
       describe: async (refs: string[]) => {
         await state.credentialGate?.()
+        if (state.credentialFailure !== undefined) return { ok: false as const, error: state.credentialFailure }
         const value: Record<string, { configured: boolean; source?: string; writable: boolean }> = {}
         for (const ref of refs) {
           const info = state.credentialStore.get(ref)
@@ -219,11 +223,13 @@ function createBackend(seed?: (state: FakeState) => void) {
       },
       set: async (ref: string, _value: string) => {
         await state.credentialGate?.()
+        if (state.credentialFailure !== undefined) return { ok: false as const, error: state.credentialFailure }
         state.credentialStore.set(ref, { configured: true, source: 'provider' })
         return { ok: true as const, value: undefined }
       },
       unset: async (ref: string) => {
         await state.credentialGate?.()
+        if (state.credentialFailure !== undefined) return { ok: false as const, error: state.credentialFailure }
         state.credentialStore.delete(ref)
         return { ok: true as const, value: undefined }
       },
@@ -974,4 +980,34 @@ test('credential operations re-check the Connection generation before reporting 
   assert.equal((await same.port.credentials.describeReference('ACME_KEY')).configured, false)
   await same.port.credentials.setReference('ACME_KEY', 'secret')
   assert.equal((await same.port.credentials.describeReference('ACME_KEY')).configured, true)
+})
+
+test('a credential failure from a REPLACED connection is superseded, not this Host error', async () => {
+  // The generation fence runs BEFORE the outcome is classified: a failure that
+  // belongs to the old connection (including a transport rejection folded by
+  // settledResult) must be reported as superseded-and-retry, never surfaced as
+  // the current Host's error — /login would otherwise call it "login
+  // cancelled" instead of "the connection changed".
+  for (const call of [
+    (port: ReturnType<typeof createBackend>['port']) => port.credentials.setReference('ACME_KEY', 'secret'),
+    (port: ReturnType<typeof createBackend>['port']) => port.credentials.unsetReference('ACME_KEY'),
+    (port: ReturnType<typeof createBackend>['port']) => port.credentials.describeReference('ACME_KEY'),
+  ]) {
+    const { port, state, generation } = createBackend()
+    state.credentialFailure = { code: 'gateway/unavailable', message: 'the old host is gone' }
+    state.credentialGate = () => { generation.set({ id: 'gen-2' }) }
+    await assert.rejects(() => call(port), (error: unknown) => {
+      assert.equal((error as Error).name, 'SupersededReadError',
+        'a replaced-connection failure is a superseded outcome')
+      return true
+    })
+  }
+
+  // The same failure on the SAME generation still surfaces as the real error.
+  const same = createBackend()
+  same.state.credentialFailure = { code: 'gateway/unavailable', message: 'the host refused' }
+  await assert.rejects(
+    () => same.port.credentials.setReference('ACME_KEY', 'secret'),
+    /credentials\.set\(ACME_KEY\) failed: the host refused/u,
+  )
 })
