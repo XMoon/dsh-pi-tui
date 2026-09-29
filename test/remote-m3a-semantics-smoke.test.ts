@@ -38,16 +38,20 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, MessageId } from '@deepseek-ai/dsh-llm'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../src/app/remote/m3a-semantics.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../src/runtime/remote/session-reference.ts'
+import { contextPressureOccupancy } from '../src/runtime/session-reader-port.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 const PRESET = 'm3a-smoke-preset'
 const MAIN = 'm3a-main'
 const CHILD = 'm3a-child'
+const BARE = 'm3a-bare'
 
 /** The L5 stub llm route shape (enough adapter for real composition). */
 class StubLlmAdapter extends LlmAdapter {
@@ -77,6 +81,11 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
   try {
     await ctx.plugin(TypertRegistry)
     await mountAgentLoopTestDependencies(ctx)
+    // The REAL token-meter Host rows: the official contextPressure /
+    // contextBreakdown / tokenUsage projection units the smoke proves on the
+    // wire — plus the official todos projection unit.
+    await ctx.plugin(TokenMeter)
+    await ctx.plugin(toolTodo, { allowParallelInProgress: false })
     persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
     harness = await mountAgentLoopTestHarness(ctx)
     ctx.llm.registerAdapter(['smoke'], new StubLlmAdapter())
@@ -147,6 +156,35 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
   return { ctx, workRoot, anchorDir, harness: harness!, dispose }
 }
 
+/** Seed one REAL completed turn with a provider usage sample; the official
+ * projection units fold it exactly like a live model turn would. */
+function seedTurn(
+  host: HostFixture,
+  sessionId: string,
+  input: { turn: number; prompt: string; response: string; usage: { inputTokens: number; outputTokens: number } },
+): void {
+  const session = host.ctx.sessions.get(SessionId(sessionId))
+  if (session === undefined) throw new Error(`seedTurn: no Host session ${sessionId}`)
+  session.append('turn/start', { turn: input.turn })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: input.prompt }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: input.turn,
+    step: 0,
+    message: {
+      id: MessageId(`${sessionId}-assistant-${input.turn}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: input.response }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke-model' },
+    },
+    stream: [],
+    usage: { ...input.usage },
+  }, { surfaceOp: 'append' })
+  session.append('turn/end', { turn: input.turn, reason: { kind: 'completed' } })
+}
+
 function stubSerializer(): import('../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer {
   return {
     preflight: () => ({ kind: 'unsupported', reason: 'smoke serializer never dispatches' }),
@@ -173,10 +211,20 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
   const { runtime, semantics } = await compose(host)
   try {
     // The main Session is a REAL live Agent (the file-reference Host face
-    // resolves the live Agent from the exact session identity); the child
-    // stays a cold persisted Session for the retained-read probe.
+    // resolves the live Agent from the exact session identity); the child is
+    // its own live Agent with COMPETING projection facts; the bare session
+    // keeps the absent-value cases honest.
     await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
     await host.harness.create(SessionId(CHILD), undefined, { cwd: join(host.anchorDir, 'child') })
+    await host.harness.create(SessionId(BARE), undefined, { cwd: join(host.anchorDir, 'bare') })
+    // Seed REAL Host-side projection facts BEFORE any retention, so the
+    // Client's initial tail page carries them: distinct usage per session
+    // (parent/child values must never mix) and one completed turn each.
+    seedTurn(host, MAIN, { turn: 1, prompt: 'plan the launch', response: 'launch plan ready', usage: { inputTokens: 1000, outputTokens: 42 } })
+    seedTurn(host, CHILD, { turn: 1, prompt: 'child task', response: 'child done', usage: { inputTokens: 200, outputTokens: 7 } })
+    host.ctx.sessions.get(SessionId(CHILD))!.append('todo/write', {
+      todos: [{ content: 'child todo', status: 'in_progress' }],
+    })
 
     // P1 — Session list/read through the official Client list face.
     const rows = await semantics.sessionReader.list(undefined)
@@ -186,14 +234,37 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
     assert.ok(rows!.find(row => row.id === MAIN)!.cwd === host.anchorDir,
       `the official cwd fact rides the row: ${JSON.stringify(rows!.find(row => row.id === MAIN))}`)
 
-    // Retain BOTH sessions the way the TUI's surfaces would.
+    // Retain the sessions the way the TUI's surfaces would, and let the
+    // initial tail pages (with their projection blocks) settle.
     const mainRef: MainSurfaceReference = acquireMainSurfaceReference(runtime.client.sessions, SessionId(MAIN))
     const childRef: MainSurfaceReference = acquireMainSurfaceReference(runtime.client.sessions, SessionId(CHILD))
+    const bareRef: MainSurfaceReference = acquireMainSurfaceReference(runtime.client.sessions, SessionId(BARE))
+    await waitFor('the MAIN window to open', () =>
+      runtime.client.sessions.binding(SessionId(MAIN))?.session.getSnapshot().openState === 'open')
+    await waitFor('the CHILD window to open', () =>
+      runtime.client.sessions.binding(SessionId(CHILD))?.session.getSnapshot().openState === 'open')
 
-    // P2 — the contextPressure projection face (unmeasured until usage: the
-    // truthful official value, never an invented number).
-    assert.equal(semantics.sessionReader.measureContext(MAIN), undefined,
-      'no provider usage yet — the official pressure projection reads unmeasured')
+    // The HOST-side projection snapshot is the truth the wire must carry.
+    const hostProjections = host.ctx.get('sessionProjections') as {
+      snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
+    }
+    const hostMainValues = hostProjections.snapshot(host.ctx.sessions.get(SessionId(MAIN)), [
+      'contextPressure', 'turnOutline', 'tokenUsage',
+    ])!.values!
+    const hostChildValues = hostProjections.snapshot(host.ctx.sessions.get(SessionId(CHILD)), [
+      'contextPressure', 'tokenUsage', 'todos',
+    ])!.values!
+
+    // P2 — the POPULATED contextPressure projection crosses the real wire:
+    // the Remote occupancy equals the Host fold's own numerator, and it is a
+    // measured number (the seeded 1000-prompt-token usage), never invented.
+    const hostMainPressure = contextPressureOccupancy(hostMainValues.contextPressure)
+    assert.ok(typeof hostMainPressure === 'number', 'the Host fold reports usage pressure')
+    assert.equal(semantics.sessionReader.measureContext(MAIN), hostMainPressure,
+      'the wire carries the exact official numerator the Host fold produced')
+    // The BARE session (no usage) keeps the truthful unmeasured value.
+    assert.equal(semantics.sessionReader.measureContext(BARE), undefined,
+      'no provider usage — the official pressure projection reads unmeasured')
 
     // P3 — the modelCatalog grouped directory over the stub route.
     const directory = await semantics.catalog.models.loadDirectory()
@@ -223,16 +294,45 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
     assert.ok(jumped !== undefined, 'the jump settles for the retained session')
     assert.equal(jumped!.coverage, 'bounded')
 
-    // P8 — the turnOutline projection (no turns yet: the official empty
-    // outline, still a projection read — never a history fold).
-    assert.deepEqual(semantics.sessionReader.turnOutline(MAIN), [])
+    // P8 — the POPULATED turnOutline projection crosses the real wire and
+    // equals the Host fold's own outline (the seeded turn, its prompt
+    // preview and its `turn/start` seq — the loadThrough target).
+    const hostOutline = semantics.sessionReader.turnOutline(MAIN)
+    assert.ok(hostOutline !== undefined && hostOutline.length === 1,
+      'the seeded turn is outlined')
+    if (hostOutline !== undefined && hostOutline.length === 1) {
+      assert.equal(hostOutline[0]!.turn, 1)
+      assert.ok(hostOutline[0]!.prompt.includes('plan the launch'),
+        `the prompt preview flows through: ${JSON.stringify(hostOutline[0])}`)
+    }
+    assert.deepEqual(semantics.sessionReader.turnOutline(BARE), [],
+      'the bare session keeps the official empty outline')
 
-    // P9 — the retained CHILD Session reads its own projection facts.
-    const childStatus = semantics.sessionReader.sessionStatus(CHILD)
-    assert.deepEqual(childStatus, {
-      sessionId: CHILD,
-      cwd: join(host.anchorDir, 'child'),
-    }, 'the child reads its own cwd fact only — no parent fallback, no invented values')
+    // P9 — the retained CHILD Session reads its OWN populated projection
+    // facts (its distinct usage and todos), never the parent's competing
+    // values; the bare session stays fact-free beyond its cwd.
+    const mainStatus = semantics.sessionReader.sessionStatus(MAIN)!
+    const childStatus = semantics.sessionReader.sessionStatus(CHILD)!
+    assert.ok(childStatus.usage !== undefined, 'the child usage projection crossed the wire')
+    assert.ok(mainStatus.usage !== undefined, 'the main usage projection crossed the wire')
+    assert.deepEqual(childStatus.todos, [{ content: 'child todo', status: 'in_progress' }])
+    if (childStatus.usage !== undefined && mainStatus.usage !== undefined) {
+      assert.ok(childStatus.usage.uncachedInputTokens !== mainStatus.usage.uncachedInputTokens
+        || childStatus.usage.outputTokens !== mainStatus.usage.outputTokens,
+        'the two sessions carry COMPETING usage values')
+      assert.ok(childStatus.usage.uncachedInputTokens <= 200 + 42,
+        `the child value is its own small sample, never the parent's 1000: ${JSON.stringify(childStatus.usage)}`)
+    }
+    assert.equal(childStatus.cwd, join(host.anchorDir, 'child'))
+    // The bare session's official projection units are REGISTERED but empty:
+    // their truthful zero-value wire views (usage totals, breakdown) cross —
+    // they are the Host fold's real values, not inventions.
+    assert.deepEqual(semantics.sessionReader.sessionStatus(BARE), {
+      sessionId: BARE,
+      cwd: join(host.anchorDir, 'bare'),
+      context: { breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 } },
+      usage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    }, 'the bare session reads its own cwd fact and its official zero-valued folds')
     assert.equal(semantics.sessionReader.sessionStatus('never-created'), undefined,
       'an unretained session has no facts')
 
@@ -252,6 +352,7 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
     assert.ok(afterRows!.some(row => row.id === MAIN), 'the new generation serves the same Host sessions')
     const afterDirectory = await semantics.catalog.models.loadDirectory()
     assert.ok(afterDirectory.groups.some(group => group.id === 'smoke'))
+    bareRef.release()
     childRef.release()
     mainRef.release()
     semantics.dispose()
