@@ -610,13 +610,8 @@ export class QuestionFlow implements Component, Focusable {
       this.cursor = Number(key)
       this.pendingCursorScroll = true
       // Mouse parity with the KEYBOARD SELECTION action (Space/digit),
-      // not with Enter's continue: a multi-select click toggles the
-      // option, a single-select click adopts it and advances.
-      if (this.questions[this.tab]?.multiSelect === true) {
-        this.toggleCurrentSelection()
-      } else {
-        this.confirm()
-      }
+      // not with Enter's continue.
+      this.activateHighlightedOption()
       return
     }
   }
@@ -707,9 +702,9 @@ export class QuestionFlow implements Component, Focusable {
     hits.push(...new Array(lines.length - hits.length).fill(undefined))
     lines.push('')
     hits.push(undefined)
+    const customAnswer = this.hasCustomAnswer(draft)
     for (const row of rows) {
       const isCursor = rows[this.cursor] === row
-      const customAnswer = this.hasCustomAnswer(draft)
       const selected = row.key === OTHER_ROW
         ? customAnswer
         : draft.selected.has(question.options?.[Number(row.key)]?.label ?? '')
@@ -724,8 +719,10 @@ export class QuestionFlow implements Component, Focusable {
       // The free-text row's LIST-mode label shows the saved answer, not
       // the placeholder: a revisited draft must be readable (and stay
       // masked for secrets). Only a blank draft keeps "Type something.".
+      // (The row's badge stays empty there — rows() builds the OTHER row
+      // with recommended: false — so the saved answer renders bare.)
       const rowLabel = row.key === OTHER_ROW && !this.editingOther && customAnswer
-        ? question.masked === true ? this.maskedValue(draft.custom) : draft.custom
+        ? this.presentCustom(question, draft)
         : row.label
       const label = isCursor ? color.textStrong(rowLabel) : rowLabel
       // The free-text row swaps its label for the live Input while editing.
@@ -750,10 +747,7 @@ export class QuestionFlow implements Component, Focusable {
         continue
       }
       const labelWidth = Math.max(1, width - visibleWidth(prefix))
-      const labelText = row.key === OTHER_ROW && !this.editingOther && customAnswer
-        ? label
-        : `${label}${badge}`
-      for (const wrapped of wrapTextWithAnsi(labelText, labelWidth)) {
+      for (const wrapped of wrapTextWithAnsi(`${label}${badge}`, labelWidth)) {
         if (!this.pushPageRow(lines, hits, prefix + wrapped, row.key)) return { lines, hits }
       }
       if (row.description !== undefined && row.description !== '' && !(row.key === OTHER_ROW && this.editingOther)) {
@@ -832,12 +826,26 @@ export class QuestionFlow implements Component, Focusable {
   private answered(): boolean {
     const draft = this.draft()
     if (draft === undefined) return false
-    return draft.selected.size > 0 || draft.custom.trim() !== '' || draft.skipped
+    return this.draftAnswered(draft)
+  }
+
+  /** Whether a draft has an answer (selected, nonblank custom, or skipped)
+   * — the ONE answered-boundary predicate shared by the continue/skip
+   * decision and the tab/review answered marks. */
+  private draftAnswered(draft: Draft): boolean {
+    return draft.selected.size > 0 || this.hasCustomAnswer(draft) || draft.skipped
   }
 
   /** Whether a draft's custom text is a real (nonblank) answer. */
   private hasCustomAnswer(draft: Draft): boolean {
     return draft.custom.trim() !== ''
+  }
+
+  /** Display form of a draft's custom answer: one bullet per grapheme for
+   * masked questions, the raw text otherwise (the list row and the review
+   * page share this rule). */
+  private presentCustom(question: QuestionFlowQuestion, draft: Draft): string {
+    return question.masked === true ? this.maskedValue(draft.custom) : draft.custom
   }
 
   /** The free-text row of the current question (present when options exist). */
@@ -890,11 +898,12 @@ export class QuestionFlow implements Component, Focusable {
 
   /** Toggle the highlighted multi-select option (Space / digit / mouse):
    * the SELECTION action, never progression. On the free-text row it
-   * enters the edit instead (the row has no checkbox state of its own). */
-  private toggleCurrentSelection(): void {
+   * enters the edit instead (the row has no checkbox state of its own).
+   * `rows` may be passed by callers that already built them (the digit
+   * and Space routes); the mouse route omits it. */
+  private toggleCurrentSelection(rows: Row[] = this.rows()): void {
     const draft = this.draft()
     if (draft === undefined) return
-    const rows = this.rows()
     const row = rows[this.cursor]
     if (row === undefined) return
     if (row.key === OTHER_ROW) {
@@ -906,6 +915,19 @@ export class QuestionFlow implements Component, Focusable {
     if (draft.selected.has(label)) draft.selected.delete(label)
     else draft.selected.add(label)
     draft.skipped = false
+  }
+
+  /** Activate the highlighted option row with the SELECTION semantics the
+   * digit and mouse routes share: a multi-select question toggles the
+   * option, a single-select question adopts it and advances (Enter's
+   * continue semantics never flow through here — this is the Space/digit/
+   * click parity point). */
+  private activateHighlightedOption(rows: Row[] = this.rows()): void {
+    if (this.questions[this.tab]?.multiSelect === true) {
+      this.toggleCurrentSelection(rows)
+    } else {
+      this.confirm()
+    }
   }
 
   /** The single continue authority shared by Enter (multi-select list
@@ -986,7 +1008,7 @@ export class QuestionFlow implements Component, Focusable {
     if (draft === undefined) return
     draft.custom = this.otherInput.getValue()
     draft.skipped = false
-    if (draft.custom.trim() !== '' && this.questions[this.tab]?.multiSelect !== true) {
+    if (this.hasCustomAnswer(draft) && this.questions[this.tab]?.multiSelect !== true) {
       draft.selected.clear()
     }
   }
@@ -1053,7 +1075,6 @@ export class QuestionFlow implements Component, Focusable {
     const draft = this.draft()
     if (draft === undefined) return
     const text = value.trim()
-    draft.custom = value
     if (text === '') {
       // An empty "type something" answer counts as skipped (Web semantics) —
       // but NEVER when an earlier selection is still on the draft: the
@@ -1062,9 +1083,9 @@ export class QuestionFlow implements Component, Focusable {
       // (the arrow-key move-on must keep an answered draft, list-mode
       // parity). With a selection, empty text just keeps the selection.
       if (draft.selected.size === 0) draft.skipped = true
-    } else {
-      draft.skipped = false
     }
+    // Nonblank text needs no state work: syncCustomDraft already made it
+    // the draft answer (skipped=false, single-select selection cleared).
     this.exitOther()
     this.advance()
   }
@@ -1125,11 +1146,7 @@ export class QuestionFlow implements Component, Focusable {
       } else if (componentKeymap.matches(data, 'question.pageDown')) {
         this.scrollBody(1)
       } else {
-        this.otherInput.handleInput(data)
-        // EVERY mutation lands in the draft immediately: Draft.custom is
-        // the live answer authority, so Esc/navigation/advance can never
-        // drop un-Enter-ed text.
-        this.syncCustomDraft()
+        this.deliverOtherInput(data)
       }
       return
     }
@@ -1154,7 +1171,7 @@ export class QuestionFlow implements Component, Focusable {
       return
     }
     const digit = /^[1-9]$/.exec(data)
-    if (digit !== null && !this.isOptionless()) {
+    if (digit !== null && !this.isOptionless(rows)) {
       // A digit in an OPTIONLESS question's navigation state is text —
       // the option-choice shortcut does not exist without options (the
       // fall-through re-enters the edit below).
@@ -1162,14 +1179,10 @@ export class QuestionFlow implements Component, Focusable {
       if (row !== undefined) {
         this.cursor = rows.indexOf(row)
         this.pendingCursorScroll = true
-        // Single-select: choose + advance. Multi-select: the digit is the
-        // SELECTION action (toggle), never progression — Enter's new
-        // continue semantics must not leak into the digit route.
-        if (this.questions[this.tab]?.multiSelect === true) {
-          this.toggleCurrentSelection()
-        } else {
-          this.confirm()
-        }
+        // The digit is the SELECTION action (multi: toggle, single:
+        // choose + advance), never progression — Enter's new continue
+        // semantics must not leak into the digit route.
+        this.activateHighlightedOption(rows)
       }
       return
     }
@@ -1230,8 +1243,8 @@ export class QuestionFlow implements Component, Focusable {
     // select owns no toggle; optionless/edit states never reach here.
     if (componentKeymap.matches(data, 'question.toggleSelection')
       && this.questions[this.tab]?.multiSelect === true
-      && !this.isOptionless()) {
-      this.toggleCurrentSelection()
+      && !this.isOptionless(rows)) {
+      this.toggleCurrentSelection(rows)
       return
     }
     // ←/→ back/next (the physical arrows own these verbs). The vim h/l
@@ -1279,8 +1292,17 @@ export class QuestionFlow implements Component, Focusable {
         return
       }
       this.enterOther()
-      this.otherInput.handleInput(data)
+      this.deliverOtherInput(data)
     }
+  }
+
+  /** Hand one raw key to the shared free-text Input and sync the live
+   * draft afterwards — EVERY mutation path (edit mode and the optionless
+   * navigation re-entry) goes through here, so Draft.custom can never go
+   * stale with visible editor text. */
+  private deliverOtherInput(data: string): void {
+    this.otherInput.handleInput(data)
+    this.syncCustomDraft()
   }
 
   invalidate(): void {
@@ -1298,19 +1320,16 @@ export class QuestionFlow implements Component, Focusable {
     // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.
+    // One pass derives BOTH the per-tab marks and the Submit mark.
+    const answeredFlags = this.drafts.map(draft => this.draftAnswered(draft))
     const tabs = this.questions.map((_, index) => {
-      const draft = this.drafts[index]
-      const answered = draft !== undefined
-        && (draft.selected.size > 0 || this.hasCustomAnswer(draft) || draft.skipped)
       const label = tabLabel(index, this.questions.length)
-      const mark = answered ? '✓' : '○'
+      const mark = answeredFlags[index] === true ? '✓' : '○'
       return this.tab === index
         ? color.textStrong(`${mark} ${label}`)
         : color.textDim(`${mark} ${label}`)
     })
-    const submitAnswered = this.drafts.every(draft =>
-      draft.selected.size > 0 || this.hasCustomAnswer(draft) || draft.skipped)
-    const submitText = `${submitAnswered ? '✓' : '○'} Submit`
+    const submitText = `${answeredFlags.every(answered => answered) ? '✓' : '○'} Submit`
     tabs.push(this.tab === this.questions.length
       ? color.textStrong(submitText)
       : color.textDim(submitText))
@@ -1342,20 +1361,16 @@ export class QuestionFlow implements Component, Focusable {
         const question = this.questions[qi]
         const draft = this.drafts[qi]
         if (question === undefined || draft === undefined) continue
+        const hasCustom = this.hasCustomAnswer(draft)
         const value = draft.skipped
           ? '(skipped)'
-          : this.hasCustomAnswer(draft) && question.multiSelect !== true
-            ? question.masked === true
-              // A masked secret stays masked on the review page too: the
-              // answer is confirmed as "typed", never re-shown in
-              // plaintext — one bullet per GRAPHEME, matching the
-              // editing-state mask contract.
-              ? this.maskedValue(draft.custom)
-              : draft.custom
+          // A masked secret stays masked on the review page too: the answer
+          // is confirmed as "typed", never re-shown in plaintext — one
+          // bullet per GRAPHEME, matching the editing-state mask contract.
+          : hasCustom && question.multiSelect !== true
+            ? this.presentCustom(question, draft)
             : [...draft.selected].join(', ')
-                + (this.hasCustomAnswer(draft)
-                  ? ` + ${question.masked === true ? this.maskedValue(draft.custom) : draft.custom}`
-                  : '')
+                + (hasCustom ? ` + ${this.presentCustom(question, draft)}` : '')
         reviewBudget = appendWrappedBudgeted(
           lines,
           `${color.textDim(`Q${qi + 1}`)}  `,
