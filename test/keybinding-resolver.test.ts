@@ -181,3 +181,14 @@ test('snapshot lists every action with its effective keys and sources', () => {
   assert.equal(steer.scope, 'agent-running')
   assert.deepEqual(snapshot.conflicts, [])
 })
+
+test('question.toggleSelection (space) never resolves as a host action', () => {
+  // Plan §15: the component action's default key is host-isolated — the
+  // host effective keymap must never resolve a raw space to it (or to
+  // anything else); the QuestionFlow's ownsFixedKey/component-keymap own
+  // it while the flow holds the seat.
+  const km = keymap()
+  const context = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: true, tasksActive: true })
+  assert.equal(km.resolve(' ', context), undefined)
+  assert.equal(km.resolve('\x1b[32;1u', context), undefined) // Kitty CSI-u space
+})

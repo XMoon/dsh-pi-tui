@@ -86,6 +86,7 @@ export type AppKeybindingId =
   | 'question.pageUp'
   | 'question.pageDown'
   | 'question.toggleExpand'
+  | 'question.toggleSelection'
   // Focused component: the Task Center (plan §3.3/§29)
   | 'tasks.open'
   | 'tasks.search.enter'

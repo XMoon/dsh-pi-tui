@@ -356,6 +356,18 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'question',
     configurable: false,
   },
+  'question.toggleSelection': {
+    id: 'question.toggleSelection',
+    // Space is the multi-select list-mode checkbox verb ONLY: the
+    // QuestionFlow's ownsFixedKey gates it to list mode + multi-select,
+    // so it can never steal the text editor's ordinary space (a plain
+    // `data === ' '` check would have no such boundary).
+    defaultKeys: ['space'],
+    description: 'Toggle the highlighted multi-select option',
+    category: 'Question',
+    scope: 'question',
+    configurable: false,
+  },
 
   // ── Focused component: Task Center (plan §3.3/§29) ──────────────────────
   'tasks.open': {

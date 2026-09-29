@@ -117,6 +117,7 @@ const LABELS: Readonly<Partial<Record<AppKeybindingId, string>>> = {
   'question.pageUp': 'Page question list up',
   'question.pageDown': 'Page question list down',
   'question.toggleExpand': 'Expand question details',
+  'question.toggleSelection': 'Toggle multi-select option',
   'tasks.confirm': 'Confirm selected task',
   'tasks.cancel': 'Close task browser',
   'tasks.cursorUp': 'Move task selection up',
