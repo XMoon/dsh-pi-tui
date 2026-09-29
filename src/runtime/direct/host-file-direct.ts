@@ -1,14 +1,15 @@
 /**
- * The Direct Host-file adapter (M1.10) — the in-process implementation of
- * `HostFilePort` over the CURRENT TUI filesystem behavior: the SHARED
- * file-completion engine (fd/fdfind whole-tree fuzzy when a finder is on
- * the Host PATH, scoped-directory discovery otherwise, the bounded
- * recursive fallback as last resort) and stat-based existence checks. This
- * is the ONLY module in the `@`-file path that touches the filesystem; the
- * pure grammar (`findFileMentions`, the rewrite rules) stays in
- * `src/mentions.ts`, and a Remote adapter will implement the same
- * interface over the official fileReferences capability in a later
- * milestone.
+ * The Direct Host-file adapter (M1.10, realigned M3-3A) — the in-process
+ * implementation of `HostFilePort` over the CURRENT TUI filesystem
+ * behavior: the SHARED file-completion engine (fd/fdfind whole-tree fuzzy
+ * when a finder is on the Host PATH, scoped-directory discovery otherwise,
+ * the bounded recursive fallback as last resort) and stat-based existence
+ * checks. This is the ONLY module in the `@`-file path that touches the
+ * filesystem; the pure grammar stays in `src/mentions.ts`, and the Remote
+ * adapter maps the same interface onto the official fileReferences wire.
+ * The interim same-machine discovery answers the same path-only contract
+ * the wire serves; the official `dsh-file-reference-local` provider
+ * (mounted by the TUI composition) is the Host-side authority.
  *
  * SCOPED QUERIES (plan §19): `@src/de` searches workspace/src + term `de`;
  * `@../../foo` searches the resolved parent scope; `@~/foo` searches the
@@ -24,10 +25,7 @@
  */
 
 import { statSync } from 'node:fs'
-import {
-  expandFileMentionsForSubmit,
-  resolveMentionCandidate,
-} from '../../mentions.ts'
+import { resolveMentionCandidate } from '../../mentions.ts'
 import type { DiscoverySource } from '../../file-completion/discovery.ts'
 import { discoverForQuery, resolveFdPath } from '../../file-completion/discovery.ts'
 import { reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
@@ -150,10 +148,15 @@ export class DirectHostFilePort implements HostFilePort {
       : { kind: 'missing' }
   }
 
-  async canonicalizeMentions(scope: HostFileScope, text: string): Promise<string> {
-    const cwd = this.scopeCwd(scope)
-    if (cwd === undefined) return text
-    return expandFileMentionsForSubmit(text, cwd, exists)
+  async canonicalizeMentions(_scope: HostFileScope, text: string): Promise<string> {
+    // The OFFICIAL mention semantics (M3-3A realignment): the selected
+    // `@`-reference is literal prompt text and the Host's
+    // FILE_REFERENCE_PROMPT (installed by the official
+    // dsh-file-reference-local row the composition mounts) owns its
+    // resolution. The historical existence-probe absolute rewrite — a
+    // Direct-only behavior the wire has no carrier for — is retired so
+    // both backends send the SAME bytes for the same input.
+    return text
   }
 }
 

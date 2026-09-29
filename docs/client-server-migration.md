@@ -10,7 +10,7 @@
 
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
-M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
+M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery; its historical send-time canonicalization was retired by the M3-3A official-mention realignment — submitted mentions stay literal, the Host's FILE_REFERENCE_PROMPT owns resolution), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
 M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
 Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
 Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer ownership convergence, NO behavior change — A5a + A5b; see the Pre-M3 TS Architecture Convergence status section)
@@ -2176,10 +2176,18 @@ the final complete Remote Backend assembly.
   third state (never fake `missing`). The Remote adapter maps the session
   scope to the official `fileReferences/list(agentId, query, signal)` with
   generation fencing; the workspace scope and existence/canonicalization are
-  explicit `unavailable` (no Client fs, no cwd guess, no fake empty), so
-  relative `@`-mentions stay literal. Cancellation is its own outcome on
-  BOTH adapters: an aborted signal REJECTS (`throwIfAborted`), never folded
-  into `unavailable`.
+  explicit `unavailable` (no Client fs, no cwd guess, no fake empty).
+  MENTIONS STAY LITERAL ON BOTH BACKENDS — and that is not a missing-carrier
+  fallback but the OFFICIAL client contract itself (the official codec is
+  `serialize: ref => ref`; the Host's `FILE_REFERENCE_PROMPT` — installed
+  by the official `dsh-file-reference-local` row the TUI composition now
+  mounts, the same row the web bundle uses — resolves relative paths from
+  the workspace root). The Direct adapter's historical send-time
+  existence-probe absolute rewrite is RETIRED: it was Direct-only behavior
+  with no wire carrier and made the two backends send different bytes for
+  the same input. Cancellation is its own outcome on BOTH adapters: an
+  aborted signal REJECTS (`throwIfAborted`, entry-time — outranking every
+  `unavailable` early return), never folded into `unavailable`.
 - `src/runtime/presentation-read-port.ts` + readers —
   `PresentationReader.loadThrough(sessionId, seq)` maps the official Client
   `Session.loadThrough` jump (borrow → pin exact generation → ONE official
@@ -2212,7 +2220,8 @@ the final complete Remote Backend assembly.
 | SkillCatalog `listHumanSkills` | READY | `skills/list` |
 | SkillCatalog `standing` / `resolveSkill` / `onSkillsChange` | UNSUPPORTED | session-addressed list-only wire; no `skills/read`; no forwarded `skills/*` event |
 | HostFile session scope | READY | `fileReferences/list(agentId, …)` |
-| HostFile workspace scope / existence / canonicalization | UNSUPPORTED | no official carrier — `unavailable`, mentions stay literal |
+| HostFile workspace scope / existence | UNSUPPORTED | no official carrier — `unavailable`; `resolveReference` is a Direct-only diagnostic seam, not a cross-backend contract |
+| HostFile mention send semantics | OFFICIAL_LITERAL (both backends) | the official codec + `FILE_REFERENCE_PROMPT`; no send-time probe or rewrite anywhere |
 | PresentationReader `read`/`loadOlder`/`loadThrough` | READY | official Client event window + jump loop |
 | PresetCatalog roster/default/resolve/select | READY (requalified) | `agentPresets/list`/`select` |
 
@@ -2259,7 +2268,9 @@ build a `ChildStatusReader`, `ViewerStatusPort` or any parent-fallback.
 - Mutation checks (plan §26): A (context mapping), C (workspace fake-empty),
   D (local-fs canonicalization), E (loadThrough fence), F (child fallback)
   each verified to fail the guarding tests; B is enforced structurally (the
-  retired pair no longer exists on the port).
+  retired pair no longer exists on the port). (D's guard predates the
+  literal-mention realignment, where the whole rewrite path was retired
+  rather than mutation-guarded.)
 
 
 ## Known coverage follow-ups

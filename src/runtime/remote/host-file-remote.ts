@@ -10,10 +10,11 @@
  *
  * Explicitly unsupported (docs/m3-entry-contract.md §10, requalified against
  * 0.2.0-rc.1): the WORKSPACE/sessionless scope (every file endpoint is
- * Session-scoped) and existence/canonicalization (no public existence or
- * canonicalization verb — `fileReferences/list` is discovery only). Both are
- * returned as `unavailable` with a reason, never as an authoritative empty
- * list or a proven `missing`; relative `@`-mentions therefore stay literal.
+ * Session-scoped) and existence probing (no public existence verb —
+ * `fileReferences/list` is discovery only). Both are returned as
+ * `unavailable` with a reason, never as an authoritative empty list or a
+ * proven `missing`. Submitted mentions stay literal — which is not a
+ * fallback at all but the official client contract itself.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/host-file-remote
  */
@@ -126,9 +127,10 @@ export class RemoteHostFilePort implements HostFilePort {
   }
 
   async canonicalizeMentions(_scope: HostFileScope, text: string): Promise<string> {
-    // Without an existence carrier there is nothing to canonicalize
-    // against: every relative `@`-mention stays literal (the model receives
-    // exactly what the user typed; the Host resolves its own references).
+    // The OFFICIAL mention semantics (not merely a missing-carrier
+    // fallback): the selected reference is literal prompt text and the
+    // Host's FILE_REFERENCE_PROMPT owns its resolution. Direct answers
+    // verbatim too — the two backends send the SAME bytes.
     return text
   }
 }

@@ -98,9 +98,12 @@ function modelSelectionFact(value: unknown): SessionStatusProjection['model'] {
   return undefined
 }
 
-/** Detach the official `todos` whole-list snapshot (`null` = none yet). */
+/** Detach the official `todos` whole-list snapshot. The projection's
+ * LEGAL `null` (no `todo/write` yet) stays `null`; only `undefined` (the
+ * projection value was absent — capability unavailable) reads absent. */
 function detachedTodos(value: unknown): SessionStatusProjection['todos'] | undefined {
-  if (value === null || value === undefined) return undefined
+  if (value === null) return null
+  if (value === undefined) return undefined
   if (!Array.isArray(value)) return undefined
   const todos: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }> = []
   for (const item of value) {

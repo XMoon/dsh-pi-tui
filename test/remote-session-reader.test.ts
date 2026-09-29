@@ -515,6 +515,20 @@ test('sessionStatus reads only the addressed session — no parent/main fallback
   assert.deepEqual(new RemoteSessionReader(bare, generation.source).sessionStatus('s'), { sessionId: 's' })
 })
 
+test('sessionStatus keeps the official todos null distinct from capability-absent', () => {
+  const generation = createObservableGenerationHarness()
+  const withNull = remoteSource({
+    state: state(['s'], { s: listRow('s', 1) }),
+    bindings: { s: binding({ todos: null }) },
+  })
+  assert.equal(new RemoteSessionReader(withNull, generation.source).sessionStatus('s')?.todos, null)
+  const withoutValue = remoteSource({
+    state: state(['s'], { s: listRow('s', 1) }),
+    bindings: { s: binding({}) },
+  })
+  assert.equal(new RemoteSessionReader(withoutValue, generation.source).sessionStatus('s')?.todos, undefined)
+})
+
 test('a same-id binding replacement yields a NEW read — the stale projection never repaints', () => {
   const generation = createObservableGenerationHarness()
   const oldValues = { contextPressure: { projectedTokens: 111 } }

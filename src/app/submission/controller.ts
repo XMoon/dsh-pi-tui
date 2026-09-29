@@ -563,8 +563,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     get fileStore() { return deps.drafts.files },
     signal: deps.signal,
     llm: deps.image.llm(),
-    // Send-time `@`-file canonicalization through the Host-file port
-    // (migration M1.10): the live session's workspace is the scope.
+    // The `@`-mention send seam (M1.10 → M3-3A official semantics): the
+    // submitted text stays LITERAL — the Host's FILE_REFERENCE_PROMPT owns
+    // relative-path resolution — and the seam routes through the port so a
+    // future official carrier (if one ever exists) lands in one place.
     canonicalizeMentions: (text) => deps.backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: deps.liveAgent()?.session.id ?? '' }, text),
     sessionCwd: () => deps.status.sessionCwd(),
     currentModel: () => {

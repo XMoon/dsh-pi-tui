@@ -13,7 +13,9 @@
  * parsing, ranking, quoting and presentation behind `@` mentions and
  * `/attach` and `/image` arguments are ONE shared engine in `src/file-completion/`
  * (plan §5-§8). THIS module keeps the mention GRAMMAR (extractAtPrefix,
- * findFileMentions, the send-time rewriter) and the MentionProvider
+ * findFileMentions, the historical send-time rewriter — retired from the
+ * product path by the M3-3A official-mention realignment) and the
+ * MentionProvider
  * adapter; the engine owns the path math and BOTH sources (the Host-file
  * port for `@`, LocalFileSource for attachment commands) answer discovery through
  * it. The FILE-COMPLETION CONTEXT classifier (plan §4) is the ONE gate —

@@ -1,12 +1,24 @@
 /**
- * The Host-file domain port (M1.10) — the semantic contract between the
- * TUI and the HOST filesystem for `@`-file references: completion
- * discovery, send-time existence resolution and draft canonicalization.
- * Implemented by `src/runtime/direct/` (Direct) today and by a Remote
- * adapter in a later milestone. The port is the locality boundary the
- * migration guardrails demand: the TUI must never assume the Client
- * filesystem IS the Host filesystem — under remote attach, `@src/foo.ts`
- * means the HOST workspace, and this port is where that resolution lives.
+ * The Host-file domain port (M1.10, realigned to the official contract in
+ * M3-3A) — the semantic contract between the TUI and the HOST filesystem
+ * for `@`-file references: COMPLETION DISCOVERY. Implemented by
+ * `src/runtime/direct/` (Direct) and
+ * `src/runtime/remote/host-file-remote.ts` (the Session-scoped wire
+ * adapter). The port is the locality boundary the migration guardrails
+ * demand: the TUI must never assume the Client filesystem IS the Host
+ * filesystem — under remote attach, `@src/foo.ts` means the HOST
+ * workspace, and this port is where that resolution lives.
+ *
+ * OFFICIAL MENTION SEMANTICS (M3-3A realignment): the selected reference
+ * goes to the prompt LITERALLY — the official client codec is
+ * `serialize: ref => ref`, and the Host's official `FILE_REFERENCE_PROMPT`
+ * instructs the model that "relative paths resolve from the workspace
+ * root; absolute paths identify files or directories on the host". The
+ * TUI therefore performs NO send-time existence probe or absolute-path
+ * rewrite; the historical Direct-only canonicalization is retired from
+ * the cross-backend contract (it made the two backends send different
+ * bytes for the same input, and duplicated a resolution the Host/model
+ * already owns).
  *
  * Only identity/data crosses the port: scopes are serializable
  * (`sessionId` / `cwd`), candidates are path-only DTOs, and NO Node fs
@@ -17,9 +29,12 @@
  * the external editor and plain shell/path completion — those keep their
  * own client-local semantics.
  *
- * Wire mapping (M3-3A, landed): the official fileReferences Remote seam
+ * Wire mapping: the official fileReferences Remote seam
  * (`fileReferences/list(agentId, query, signal)` → path-only candidates,
- * Session scope only).
+ * Session scope only). The Direct adapter's in-process discovery remains
+ * the interim same-machine implementation behind the same contract; the
+ * official `dsh-file-reference-local` provider (mounted by the TUI's
+ * composition) is the Host-side authority the wire forwards to.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/host-file-port
@@ -65,7 +80,9 @@ export type HostFileListResult =
   | { readonly kind: 'ok'; readonly items: readonly HostFileCandidate[] }
   | { readonly kind: 'unavailable'; readonly reason: string }
 
-/** The Host-file domain port. */
+/** The Host-file domain port: `@`-file COMPLETION DISCOVERY under the
+ *  official mention semantics (the selected reference stays literal; the
+ *  Host/model resolves relative paths from the workspace root). */
 export interface HostFilePort {
   /** Complete one `@`-mention query (the editor's at-prefix INCLUDING the
    * leading `@`, e.g. `@src/fo` or `@"my file`). Returns the candidates
@@ -84,17 +101,23 @@ export interface HostFilePort {
   /** Probe one raw mention path (`src/foo.ts`, `~/x`, `/abs/x`) for
    * existence in the scope, resolving it to the absolute Host path
    * (`~` expansion; relative against the scope workspace; absolute kept;
-   * symlinks absolutized, never realpath'd). An aborted signal rejects
+   * symlinks absolutized, never realpath'd). DIRECT-ONLY compatibility
+   * seam (M3-3A): the official wire has no existence carrier — the
+   * Remote adapter answers `unavailable` — and nothing in the submission
+   * path consumes it anymore (mentions stay literal on BOTH backends).
+   * Retained for Direct-local diagnostics only; it is NOT part of the
+   * cross-backend semantic contract. An aborted signal rejects
    * (entry-time, both adapters — cancellation outranks `unavailable`). */
   resolveReference(
     scope: HostFileScope,
     path: string,
     options?: { signal?: AbortSignal },
   ): Promise<HostFileResolveResult>
-  /** Canonicalize every `@`-file mention of one draft for submission: the
-   * editor keeps the concise relative form, the model-facing message
-   * carries the unambiguous absolute path. A nonexistent path is left
-   * verbatim (typos and non-path `@` words are never mangled); a scope
-   * without an existence carrier leaves the WHOLE text literal. */
+  /** The official mention semantics: the submitted text is returned
+   * VERBATIM. The selected `@`-reference is literal prompt text — the
+   * Host's `FILE_REFERENCE_PROMPT` owns its resolution — so no backend
+   * probes existence or rewrites paths at send time. The seam stays so
+   * submission surfaces do not each hardcode identity; a future official
+   * carrier (if one ever exists) would land behind it. */
   canonicalizeMentions(scope: HostFileScope, text: string): Promise<string>
 }
