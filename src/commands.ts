@@ -1147,7 +1147,7 @@ async function logoutPickerRows(
   credentials: LogoutCredentialsLike,
   options: readonly CredentialProviderOption[],
   targets: readonly AuthorizationTarget[],
-): Promise<PickerItem[]> {
+): Promise<{ rows: PickerItem[]; recordCleanupUnavailable: boolean }> {
   const rows: PickerItem[] = []
   const seenRefs = new Set<string>()
   for (const option of options) {
@@ -1162,7 +1162,20 @@ async function logoutPickerRows(
       // A throwing describe degrades to "not configured".
     }
   }
-  const records = await credentials.listRecords()
+  // An enumeration-unavailable backend (Remote: rc.2 publishes no record-read
+  // Remote) must NOT make the whole picker fail: the reference rows above are
+  // still clearable, so the picker opens and the RESULT wording states that
+  // stored-record cleanup is unavailable here (plan §9.4). A backend that
+  // CAN enumerate but whose read failed for another reason would be hidden by
+  // a broad catch — the port is responsible for that distinction, and this
+  // path only reports the capability gap truthfully.
+  let recordCleanupUnavailable = false
+  let records: readonly { key: string; kind?: string }[] = []
+  try {
+    records = await credentials.listRecords()
+  } catch {
+    recordCleanupUnavailable = true
+  }
   const seenKeys = new Set<string>()
   for (const record of records) {
     if (seenKeys.has(record.key)) continue
@@ -1173,7 +1186,7 @@ async function logoutPickerRows(
       : `${record.key}${record.kind === undefined ? '' : ` (${record.kind})`}`
     rows.push({ value: LOGOUT_RECORD_VALUE + record.key, label, group: 'stored credentials' })
   }
-  return rows
+  return { rows, recordCleanupUnavailable }
 }
 
 /** The add-provider wizard outcome. */
@@ -5205,8 +5218,20 @@ export function registerTuiCommands(
       // No argument: aggregate what actually exists — stored records plus
       // configured references (§13.3). Presence and kind only; a secret's
       // value never leaves the credentials service.
-      const rows = await logoutPickerRows(credentials, options, targets)
-      if (rows.length === 0) return { kind: 'error', text: 'nothing to sign out' }
+      const { rows, recordCleanupUnavailable } = await logoutPickerRows(credentials, options, targets)
+      if (rows.length === 0) {
+        return {
+          kind: 'error',
+          text: recordCleanupUnavailable
+            ? 'nothing to sign out; stored credential records cannot be enumerated or removed on this backend'
+            : 'nothing to sign out',
+        }
+      }
+      // §9.4: a reference clear must not imply that stored records were also
+      // cleaned up when this backend cannot even enumerate them.
+      const recordLimitationNote = recordCleanupUnavailable
+        ? '; stored credential records cannot be enumerated or removed on this backend'
+        : ''
       const picked = await new Promise<string | undefined>((resolve) => {
         app.openPicker(
           rows,
@@ -5222,7 +5247,7 @@ export function registerTuiCommands(
       }
       const targetRef = picked.slice(LOGOUT_REF_VALUE.length)
       await credentials.unsetReference(targetRef)
-      return { kind: 'success', text: `API key ${targetRef} cleared` }
+      return { kind: 'success', text: `API key ${targetRef} cleared${recordLimitationNote}` }
     },
   })
 

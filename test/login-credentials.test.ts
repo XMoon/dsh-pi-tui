@@ -61,7 +61,7 @@ const LLM_PI_AI_SECTION = {
 
 /** A fake credentials service recording every set/unset and serving the
  * rc.1 record enumeration /logout's picker reads. */
-function fakeCredentials(options: { failSet?: boolean } = {}) {
+function fakeCredentials(options: { failSet?: boolean; failListRecords?: boolean } = {}) {
   const sets: string[] = []
   const unsets: string[] = []
   const deletes: string[] = []
@@ -78,7 +78,12 @@ function fakeCredentials(options: { failSet?: boolean } = {}) {
       },
       unset: async (ref: string): Promise<void> => { unsets.push(ref) },
       describe: async (ref: string): Promise<{ configured: boolean; source?: string }> => ({ configured: true }),
-      listRecords: async (): Promise<{ key: string; kind?: string }[]> => [...records],
+      listRecords: async (): Promise<{ key: string; kind?: string }[]> => {
+        if (options.failListRecords === true) {
+          throw new Error('the Remote credentials backend cannot enumerate stored credential records')
+        }
+        return [...records]
+      },
       deleteRecord: async (key: string): Promise<void> => { deletes.push(key) },
     },
   }
@@ -208,6 +213,8 @@ function setup(options: {
   pick?: (items: readonly { value: string; label?: string }[]) => string
   withLlmpiAi?: boolean
   failSet?: boolean
+  /** A backend that cannot enumerate stored credential records (Remote rc.2). */
+  failListRecords?: boolean
   questions?: () => { id: string; selected: string[]; custom?: string }[]
   llm?: ReturnType<typeof fakeLlm>
 } = {}) {
@@ -226,7 +233,7 @@ function setup(options: {
     },
   }
   ctx.provide('commands', commands.service as never)
-  const credentials = fakeCredentials({ failSet: options.failSet })
+  const credentials = fakeCredentials({ failSet: options.failSet, failListRecords: options.failListRecords })
   ctx.provide('credentials', credentials.service as never)
   let settings: ReturnType<typeof fakeSettings> | undefined
   if (options.withLlmpiAi !== false) {
@@ -532,5 +539,34 @@ test('/login Add New Platform rejects a malformed route id', async () => {
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /invalid provider route/)
   assert.deepEqual(t.credentials.sets, [])
+  t.app.stop()
+})
+
+test('/logout keeps the reference picker usable when the backend cannot enumerate records', async () => {
+  // Remote rc.2 publishes no record-read Remote: the adapter REJECTS
+  // listRecords() instead of pretending the list is empty. That must not make
+  // the whole /logout picker fail — the configured references are still
+  // clearable, and the result states the record limitation plainly (§9.4).
+  const t = setup({ failListRecords: true })
+  const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
+  assert.equal(result.kind, 'success')
+  assert.ok(t.pickerRows.length > 0, 'the picker still opens with the clearable references')
+  assert.ok(
+    t.pickerRows.every(row => !row.value.startsWith('\u0000record:')),
+    'no fabricated record row is offered',
+  )
+  assert.match(result.text ?? '', /cannot be enumerated or removed on this backend/u,
+    'the reference clear says what it did NOT clean up')
+  assert.deepEqual(t.credentials.unsets, ['DEEPSEEK_API_KEY'])
+  t.app.stop()
+})
+
+test('/logout reports nothing-to-sign-out with the record limitation instead of failing', async () => {
+  const t = setup({ failListRecords: true })
+  // No reference is configured for this deployment: the picker would be empty.
+  t.credentials.service.describe = async () => ({ configured: false })
+  const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /cannot be enumerated or removed on this backend/u)
   t.app.stop()
 })
