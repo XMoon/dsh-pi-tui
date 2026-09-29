@@ -79,6 +79,9 @@ const attention = (turn: number): TranscriptMessage => ({
 
 const noOptions = { expandedWorkOwners: new Set<TranscriptMessage>(), expandedClusters: new Set<TranscriptMessage>(), forcedExpanded: new Set<TranscriptMessage>() }
 
+/** Strip ANSI styling from one rendered row (per-file assertion idiom). */
+const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+
 function kindsOf(blocks: ReturnType<typeof projectCompact>): string[] {
   return blocks.map(block => block.kind === 'message' ? block.message.kind : block.kind)
 }
@@ -395,13 +398,15 @@ test('the Work component renders one header row and, collapsed, the slot rows', 
 
 // ── Compact historical compaction (2026-09-29 plan §7.1/§7.2) ──────────────
 
+const READ_ACTION = { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' } as const
+
 test('showPreview=false renders exactly one header row for a historical span', () => {
   const span = projectCompact([thinking(0, 'historical reasoning'), tool(0)], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
   const rows = new CompactWorkComponent({
     span: span.span,
     expanded: false,
-    action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' },
+    action: READ_ACTION,
     showPreview: false,
     iconStyle: 'symbols',
   }).render(80)
@@ -417,7 +422,6 @@ test('a historical think-only header reads Thought and keeps it when expanded', 
   assert.equal(summary.actionStats.total, 0)
   assert.ok(summary.think !== undefined, 'fixture: think-only span')
   const collapsed = new CompactWorkComponent({ span: span.span, expanded: false, showPreview: false, iconStyle: 'symbols' }).render(80)
-  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   assert.equal(collapsed.length, 1, 'header only — the reasoning text never leaks as a preview')
   assert.match(strip(collapsed[0]!), /^▸ Thought(?: |$)/)
   assert.ok(!collapsed[0]!.includes('only reasoning'), 'the collapsed history shows no Think preview')
@@ -450,7 +454,7 @@ test('a latest think-only span defaults to Activity + Think (identity is not bak
   // showPreview defaults to true: the component alone never decides
   // historical — the presentation authority does.
   const rows = new CompactWorkComponent({ span: span.span, expanded: false, iconStyle: 'symbols' }).render(80)
-  assert.match(rows[0]!.replace(/\x1b\[[0-9;]*m/g, ''), /^▸ Activity(?: |$)/)
+  assert.match(strip(rows[0]!), /^▸ Activity(?: |$)/)
   assert.match(rows[1] ?? '', /Think:/, 'the latest think-only span keeps its Think preview')
 })
 

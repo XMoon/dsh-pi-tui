@@ -60,6 +60,58 @@ function show(app: TuiApp, folder: TranscriptFolder): void {
   app.setTranscript(folder.messages(), folder.turnActivities())
 }
 
+/** The authoritative same-id assistant settlement carrying a settled
+ * reasoning block (plus an optional narration text block), which replaces
+ * the live reasoning row with the same text — the settle-a-Work fixture
+ * shape shared by the compaction and timing tests. */
+function settlementEvent(options: {
+  id: string
+  step: number
+  reasoning: string
+  narration?: string
+  startedAt: number
+  endedAt: number
+  seq: number
+}): SessionEvent {
+  const chunks: Record<string, unknown>[] = [
+    { type: 'chunk', time: options.startedAt, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+    { type: 'chunk', time: options.startedAt, chunk: { type: 'reasoning-delta', index: 0, text: options.reasoning } },
+    { type: 'chunk', time: options.endedAt, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: options.reasoning } } },
+  ]
+  const content: Record<string, unknown>[] = [{ type: 'reasoning', text: options.reasoning }]
+  if (options.narration !== undefined) {
+    content.push({ type: 'text', text: options.narration })
+    chunks.push(
+      { type: 'chunk', time: options.endedAt, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+      { type: 'chunk', time: options.endedAt, chunk: { type: 'text-delta', index: 1, text: options.narration } },
+      { type: 'chunk', time: options.endedAt, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: options.narration } } },
+    )
+  }
+  return eventAt('assistant/message', {
+    turn: 1, step: options.step,
+    message: {
+      id: MessageId(options.id), role: 'assistant',
+      content,
+      source: { kind: 'model', provider: 'p', model: 'm' },
+      stream: chunks,
+    },
+  }, options.endedAt, options.seq)
+}
+
+/** The `tool/result` settlement of one call — the shared fixture shape the
+ * Work-span tests pair with their `tool/call` events. */
+function toolResultEvent(callId: string, time: number, seq: number): SessionEvent {
+  return eventAt('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId(`r-${callId}`), role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, time, seq)
+}
+
 function contextEvent(id: string, source: Record<string, unknown>, text: string, time: number, seq: number): SessionEvent {
   return eventAt('user/message', {
     id: MessageId(id), role: 'user',
@@ -107,8 +159,15 @@ function workHeaders(view: string, expanded?: boolean): string[] {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
   // post-F6 plan §6.1/§6.3 + the 2026-09-22 v2 addendum: the visible
   // container is `Activity` with NO identity icon; the grammar is
-  // `<identity> <duration> · <stats>`.
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Activity(?: | ·|$)`).test(line))
+  // `<identity> <duration> · <stats>`. The 2026-09-29 historical compaction
+  // adds the think-only presentation identity `Thought` (same container).
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:Activity|Thought)(?: | ·|$)`).test(line))
+}
+
+/** The collapsed/expanded header of a think-only historical span (`Thought`). */
+function thoughtHeaders(view: string, expanded?: boolean): string[] {
+  const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Thought(?: | ·|$)`).test(line))
 }
 
 function clusterHeaders(view: string, expanded?: boolean): string[] {
@@ -327,8 +386,7 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
     const view = lines.join('\n')
     // Work A is historical and think-only: `▸ Thought` is its compacted
     // header (the 2026-09-29 plan §2.1) — still one durable span.
-    assert.equal(view.split('\n').filter(line => /^\s*▸ (?:Activity|Thought)(?: | ·|$)/.test(line)).length, 2,
-      `two durable spans:\n${view}`)
+    assert.equal(workHeaders(view).length, 2, `two durable spans:\n${view}`)
     const narrationRow = lines.findIndex(line => line.includes('narration'))
     const preparing = preparingRows(view)
     assert.equal(preparing.length, 1, `the call renders exactly once:\n${view}`)
@@ -463,32 +521,12 @@ test('a newer Work makes the previous one header-only without changing its summa
   const { vt, app } = startApp('compact')
   const folder = new TranscriptFolder()
   const settleA = (seq: number): SessionEvent =>
-    eventAt('assistant/message', {
-      turn: 1, step: 0,
-      message: {
-        id: MessageId('as1'), role: 'assistant',
-        content: [{ type: 'reasoning', text: 'A reasoning' }],
-        source: { kind: 'model', provider: 'p', model: 'm' },
-        stream: [
-          { type: 'chunk', time: T0 + 1, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
-          { type: 'chunk', time: T0 + 1, chunk: { type: 'reasoning-delta', index: 0, text: 'A reasoning' } },
-          { type: 'chunk', time: T0 + 3, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'A reasoning' } } },
-        ],
-      },
-    }, T0 + 3, seq)
+    settlementEvent({ id: 'as1', step: 0, reasoning: 'A reasoning', startedAt: T0 + 1, endedAt: T0 + 3, seq })
   applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'A reasoning' } }, T0 + 1, 1),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('a1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 2, 2),
-    eventAt('tool/result', {
-      turn: 1, step: 0,
-      message: {
-        id: MessageId('ar1'), role: 'tool',
-        toolCallId: ToolCallId('a1'),
-        content: [{ type: 'text', text: 'ok' }],
-        source: { kind: 'tool', callId: ToolCallId('a1') },
-      },
-    }, T0 + 3, 3),
+    toolResultEvent('a1', T0 + 3, 3),
     settleA(4),
   ])
   show(app, folder)
@@ -505,15 +543,7 @@ test('a newer Work makes the previous one header-only without changing its summa
     }, T0 + 5, 5),
     eventAt('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'B reasoning' } }, T0 + 6, 6),
     eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('b1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 7, 7),
-    eventAt('tool/result', {
-      turn: 1, step: 2,
-      message: {
-        id: MessageId('br1'), role: 'tool',
-        toolCallId: ToolCallId('b1'),
-        content: [{ type: 'text', text: 'ok' }],
-        source: { kind: 'tool', callId: ToolCallId('b1') },
-      },
-    }, T0 + 8, 8),
+    toolResultEvent('b1', T0 + 8, 8),
   ])
   show(app, folder)
   await vt.waitForRender()
@@ -531,43 +561,22 @@ test('a historical think-only Work collapses to Thought while the latest keeps A
   // B stays live (a running reasoning tail + tool).
   applyMixed(folder, [
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('assistant/message', {
-      turn: 1, step: 1,
-      message: {
-        id: MessageId('a-boundary'), role: 'assistant',
-        content: [
-          { type: 'reasoning', text: 'checking whether the cache can be reused' },
-          { type: 'text', text: 'narration boundary' },
-        ],
-        source: { kind: 'model', provider: 'p', model: 'm' },
-        stream: [
-          { type: 'chunk', time: T0 + 1, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
-          { type: 'chunk', time: T0 + 1, chunk: { type: 'reasoning-delta', index: 0, text: 'checking whether the cache can be reused' } },
-          { type: 'chunk', time: T0 + 2000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'checking whether the cache can be reused' } } },
-          { type: 'chunk', time: T0 + 2000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
-          { type: 'chunk', time: T0 + 2000, chunk: { type: 'text-delta', index: 1, text: 'narration boundary' } },
-          { type: 'chunk', time: T0 + 2000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'narration boundary' } } },
-        ],
-      },
-    }, T0 + 2000, 2),
+    settlementEvent({
+      id: 'a-boundary', step: 1,
+      reasoning: 'checking whether the cache can be reused',
+      narration: 'narration boundary',
+      startedAt: T0 + 1, endedAt: T0 + 2000, seq: 2,
+    }),
     eventAt('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'working with tools now' } }, T0 + 3, 3),
     eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'x.ts' }) }, T0 + 4, 4),
-    eventAt('tool/result', {
-      turn: 1, step: 2,
-      message: {
-        id: MessageId('cr1'), role: 'tool',
-        toolCallId: ToolCallId('c1'),
-        content: [{ type: 'text', text: 'ok' }],
-        source: { kind: 'tool', callId: ToolCallId('c1') },
-      },
-    }, T0 + 5, 5),
+    toolResultEvent('c1', T0 + 5, 5),
   ])
   show(app, folder)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   // §7.6: A is historical think-only → `▸ Thought`; its reasoning never
   // leaks as a collapsed preview.
-  assert.match(view, /^\s*▸ Thought(?: |$)/m, `the historical think-only span reads Thought:\n${view}`)
+  assert.equal(thoughtHeaders(view, false).length, 1, `the historical think-only span reads Thought:\n${view}`)
   assert.ok(!view.includes('cache can be reused'), 'the historical reasoning text stays hidden')
   // B keeps the full latest presentation (§7.5-style).
   assert.match(view, /Think:\s+working with tools now/)
@@ -601,20 +610,20 @@ test('manual expand/collapse of a historical Thought keeps its identity and hide
   app.setFullscreen(true)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.match(view, /^\s*▸ Thought(?: |$)/m, `the historical think-only span reads Thought:\n${view}`)
+  assert.equal(thoughtHeaders(view, false).length, 1, `the historical think-only span reads Thought:\n${view}`)
 
   // §7.11: expand reveals the raw Thinking row; the header stays Thought.
   app.toggleWorkSpan(owner)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.match(view, /^\s*▾ Thought(?: |$)/m, `the opened span keeps the Thought identity (no jump to Activity):\n${view}`)
+  assert.equal(thoughtHeaders(view, true).length, 1, `the opened span keeps the Thought identity (no jump to Activity):\n${view}`)
   assert.ok(view.includes('historical reasoning body'), 'the raw Thinking row renders when open')
 
   // Collapse: header-only again, the preview never resurrects.
   app.toggleWorkSpan(owner)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.match(view, /^\s*▸ Thought(?: |$)/m)
+  assert.equal(thoughtHeaders(view, false).length, 1)
   assert.ok(!view.includes('historical reasoning body'), `collapsing returns to the header-only compaction:\n${view}`)
 })
 
@@ -629,7 +638,7 @@ test('search reveal of a hidden historical Thought member restores and dismisses
   app.setFullscreen(true)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.match(view, /^\s*▸ Thought(?: |$)/m)
+  assert.equal(thoughtHeaders(view, false).length, 1)
   assert.ok(!view.includes('searchable historical reasoning'), 'precondition: the member is hidden')
 
   // §7.12: the search reveal opens the owning Work; the raw Thinking is
@@ -642,13 +651,13 @@ test('search reveal of a hidden historical Thought member restores and dismisses
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the reveal never writes the manual state')
-  assert.match(view, /^\s*▾ Thought(?: |$)/m, `the revealed span opens with the Thought identity:\n${view}`)
+  assert.equal(thoughtHeaders(view, true).length, 1, `the revealed span opens with the Thought identity:\n${view}`)
   assert.ok(view.includes('searchable historical reasoning'), 'the revealed member renders')
 
   app.setTranscriptSearchTarget(undefined)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.match(view, /^\s*▸ Thought(?: |$)/m, 'dismissal restores the header-only compaction')
+  assert.equal(thoughtHeaders(view, false).length, 1, 'dismissal restores the header-only compaction')
   assert.ok(!view.includes('searchable historical reasoning'), 'the Think preview never resurrects')
 })
 

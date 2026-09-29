@@ -68,7 +68,9 @@ const preparingRows = (view: string): number[] =>
   view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
 
 const workHeaders = (view: string): string[] =>
-  view.split('\n').filter(line => /^\s*(?:▸|▾) Activity(?: | ·|$)/.test(line))
+  // A Work header is `Activity`, or `Thought` for a historical think-only
+  // span (the 2026-09-29 compact historical compaction).
+  view.split('\n').filter(line => /^\s*(?:▸|▾) (?:Activity|Thought)(?: | ·|$)/.test(line))
 
 // --- S5: Preparing becomes durable ----------------------------------------
 

@@ -381,7 +381,9 @@ function show(app: TuiApp, messages: readonly TranscriptMessage[]): void {
   app.setTranscript(messages, new Map())
 }
 
-const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line))
+// A Work header is `Activity`, or `Thought` for a historical think-only span
+// (the 2026-09-29 compact historical compaction).
+const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] (?:Activity|Thought)(?: | ·|$)/.test(line))
 
 /** A short window that fits one viewport: one Work span, one ambient cluster
  * and a trailing Work span, so surface presentation is directly observable. */
