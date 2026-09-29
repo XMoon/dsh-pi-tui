@@ -278,10 +278,13 @@ async function completePathArgumentText(
 
 /**
  * The editor's autocomplete provider: `@` mentions through the Host-file
- * port (the Direct adapter answers scoped discovery + fd/fdfind via the
- * shared engine) plus the fork's usual slash-command and path completion
- * (client-local editor machinery). The FILE-COMPLETION CONTEXT classifier
- * (plan §4) drives which positions ever complete files.
+ * port (the SESSION scope maps the OFFICIAL Host discovery authority —
+ * `ctx.fileReferences` / the wire — whose candidates arrive already
+ * filtered, ranked and bounded; the Direct WORKSPACE scope keeps the
+ * legacy scanner as a sessionless compatibility path) plus the fork's
+ * usual slash-command and path completion (client-local editor
+ * machinery). The FILE-COMPLETION CONTEXT classifier (plan §4) drives
+ * which positions ever complete files.
  */
 export class MentionProvider implements AutocompleteProvider {
   private readonly inner: CombinedAutocompleteProvider
@@ -573,11 +576,12 @@ export class MentionProvider implements AutocompleteProvider {
     return this.inner.getSuggestions(normalizedLines, cursorLine, cursorCol - leading, options)
   }
 
-  /** Complete one `@` mention through the shared engine + HostFilePort:
-   * the raw token is resolved against the SESSION scope, the port answers
-   * Host discovery facts, and presentation (ranking/quoting/@-shape) is
-   * the shared layer. Stale results are dropped twice: the port's own
-   * abort check and the scope re-verification after the await. */
+  /** Complete one `@` mention through the HostFilePort: the grammar is
+   * stripped to the OFFICIAL query form, the port answers the Host
+   * authority's already-ranked candidates, and this layer is
+   * PRESENTATION-ONLY (the official mention grammar's quoting + labels —
+   * no second ranking pass). Stale results are dropped twice: the port's
+   * own abort check and the scope re-verification after the await. */
   private async completeMention(scope: MentionScope, atPrefix: string, signal: AbortSignal): Promise<AutocompleteSuggestions | null> {
     // `scope` is captured at request entry and deliberately threaded through
     // the await. A session switch while the Host request is in flight must

@@ -113,12 +113,14 @@ test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', 
     { kind: 'ok', items: [] })
 })
 
-test('the fallback returns RAW paths — quoting and filtering are client-side', async (t) => {
+test('the workspace compat path returns RAW paths — quoting is the official grammar, ranking is the adapter\'s', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  // The port answers "which Host files exist": no `@`, no quotes, no
-  // trailing slash, no query filtering (the client ranks and presents).
+  // The port answers "which Host files exist" in its own ranked order: no
+  // `@`, no quotes, no trailing slash. (The SESSION path's ranking is the
+  // official Host authority's; the WORKSPACE compatibility path ranks
+  // inside its adapter — the client only presents either way.)
   const result = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'my'))
   assert.ok(result.some(item => item.path === 'my file.txt' && item.kind === 'file'),
     `the spaced path flows through raw:\n${JSON.stringify(result)}`)
