@@ -1,17 +1,14 @@
 /**
- * The file-completion engine (plan §5): the SHARED pipeline behind `@`
- * mentions and `/image` arguments. One call answers "what do I show for
- * this raw token?" — parse query → discover (through the injected source)
- * → rank → slice → present. The two contexts differ ONLY in their raw
- * input shape (an `@` prefix vs an argument) and their source (Host
- * filesystem vs Client-local) — the path math, ranking, quoting and
- * directory continuation are one implementation.
- *
- * The engine is pure policy: the discover step is injected (the Direct
- * Host adapter answers for the HOST fs; the local source for the Client
- * fs) and the presentation returns bare `AutocompleteItem`s (the client's
- * `MentionProvider` / `getArgumentCompletions` adapters own the fork's
- * value shapes).
+ * The file-completion engine (plan §5): the pipeline behind `/attach` and
+ * `/image` path arguments — parse query → discover (through the injected
+ * Client-local source) → rank → slice → present. Since the M3-3A
+ * realignment the SESSION `@` mention path no longer flows through this
+ * engine: its discovery/ranking is the OFFICIAL Host authority's (the
+ * candidates arrive already filtered, ranked and bounded via
+ * `HostFilePort`), its mention VALUE is the official grammar's, and only
+ * the Direct WORKSPACE compatibility path keeps a local scanner. This
+ * engine remains the Client-fs completion path (no Host authority) and
+ * the workspace adapter's ranking helper.
  * @module @xmoon76/dsh-pi-tui/file-completion/engine
  */
 

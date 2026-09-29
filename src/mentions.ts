@@ -9,17 +9,19 @@
  * the fork's CombinedAutocompleteProvider (client-local editor
  * machinery).
  *
- * FILE-COMPLETION CONVERGENCE (the 2026-08-27 plan): the path query
- * parsing, ranking, quoting and presentation behind `@` mentions and
- * `/attach` and `/image` arguments are ONE shared engine in `src/file-completion/`
- * (plan §5-§8). THIS module keeps the mention GRAMMAR (extractAtPrefix,
- * findFileMentions, the historical send-time rewriter — retired from the
- * product path by the M3-3A official-mention realignment) and the
- * MentionProvider
- * adapter; the engine owns the path math and BOTH sources (the Host-file
- * port for `@`, LocalFileSource for attachment commands) answer discovery through
- * it. The FILE-COMPLETION CONTEXT classifier (plan §4) is the ONE gate —
- * file completion opens ONLY on `@...`, `/attach ...`, and `/image ...`.
+ * FILE-COMPLETION CONVERGENCE (the 2026-08-27 plan, realigned M3-3A): the
+ * `/attach` and `/image` path arguments complete through the shared local
+ * engine in `src/file-completion/` (plan §5-§8). The SESSION `@` mention
+ * path is different by authority: discovery/ranking come from the OFFICIAL
+ * Host service through the Host-file port (candidates arrive already
+ * filtered, ranked and bounded), the mention VALUE is the official
+ * `formatFileMention` grammar's, and only the Direct WORKSPACE scope keeps
+ * the legacy scanner as a compatibility path. THIS module keeps the
+ * mention GRAMMAR (extractAtPrefix, findFileMentions, the historical
+ * send-time rewriter — retired from the product path) and the
+ * MentionProvider adapter. The FILE-COMPLETION CONTEXT classifier
+ * (plan §4) is the ONE gate — file completion opens ONLY on `@...`,
+ * `/attach ...`, and `/image ...`.
  * @module @xmoon76/dsh-pi-tui/mentions
  */
 

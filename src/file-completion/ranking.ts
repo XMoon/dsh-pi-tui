@@ -1,8 +1,11 @@
 /**
- * The shared path ranking (plan §7): ONE scoring model behind `@` and
- * `/image`. Exact basename > basename prefix > basename substring > full
- * path substring, with a directory bonus; empty queries order directories
- * first and shallowness first. PURE — paths in, numbers out.
+ * The local path ranking (plan §7): the scoring model for the
+ * Client-fs completion paths (`/attach`, `/image`) and the Direct
+ * WORKSPACE compatibility scanner — NOT the SESSION `@` mention path,
+ * whose ranking is the official Host authority's (M3-3A). Exact basename
+ * > basename prefix > basename substring > full path substring, with a
+ * directory bonus; empty queries order directories first and shallowness
+ * first. PURE — paths in, numbers out.
  * @module @xmoon76/dsh-pi-tui/file-completion/ranking
  */
 
