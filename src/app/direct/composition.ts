@@ -16,6 +16,7 @@ import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { installProgressUpdatesPrompt, installResponseStylePrompt, type ProgressUpdatesState, type ResponseStyleState } from '../../communication-policy.ts'
 import { installFocusPrompt, type SystemPromptLike } from '../../focus.ts'
+import { installGitAttributionPrompt, type GitAttributionState } from '../../git-attribution.ts'
 import type { DisplayState } from '../../display-preset.ts'
 import type { Diag } from '../../diag.ts'
 import { recordedSessionPreset } from '../../runtime/direct/session-preset-direct.ts'
@@ -46,9 +47,10 @@ export async function composeDirectAgent(
   diag?: Diag,
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
+  gitAttributionState?: GitAttributionState,
 ): Promise<DirectLegacyAgentComposition | DirectAgentComposition> {
   const installTuiPrompts = (agentCtx: Context): void => {
-    if (progressUpdatesState !== undefined || responseStyleState !== undefined) {
+    if (progressUpdatesState !== undefined || responseStyleState !== undefined || gitAttributionState !== undefined) {
       const systemPrompt = agentCtx.get('systemPrompt') as SystemPromptLike | undefined
       if (systemPrompt !== undefined) {
         // The progress section's effective text reads the live display state
@@ -59,6 +61,9 @@ export async function composeDirectAgent(
           diag?.warn('progress updates prompt unavailable', { reason: 'display state missing' })
         }
         if (responseStyleState !== undefined) installResponseStylePrompt(systemPrompt, responseStyleState)
+        // Git attribution is Agent guidance only: one prompt section, no
+        // Git-level enforcement (the prompt-based migration plan).
+        if (gitAttributionState !== undefined) installGitAttributionPrompt(systemPrompt, gitAttributionState)
       } else {
         diag?.warn('communication policy prompt unavailable', { reason: 'systemPrompt service missing' })
       }

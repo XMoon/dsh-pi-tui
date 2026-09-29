@@ -178,7 +178,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

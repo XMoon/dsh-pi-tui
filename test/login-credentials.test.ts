@@ -162,7 +162,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

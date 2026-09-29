@@ -67,6 +67,8 @@ export interface Config {
   readonly displayPreset: Volatile<string>
   /** Mid-turn progress-update cadence (off | milestones | frequent). */
   readonly progressUpdates: Volatile<string>
+  /** Git attribution guidance mode (off | product | product-model). */
+  readonly gitAttribution: Volatile<string>
   /** Visible-answer density guidance (default | concise | explanatory). */
   readonly responseStyle: Volatile<string>
   /** Completion-notification mode ('unfocused' | 'always' | 'off'). */
@@ -134,6 +136,7 @@ export const Config: z<Config> = z.object({
   homeEndKeys: z.string().default('input').volatile(),
   displayPreset: z.string().default('full').volatile(),
   progressUpdates: z.string().default('milestones').volatile(),
+  gitAttribution: z.string().default('off').volatile(),
   responseStyle: z.string().default('default').volatile(),
   notificationMode: z.string().default('unfocused').volatile(),
   notificationMethod: z.string().default('auto').volatile(),

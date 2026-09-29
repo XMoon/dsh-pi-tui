@@ -174,7 +174,7 @@ function stubRunner(
       state.displayWrites?.push(preset)
       return { kind: 'applied', preset }
     },
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => displayPreset === 'focus',
     setFocusMode: (enabled) => { displayPreset = enabled ? 'focus' : 'full' },
     setNotificationMode: () => {},

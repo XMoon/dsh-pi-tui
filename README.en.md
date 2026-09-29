@@ -265,6 +265,35 @@ Runs the command locally only. Its output is not added to model context.
 
 Shell cards show a bounded output preview by default. `Ctrl+O` expands the retained output — except in fullscreen Focus, where Ctrl+O owns the Thought roots and the shell cards keep their folded state.
 
+### Git commit attribution (optional)
+
+When enabled, dsh-pi-tui instructs the Agent to add the official attribution trailers when it creates Git commits:
+
+```text
+Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>
+```
+
+It is **off by default**. Three modes are supported:
+
+```text
+off            no attribution guidance (default)
+product        the official Co-Authored-By trailer
+product-model  official trailer + Assisted-By: <provider>/<model>
+```
+
+This is **Agent guidance (a prompt policy), not repository-level enforcement**:
+dsh-pi-tui installs no Git hooks, rewrites no `git commit` command, and probes
+no repository. The `provider`/`model` in `product-model` come straight from
+DSH's official model selection (a model switch takes effect on the next
+request).
+
+Boundaries:
+
+- `!` / `!!` local shell commands and commits from your own terminal are completely untouched;
+- no `prepare-commit-msg` hook is installed and existing hooks are never modified;
+- no GitHub credentials or API are required; the Author/Committer identity is never modified;
+- a model may in theory ignore or mis-transcribe the instruction — this is the accepted tradeoff: low-intrusion guidance instead of a full Git lifecycle subsystem.
+
 ### File references and images
 
 Typing `@` opens workspace file search and completion:

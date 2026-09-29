@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional official Git commit attribution guidance (off by default): when
+  enabled, the Agent is instructed to add
+  `Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>` to commits it
+  creates; the `product-model` mode additionally adds
+  `Assisted-By: <provider>/<model>` (injected straight from DSH's official
+  model selection — a model switch takes effect on the next request). This is
+  Agent guidance (a prompt policy), not repository-level enforcement: no Git
+  hooks are installed, no commands are rewritten, no repositories are probed,
+  and manual commits stay untouched.
+
 ### Changed
 
 - The Question tool's input semantics now split into selection / editing /

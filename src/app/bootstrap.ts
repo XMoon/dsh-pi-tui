@@ -64,6 +64,7 @@ import { createSubmissionController, type LocalCommandHandler } from './submissi
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
+import { parseGitAttributionMode, type GitAttributionState } from '../git-attribution.ts'
 import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
@@ -351,6 +352,10 @@ export function applyRunner(ctx: Context, config: Config): void {
     // Two independent live authorities, resolved before the first compose.
     const progressUpdatesState: ProgressUpdatesState = { mode: parseProgressUpdates(persistedTuiSettings?.progressUpdates) }
     const responseStyleState: ResponseStyleState = { style: parseResponseStyle(persistedTuiSettings?.responseStyle) }
+    // Git attribution is Agent guidance only (one prompt section, no Git
+    // enforcement): the live holder is resolved before the first compose and
+    // the section reads it on every assembly.
+    const gitAttributionState: GitAttributionState = { mode: parseGitAttributionMode(persistedTuiSettings?.gitAttribution) }
 
     // Completion notifications (plan: Client/TUI presentation capability —
     // settled detection, focus detection, terminal output and settings parsing
@@ -400,7 +405,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // Behavior preserved: the same `composeDirectAgent` wiring, now with the
       // runtime's Agent-scoped model-selection install.
       compose: (installSelection, presetId) =>
-        composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState),
+        composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState),
       getViewedQueueAgent: () => viewerRef?.viewedQueueAuthority(),
     })
     /**
@@ -1011,7 +1016,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         prepareDeps: () => submission.prepareDeps(),
         settleQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
       },
-      promptState: { progressUpdates: progressUpdatesState, responseStyle: responseStyleState },
+      promptState: { progressUpdates: progressUpdatesState, responseStyle: responseStyleState, gitAttribution: gitAttributionState },
       tuiSettings,
       displayState,
       get agents() { return lifecycleAgents },

@@ -75,6 +75,10 @@ export interface TuiSettingsDoc {
   /** Visible-answer density guidance ('default' | 'concise' |
    * 'explanatory'); absent/invalid values resolve to default. */
   responseStyle?: string
+  /** Git attribution guidance mode ('off' | 'product' | 'product-model');
+   * absent/invalid values resolve to off. Agent prompt policy only — no
+   * Git hooks, no command interception. */
+  gitAttribution?: string
   displayPreset?: string
   /** Completion-notification mode: 'unfocused' (default) | 'always' |
    * 'off' — when the main agent's settlement notifies the terminal. */

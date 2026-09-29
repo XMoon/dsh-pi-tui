@@ -50,6 +50,7 @@ function communicationRegistry(display: DisplayState = { preset: 'full' }) {
     display,
     progressUpdatesState,
     responseStyleState,
+    gitAttributionState: { mode: 'off' },
     progress: () => registry.text(PROGRESS_UPDATES_SECTION_NAME),
     response: () => registry.text(RESPONSE_STYLE_SECTION_NAME),
     dispose: () => { disposeProgress(); disposeResponse() },
@@ -354,5 +355,6 @@ test('production startup resolves both settings before compose and settings swit
   await commands.handler('display')({ rawInput: 'full' })
   await settle()
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/)
-  assert.equal(registry.sections.size, 3, 'neither setting recomposes the agent')
+  assert.equal(registry.sections.size, 4, 'neither setting recomposes the agent')
+  assert.equal(registry.text('tui:git-attribution'), '', 'the default-off attribution section is empty')
 })
