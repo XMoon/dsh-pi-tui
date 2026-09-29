@@ -82,6 +82,9 @@ const TUI_DEFAULTS = {
   homeEndKeys: 'input',
   displayPreset: 'full',
   progressUpdates: 'milestones',
+  // The real Host descriptor always carries the schema default, so the remote
+  // fixture must too (an absent field would look like a change to pin).
+  gitAttribution: 'off',
   responseStyle: 'default',
   notificationMode: 'unfocused',
   notificationMethod: 'auto',
@@ -736,6 +739,7 @@ test('raw settings fields round-trip verbatim and an unrelated write never touch
   assert.ok(settings !== undefined)
   const doc: TuiSettingsDoc = settings.get()
   assert.equal(doc.theme, 'dark')
+  assert.equal(doc.gitAttribution, 'off')
   assert.deepEqual(doc.keybindings, keybindings)
   assert.deepEqual(doc.footerCustomItems, footerCustomItems)
   assert.deepEqual(doc.footerCommand, footerCommand)
@@ -748,6 +752,7 @@ test('raw settings fields round-trip verbatim and an unrelated write never touch
   // The authoritative refresh preserves the raw fields verbatim.
   const after = settings.get()
   assert.equal(after.theme, 'light')
+  assert.equal(after.gitAttribution, 'off')
   assert.deepEqual(after.keybindings, keybindings)
   assert.deepEqual(after.footerCustomItems, footerCustomItems)
   assert.deepEqual(after.footerCommand, footerCommand)

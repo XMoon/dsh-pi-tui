@@ -609,6 +609,7 @@ const TUI_SETTINGS_DEFAULTS: {
   readonly homeEndKeys: string
   readonly displayPreset: string
   readonly progressUpdates: string
+  readonly gitAttribution: string
   readonly responseStyle: string
   readonly notificationMode: string
   readonly notificationMethod: string
@@ -624,6 +625,7 @@ const TUI_SETTINGS_DEFAULTS: {
   homeEndKeys: 'input',
   displayPreset: 'full',
   progressUpdates: 'milestones',
+  gitAttribution: 'off',
   responseStyle: 'default',
   notificationMode: 'unfocused',
   notificationMethod: 'auto',
@@ -647,6 +649,7 @@ const DIFF_FIELDS: readonly string[] = [
   'homeEndKeys',
   'displayPreset',
   'progressUpdates',
+  'gitAttribution',
   'responseStyle',
   'notificationMode',
   'notificationMethod',
@@ -676,6 +679,7 @@ function tuiSettingsDocOf(section: unknown): TuiSettingsDoc {
     localShellSandbox: stringOr(record.localShellSandbox, TUI_SETTINGS_DEFAULTS.localShellSandbox),
     homeEndKeys: stringOr(record.homeEndKeys, TUI_SETTINGS_DEFAULTS.homeEndKeys),
     progressUpdates: stringOr(record.progressUpdates, TUI_SETTINGS_DEFAULTS.progressUpdates),
+    gitAttribution: stringOr(record.gitAttribution, TUI_SETTINGS_DEFAULTS.gitAttribution),
     responseStyle: stringOr(record.responseStyle, TUI_SETTINGS_DEFAULTS.responseStyle),
     displayPreset: stringOr(record.displayPreset, TUI_SETTINGS_DEFAULTS.displayPreset),
     notificationMode: stringOr(record.notificationMode, TUI_SETTINGS_DEFAULTS.notificationMode),
