@@ -1554,12 +1554,12 @@ Mouse handling belongs to the alternate fullscreen screen; regular mode remains 
 - Category: `HARD_HOST_API`
 - Risk: `HIGH`
 - Files: `src/tui-alt-screen.ts`, `src/tui.ts`, `src/components/box.ts`, `src/components/mouse-region.ts`
-- Last audited: `2026-09-09`
+- Last audited: `2026-09-29`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
-The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback. Pointer events must also never reach a stale target: an overlay hidden or removed since the last paint, a layout root replaced via setLayoutRoot, or a component removed from a Container mid-gesture must stop receiving press/drag/release events immediately (the cached layout frame only refreshes on the next paint).
+The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback. Pointer events must also never reach a stale target: an overlay hidden or removed since the last paint, a layout root replaced via setLayoutRoot, or a component removed from a Container mid-gesture must stop receiving press/drag/release events immediately (the cached layout frame only refreshes on the next paint). One HOST-owned surface deliberately takes the first plain single click away from selection: the long-user disclosure bubble (dsh-pi-tui issue #192 / PR #197) is a local disclosure surface in BOTH its collapsed and expanded states, so double-click word selection is intentionally not promised on that specific bubble — a host decision expressed through onCellClick, NOT a fork click-granularity change (everywhere else the first plain click stays inert and double-click keeps native word selection).
 
 #### Changed surface
 
@@ -1590,8 +1590,9 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - Audit note: No subclass replaces click classification.
 
 **Host**
-- src/tui-app.ts handleFullscreenClick expands the question/transcript surface.
-- Audit note: The callback is a direct host seam.
+- src/tui-app.ts handleFullscreenClick expands the question/transcript surface, and resolves the long-user disclosure bubble (issue #192 / PR #197) as a whole-bubble local disclosure surface in both states — the first plain single click on it runs the Host expand/collapse action, never selection.
+- test/long-user-disclosure.test.ts pins the intentional exception: the first complete click on a long-user bubble (collapsed or expanded) acts immediately, so no deferred double-click window exists on that surface.
+- Audit note: The callback is a direct host seam. The long-user bubble is the ONE host surface that consumes the first plain click; it is a host ownership decision recorded here so a revendor audit does not mistake it for a click-granularity regression.
 
 **Public / extension**
 - TuiAltScreen options expose the click callback through the public component constructor.
@@ -1656,7 +1657,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed the host callback is a structural and behavioral seam, not a convenience import.
+- Notes: Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 made the long-user bubble a whole-bubble disclosure surface (both states) — recorded as the intentional first-click exception in why/host above; the fork's click granularity itself is unchanged.
 
 ### X019 — Text no-op dispose inheritance shim
 
@@ -4749,7 +4750,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - Category: `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `LOW`
 - Files: `src/tui-alt-screen.ts`
-- Last audited: `2026-09-18`
+- Last audited: `2026-09-29`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
@@ -4771,7 +4772,7 @@ The host paints presentation-only chrome inside the transcript scroll content (t
 - Audit note: None.
 
 **Host**
-- src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows/userDisclosureHit geometry; every other row returns undefined.
+- src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows userDisclosureHits range geometry (the collapse+tail-slot hit rows); every other row — the whole-bubble body range included — returns undefined.
 - src/tui-app.ts selectionLineText returns undefined unless the context scrollView is the transcript ScrollView, so overlay/editor selections are never filtered.
 - Audit note: The host owns the semantic meaning of its chrome; the fork never learns what the row is.
 
@@ -4818,7 +4819,7 @@ The host paints presentation-only chrome inside the transcript scroll content (t
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only.
+- Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only. 2026-09-29: host dependency re-verified after PR #197 moved the host hit geometry to plural userDisclosureHits ranges — the override still targets only the tail-slot collapse rows.
 
 ### X058 — Viewport passthrough for a focused capturing overlay
 
