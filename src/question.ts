@@ -446,6 +446,13 @@ export class QuestionFlow implements Component, Focusable {
       || componentKeymap.matches(data, 'question.pageUp')
       || componentKeymap.matches(data, 'question.pageDown')
       || componentKeymap.matches(data, 'question.toggleExpand')) return true
+    // Space is the multi-select LIST-mode checkbox verb ONLY. In the edit
+    // (handled above) space is ordinary Input text ("hello world" must
+    // type), and a single-select list owns no toggle — Space falls through
+    // to the app layer there.
+    if (!optionless
+      && this.questions[this.tab]?.multiSelect === true
+      && componentKeymap.matches(data, 'question.toggleSelection')) return true
     return !optionless && (data === 'h' || data === 'j' || data === 'k' || data === 'l')
   }
 
@@ -602,7 +609,14 @@ export class QuestionFlow implements Component, Focusable {
     if (key !== undefined) {
       this.cursor = Number(key)
       this.pendingCursorScroll = true
-      this.confirm()
+      // Mouse parity with the KEYBOARD SELECTION action (Space/digit),
+      // not with Enter's continue: a multi-select click toggles the
+      // option, a single-select click adopts it and advances.
+      if (this.questions[this.tab]?.multiSelect === true) {
+        this.toggleCurrentSelection()
+      } else {
+        this.confirm()
+      }
       return
     }
   }
@@ -695,8 +709,9 @@ export class QuestionFlow implements Component, Focusable {
     hits.push(undefined)
     for (const row of rows) {
       const isCursor = rows[this.cursor] === row
+      const customAnswer = this.hasCustomAnswer(draft)
       const selected = row.key === OTHER_ROW
-        ? draft.custom !== ''
+        ? customAnswer
         : draft.selected.has(question.options?.[Number(row.key)]?.label ?? '')
       const marker = multi || row.key === OTHER_ROW
         ? selected ? color.success('[✓]') : color.textDim('[ ]')
@@ -706,7 +721,13 @@ export class QuestionFlow implements Component, Focusable {
       if (row.key === OTHER_ROW && this.editingOther) this.otherPrefixWidth = visibleWidth(prefix)
       const indent = ' '.repeat(visibleWidth(prefix))
       const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
-      const label = isCursor ? color.textStrong(row.label) : row.label
+      // The free-text row's LIST-mode label shows the saved answer, not
+      // the placeholder: a revisited draft must be readable (and stay
+      // masked for secrets). Only a blank draft keeps "Type something.".
+      const rowLabel = row.key === OTHER_ROW && !this.editingOther && customAnswer
+        ? question.masked === true ? this.maskedValue(draft.custom) : draft.custom
+        : row.label
+      const label = isCursor ? color.textStrong(rowLabel) : rowLabel
       // The free-text row swaps its label for the live Input while editing.
       // An EMPTY input renders only a subtle fake cursor — show the row's
       // own label dimmed instead (a bare cursor block reads as a blank row).
@@ -729,7 +750,10 @@ export class QuestionFlow implements Component, Focusable {
         continue
       }
       const labelWidth = Math.max(1, width - visibleWidth(prefix))
-      for (const wrapped of wrapTextWithAnsi(`${label}${badge}`, labelWidth)) {
+      const labelText = row.key === OTHER_ROW && !this.editingOther && customAnswer
+        ? label
+        : `${label}${badge}`
+      for (const wrapped of wrapTextWithAnsi(labelText, labelWidth)) {
         if (!this.pushPageRow(lines, hits, prefix + wrapped, row.key)) return { lines, hits }
       }
       if (row.description !== undefined && row.description !== '' && !(row.key === OTHER_ROW && this.editingOther)) {
@@ -801,11 +825,19 @@ export class QuestionFlow implements Component, Focusable {
     return this.drafts[this.tab]
   }
 
-  /** Whether the current question has an answer (selected, custom, or skipped). */
+  /** Whether the current question has an answer (selected, custom, or skipped).
+   * A custom draft counts only when NONBLANK: the draft keeps the raw
+   * editor text (spaces included), so blankness — not emptiness — is the
+   * answered boundary. */
   private answered(): boolean {
     const draft = this.draft()
     if (draft === undefined) return false
-    return draft.selected.size > 0 || draft.custom !== '' || draft.skipped
+    return draft.selected.size > 0 || draft.custom.trim() !== '' || draft.skipped
+  }
+
+  /** Whether a draft's custom text is a real (nonblank) answer. */
+  private hasCustomAnswer(draft: Draft): boolean {
+    return draft.custom.trim() !== ''
   }
 
   /** The free-text row of the current question (present when options exist). */
@@ -814,7 +846,12 @@ export class QuestionFlow implements Component, Focusable {
     return rows.findIndex(row => row.key === OTHER_ROW)
   }
 
-  /** Enter on the highlighted row, or in text mode: commit and advance. */
+  /** Enter on the highlighted row: the flow's CONTINUE verb. Single-select
+   * adopts the highlighted option and advances; a multi-select list page
+   * continues the current question (answered → advance, unanswered →
+   * skip); the free-text row enters its edit. Selection itself is NOT
+   * this method's job — Space/digits/mouse toggle selections via
+   * {@link toggleCurrentSelection}. */
   private confirm(): void {
     const draft = this.draft()
     if (draft === undefined) return
@@ -830,17 +867,17 @@ export class QuestionFlow implements Component, Focusable {
     const rows = this.rows()
     const row = rows[this.cursor]
     if (row !== undefined && row.key !== OTHER_ROW) {
-      const option = this.questions[this.tab]?.options?.[Number(row.key)]
+      const question = this.questions[this.tab]
+      if (question?.multiSelect === true) {
+        // multi + Enter != toggle: Enter shares →'s continue/skip
+        // contract — the ONE completion authority.
+        this.continueCurrentQuestion()
+        return
+      }
+      const option = question?.options?.[Number(row.key)]
       if (option !== undefined) {
-        const label = option.label
-        if (this.questions[this.tab]?.multiSelect === true) {
-          if (draft.selected.has(label)) draft.selected.delete(label)
-          else draft.selected.add(label)
-          draft.skipped = false
-          return // multi-select stays on the question; ←/→ pages on.
-        }
         draft.selected.clear()
-        draft.selected.add(label)
+        draft.selected.add(option.label)
         draft.skipped = false
         this.advance()
       }
@@ -849,6 +886,38 @@ export class QuestionFlow implements Component, Focusable {
     if (row?.key === OTHER_ROW) {
       this.enterOther()
     }
+  }
+
+  /** Toggle the highlighted multi-select option (Space / digit / mouse):
+   * the SELECTION action, never progression. On the free-text row it
+   * enters the edit instead (the row has no checkbox state of its own). */
+  private toggleCurrentSelection(): void {
+    const draft = this.draft()
+    if (draft === undefined) return
+    const rows = this.rows()
+    const row = rows[this.cursor]
+    if (row === undefined) return
+    if (row.key === OTHER_ROW) {
+      this.enterOther()
+      return
+    }
+    const label = this.questions[this.tab]?.options?.[Number(row.key)]?.label
+    if (label === undefined) return
+    if (draft.selected.has(label)) draft.selected.delete(label)
+    else draft.selected.add(label)
+    draft.skipped = false
+  }
+
+  /** The single continue authority shared by Enter (multi-select list
+   * rows), → and the `l` alias: an unanswered question is skipped (Web
+   * QuestionComposer parity), an answered one keeps its draft and
+   * advances. */
+  private continueCurrentQuestion(): void {
+    if (!this.answered()) {
+      this.skip()
+      return
+    }
+    this.advance()
   }
 
   /** Move to the next question (or the review page on the last one). */
@@ -861,15 +930,16 @@ export class QuestionFlow implements Component, Focusable {
   /** Optionless questions edit text directly; options start in list mode. */
   private syncEditMode(): void {
     this.resetBodyView()
-    // Tab-change contract: in-progress free-text survives ONLY an Esc →
-    // navigation → ↵ round trip on the SAME question. The moment the
-    // user actually moves to ANOTHER question (←/→/skip/commit advance),
-    // the uncommitted edit is DROPPED — invalidate the Input's owner so
-    // the re-entry reseeds from the committed draft. This must happen on
-    // EVERY tab change regardless of the NEXT question's type (a choices
-    // stopover used to leave the old owner alive, so whether the text
-    // survived depended on the intermediate question's kind — round
-    // finding).
+    // Tab-change contract: the ANSWER TEXT survives every tab change —
+    // it was synced into Draft.custom on every mutation. What is dropped
+    // is only the Input's EDITOR state (undo stack, kill ring, cursor):
+    // the owner is invalidated on every tab change so a re-entry builds
+    // a fresh Input seeded from the target question's draft, never
+    // leaking the previous question's editing history (this must happen
+    // on EVERY tab change regardless of the NEXT question's type — a
+    // choices stopover used to leave the old owner alive, so whether the
+    // editing history leaked depended on the intermediate question's
+    // kind).
     if (this.otherInputTab !== -1 && this.otherInputTab !== this.tab) {
       this.otherInputTab = -1
     }
@@ -877,9 +947,10 @@ export class QuestionFlow implements Component, Focusable {
     this.editingOther = optionless
     if (optionless) {
       // A DIFFERENT question's edit gets a FRESH Input seeded from that
-      // question's committed draft (the Input's undo/kill history is
+      // question's live draft (the Input's undo/kill history is
       // per-instance, so reuse would leak the previous question's
-      // editing state — see resetOtherInput).
+      // editing state — see resetOtherInput; the TEXT itself was already
+      // synced into Draft.custom on every mutation and survives).
       const draft = this.draft()
       this.resetOtherInput(draft?.custom ?? '')
     } else {
@@ -903,6 +974,23 @@ export class QuestionFlow implements Component, Focusable {
     this.exitOther()
   }
 
+  /** Sync the live editor text into the current question's draft after
+   * EVERY Input mutation (typing, paste, delete, kill/yank, undo, cursor
+   * moves). Draft.custom is the cross-question answer authority — the
+   * user never presses Enter to make text survive. The selection
+   * semantics mirror the DSH Web draft model: a nonblank custom replaces
+   * a single-select choice (multi-select keeps its checked labels), and
+   * clearing the text never fabricates a skip. */
+  private syncCustomDraft(): void {
+    const draft = this.draft()
+    if (draft === undefined) return
+    draft.custom = this.otherInput.getValue()
+    draft.skipped = false
+    if (draft.custom.trim() !== '' && this.questions[this.tab]?.multiSelect !== true) {
+      draft.selected.clear()
+    }
+  }
+
   /** Skip the current question (empty answer) and move on. */
   private skip(): void {
     const draft = this.draft()
@@ -920,8 +1008,8 @@ export class QuestionFlow implements Component, Focusable {
   /** Enter the free-text editing mode for the current question. The shared
    * Input keeps in-progress text across an Esc → navigation → ↵ round
    * trip on the SAME question; entering a DIFFERENT question's edit (or a
-   * fresh entry) seeds from that question's committed draft — the
-   * previous question's text must never leak into the new row. */
+   * fresh entry) seeds from that question's live draft — the previous
+   * question's editing history must never leak into the new row. */
   private enterOther(): void {
     this.editingOther = true
     if (this.otherInputTab !== this.tab) {
@@ -957,12 +1045,15 @@ export class QuestionFlow implements Component, Focusable {
     this.otherInput.focused = false
   }
 
-  /** Commit the typed text into the draft and advance. */
+  /** Enter in the edit: the live text is ALREADY the draft (every
+   * mutation synced it via {@link syncCustomDraft}), so this only
+   * applies the empty-answer continuation semantics, leaves the edit,
+   * and advances. */
   private commitOther(value: string): void {
     const draft = this.draft()
     if (draft === undefined) return
     const text = value.trim()
-    draft.custom = text
+    draft.custom = value
     if (text === '') {
       // An empty "type something" answer counts as skipped (Web semantics) —
       // but NEVER when an earlier selection is still on the draft: the
@@ -972,9 +1063,6 @@ export class QuestionFlow implements Component, Focusable {
       // parity). With a selection, empty text just keeps the selection.
       if (draft.selected.size === 0) draft.skipped = true
     } else {
-      // A custom answer replaces a single-select choice; multi-select keeps
-      // its checked labels (Web draftCustom parity).
-      if (this.questions[this.tab]?.multiSelect !== true) draft.selected.clear()
       draft.skipped = false
     }
     this.exitOther()
@@ -1024,7 +1112,7 @@ export class QuestionFlow implements Component, Focusable {
       // belongs to the shared Input (the flow previously intercepted
       // question.previous/next, so → committed+advanced and ← could page
       // back, stealing the text cursor). The flow keeps only its own
-      // mode verbs: Enter commits, Esc leaves the edit (back to the
+      // mode verbs: Enter continues, Esc leaves the edit (back to the
       // option list for choices, to the NAVIGATION state for optionless
       // — the second Esc there cancels the flow), PageUp/PageDown scroll
       // the body ('e' stays a letter here — expand is a list-mode verb).
@@ -1038,6 +1126,10 @@ export class QuestionFlow implements Component, Focusable {
         this.scrollBody(1)
       } else {
         this.otherInput.handleInput(data)
+        // EVERY mutation lands in the draft immediately: Draft.custom is
+        // the live answer authority, so Esc/navigation/advance can never
+        // drop un-Enter-ed text.
+        this.syncCustomDraft()
       }
       return
     }
@@ -1070,7 +1162,14 @@ export class QuestionFlow implements Component, Focusable {
       if (row !== undefined) {
         this.cursor = rows.indexOf(row)
         this.pendingCursorScroll = true
-        this.confirm()
+        // Single-select: choose + advance. Multi-select: the digit is the
+        // SELECTION action (toggle), never progression — Enter's new
+        // continue semantics must not leak into the digit route.
+        if (this.questions[this.tab]?.multiSelect === true) {
+          this.toggleCurrentSelection()
+        } else {
+          this.confirm()
+        }
       }
       return
     }
@@ -1126,6 +1225,15 @@ export class QuestionFlow implements Component, Focusable {
       this.confirm()
       return
     }
+    // Space in a MULTI-SELECT list page toggles the highlighted option
+    // (the checkbox verb — the digit route's keyboard twin). Single-
+    // select owns no toggle; optionless/edit states never reach here.
+    if (componentKeymap.matches(data, 'question.toggleSelection')
+      && this.questions[this.tab]?.multiSelect === true
+      && !this.isOptionless()) {
+      this.toggleCurrentSelection()
+      return
+    }
     // ←/→ back/next (the physical arrows own these verbs). The vim h/l
     // aliases are LIST-mode conveniences only: they must NOT eat 'h'/'l'
     // inside an OPTIONLESS question's NAVIGATION state, where every
@@ -1144,24 +1252,12 @@ export class QuestionFlow implements Component, Focusable {
     if (componentKeymap.matches(data, 'question.next')
       || (!this.isOptionless() && data === 'l')) {
       // → move on (the arrows own back/skip now, replacing the old 's'
-      // skip key): an UNANSWERED question is marked skipped and advances
-      // (web QuestionComposer skip parity); an ANSWERED one keeps its draft
-      // and just advances. syncEditMode resets the body view (scroll/expand)
-      // on EVERY tab change — forward included — so a scrolled/expanded
-      // question never leaks its view into the next one.
-      if (!this.answered()) {
-        this.skip()
-        return
-      }
-      if (this.tab < this.questions.length - 1) {
-        this.tab += 1
-        this.cursor = 0
-        this.syncEditMode()
-      } else {
-        this.tab = this.questions.length
-        this.cursor = 0
-        this.syncEditMode()
-      }
+      // skip key): the SAME continue/skip contract as Enter on a
+      // multi-select row — one authority (continueCurrentQuestion).
+      // syncEditMode resets the body view (scroll/expand) on EVERY tab
+      // change — forward included — so a scrolled/expanded question never
+      // leaks its view into the next one.
+      this.continueCurrentQuestion()
       return
     }
     if (componentKeymap.matches(data, 'question.cancel')) {
@@ -1204,14 +1300,16 @@ export class QuestionFlow implements Component, Focusable {
     // provides the padding), so every content row starts at the same column.
     const tabs = this.questions.map((_, index) => {
       const draft = this.drafts[index]
-      const answered = draft !== undefined && (draft.selected.size > 0 || draft.custom !== '' || draft.skipped)
+      const answered = draft !== undefined
+        && (draft.selected.size > 0 || this.hasCustomAnswer(draft) || draft.skipped)
       const label = tabLabel(index, this.questions.length)
       const mark = answered ? '✓' : '○'
       return this.tab === index
         ? color.textStrong(`${mark} ${label}`)
         : color.textDim(`${mark} ${label}`)
     })
-    const submitAnswered = this.drafts.every(draft => draft.selected.size > 0 || draft.custom !== '' || draft.skipped)
+    const submitAnswered = this.drafts.every(draft =>
+      draft.selected.size > 0 || this.hasCustomAnswer(draft) || draft.skipped)
     const submitText = `${submitAnswered ? '✓' : '○'} Submit`
     tabs.push(this.tab === this.questions.length
       ? color.textStrong(submitText)
@@ -1246,7 +1344,7 @@ export class QuestionFlow implements Component, Focusable {
         if (question === undefined || draft === undefined) continue
         const value = draft.skipped
           ? '(skipped)'
-          : draft.custom !== '' && question.multiSelect !== true
+          : this.hasCustomAnswer(draft) && question.multiSelect !== true
             ? question.masked === true
               // A masked secret stays masked on the review page too: the
               // answer is confirmed as "typed", never re-shown in
@@ -1255,7 +1353,7 @@ export class QuestionFlow implements Component, Focusable {
               ? this.maskedValue(draft.custom)
               : draft.custom
             : [...draft.selected].join(', ')
-                + (draft.custom !== ''
+                + (this.hasCustomAnswer(draft)
                   ? ` + ${question.masked === true ? this.maskedValue(draft.custom) : draft.custom}`
                   : '')
         reviewBudget = appendWrappedBudgeted(
@@ -1386,24 +1484,27 @@ export class QuestionFlow implements Component, Focusable {
     // The hint describes the CURRENT mode, never a generic list-mode verb
     // set:
     // - text EDIT (choices or optionless): ←→ are the TEXT cursor, Enter
-    //   confirms, Esc LEAVES the edit back to the navigation layer
-    //   (esc back — for choices its option list, for optionless its
-    //   navigation state);
+    //   CONTINUES (↵ review on the last question), Esc LEAVES the edit
+    //   back to the navigation layer (esc back — for choices its option
+    //   list, for optionless its navigation state);
     // - optionless NAVIGATION state (after Esc): ↵ re-enters the edit,
     //   ← back / → skip page between questions, esc cancels the flow;
-    // - choices list mode: ↑↓/digits/Enter select, ← back → skip, e
+    // - choices list mode: ↑↓/digits/Space select (Space is the
+    //   multi-select checkbox verb only), Enter/→ continue the flow, e
     //   expand, esc cancel.
-    // List-only verbs (↑↓ select, 1-N choose, ↵ toggle, → next, e expand)
-    // are never advertised while editing.
+    // List-only verbs (↑↓ select, 1-N choose, space toggle, ↵ continue,
+    // e expand) are never advertised while editing.
     // The hint composes from the parts that FIT: low-priority verbs drop
     // out instead of the whole line being ellipsized by the frame. The
     // escape verb ALWAYS survives (it is reserved first — the verbs drop
     // from the end, so e.g. '→ skip' goes before 'esc cancel').
     const scrollable = this.lastExpandable
+    const isLastQuestion = this.tab === this.questions.length - 1
+    const continueVerb = isLastQuestion ? '↵ review' : '↵ continue'
     if (this.editingOther) {
       const editParts = [
         '←→ edit',
-        '↵ confirm',
+        continueVerb,
         scrollable ? 'pgup/pgdn scroll' : '',
       ].filter(part => part !== '')
       const cancel = 'esc back'
@@ -1437,7 +1538,8 @@ export class QuestionFlow implements Component, Focusable {
     const hintParts = [
       '↑↓ select',
       optionCount > 0 ? `1-${optionCount} choose` : '',
-      multi ? '↵ toggle' : '↵ confirm',
+      multi ? 'space toggle' : '',
+      continueVerb,
       scrollable ? 'pgup/pgdn scroll' : '',
       this.bodyExpanded ? 'e collapse' : scrollable ? 'e expand' : '',
       this.questions.length > 1 ? '← back · → skip' : '→ skip',
