@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { SystemPromptLike } from '../src/focus.ts'
+import { installFocusPrompt, type SystemPromptLike } from '../src/focus.ts'
 import {
   DEFAULT_GIT_ATTRIBUTION_MODE,
   GIT_ATTRIBUTION_SECTION_NAME,
@@ -257,16 +257,16 @@ test('the `minimal` preset contract: a COMPLETE persona suppresses every TUI pro
   // (a parity-gated mirror of the official DSH preset asset, so the semantics
   // are upstream-owned): the system-prompt service restores that section as
   // the SOLE prompt after the waterfall. Every TUI prompt policy — the
-  // pre-existing progress/response-style sections AND the attribution
-  // section — is therefore absent under `minimal`. This test pins that
-  // contract with the REAL SystemPrompt + REAL dsh-persona, and includes a
-  // positive control so it can never pass vacuously.
+  // pre-existing progress / response-style / Focus sections AND the
+  // attribution section — is therefore absent under `minimal`. This test
+  // pins that contract with the REAL SystemPrompt + REAL dsh-persona, and
+  // includes a positive control per section so it cannot pass vacuously.
   const { Context: RealContext } = await import('@deepseek-ai/cordis')
   const { default: SystemPrompt, renderPrompt } = await import('@deepseek-ai/dsh-system-prompt')
   const { createScope } = await import('@deepseek-ai/dsh-scope')
   const { apply: applyPersona } = await import('@deepseek-ai/dsh-persona')
 
-  const renderWithPersona = async (persona: { prefix: string, complete: boolean }): Promise<string> => {
+  const renderWithPersona = async (persona: { prefix: string, complete: boolean }, displayPreset: DisplayState['preset']): Promise<string> => {
     const ctx = new RealContext()
     await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
     const systemPrompt = ctx.get('systemPrompt') as unknown as {
@@ -281,25 +281,37 @@ test('the `minimal` preset contract: a COMPLETE persona suppresses every TUI pro
       inject: ['systemPrompt'],
       apply: (c: never) => applyPersona(c, { ...persona, includeRuntimeContext: false }),
     })
+    const display: DisplayState = { preset: displayPreset }
     const scopedPrompt = scoped.ctx.get('systemPrompt') as unknown as SystemPromptLike
     installGitAttributionPrompt(scopedPrompt, { mode: 'product' })
-    installProgressUpdatesPrompt(scopedPrompt, { preset: 'full' } as DisplayState, { mode: 'frequent' })
+    installProgressUpdatesPrompt(scopedPrompt, display, { mode: 'frequent' })
     installResponseStylePrompt(scopedPrompt, { style: 'concise' })
+    // Production composition installs Focus whenever a display state exists.
+    installFocusPrompt(scoped.ctx, display)
     return renderPrompt(await systemPrompt.assemble({ scope: scopeKey }))
   }
+  const MINIMAL_PERSONA = { prefix: 'You are a helpful software engineer assistant.', complete: true }
+  const OPEN_PERSONA = { prefix: 'You are a helpful software engineer assistant.', complete: false }
 
-  // minimal: the complete persona IS the whole prompt.
-  const minimal = await renderWithPersona({ prefix: 'You are a helpful software engineer assistant.', complete: true })
+  // minimal (complete persona): the persona IS the whole prompt — attribution
+  // plus BOTH pre-existing policies are gone.
+  const minimal = await renderWithPersona(MINIMAL_PERSONA, 'full')
   assert.ok(minimal.includes('You are a helpful software engineer assistant.'), `the persona is the prompt:\n${minimal}`)
   assert.ok(!minimal.includes(OFFICIAL_TRAILER), 'no attribution guidance reaches a complete-persona preset')
   assert.ok(!minimal.includes('# Progress updates'), 'the pre-existing progress policy is suppressed identically')
   assert.ok(!minimal.includes('# Response style'), 'the pre-existing response-style policy is suppressed identically')
+  // Focus needs its own render: its text is non-empty only while the display
+  // preset IS focus (and the progress policy is empty then by its own rule).
+  const minimalFocus = await renderWithPersona(MINIMAL_PERSONA, 'focus')
+  assert.ok(!minimalFocus.includes('# Focus mode'), 'the pre-existing Focus policy is suppressed identically')
 
-  // Positive control: the same sections DO render under a non-complete
-  // persona (so the assertions above are about `complete`, not about the
-  // sections silently failing to register).
-  const nonComplete = await renderWithPersona({ prefix: 'You are a helpful software engineer assistant.', complete: false })
-  assert.ok(nonComplete.includes(OFFICIAL_TRAILER), `attribution renders without a complete persona:\n${nonComplete}`)
-  assert.ok(nonComplete.includes('# Progress updates'), 'the progress policy renders too')
-  assert.ok(nonComplete.includes('# Response style'), 'the response-style policy renders too')
+  // Positive controls: every one of those sections DOES render under a
+  // non-complete persona, so the assertions above are about `complete` and
+  // cannot pass because a section silently failed to register.
+  const open = await renderWithPersona(OPEN_PERSONA, 'full')
+  assert.ok(open.includes(OFFICIAL_TRAILER), `attribution renders without a complete persona:\n${open}`)
+  assert.ok(open.includes('# Progress updates'), 'the progress policy renders too')
+  assert.ok(open.includes('# Response style'), 'the response-style policy renders too')
+  const openFocus = await renderWithPersona(OPEN_PERSONA, 'focus')
+  assert.ok(openFocus.includes('# Focus mode'), `the Focus policy renders too:\n${openFocus}`)
 })
