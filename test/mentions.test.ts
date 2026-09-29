@@ -33,8 +33,9 @@ const abort = new AbortController().signal
  * so the bounded recursive scan is what the completion exercises. */
 /** A Direct adapter whose session scope runs the OFFICIAL search over the
  * fixture tree (`WorkspaceFileSearch`: path text after `@`, deterministic
- * ranked path-only candidates). */
-function officialSeam(root: string): DirectHostFilePort {
+ * ranked path-only candidates). `queries` records the official-form query
+ * each service call received. */
+function officialSeam(root: string, queries?: string[]): DirectHostFilePort {
   const search = new WorkspaceFileSearch(root, {
     maxResults: 20,
     maxEntries: 50_000,
@@ -42,7 +43,12 @@ function officialSeam(root: string): DirectHostFilePort {
   })
   return new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null, {
     get: (name: string) => name === 'fileReferences'
-      ? { list: (agent: unknown, query: string, signal: AbortSignal) => search.list(query, signal) }
+      ? {
+          list: (agent: unknown, query: string, signal: AbortSignal) => {
+            queries?.push(query)
+            return search.list(query, signal)
+          },
+        }
       : undefined,
   })
 }
@@ -125,7 +131,13 @@ test('resolveFdPath honors PATHEXT-style executable suffixes', (t) => {
 test('the fallback completes @ mentions from anywhere in the tree', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, officialSeam(root))
+  // SESSION scope through the OFFICIAL service: the provider's scope
+  // source pins a live session so the port routes to ctx.fileReferences
+  // (the WorkspaceFileSearch stand-in), and the recorded queries prove the
+  // grammar-stripped official form — including the quoted case.
+  const queries: string[] = []
+  const official = officialSeam(root, queries)
+  const provider = new MentionProvider([], root, official, undefined, () => ({ kind: 'session', sessionId: 'session-live' }))
   // Prefix match on the basename (cursor at the end of '@file').
   const file = await provider.getSuggestions(['look at @file'], 0, 13, { signal: abort })
   assert.ok(file !== null, `@file must suggest:\n${JSON.stringify(file)}`)
@@ -143,6 +155,11 @@ test('the fallback completes @ mentions from anywhere in the tree', async (t) =>
   // No matches: null.
   const none = await provider.getSuggestions(['@zzz-nope'], 0, 9, { signal: abort })
   assert.equal(none, null, 'no match must return null')
+  // The port received the OFFICIAL query form on every call — the path
+  // text after `@` — never the at-prefixed editor grammar.
+  assert.ok(queries.includes('file'), `unquoted form must strip: ${JSON.stringify(queries)}`)
+  assert.ok(queries.includes('nested'), `substring form must strip: ${JSON.stringify(queries)}`)
+  assert.ok(queries.includes('zzz-nope'), `no-match form must strip: ${JSON.stringify(queries)}`)
 })
 
 test('the provider completes the QUOTED @ form through the port (quoted values)', async (t) => {

@@ -160,11 +160,13 @@ export class DirectHostFilePort implements HostFilePort {
     // NO official carrier (the wire answers `unavailable`). The legacy
     // scanner (fd/fdfind, bounded recursive fallback) answers behind the
     // same path-only contract; it must not define the session semantics.
+    // `query` is already the official form (text following `@`): a literal
+    // `@dir/file` mention normalizes to `@dir/file` — no grammar parsing
+    // here, the scanner engine owns scope resolution for the raw text.
     const workDir = scope.cwd
     const signal = options?.signal
-    const { raw } = stripPrefix(query)
     try {
-      const resolved = resolveQuery(raw, workDir)
+      const resolved = resolveQuery(query, workDir)
       const candidates = await discoverForQuery(resolved, this.discoverySource, signal ?? new AbortController().signal)
       signal?.throwIfAborted()
       // THE PORT CONTRACT: paths are USER-FACING — the display base the
@@ -213,19 +215,6 @@ export class DirectHostFilePort implements HostFilePort {
     // both backends send the SAME bytes for the same input.
     return text
   }
-}
-
-/** Strip the `@` and any closing quote from one editor at-prefix
- * (`@src/fo` → `src/fo`; `@"my file` → `my file`; `@"closed"` → `closed`). */
-function stripPrefix(query: string): { raw: string } {
-  if (query.startsWith('@')) {
-    const inner = query.slice(1)
-    if (inner.startsWith('"')) {
-      return { raw: inner.endsWith('"') ? inner.slice(1, -1) : inner.slice(1) }
-    }
-    return { raw: inner }
-  }
-  return { raw: query }
 }
 
 /** The synchronous existence probe (the Direct machine IS the Host
