@@ -487,6 +487,12 @@ test('/settings announces a disconnected config backend as unavailable', async (
     harness.notices.some(entry => /configuration backend is unavailable/u.test(entry.message)),
     'a disconnected config backend is announced as unavailable',
   )
+  // The harness has no settings document, so the rows show the panel's
+  // BUILT-IN defaults: the notice must not call those "last known" Host values.
+  assert.ok(
+    harness.notices.some(entry => /built-in defaults, not Host values/u.test(entry.message)),
+    'without a Host document the notice says so instead of claiming last-known values',
+  )
 })
 
 test('/settings stays silent when the config backend is current', async () => {

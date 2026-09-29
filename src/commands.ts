@@ -1995,10 +1995,18 @@ export function registerTuiCommands(
       // last-known values as authoritative.
       const configReadiness = runner.config.configReadiness()
       if (configReadiness !== 'ready') {
+        // The wording must match what the rows actually show: without a
+        // settings document the rows fall back to the panel's BUILT-IN
+        // defaults, which are not Host values at all — calling them
+        // "last known" would fabricate authority the backend never had
+        // (§9.1). With a document they are the last-known Host values.
+        const hasHostValues = tuiSettings !== undefined
         app.notify(
           configReadiness === 'unavailable'
-            ? 'the configuration backend is unavailable — values shown are the last known ones and changes cannot be saved'
-            : 'the configuration is not current (reconnecting) — values shown are the last known ones; changes will be refused until it reconnects',
+            ? hasHostValues
+              ? 'the configuration backend is unavailable — the values shown are the last known ones and changes cannot be saved'
+              : 'the configuration backend is unavailable — the settings below show built-in defaults, not Host values, and changes cannot be saved'
+            : 'the configuration is not current (reconnecting) — the values shown are the last known ones; changes will be refused until it reconnects',
           'error',
         )
       }
@@ -5146,7 +5154,13 @@ export function registerTuiCommands(
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
         await credentials.setReference(targetRef, key)
         return { kind: 'success', text: `API key ${targetRef} set` }
-      } catch {
+      } catch (error) {
+        // A superseded completion is NOT a user cancellation: the key cannot
+        // be confirmed as set on the current Host (the Remote credential
+        // write re-checks its Connection generation before reporting success).
+        if (error instanceof SupersededReadError) {
+          return { kind: 'error', text: 'the connection changed while setting the key; it was not confirmed — retry' }
+        }
         return { kind: 'error', text: 'login cancelled' }
       }
     },

@@ -115,7 +115,7 @@ test('a failing config first read is recorded and still yields a backend (never 
     fetch: async () => new Response(null, { status: 404 }),
   })
   const config = runtime.backend.config as unknown as { readiness(): string; lastRefreshFailure(): unknown; tuiSettings?: unknown }
-  assert.equal(config.readiness(), 'stale', 'a failed read is never reported as ready')
+  assert.equal(config.readiness(), 'unavailable', 'no committed read: nothing authoritative to present, never "ready"')
   assert.ok(config.lastRefreshFailure() !== undefined, 'the failure is recorded, not swallowed')
   assert.equal(config.tuiSettings, undefined, 'no fabricated namespace is served')
   runtime.dispose()

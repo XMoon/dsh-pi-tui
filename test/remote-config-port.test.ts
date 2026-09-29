@@ -53,6 +53,8 @@ interface FakeState {
   mutateFailure: unknown
   mutateApplies: boolean
   readonly credentialStore: Map<string, { configured: boolean; source?: string }>
+  /** Runs INSIDE a credential RPC so a test can replace the generation mid-call. */
+  credentialGate: (() => void | Promise<void>) | undefined
   readonly executeCalls: { sessionId: string; line: string; attachments: readonly unknown[]; signal?: AbortSignal }[]
   executeResult: { ok: true; value: unknown } | { ok: false; error: unknown }
   readonly order: string[]
@@ -139,6 +141,7 @@ function createBackend(seed?: (state: FakeState) => void) {
     mutateFailure: undefined,
     mutateApplies: true,
     credentialStore: new Map(),
+    credentialGate: undefined,
     executeCalls: [],
     executeResult: { ok: true, value: { commandId: 'c' } },
     order: [],
@@ -202,6 +205,7 @@ function createBackend(seed?: (state: FakeState) => void) {
     },
     credentials: {
       describe: async (refs: string[]) => {
+        await state.credentialGate?.()
         const value: Record<string, { configured: boolean; source?: string; writable: boolean }> = {}
         for (const ref of refs) {
           const info = state.credentialStore.get(ref)
@@ -214,10 +218,12 @@ function createBackend(seed?: (state: FakeState) => void) {
         return { ok: true as const, value }
       },
       set: async (ref: string, _value: string) => {
+        await state.credentialGate?.()
         state.credentialStore.set(ref, { configured: true, source: 'provider' })
         return { ok: true as const, value: undefined }
       },
       unset: async (ref: string) => {
+        await state.credentialGate?.()
         state.credentialStore.delete(ref)
         return { ok: true as const, value: undefined }
       },
@@ -831,7 +837,11 @@ test('configReadiness reports the mirror currentness truthfully and refuses writ
   const { port, state, generation } = createBackend(current => {
     current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
   })
-  assert.equal(port.configReadiness(), 'stale', 'no read yet: the mirror is not current')
+  // No committed read means there is nothing authoritative to present — not
+  // even last-known values — so the consumer must not show its own built-in
+  // defaults as Host values.
+  assert.equal(port.configReadiness(), 'unavailable', 'no read yet: no authoritative values exist')
+  assert.equal(port.tuiSettings, undefined, 'no namespace view is served before the first read')
   await port.describe()
   assert.equal(port.configReadiness(), 'ready')
 
@@ -868,4 +878,100 @@ test('configReadiness reports the mirror currentness truthfully and refuses writ
   assert.equal(state.mutateCalls.length, mutationsAfter, 'a refused write dispatches no mutate')
   assert.equal(port.configReadiness(), 'stale', 'the failed refresh leaves the mirror non-current')
   assert.ok(port.lastRefreshFailure() !== undefined, 'the failure is recorded for the UI')
+})
+
+test('a failed FIRST read yields no authoritative values and refuses writes with the real reason', async () => {
+  // §9.1: "no snapshot" is not "last-known snapshot". Presenting the panel's
+  // own built-in defaults as Host values would fabricate authority the backend
+  // never had.
+  const { port, state } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
+    current.describeFailure = { code: 'gateway/unavailable', message: 'offline' }
+  })
+  await assert.rejects(() => port.describe(), /settings\.describe failed/u)
+  assert.equal(port.configReadiness(), 'unavailable', 'no committed snapshot: nothing to present')
+  assert.equal(port.tuiSettings, undefined, 'the port serves no settings facade without a read')
+  assert.ok(port.lastRefreshFailure() !== undefined, 'the failure is recorded for the UI')
+
+  // The write path names the actual reason rather than claiming a stale value.
+  const facade = {
+    get: () => ({ ...TUI_DEFAULTS }),
+    replace: async () => {},
+  }
+  state.describeFailure = undefined
+  await port.describe()
+  assert.equal(port.configReadiness(), 'ready')
+  state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
+  await assert.rejects(async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
+    /settings\.describe failed/u)
+})
+
+test('an empty replace diff is a no-op only once the mirror is current', async () => {
+  // A diff computed from a STALE mirror can be empty while the Host's
+  // authoritative value differs: returning before the authority fence would
+  // report success for a document the UI computed from superseded values.
+  const { port, state, generation } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
+  })
+  await port.describe()
+  const mutations = state.mutateCalls.length
+  // Current + unchanged: a real no-op, nothing dispatched.
+  await port.tuiSettings!.replace(port.tuiSettings!.get())
+  assert.equal(state.mutateCalls.length, mutations, 'a current empty diff dispatches nothing')
+
+  // Stale + unchanged + the refresh fails: the write must NOT resolve. The
+  // failure is armed BEFORE the generation change so the invalidation-triggered
+  // rerun fails too (no racy successful commit).
+  state.describeFailure = { code: 'gateway/unavailable', message: 'offline' }
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.configReadiness(), 'stale')
+  await assert.rejects(async () => { await port.tuiSettings!.replace(port.tuiSettings!.get()) },
+    /settings\.describe failed/u)
+  assert.equal(state.mutateCalls.length, mutations, 'no mutate is dispatched')
+
+  // Stale + unchanged + the refresh succeeds: the mirror becomes current
+  // again and the authoritative value is what consumers now read.
+  state.describeFailure = undefined
+  state.namespaces.get(TUI_NS)!.value.theme = 'light'
+  await port.tuiSettings!.replace(port.tuiSettings!.get())
+  assert.equal(port.configReadiness(), 'ready')
+  assert.equal(port.tuiSettings!.get().theme, 'light', 'the refreshed authority is what the UI reads')
+  assert.equal(state.mutateCalls.length, mutations, 'an unchanged document still dispatches no mutate')
+})
+
+test('credential operations re-check the Connection generation before reporting an outcome', async () => {
+  // AGENTS.md: a Remote async result must re-check generation/identity before
+  // it can mutate visible state. A credential call that completed against a
+  // REPLACED Host must not be reported as a success on the new one (the write
+  // may have landed on the old Host), and a replaced describe must not feed
+  // the /logout picker a stale row.
+  const { port, state, generation } = createBackend()
+  state.credentialGate = async () => { generation.set({ id: 'gen-2' }) }
+  await assert.rejects(
+    () => port.credentials.setReference('ACME_KEY', 'secret'),
+    (error: unknown) => {
+      assert.equal((error as Error).name, 'SupersededReadError')
+      return true
+    },
+  )
+  await assert.rejects(
+    () => port.credentials.unsetReference('ACME_KEY'),
+    (error: unknown) => {
+      assert.equal((error as Error).name, 'SupersededReadError')
+      return true
+    },
+  )
+  await assert.rejects(
+    () => port.credentials.describeReference('ACME_KEY'),
+    (error: unknown) => {
+      assert.equal((error as Error).name, 'SupersededReadError')
+      return true
+    },
+  )
+
+  // Same-generation operations still settle normally.
+  const same = createBackend()
+  assert.equal((await same.port.credentials.describeReference('ACME_KEY')).configured, false)
+  await same.port.credentials.setReference('ACME_KEY', 'secret')
+  assert.equal((await same.port.credentials.describeReference('ACME_KEY')).configured, true)
 })

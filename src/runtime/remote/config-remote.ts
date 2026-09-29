@@ -424,7 +424,11 @@ class RemoteConfigMirror {
     // A disconnected Connection has no authority to mirror: never "ready".
     if (generation === undefined) return 'unavailable'
     const snapshot = this.snapshot
-    if (snapshot === undefined) return 'stale'
+    // No COMMITTED read means there are no authoritative values at all — not
+    // even last-known ones. Reporting `stale` here would let a consumer
+    // present its own built-in defaults as "last known Host values" (§9.1);
+    // for the config consumer the truthful state is "nothing to show".
+    if (snapshot === undefined) return 'unavailable'
     // A generation change or an invalidation both make the last commit
     // non-current; the last-known value stays readable but not authoritative.
     if (!Object.is(snapshot.generation, generation)) return 'stale'
@@ -579,18 +583,24 @@ class RemoteConfigMirror {
    * authority, which is what makes "never an optimistic local write" true.
    */
   async mutate(ns: string, ops: readonly RemoteSettingsPathOp[]): Promise<void> {
-    if (ops.length === 0) return
     await this.enqueueWrite(async () => {
       await this.ensureCurrent()
       const snapshot = this.lastKnown()
       if (snapshot === undefined || !this.isCurrent()) {
-        // §9.1: a write against a non-current backend fails IMMEDIATELY with
-        // an explicit reason — never a silent no-op and never an optimistic
-        // local success (the pre-flight refresh above already had its chance).
-        throw new Error(this.readiness() === 'unavailable'
+        // §9.1: a write against a backend that cannot vouch for its values
+        // fails IMMEDIATELY with an explicit reason — never a silent no-op and
+        // never an optimistic local success (the pre-flight refresh above
+        // already had its chance).
+        throw new Error(this.generation.getSnapshot() === undefined
           ? 'the Remote configuration is unavailable on this connection; the change was not saved'
-          : 'the Remote configuration is not current; the change was not saved')
+          : snapshot === undefined
+            ? 'the Remote configuration has not been read yet; the change was not saved'
+            : 'the Remote configuration is not current; the change was not saved')
       }
+      // A genuinely empty diff is a no-op ONLY once the mirror is current:
+      // returning earlier would let a stale mirror report success for a
+      // document it computed from superseded values (§8.1/§9.1).
+      if (ops.length === 0) return
       const descriptor = snapshot.namespaces.get(ns)
       if (descriptor === undefined) {
         throw new Error(`settings namespace "${ns}" is not available in this deployment`)
@@ -998,19 +1008,42 @@ class RemoteCredentialConfig implements CredentialConfig {
     return this.generation.getSnapshot() !== undefined
   }
 
+  /**
+   * The generation fence every credential operation shares: a Remote async
+   * result must re-check the Connection generation before it can mutate
+   * visible state (AGENTS.md). A credential call that completed against a
+   * replaced Host is reported as superseded instead of as a success on the
+   * NEW Host — the write may have landed on the old one, and the UI must not
+   * claim otherwise.
+   */
+  private fence(captured: RemoteConnectionGeneration | undefined): void {
+    if (captured === undefined || !Object.is(captured, this.generation.getSnapshot())) {
+      throw new SupersededReadError('the credential result belongs to a replaced Connection generation')
+    }
+  }
+
   async setReference(ref: string, secret: string): Promise<void> {
+    const captured = this.generation.getSnapshot()
     const result = await settledResult(this.credentials.set(ref, secret))
     if (!result.ok) throw new Error(`credentials.set(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    this.fence(captured)
   }
 
   async unsetReference(ref: string): Promise<void> {
+    const captured = this.generation.getSnapshot()
     const result = await settledResult(this.credentials.unset(ref))
     if (!result.ok) throw new Error(`credentials.unset(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    this.fence(captured)
   }
 
   async describeReference(ref: string): Promise<{ configured: boolean; source?: string }> {
+    const captured = this.generation.getSnapshot()
     const result = await settledResult(this.credentials.describe([ref]))
     if (!result.ok) throw new Error(`credentials.describe(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    // A read from a replaced Host must not be presented as the current
+    // configuration (the /logout picker degrades a throwing describe to
+    // "not configured" — fail closed, never a stale row).
+    this.fence(captured)
     const info = result.value?.[ref]
     if (info === undefined) return { configured: false }
     return {
