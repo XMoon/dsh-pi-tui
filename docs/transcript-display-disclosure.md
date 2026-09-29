@@ -188,7 +188,10 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   instead of a semantically empty `Activity` (still the same
   `TranscriptWorkSpan`; never a semantic class, stat or persisted state — and
   the latest think-only span stays `Activity` so the identity never flips
-  while streaming). The "true latest" test is the window authority
+  while streaming). This policy is COMPACT-ONLY: expanded Focus materializes
+  the same canonical spans through the same component path, and its nested
+  Work keeps the original header + Think/Action contract (`Thought` never
+  appears outside Compact). The "true latest" test is the window authority
   (`transcriptWindow.hasNewer !== true` AND the span is the projected tail):
   a history page's last Work is that page's tail, not the global latest. The
   policy bit (`showPreview`) joins the Compact Work component-cache signature,

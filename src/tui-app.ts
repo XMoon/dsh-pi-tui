@@ -9571,12 +9571,17 @@ export class TuiApp {
     // Live wins, then the true latest Work, then historical compaction. The
     // live check reads the RAW block input; `preparingSummary` above follows
     // the existing expanded contract. Expanding a historical span never
-    // re-promotes it to live/latest (§5.2A).
+    // re-promotes it to live/latest (§5.2A). The historical policy is
+    // COMPACT-ONLY (plan §3/§6.5): expanded Focus materializes the same
+    // nested Work blocks through this component, and its spans must keep the
+    // original header + preview contract — `Thought` included, which derives
+    // from `showPreview` and therefore also never appears outside Compact.
     const latestWorkSpan = this.canonicalStructureIndex().workSpans.at(-1)
     const windowHasNewer = this.transcriptWindow?.hasNewer === true
     const isTrueLatestWork = !windowHasNewer && latestWorkSpan?.owner === span.owner
     const showPreview =
-      blockPreparingSummary !== undefined
+      this.displayState.preset !== 'compact'
+      || blockPreparingSummary !== undefined
       || summary.timing?.running === true
       || isTrueLatestWork
     const signature = this.compactWorkSignature(summary, action, preparingSummary, showPreview)

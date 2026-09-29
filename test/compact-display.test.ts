@@ -655,6 +655,54 @@ test('search reveal of a hidden historical Thought member restores and dismisses
   assert.ok(!view.includes('searchable historical reasoning'), 'the Think preview never resurrects')
 })
 
+test('the historical compaction never leaks into expanded Focus nested Work', async () => {
+  // Plan §3/§6.5: the historical preview policy (and the `Thought` identity
+  // derived from it) is COMPACT-ONLY. Expanded Focus materializes the same
+  // canonical spans through the same CompactWorkComponent path, so a preset
+  // gate must keep its collapsed historical Work on the original
+  // header + Think/Action contract.
+  const { vt, app } = startApp('focus')
+  const oldWorkOwner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'older focus reasoning' }
+  const oldTool: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' }
+  app.setTranscript([
+    oldWorkOwner,
+    oldTool,
+    { kind: 'assistant', turn: 1, text: 'boundary' },
+    { kind: 'thinking', turn: 1, text: 'latest focus reasoning' },
+    { kind: 'tool', turn: 1, name: 'bash', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map())
+  app.setFullscreen(true)
+  // Opening the Thought root materializes the turn's spans as nested Work
+  // containers (collapsed headers + previews).
+  app.expandFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!/Thought/.test(view), `Focus must never show the Compact Thought identity:\n${view}`)
+  assert.match(view, /Think:\s+older focus reasoning/,
+    `a HISTORICAL nested Work keeps its Think preview on Focus:\n${view}`)
+  assert.match(view, /Action:\s+✓ Read \{\}/,
+    `a historical nested Work keeps its Action preview on Focus:\n${view}`)
+  assert.match(view, /Think:\s+latest focus reasoning/, 'the latest nested Work also keeps its preview')
+})
+
+test('a historical think-only nested Work stays Activity on expanded Focus', async () => {
+  const { vt, app } = startApp('focus')
+  const thinkOnlyOwner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'think only focus reasoning' }
+  app.setTranscript([
+    thinkOnlyOwner,
+    { kind: 'assistant', turn: 1, text: 'boundary' },
+    { kind: 'thinking', turn: 1, text: 'latest focus reasoning' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map())
+  app.setFullscreen(true)
+  app.expandFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!/Thought/.test(view), `a think-only nested Work is never Thought on Focus:\n${view}`)
+  assert.match(view, /Think:\s+think only focus reasoning/,
+    `the think-only nested Work keeps its Activity + Think preview on Focus:\n${view}`)
+})
+
 test('regular Compact Ctrl+O opens the Work run without a dead ctrl+o card hint', async () => {
   const { vt, app } = startApp('compact')
   app.setTranscript([
