@@ -1001,17 +1001,17 @@ export class QuestionFlow implements Component, Focusable {
     this.exitOther()
   }
 
-  /** Sync the live editor text into the current question's draft after
-   * EVERY Input mutation (typing, paste, delete, kill/yank, undo, cursor
-   * moves). Draft.custom is the cross-question answer authority — the
-   * user never presses Enter to make text survive. The selection
-   * semantics mirror the DSH Web draft model: a nonblank custom replaces
-   * a single-select choice (multi-select keeps its checked labels), and
-   * clearing the text never fabricates a skip. */
-  private syncCustomDraft(): void {
-    const draft = this.draft()
-    if (draft === undefined) return
-    draft.custom = this.otherInput.getValue()
+  /** Sync the live editor text into the given question's draft after
+   * EVERY Input mutation (typing, paste, delete, kill/yank, undo). Only
+   * a REAL value change touches the answer semantics: cursor moves and
+   * other read-only Input operations leave `skipped` intact (a skipped
+   * blank question must stay skipped until the user actually types).
+   * The selection semantics mirror the DSH Web draft model: a nonblank
+   * custom replaces a single-select choice (multi-select keeps its
+   * checked labels), and clearing the text never fabricates a skip. */
+  private syncCustomDraft(draft: Draft, value: string): void {
+    if (value === draft.custom) return
+    draft.custom = value
     draft.skipped = false
     if (this.hasCustomAnswer(draft) && this.questions[this.tab]?.multiSelect !== true) {
       draft.selected.clear()
@@ -1072,10 +1072,12 @@ export class QuestionFlow implements Component, Focusable {
     this.otherInput.focused = false
   }
 
-  /** Enter in the edit: the live text is ALREADY the draft (every
-   * mutation synced it via {@link syncCustomDraft}), so this only
-   * applies the empty-answer continuation semantics, leaves the edit,
-   * and advances. */
+  /** Enter (or the Input's synchronous submit seam) in the edit: applies
+   * the empty-answer continuation semantics, leaves the edit, and
+   * advances. The value is committed to the CURRENT question's draft
+   * HERE — not left to the post-delivery sync — because this can run
+   * from inside Input.handleInput (onSubmit), after which the flow has
+   * already advanced and the old owner is gone. */
   private commitOther(value: string): void {
     const draft = this.draft()
     if (draft === undefined) return
@@ -1088,9 +1090,13 @@ export class QuestionFlow implements Component, Focusable {
       // (the arrow-key move-on must keep an answered draft, list-mode
       // parity). With a selection, empty text just keeps the selection.
       if (draft.selected.size === 0) draft.skipped = true
+    } else {
+      // A nonblank commit IS the answer: seed the draft from the live
+      // editor value (typing already synced it, but the submit seam can
+      // fire before any sync when the edit was entered with residual
+      // editor state), then apply the same replacement semantics.
+      this.syncCustomDraft(draft, value)
     }
-    // Nonblank text needs no state work: syncCustomDraft already made it
-    // the draft answer (skipped=false, single-select selection cleared).
     this.exitOther()
     this.advance()
   }
@@ -1304,10 +1310,25 @@ export class QuestionFlow implements Component, Focusable {
   /** Hand one raw key to the shared free-text Input and sync the live
    * draft afterwards — EVERY mutation path (edit mode and the optionless
    * navigation re-entry) goes through here, so Draft.custom can never go
-   * stale with visible editor text. */
+   * stale with visible editor text.
+   *
+   * REENTRANCY FENCE: Input.handleInput is NOT pure — it can fire
+   * onSubmit/onEscape SYNCHRONOUSLY (e.g. the submit seam for "\\n",
+   * Ghostty's Kitty-mode shift+enter text mapping), and those callbacks
+   * advance the tab or rebuild the Input. The post-delivery sync
+   * therefore re-checks the owner (tab AND Input instance) captured
+   * BEFORE the delivery and drops the sync when the callback moved the
+   * flow on — otherwise the OLD question's live text would be written
+   * into the NEW question's draft (commitOther already synced the old
+   * draft before advancing). */
   private deliverOtherInput(data: string): void {
-    this.otherInput.handleInput(data)
-    this.syncCustomDraft()
+    const tab = this.tab
+    const input = this.otherInput
+    input.handleInput(data)
+    if (this.tab !== tab || this.otherInput !== input) return
+    const draft = this.drafts[tab]
+    if (draft === undefined) return
+    this.syncCustomDraft(draft, input.getValue())
   }
 
   invalidate(): void {
