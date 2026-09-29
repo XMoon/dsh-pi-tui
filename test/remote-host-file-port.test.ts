@@ -105,6 +105,27 @@ test('no connection reads unavailable without any Host call', async () => {
   assert.deepEqual(calls, [])
 })
 
+test('F5+cancellation: a pre-aborted WORKSPACE request rejects before the unsupported answer', async () => {
+  const { port, calls } = harness()
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    port.listReferences({ kind: 'workspace', cwd: '/any' }, '@a', { signal: controller.signal }),
+    /aborted/u,
+    'cancellation outranks the workspace-scope unavailable')
+  assert.deepEqual(calls, [], 'the rejected request never dispatches')
+})
+
+test('a pre-aborted resolveReference rejects instead of answering unavailable', async () => {
+  const { port } = harness()
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    port.resolveReference({ kind: 'session', sessionId: 's' }, 'a.ts', { signal: controller.signal }),
+    /aborted/u,
+    'cancellation outranks the no-carrier unavailable on the synchronous resolve path')
+})
+
 test('F5: the workspace scope is unavailable with ZERO Remote calls', async () => {
   const { port, calls } = harness()
   const result = await port.listReferences({ kind: 'workspace', cwd: '/any/cwd' }, '@a')

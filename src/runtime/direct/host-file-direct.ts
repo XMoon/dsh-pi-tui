@@ -88,17 +88,18 @@ export class DirectHostFilePort implements HostFilePort {
     query: string,
     options?: { signal?: AbortSignal },
   ): Promise<HostFileListResult> {
+    const signal = options?.signal
+    // Cancellation is CANCELLATION and wins over EVERY other outcome
+    // (the M3-3A failure vocabulary: an aborted request rejects — the
+    // Remote adapter's `throwIfAborted` shape) — including the
+    // unresolvable-scope unavailable below.
+    signal?.throwIfAborted()
     const workDir = this.scopeCwd(scope)
     // An unresolvable scope is an UNAVAILABLE capability (the adapter cannot
     // even form the Host-side query), never an authoritative empty answer.
     if (workDir === undefined) {
       return { kind: 'unavailable', reason: 'the session scope has no resolvable Host workspace' }
     }
-    const signal = options?.signal
-    // Cancellation is CANCELLATION (the M3-3A failure vocabulary: an
-    // aborted request rejects, it is never reported as a capability being
-    // unavailable) — exactly the Remote adapter's `throwIfAborted` shape.
-    signal?.throwIfAborted()
     // `query` is the editor's at-prefix INCLUDING the leading `@` (and an
     // unclosed `"` for the quoted form). The engine strips the `@` and any
     // trailing quote, resolves the scope and answers discovery with path
@@ -136,7 +137,8 @@ export class DirectHostFilePort implements HostFilePort {
     options?: { signal?: AbortSignal },
   ): Promise<HostFileResolveResult> {
     // A cancelled probe rejects before any filesystem access — cancellation
-    // is never folded into the unavailable state (M3-3A failure vocabulary).
+    // wins over the unresolvable-scope unavailable below (M3-3A failure
+    // vocabulary).
     options?.signal?.throwIfAborted()
     const cwd = this.scopeCwd(scope)
     if (cwd === undefined) {
