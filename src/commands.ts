@@ -1132,7 +1132,7 @@ async function provisionKeylessProfile(
 
 /** The credential surface /logout's picker needs — the config port's
  * credentials sub-interface (presence-only reads). */
-type LogoutCredentialsLike = Pick<import('./runtime/config-port.ts').CredentialConfig, 'listRecords' | 'describeReference'>
+type LogoutCredentialsLike = Pick<import('./runtime/config-port.ts').CredentialConfig, 'recordsSupported' | 'listRecords' | 'describeReference'>
 
 /** Value prefixes for the /logout picker rows (no collision with a ref). */
 const LOGOUT_REF_VALUE = '\u0000ref:'
@@ -1162,18 +1162,17 @@ async function logoutPickerRows(
       // A throwing describe degrades to "not configured".
     }
   }
-  // An enumeration-unavailable backend (Remote: rc.2 publishes no record-read
+  // An enumeration-UNAVAILABLE backend (Remote: rc.2 publishes no record-read
   // Remote) must NOT make the whole picker fail: the reference rows above are
   // still clearable, so the picker opens and the RESULT wording states that
-  // stored-record cleanup is unavailable here (plan §9.4). A backend that
-  // CAN enumerate but whose read failed for another reason would be hidden by
-  // a broad catch — the port is responsible for that distinction, and this
-  // path only reports the capability gap truthfully.
+  // stored-record cleanup is unavailable here (plan §9.4). The port owns the
+  // capability distinction, so a SUPPORTED backend whose read really fails
+  // propagates that failure instead of being mislabelled a capability gap.
   let recordCleanupUnavailable = false
   let records: readonly { key: string; kind?: string }[] = []
-  try {
+  if (credentials.recordsSupported()) {
     records = await credentials.listRecords()
-  } catch {
+  } else {
     recordCleanupUnavailable = true
   }
   const seenKeys = new Set<string>()

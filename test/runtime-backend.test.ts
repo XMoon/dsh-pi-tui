@@ -117,6 +117,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       writeKeylessProfile: async () => ({ kind: 'written' as const }),
     },
     credentials: {
+      recordsSupported: () => true,
       available: () => true,
       setReference: async () => {},
       unsetReference: async () => {},

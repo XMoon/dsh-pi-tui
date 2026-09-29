@@ -545,6 +545,10 @@ export class DirectCredentialConfig implements CredentialConfig {
     return { configured: info.configured, ...typeof info.source === 'string' ? { source: info.source } : {} }
   }
 
+  recordsSupported(): boolean {
+    return true
+  }
+
   async listRecords(): Promise<readonly { key: string; kind?: string }[]> {
     const credentials = this.credentials()
     if (credentials === undefined) return []

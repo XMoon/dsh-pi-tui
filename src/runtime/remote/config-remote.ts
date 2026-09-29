@@ -1068,6 +1068,13 @@ class RemoteCredentialConfig implements CredentialConfig {
     ))
   }
 
+  recordsSupported(): boolean {
+    // INTENTIONAL_UNSUPPORTED_IN_M3 (§8.5/§10): rc.2 publishes no record-read
+    // and no record-delete Remote, so this is a CAPABILITY GAP — reported as
+    // such by consumers, never as an empty record list.
+    return false
+  }
+
   /** @see listRecords — no record delete Remote exists on rc.2. */
   deleteRecord(key: string): Promise<void> {
     return Promise.reject(new Error(

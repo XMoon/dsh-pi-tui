@@ -137,6 +137,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         writeKeylessProfile: async () => ({ kind: 'written' as const }),
       },
       credentials: {
+        recordsSupported: () => true,
         available: () => true,
         setReference: async () => {},
         unsetReference: async () => {},

@@ -271,6 +271,18 @@ export interface CredentialConfig {
   setReference(ref: string, secret: string): Promise<void>
   /** Clear one reference credential (/logout). */
   unsetReference(ref: string): Promise<void>
+  /**
+   * Whether this backend can enumerate and delete stored credential RECORDS
+   * (plan §8.5). Direct: yes — the credentials service owns them. Remote
+   * rc.2: NO — the wire publishes no record read and no record delete, so
+   * `listRecords()` rejects and `deleteRecord()` fails closed.
+   *
+   * The distinction is the point: a consumer must present "this backend
+   * cannot list stored records" instead of treating a rejection as an empty
+   * list, and a SUPPORTED backend whose read really failed must still surface
+   * that failure rather than being reported as a capability gap.
+   */
+  recordsSupported(): boolean
   /** Delete one stored credential record (/logout; the authorization
    * flow's durable record). */
   deleteRecord(key: string): Promise<void>

@@ -262,7 +262,7 @@ function setup(options: {
   assert.ok(logout?.handler !== undefined, 'logout handler missing')
   const run = async <T>(def: { handler?: unknown }, rawInput: string): Promise<T> =>
     (def!.handler as (inv: CommandInvocation) => Promise<T>)(invoke(rawInput))
-  return { app, credentials, settings, llm: options.llm, signal: runner.signal, pickerRows, run, login, logout }
+  return { app, credentials, settings, llm: options.llm, signal: runner.signal, pickerRows, run, login, logout, runnerConfig: runner.config }
 }
 
 test('credentialOptionsFor lists deepseek official plus deduped llm-pi-ai routes', () => {
@@ -547,7 +547,10 @@ test('/logout keeps the reference picker usable when the backend cannot enumerat
   // listRecords() instead of pretending the list is empty. That must not make
   // the whole /logout picker fail — the configured references are still
   // clearable, and the result states the record limitation plainly (§9.4).
-  const t = setup({ failListRecords: true })
+  const t = setup()
+  // A Remote-shaped credential backend: the port reports the capability gap
+  // (rc.2 has no record-read Remote), so the picker must not depend on it.
+  ;(t.runnerConfig.credentials as unknown as { recordsSupported: () => boolean }).recordsSupported = () => false
   const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
   assert.equal(result.kind, 'success')
   assert.ok(t.pickerRows.length > 0, 'the picker still opens with the clearable references')
@@ -562,11 +565,20 @@ test('/logout keeps the reference picker usable when the backend cannot enumerat
 })
 
 test('/logout reports nothing-to-sign-out with the record limitation instead of failing', async () => {
-  const t = setup({ failListRecords: true })
+  const t = setup()
+  ;(t.runnerConfig.credentials as unknown as { recordsSupported: () => boolean }).recordsSupported = () => false
   // No reference is configured for this deployment: the picker would be empty.
   t.credentials.service.describe = async () => ({ configured: false })
   const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /cannot be enumerated or removed on this backend/u)
+  t.app.stop()
+})
+
+test('/logout surfaces a real record-read failure on a backend that CAN enumerate', async () => {
+  // The port owns the capability distinction: a supported backend whose read
+  // fails must not be mislabelled as "records are unavailable here".
+  const t = setup({ failListRecords: true })
+  await assert.rejects(() => t.run(t.logout, ''), /cannot enumerate stored credential records/u)
   t.app.stop()
 })
