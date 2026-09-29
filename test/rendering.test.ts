@@ -1061,7 +1061,7 @@ test('askQuestions toggles multi-select options', async () => {
   await viewport(vt)
   vt.sendInput('2') // toggle B on
   await viewport(vt)
-  // Multi-select Enter toggles; → pages to the review page, Enter submits.
+  // Multi-select digits toggle; → pages to the review page, Enter submits.
   vt.sendInput('\x1b[C')
   await viewport(vt)
   vt.sendInput('\r')
