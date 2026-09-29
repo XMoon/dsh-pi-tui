@@ -41,11 +41,15 @@
  */
 
 /** One `@`-reference completion candidate (detached, path-only — the
- * exact upstream `FileReferenceCandidate` shape: `path` + `kind`). All
- * TUI presentation (fuzzy ranking, quoting, the `@`-insertion value, the
- * basename label, the description row, directory continuation) is CLIENT
- * policy in the editor's mention provider, never Host data: a Remote
- * adapter answers "which Host files exist" and nothing more. */
+ * exact upstream `FileReferenceCandidate` shape: `path` + `kind`). The
+ * candidates arrive ALREADY FILTERED, RANKED and BOUNDED by the Host
+ * discovery authority for the query: the official service owns fuzzy
+ * matching, ranking, `maxResults` and the deterministic order, and the
+ * client must PRESERVE that order (a second client-side ranking/filter
+ * pass would be a second semantic authority — and can DROP candidates
+ * the Host deliberately returned, e.g. its subsequence matches). Only
+ * presentation (quoting, the `@`-insertion value, the label, directory
+ * continuation) is CLIENT policy. */
 export interface HostFileCandidate {
   /** The user-facing path relative to the scope workspace (`src/deep.ts`),
    * accepted by normal prompts and filesystem tools; directories carry NO
@@ -91,8 +95,11 @@ export interface HostFilePort {
    * the generated `fileReferences/list` Remote accept. The editor
    * grammar's `@`/quote stripping is CLIENT policy (mentions.ts), never
    * an adapter's. Returns the candidates the current Host filesystem
-   * discovery offers as an authoritative `ok` — `[]` when nothing
-   * matches — or `unavailable` when the capability cannot answer.
+   * discovery offers — ALREADY filtered, ranked and bounded BY THE HOST
+   * AUTHORITY for this query, in the Host's order (the client presents
+   * without re-ranking; see `HostFileCandidate`) — as an authoritative
+   * `ok` (`[]` when nothing matches) or `unavailable` when the capability
+   * cannot answer.
    * Cancellation is its own outcome and outranks every other one: an
    * aborted signal REJECTS (both adapters, entry-time — before any
    * scope/capability decision), never folded into `unavailable`. */

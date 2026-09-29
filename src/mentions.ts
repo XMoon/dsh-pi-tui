@@ -42,7 +42,8 @@ import {
   extractAtPrefix,
   FILE_ARGUMENT_COMMANDS,
 } from './file-completion/context.ts'
-import { completePath, presentDiscovery, resolveQuery } from './file-completion/engine.ts'
+import { completePath, resolveQuery } from './file-completion/engine.ts'
+import { presentPathCandidate } from './file-completion/presentation.ts'
 import { separatorOfRaw, stripAtQuotes } from './file-completion/query.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { resolveFdPath } from './file-completion/discovery.ts'
@@ -589,11 +590,16 @@ export class MentionProvider implements AutocompleteProvider {
     if (!sameMentionScope(scope, this.scopeOf())) return null
     const { raw, quoted } = stripMentionToken(atPrefix)
     const query = resolveQuery(raw, this.workDir)
-    const items = presentDiscovery(
-      candidates.map(candidate => ({ path: candidate.path, kind: candidate.kind })),
-      query.searchTerm,
-      { at: true, quoted, sep: separatorOfRaw(raw, query.winAbsolute || raw.includes('\\')) },
-    )
+    // PRESENTATION ONLY: the port's candidates are already filtered,
+    // ranked and bounded by the Host discovery authority — this layer
+    // preserves their order exactly (no second client-side ranking pass
+    // that could drop or reorder Host-returned candidates) and owns just
+    // the `@`/quoting shape, labels and directory continuation.
+    const items = candidates.map(candidate =>
+      presentPathCandidate(
+        { path: candidate.path, kind: candidate.kind },
+        { at: true, quoted, sep: separatorOfRaw(raw, query.winAbsolute || raw.includes('\\')) },
+      ))
     if (items.length === 0) return null
     return { prefix: atPrefix, items }
   }

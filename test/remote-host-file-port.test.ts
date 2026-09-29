@@ -50,7 +50,7 @@ test('F1b: an authoritative Host empty answer stays ok([]) — not unavailable',
 test('F2: the AbortSignal is forwarded to the official call', async () => {
   const controller = new AbortController()
   const { port, calls } = harness()
-  await port.listReferences({ kind: 'session', sessionId: 's' }, '@x', { signal: controller.signal })
+  await port.listReferences({ kind: 'session', sessionId: 's' }, 'x', { signal: controller.signal })
   assert.equal(calls[0]!.signal, controller.signal)
 })
 
@@ -58,7 +58,7 @@ test('F2b: an already-aborted request never dispatches', async () => {
   const controller = new AbortController()
   controller.abort()
   const { port, calls } = harness()
-  await assert.rejects(port.listReferences({ kind: 'session', sessionId: 's' }, '@x', { signal: controller.signal }))
+  await assert.rejects(port.listReferences({ kind: 'session', sessionId: 's' }, 'x', { signal: controller.signal }))
   assert.deepEqual(calls, [])
 })
 
@@ -112,7 +112,7 @@ test('F5+cancellation: a pre-aborted WORKSPACE request rejects before the unsupp
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(
-    port.listReferences({ kind: 'workspace', cwd: '/any' }, '@a', { signal: controller.signal }),
+    port.listReferences({ kind: 'workspace', cwd: '/any' }, 'a', { signal: controller.signal }),
     /aborted/u,
     'cancellation outranks the workspace-scope unavailable')
   assert.deepEqual(calls, [], 'the rejected request never dispatches')
