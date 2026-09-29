@@ -4,7 +4,9 @@
  * notes for a version straight from the changelogs, never from commit
  * messages or AI summarization. Doubles as the release-metadata gate:
  *
- *   - the tag must be `v<stable-version>` or `next-v<prerelease-version>`,
+ *   - the input must be an explicit release tag `v<version>` or
+ *     `next-v<version>`; the tag prefix selects the publication channel,
+ *     so a bare package version is ambiguous and rejected,
  *   - package.json `version` must equal the parsed tag version,
  *   - CHANGELOG.md must contain a `## [<version>]` section,
  *   - CHANGELOG.en.md must contain the same section,
@@ -23,15 +25,13 @@ import { requiredGuidance } from './lib/dsh-compat.mjs'
 const [, , input, output = 'release-notes.md'] = process.argv
 
 if (input === undefined) {
-  throw new Error('Usage: node scripts/release-notes.mjs <tag-or-version> [output]')
+  throw new Error('Usage: node scripts/release-notes.mjs <release-tag> [output]')
 }
 
-// CI passes the original tag after release-context has validated it; local
-// invocations may pass either supported tag form (or a bare version). Re-use
-// the same parser without making the `next-` prefix part of package SemVer.
-const release = input.startsWith('v') || input.startsWith('next-')
-  ? parseReleaseTag(input)
-  : parseReleaseTag(input.includes('-') ? `next-v${input}` : `v${input}`)
+// Both CI and local invocations must pass an explicit release tag: the tag
+// prefix is the only publication-channel authority, so a bare version cannot
+// be mapped to a channel and is rejected by the parser.
+const release = parseReleaseTag(input)
 const { channel, version } = release
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
@@ -190,9 +190,9 @@ if (zh.heading !== en.heading) {
 // The 0.4 migration changes the runtime pairing. Keep the copy-paste commands
 // in both the changelog and the generated GitHub Release body; a release page
 // that only says "upgrade" is not actionable enough to prevent a mixed install.
-// The stable cutover has a different install channel and DSH baseline from the
-// alpha train, so do not make a future stable release retain prerelease-only
-// guidance by accident.
+// A latest-channel release may carry a different install channel and DSH
+// baseline than the previous next-channel train, so do not let any release
+// accidentally retain an older pin's guidance.
 function containsExactGuidance(content, command) {
   const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)

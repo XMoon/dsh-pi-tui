@@ -55,7 +55,7 @@ test('the package version reserves one consistent release identity across manife
   // Version-coupled fields move ATOMICALLY: an untagged promotion candidate
   // reserves its identity in package.json, matrix current.since, and the
   // current compatibility row's `tui` (see docs/releasing.md — the version is
-  // only consumed when the stable tag is created). A partial move (e.g.
+  // consumed when the corresponding release tag is published). A partial move (e.g.
   // version 0.5.1 with since 0.5.0, or a current row still naming the
   // previous TUI) must fail here instead of shipping a mixed identity.
   const version = packageJson.version
