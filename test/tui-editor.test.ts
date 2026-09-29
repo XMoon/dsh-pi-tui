@@ -247,7 +247,10 @@ test('quoted @ directory acceptance keeps the quote open for child completion', 
   await waitForDropdownRow(vt, 'sub dir/', 'quoted mention directory')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.equal(app.seatTextForTest(), '@"sub dir/"', 'the accepted value keeps balanced quote text')
+  // The OFFICIAL mention grammar (formatFileMention): a quoted DIRECTORY
+  // keeps the quote OPEN after its trailing slash so completion can
+  // descend another level — never a balanced closed quote.
+  assert.equal(app.seatTextForTest(), '@"sub dir/', 'the official grammar keeps the quote open')
   assert.equal(app.seatEditorForTest().getCursor(), '@"sub dir/'.length, 'the cursor remains inside the open quote')
   await waitForDropdownRow(vt, 'deep.png', 'quoted mention children after Tab')
 })
