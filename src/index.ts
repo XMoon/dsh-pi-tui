@@ -26,6 +26,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
+import { type GitAttributionState } from './git-attribution.ts'
 import { type DisplayState } from './display-preset.ts'
 
 import { type Diag } from './diag.ts'
@@ -173,6 +174,7 @@ export function composeAgent(
   diag?: Diag,
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
+  gitAttributionState?: GitAttributionState,
 ): Promise<LegacyAgentComposition>
 export function composeAgent(
   ctx: Context,
@@ -182,6 +184,7 @@ export function composeAgent(
   diag?: Diag,
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
+  gitAttributionState?: GitAttributionState,
 ): Promise<AgentComposition>
 export async function composeAgent(
   ctx: Context,
@@ -191,10 +194,11 @@ export async function composeAgent(
   diag?: Diag,
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
+  gitAttributionState?: GitAttributionState,
 ): Promise<LegacyAgentComposition | AgentComposition> {
   // The Direct-only body lives in app/direct (plan §27); the entry keeps the
   // public overloads above and delegates the composition here.
-  return composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState)
+  return composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState)
 }
 
 /**

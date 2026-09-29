@@ -36,6 +36,7 @@ import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from './display-preset.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
+import { parseGitAttributionMode, type GitAttributionState } from './git-attribution.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
@@ -731,6 +732,8 @@ export interface TuiCommandRunner {
   readonly progressUpdatesState: ProgressUpdatesState
   /** Shared with prompt assembly; settings changes take effect on the next step. */
   readonly responseStyleState: ResponseStyleState
+  /** Shared with prompt assembly; settings changes take effect on the next step. */
+  readonly gitAttributionState: GitAttributionState
   /** The canonical display preset (the authoritative runtime state). */
   displayPreset?(): DisplayPreset
   /** Apply a canonical display preset through the shared setter. */
@@ -2260,6 +2263,13 @@ export function registerTuiCommands(
             currentValue: String(wheelScrollLinesOf(settingsDoc?.wheelScrollLines)),
             values: [...WHEEL_SCROLL_LINE_VALUES],
           },
+          {
+            id: 'git-attribution',
+            label: 'Git attribution',
+            description: 'Off (default): no guidance; Product: instruct the Agent to add the official Co-Authored-By trailer; Product+model: also add Assisted-By provider/model. Prompt guidance only — no Git hooks',
+            currentValue: runner.gitAttributionState.mode,
+            values: ['off', 'product', 'product-model'],
+          },
           // ── read-only session facts ─────────────────────────────
           {
             id: 'separator',
@@ -2661,6 +2671,16 @@ export function registerTuiCommands(
               detach('settings response style write', () => serializeTuiSettingsMutation(
                 settings,
                 () => settings.replace(withUserFooterCustomItems({ ...settings.get(), responseStyle: style }, runner.config)),
+              ), { notify: true })
+            }
+          } else if (id === 'git-attribution') {
+            const mode = parseGitAttributionMode(value)
+            runner.gitAttributionState.mode = mode
+            const settings = tuiSettings
+            if (settings !== undefined) {
+              detach('settings git attribution write', () => serializeTuiSettingsMutation(
+                settings,
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), gitAttribution: mode }, runner.config)),
               ), { notify: true })
             }
           } else if (id === 'notification-mode') {

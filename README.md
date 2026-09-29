@@ -230,6 +230,34 @@ Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导
 
 Shell 卡片默认只显示有限的输出预览，`Ctrl+O` 可以展开完整保留内容——全屏 Focus 除外:那里 `Ctrl+O` 负责 Thought root 的整体开关,Shell 卡片保持折叠。
 
+### Git 提交署名（可选）
+
+开启后，dsh-pi-tui 会指示 Agent 在创建 Git 提交时加上官方项目署名：
+
+```text
+Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>
+```
+
+默认 **关闭**。支持三种模式：
+
+```text
+off            不添加署名指引（默认）
+product        官方 Co-Authored-By 署名
+product-model  官方署名 + Assisted-By: <provider>/<model>
+```
+
+这是 **Agent 指引（prompt policy），不是仓库级强制**：dsh-pi-tui 不会安装 Git
+钩子、不改写任何 `git commit` 命令、也不探测仓库。`product-model` 的
+`provider`/`model` 由 DSH 官方模型选择直接注入（切换模型后下一次请求生效）。
+
+边界说明：
+
+- `!` / `!!` 本地 Shell 和你自己终端里的手动提交完全不受影响；
+- 不安装任何 `prepare-commit-msg` 钩子，不修改已有钩子；
+- 不需要 GitHub 凭证/API；不修改 Author/Committer 身份；
+- 模型理论上可能忽略或写错指引——这是有意的取舍：用低侵入的指引替代一整套
+  Git 生命周期子系统。
+
 ### 文件引用与图片
 
 输入 `@` 可以搜索和补全工作区文件：

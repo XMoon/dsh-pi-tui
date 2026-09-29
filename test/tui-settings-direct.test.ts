@@ -40,6 +40,7 @@ function refsOf(overrides: Partial<Record<keyof TuiConfigRefs, unknown>> = {}): 
     displayPreset: ref('full'),
     progressUpdates: ref('milestones'),
     responseStyle: ref('default'),
+    gitAttribution: ref('off'),
     notificationMode: ref('unfocused'),
     notificationMethod: ref('auto'),
     wheelScrollLines: ref('1'),
@@ -105,6 +106,7 @@ function defaults(): TuiSettingsDoc {
     displayPreset: 'full',
     progressUpdates: 'milestones',
     responseStyle: 'default',
+    gitAttribution: 'off',
     notificationMode: 'unfocused',
     notificationMethod: 'auto',
     wheelScrollLines: '1',
@@ -138,6 +140,32 @@ test('a whole-document replace writes ONLY the changed fields as path-scoped set
     ],
     revision: 2,
   }], 'only the two changed fields cross; unchanged fields never pin the profile')
+})
+
+test('a gitAttribution change crosses the DIFF_FIELDS mapping as its own path-scoped set', async () => {
+  // The /settings row's persistence depends on this mapping: without the
+  // field in DIFF_FIELDS the whole-document write would silently DROP the
+  // new mode, while the fake-settings row test would still pass. Assert the
+  // ACTUAL adapter path (refs -> replace -> SettingsForms.mutate).
+  const refs = refsOf()
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  assert.equal(settings.get().gitAttribution, 'off')
+  await settings.replace({ ...settings.get(), gitAttribution: 'product-model' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls, [{
+    ns: 'tui-app',
+    ops: [{ op: 'set', path: ['gitAttribution'], value: 'product-model' }],
+    revision: 2,
+  }], 'the attribution mode change crosses as exactly one path-scoped set')
+
+  // Writing the inherited value over a USER override resets it (unset), the
+  // same contract every other preference field obeys.
+  const refs2 = refsOf({ gitAttribution: 'off' })
+  const forms2 = formsOf({ gitAttribution: 'product-model' }, 2, refs2.snapshot())
+  const settings2 = new DirectTuiSettings(refs2, forms2.forms)
+  await settings2.replace({ ...settings2.get(), gitAttribution: 'off' } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [{ op: 'unset', path: ['gitAttribution'] }],
+    'a reset-to-inherited unsets the override instead of pinning it')
 })
 
 test('§18.2 no effective→user promotion: a base-supplied theme stays out of the USER override', async () => {

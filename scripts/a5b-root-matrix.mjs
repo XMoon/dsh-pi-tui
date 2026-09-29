@@ -110,7 +110,7 @@ const CLASSIFICATION = {
   // Process / Cordis prerequisites and lifetime-owned state.
   cwd: PRE, signal: PRE, cleanedUp: PRE, app: PRE, extensionService: PRE,
   tuiSettings: PRE, persistedTuiSettings: PRE, displayResolution: PRE, displayState: PRE,
-  progressUpdatesState: PRE, responseStyleState: PRE, launchPreset: PRE, pendingPreset: PRE,
+  progressUpdatesState: PRE, responseStyleState: PRE, gitAttributionState: PRE, launchPreset: PRE, pendingPreset: PRE,
   draftImages: PRE, draftFiles: PRE, viewerRef: PRE,
   initialSnapshot: PRE, initialSkills: PRE, surfaceNotice: PRE, handle: PRE,
   resumeFailure: PRE, resumeResolved: PRE, assistantStreamBaselineFor: PRE,
@@ -207,6 +207,7 @@ const SWEEP_NOTES = {
   displayState: 'DisplayState holder constructed once and injected into Direct compose/surface/command; bootstrap does not mutate it.',
   progressUpdatesState: 'ProgressUpdatesState holder constructed once before the first compose and injected; no bootstrap state machine.',
   responseStyleState: 'ResponseStyleState holder constructed once before the first compose and injected; no bootstrap state machine.',
+  gitAttributionState: 'GitAttributionState holder constructed once before the first compose and injected; no bootstrap state machine.',
   launchPreset: 'startup.presetId / DSH_PI_TUI_PRESET resolution; startup input (process prerequisite).',
   pendingPreset: 'late-bound preset chosen during startup/resume; startup orchestration prerequisite.',
   resumeFailure: 'resume failure message shown post-mount then cleared; startup/resume transaction state.',

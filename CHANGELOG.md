@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 可选的官方 Git 提交署名指引（默认关闭）：开启后 Agent 创建 Git 提交时会按指引加入
+  `Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>`；
+  `product-model` 模式额外加入 `Assisted-By: <provider>/<model>`（由 DSH 官方模型
+  选择直接注入，切换模型后下一次请求生效）。这是 Agent 指引（prompt policy）而非
+  仓库级强制：不安装 Git 钩子、不改写命令、不探测仓库；手动提交不受影响。
+
 ### 变更
 
 - Question 工具的输入语义收敛为「选择 / 编辑 / 前进」三层:多选题用

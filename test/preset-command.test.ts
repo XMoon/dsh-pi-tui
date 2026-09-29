@@ -306,7 +306,7 @@ function stubRunner(options: {
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
     },
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

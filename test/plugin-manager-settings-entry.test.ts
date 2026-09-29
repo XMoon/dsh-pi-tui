@@ -45,7 +45,7 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
     cwd: '/ws',
     sessionCwd: () => '/ws',
     progressUpdatesState: { mode: 'milestones' },
-    responseStyleState: { style: 'default' },
+    responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     signal: new AbortController().signal,
     commandRegistry: commands,
     recordExtensionError: () => {},

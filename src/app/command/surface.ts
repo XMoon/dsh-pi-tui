@@ -235,6 +235,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly promptState: {
     readonly progressUpdates: TuiCommandRunner['progressUpdatesState']
     readonly responseStyle: TuiCommandRunner['responseStyleState']
+    readonly gitAttribution: TuiCommandRunner['gitAttributionState']
   }
   /** The Direct TUI-settings facade (a Host value forwarded opaquely). */
   readonly tuiSettings: TuiCommandRunner['tuiSettings']
@@ -698,6 +699,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       signal: deps.signal,
       progressUpdatesState: deps.promptState.progressUpdates,
       responseStyleState: deps.promptState.responseStyle,
+      gitAttributionState: deps.promptState.gitAttribution,
       /** Canonical display surface: /display and /focus compatibility both
        * read and mutate the shared DisplayState through one setter. */
       displayPreset: () => deps.displayState.preset,

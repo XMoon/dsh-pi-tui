@@ -171,6 +171,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     applyFooterSettings: () => {},
     progressUpdatesState,
     responseStyleState,
+    gitAttributionState: { mode: 'off' },
     displayPreset: () => displayState.preset,
     setDisplayPreset: preset => { displayState.preset = preset; return { kind: 'applied', preset } },
     focusEnabled: () => displayState.preset === 'focus',

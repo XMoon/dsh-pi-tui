@@ -45,6 +45,7 @@ export interface TuiConfigRefs {
   readonly displayPreset: Volatile<string | undefined>
   readonly progressUpdates: Volatile<string | undefined>
   readonly responseStyle: Volatile<string | undefined>
+  readonly gitAttribution: Volatile<string | undefined>
   readonly notificationMode: Volatile<string>
   readonly notificationMethod: Volatile<string>
   readonly wheelScrollLines: Volatile<string>
@@ -119,6 +120,7 @@ const DIFF_FIELDS: readonly (keyof TuiConfigRefs)[] = [
   'displayPreset',
   'progressUpdates',
   'responseStyle',
+  'gitAttribution',
   'notificationMode',
   'notificationMethod',
   'wheelScrollLines',
@@ -156,6 +158,7 @@ export class DirectTuiSettings implements TuiSettingsConfig {
       displayPreset: this.refs.displayPreset.get(),
       progressUpdates: this.refs.progressUpdates.get(),
       responseStyle: this.refs.responseStyle.get(),
+      gitAttribution: this.refs.gitAttribution.get(),
       notificationMode: this.refs.notificationMode.get(),
       notificationMethod: this.refs.notificationMethod.get(),
       wheelScrollLines: this.refs.wheelScrollLines.get(),
