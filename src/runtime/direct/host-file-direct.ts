@@ -29,7 +29,7 @@ import { statSync } from 'node:fs'
 import { resolveMentionCandidate } from '../../mentions.ts'
 import type { DiscoverySource } from '../../file-completion/discovery.ts'
 import { discoverForQuery, resolveFdPath } from '../../file-completion/discovery.ts'
-import { presentDiscovery, reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
+import { rankDiscovery, reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
 import type {
   HostFileCandidate,
   HostFileListResult,
@@ -173,20 +173,14 @@ export class DirectHostFilePort implements HostFilePort {
       // THE PORT CONTRACT: the candidates cross ALREADY ranked, filtered
       // and bounded, in the adapter's own order. This compatibility path
       // has no official authority, so the adapter completes the legacy
-      // ranking itself (the engine's rank/slice, over the reattached
-      // user-facing paths) — the client never re-ranks what a source
-      // returned.
+      // ranking itself (the pure local rankDiscovery over the reattached
+      // user-facing paths — no UI DTO round-trip) — the client never
+      // re-ranks what a source returned.
       const displayed = candidates.map(candidate => reattachDisplayBase(candidate, resolved))
-      const ranked = presentDiscovery(displayed, resolved.searchTerm, { at: false, quoted: false })
+      const ranked = rankDiscovery(displayed, resolved.searchTerm)
       return {
         kind: 'ok',
-        items: ranked.map(item => {
-          // presentPathCandidate's label IS the user-facing path (+ the
-          // directory slash marker); the DTO wants the bare path + kind.
-          const path = item.label.endsWith('/') ? item.label.slice(0, -1) : item.label
-          const source = displayed.find(candidate => candidate.path === path)
-          return { path, kind: source?.kind ?? 'file' }
-        }),
+        items: ranked.map(candidate => ({ path: candidate.path, kind: candidate.kind })),
       }
     } catch {
       signal?.throwIfAborted()
