@@ -196,9 +196,11 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   summary is unchanged, in both window-paging directions.
   Compact current work is observable; historical work is scannable; detail
   remains available on demand.
-- Counts and previews describe the SPAN, never the whole turn. Span-local
-  duration is omitted: durable rows carry no per-row timestamps, and presenting
-  the whole-turn Focus duration as a span duration would be wrong.
+- Counts and previews describe the SPAN, never the whole turn. The header
+  duration is the span's OWN wall clock from its members' timing evidence;
+  it is omitted only when no member carries a `TranscriptTiming` sidecar
+  (unknown is omitted, never `0s`) — never faked or stretched from the
+  whole-turn Focus duration.
 - Expanding a `Work` span reveals its raw member rows through the existing
   message renderers; Thinking and tool-local detail keep their own orthogonal
   disclosure.
