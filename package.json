@@ -98,6 +98,7 @@
     "@deepseek-ai/dsh-cmdline": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-commands": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-credentials": ">=0.1.7-rc.2",
+    "@deepseek-ai/dsh-file-reference": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-goal": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-jobs": ">=0.1.7-rc.2",
     "@deepseek-ai/dsh-llm": ">=0.1.7-rc.2",
