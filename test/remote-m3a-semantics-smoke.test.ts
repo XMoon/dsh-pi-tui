@@ -40,7 +40,9 @@ import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { createUserMessage, LlmAdapter, MessageId } from '@deepseek-ai/dsh-llm'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
+import * as toolTodoInvariant from '@deepseek-ai/dsh-tool-todo/invariant'
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../src/app/remote/m3a-semantics.ts'
@@ -86,6 +88,11 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     // wire — plus the official todos projection unit.
     await ctx.plugin(TokenMeter)
     await ctx.plugin(toolTodo, { allowParallelInProgress: false })
+    // The official invariants registry plus the durable-todo companion: a
+    // todo/write OUTSIDE an open turn is a non-production event sequence and
+    // must fail the fixture rather than pass silently.
+    await ctx.plugin(InvariantRegistry, {})
+    await ctx.plugin(toolTodoInvariant)
     persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
     harness = await mountAgentLoopTestHarness(ctx)
     ctx.llm.registerAdapter(['smoke'], new StubLlmAdapter())
@@ -161,7 +168,15 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
 function seedTurn(
   host: HostFixture,
   sessionId: string,
-  input: { turn: number; prompt: string; response: string; usage: { inputTokens: number; outputTokens: number } },
+  input: {
+    turn: number
+    prompt: string
+    response: string
+    usage: { inputTokens: number; outputTokens: number }
+    /** Optional whole-list snapshot appended INSIDE the open turn (the
+     * official invariant rejects a todo/write outside one). */
+    todos?: readonly { content: string; status: 'pending' | 'in_progress' | 'completed' }[]
+  },
 ): void {
   const session = host.ctx.sessions.get(SessionId(sessionId))
   if (session === undefined) throw new Error(`seedTurn: no Host session ${sessionId}`)
@@ -182,6 +197,9 @@ function seedTurn(
     stream: [],
     usage: { ...input.usage },
   }, { surfaceOp: 'append' })
+  if (input.todos !== undefined) {
+    session.append('todo/write', { todos: [...input.todos] })
+  }
   session.append('turn/end', { turn: input.turn, reason: { kind: 'completed' } })
 }
 
@@ -221,8 +239,11 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
     // Client's initial tail page carries them: distinct usage per session
     // (parent/child values must never mix) and one completed turn each.
     seedTurn(host, MAIN, { turn: 1, prompt: 'plan the launch', response: 'launch plan ready', usage: { inputTokens: 1000, outputTokens: 42 } })
-    seedTurn(host, CHILD, { turn: 1, prompt: 'child task', response: 'child done', usage: { inputTokens: 200, outputTokens: 7 } })
-    host.ctx.sessions.get(SessionId(CHILD))!.append('todo/write', {
+    seedTurn(host, CHILD, {
+      turn: 1,
+      prompt: 'child task',
+      response: 'child done',
+      usage: { inputTokens: 200, outputTokens: 7 },
       todos: [{ content: 'child todo', status: 'in_progress' }],
     })
 
@@ -313,9 +334,14 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
     // values; the bare session stays fact-free beyond its cwd.
     const mainStatus = semantics.sessionReader.sessionStatus(MAIN)!
     const childStatus = semantics.sessionReader.sessionStatus(CHILD)!
+    // EXACT Host/Remote parity: the child's wire facts equal the Host fold's
+    // own values for the same session (usage + todos), never the parent's.
     assert.ok(childStatus.usage !== undefined, 'the child usage projection crossed the wire')
     assert.ok(mainStatus.usage !== undefined, 'the main usage projection crossed the wire')
-    assert.deepEqual(childStatus.todos, [{ content: 'child todo', status: 'in_progress' }])
+    assert.deepEqual(childStatus.usage, hostChildValues.tokenUsage,
+      'the child usage equals its own Host fold')
+    assert.deepEqual(childStatus.todos, hostChildValues.todos,
+      'the child todos equal their own Host fold')
     if (childStatus.usage !== undefined && mainStatus.usage !== undefined) {
       assert.ok(childStatus.usage.uncachedInputTokens !== mainStatus.usage.uncachedInputTokens
         || childStatus.usage.outputTokens !== mainStatus.usage.outputTokens,
@@ -323,6 +349,8 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
       assert.ok(childStatus.usage.uncachedInputTokens <= 200 + 42,
         `the child value is its own small sample, never the parent's 1000: ${JSON.stringify(childStatus.usage)}`)
     }
+    assert.deepEqual(mainStatus.usage, hostMainValues.tokenUsage,
+      'the main usage equals its own Host fold')
     assert.equal(childStatus.cwd, join(host.anchorDir, 'child'))
     // The bare session's official projection units are REGISTERED but empty:
     // their truthful zero-value wire views (usage totals, breakdown) cross —
