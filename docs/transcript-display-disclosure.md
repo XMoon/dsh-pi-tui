@@ -181,6 +181,18 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   row (presenter-first semantic display, `focusToolDisplay` fallback). There is
   deliberately **no Message slot**: Assistant intermediate narration is already
   visible outside the span. Absent facts render no placeholder row.
+- **Historical compaction (2026-09-29):** only the LIVE / Preparing / TRUE
+  latest Work of the current window keeps those previews. A settled historical
+  span collapses to its header only, and a historical span whose only evidence
+  is Thinking renders the presentation-only identity `Thought <duration>`
+  instead of a semantically empty `Activity` (still the same
+  `TranscriptWorkSpan`; never a semantic class, stat or persisted state — and
+  the latest think-only span stays `Activity` so the identity never flips
+  while streaming). The "true latest" test is the window authority
+  (`transcriptWindow.hasNewer !== true` AND the span is the projected tail):
+  a history page's last Work is that page's tail, not the global latest.
+  Compact current work is observable; historical work is scannable; detail
+  remains available on demand.
 - Counts and previews describe the SPAN, never the whole turn. Span-local
   duration is omitted: durable rows carry no per-row timestamps, and presenting
   the whole-turn Focus duration as a span duration would be wrong.
