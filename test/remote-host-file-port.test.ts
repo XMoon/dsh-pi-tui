@@ -32,16 +32,18 @@ function harness(options: {
   return { generation, calls, port: new RemoteHostFilePort(fileReferences, generation.source) }
 }
 
-test('F1: the session scope sends the EXACT session id and query', async () => {
+test('F1: the session scope sends the EXACT session id and the OFFICIAL query form', async () => {
   const { port, calls } = harness({ result: { ok: true, value: [{ path: 'src/a.ts', kind: 'file' }] } })
-  const result = await port.listReferences({ kind: 'session', sessionId: 'child-7' }, '@src/a')
+  const result = await port.listReferences({ kind: 'session', sessionId: 'child-7' }, 'src/a')
   assert.deepEqual(result, { kind: 'ok', items: [{ path: 'src/a.ts', kind: 'file' }] })
-  assert.deepEqual(calls, [{ agentId: 'child-7', query: '@src/a', signal: undefined }])
+  // The official contract: `query` is the path text FOLLOWING the `@` —
+  // never the editor's at-prefixed form.
+  assert.deepEqual(calls, [{ agentId: 'child-7', query: 'src/a', signal: undefined }])
 })
 
 test('F1b: an authoritative Host empty answer stays ok([]) — not unavailable', async () => {
   const { port } = harness({ result: { ok: true, value: [] } })
-  assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 's' }, '@none'),
+  assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 's' }, 'none'),
     { kind: 'ok', items: [] })
 })
 
@@ -63,7 +65,7 @@ test('F2b: an already-aborted request never dispatches', async () => {
 test('F3: the returned candidates are detached from the wire value', async () => {
   const wire: { path: string; kind: 'file' | 'directory' }[] = [{ path: 'a.ts', kind: 'file' }]
   const { port } = harness({ result: { ok: true, value: wire } })
-  const result = await port.listReferences({ kind: 'session', sessionId: 's' }, '@a')
+  const result = await port.listReferences({ kind: 'session', sessionId: 's' }, 'a')
   assert.equal(result.kind, 'ok')
   if (result.kind === 'ok') {
     assert.notEqual(result.items, wire)
@@ -76,7 +78,7 @@ test('F4: a replaced connection turns the settle unavailable', async () => {
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const { port, generation } = harness({ gate, result: { ok: true, value: [{ path: 'a', kind: 'file' }] } })
-  const pending = port.listReferences({ kind: 'session', sessionId: 's' }, '@a')
+  const pending = port.listReferences({ kind: 'session', sessionId: 's' }, 'a')
   generation.set({ id: 2 })
   release()
   const result = await pending
@@ -85,7 +87,7 @@ test('F4: a replaced connection turns the settle unavailable', async () => {
     gate,
     throw: new Error('transport broke mid-flight'),
   })
-  const pendingThrow = thrown.port.listReferences({ kind: 'session', sessionId: 's' }, '@a')
+  const pendingThrow = thrown.port.listReferences({ kind: 'session', sessionId: 's' }, 'a')
   thrown.generation.set({ id: 5 })
   release()
   assert.equal((await pendingThrow).kind, 'unavailable',
@@ -94,13 +96,13 @@ test('F4: a replaced connection turns the settle unavailable', async () => {
 
 test('F4b: a Host domain error surfaces as an error, never an empty ok', async () => {
   const { port } = harness({ result: { ok: false, error: { code: 'session/not-found', message: 'no such session' } } })
-  await assert.rejects(port.listReferences({ kind: 'session', sessionId: 's' }, '@a'), /no such session/)
+  await assert.rejects(port.listReferences({ kind: 'session', sessionId: 's' }, 'a'), /no such session/)
 })
 
 test('no connection reads unavailable without any Host call', async () => {
   const { port, generation, calls } = harness()
   generation.set(undefined)
-  const result = await port.listReferences({ kind: 'session', sessionId: 's' }, '@a')
+  const result = await port.listReferences({ kind: 'session', sessionId: 's' }, 'a')
   assert.equal(result.kind, 'unavailable')
   assert.deepEqual(calls, [])
 })
@@ -128,7 +130,7 @@ test('a pre-aborted resolveReference rejects instead of answering unavailable', 
 
 test('F5: the workspace scope is unavailable with ZERO Remote calls', async () => {
   const { port, calls } = harness()
-  const result = await port.listReferences({ kind: 'workspace', cwd: '/any/cwd' }, '@a')
+  const result = await port.listReferences({ kind: 'workspace', cwd: '/any/cwd' }, 'a')
   assert.equal(result.kind, 'unavailable')
   assert.match(result.kind === 'unavailable' ? result.reason : '', /no official Remote carrier/)
   assert.deepEqual(calls, [], 'the workspace scope never dispatches')
@@ -158,7 +160,7 @@ test('F8: the adapter module never touches the Client filesystem', async () => {
 
 test('F9: the child scope carries the CHILD session id — never a parent cwd', async () => {
   const { port, calls } = harness({ result: { ok: true, value: [] } })
-  await port.listReferences({ kind: 'session', sessionId: 'child-9' }, '@x')
+  await port.listReferences({ kind: 'session', sessionId: 'child-9' }, 'x')
   assert.equal(calls[0]!.agentId, 'child-9')
   assert.equal((calls[0]! as { cwd?: string }).cwd, undefined,
     'the wire carries the session identity only; the Host owns the cwd semantics')

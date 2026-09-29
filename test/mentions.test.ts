@@ -11,6 +11,7 @@ import { homedir } from 'node:os'
 import { join, win32 } from 'node:path'
 import { expandFileMentionsForSubmit, extractAtPrefix, findFileMentions, MentionProvider, resolveMentionCandidate, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
+import { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } from '@deepseek-ai/dsh-file-reference-local/search'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** A throwaway workspace with known files. */
@@ -30,6 +31,23 @@ const abort = new AbortController().signal
 
 /** The fallback-only seam: the real Direct adapter with fd FORCED absent,
  * so the bounded recursive scan is what the completion exercises. */
+/** A Direct adapter whose session scope runs the OFFICIAL search over the
+ * fixture tree (`WorkspaceFileSearch`: path text after `@`, deterministic
+ * ranked path-only candidates). */
+function officialSeam(root: string): DirectHostFilePort {
+  const search = new WorkspaceFileSearch(root, {
+    maxResults: 20,
+    maxEntries: 50_000,
+    excludedDirectories: [...DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES],
+  })
+  return new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null, {
+    get: (name: string) => name === 'fileReferences'
+      ? { list: (agent: unknown, query: string, signal: AbortSignal) => search.list(query, signal) }
+      : undefined,
+  })
+}
+
+/** A workspace-scoped legacy scanner seam (fd forced absent). */
 function fallbackSeam(): DirectHostFilePort {
   return new DirectHostFilePort(() => undefined, null)
 }
@@ -107,7 +125,7 @@ test('resolveFdPath honors PATHEXT-style executable suffixes', (t) => {
 test('the fallback completes @ mentions from anywhere in the tree', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam())
+  const provider = new MentionProvider([], root, officialSeam(root))
   // Prefix match on the basename (cursor at the end of '@file').
   const file = await provider.getSuggestions(['look at @file'], 0, 13, { signal: abort })
   assert.ok(file !== null, `@file must suggest:\n${JSON.stringify(file)}`)
