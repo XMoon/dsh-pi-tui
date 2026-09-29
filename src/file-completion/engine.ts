@@ -36,10 +36,16 @@ export function reattachDisplayBase(candidate: PathCandidate, query: PathComplet
   return { ...candidate, path: `${query.displayBase}${candidate.path}` }
 }
 
-/** Rank, slice and present one discovery set for one query. The
- * candidates ALREADY carry their final user-facing paths (the source
- * reattached the display base); this layer owns ranking, the `@`/quoting
- * shape, labels, descriptions and directory continuation. PURE. */
+/** Rank, slice and present one discovery set for one query (the
+ * Client-fs command paths and the Direct WORKSPACE compatibility
+ * scanner; the SESSION `@` mention does NOT flow through here — its
+ * discovery/ranking is the official Host authority's and its value is
+ * the official grammar's). The candidates ALREADY carry their final
+ * user-facing paths (the source reattached the display base); this
+ * layer owns the local ranking, the argument quoting, labels and
+ * directory continuation — an `at: true` context delegates the value to
+ * the official `formatFileMention` (refused paths are filtered, never
+ * coerced). PURE. */
 export function presentDiscovery(
   candidates: readonly PathCandidate[],
   term: string,
@@ -69,17 +75,22 @@ export function tokenOfAtPrefix(atPrefix: string): { raw: string; quoted: boolea
 }
 
 /**
- * Complete one raw token through the shared pipeline: resolve the query,
- * discover through the injected source, reattach the display base, rank,
- * slice and present. Throws never — discovery failures degrade to null.
+ * Complete one raw token through the local pipeline (the Client-fs
+ * command paths — `/attach`, `/image` — and the Direct WORKSPACE
+ * compatibility scanner; the SESSION `@` mention path does not call
+ * this, it reads the official Host candidates through the Host-file
+ * port): resolve the query, discover through the injected source,
+ * reattach the display base, rank, slice and present. Throws never —
+ * discovery failures degrade to null.
  * @param raw - the raw token (quotes stripped; leading separator
  *   whitespace stripped by the caller).
  * @param cwd - the completion base (session workspace).
- * @param source - the discovery seam (Host fs for `@`, Client fs for
- *   `/image`).
+ * @param source - the discovery seam (the Client-fs local source for
+ *   the command paths; the legacy scanner for the workspace compat).
  * @param signal - the editor's request abort.
- * @param context - `{ at: true }` for an `@` mention (the value carries
- *   the `@` + quoting), `{ at: false }` for a bare path argument.
+ * @param context - `{ at: false }` for a bare path argument (the only
+ *   production shape today); an `at: true` context delegates the value
+ *   to the official mention grammar.
  * @returns the ranked+presented items, or null when nothing matches.
  */
 export async function completePath(
