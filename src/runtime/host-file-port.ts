@@ -17,9 +17,9 @@
  * the external editor and plain shell/path completion — those keep their
  * own client-local semantics.
  *
- * Future wire mapping (M2): the official fileReferences Host capability /
- * Remote seam (`fileReferences.list(agent, query, signal)` →
- * path-only candidates).
+ * Wire mapping (M3-3A, landed): the official fileReferences Remote seam
+ * (`fileReferences/list(agentId, query, signal)` → path-only candidates,
+ * Session scope only).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/host-file-port

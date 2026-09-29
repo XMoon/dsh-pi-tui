@@ -3,8 +3,9 @@
  * `Catalog` over the dsh `llm` / `agentDefaultModel` / `agentPresets` /
  * `tools` services and the `src/skill-catalog.ts` seam. This is the ONLY
  * module in the catalog-read path that touches `ctx`; consumers
- * (commands.ts, the surface coordinator) depend on the port, and a Remote
- * adapter will implement the same interfaces in a later milestone.
+ * (commands.ts, the surface coordinator) depend on the port, and the
+ * Remote adapters under `src/runtime/remote/` implement the same
+ * interfaces (models/presets since D2.3, skills since M3-3A).
  *
  * The skill sub-domain deliberately keeps the pure catalog logic in
  * `src/skill-catalog.ts` (snapshot-first reads, official invocation
