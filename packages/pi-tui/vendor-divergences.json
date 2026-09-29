@@ -1923,7 +1923,7 @@
     "src/components/box.ts",
     "src/components/mouse-region.ts"
    ],
-   "why": "The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback. Pointer events must also never reach a stale target: an overlay hidden or removed since the last paint, a layout root replaced via setLayoutRoot, or a component removed from a Container mid-gesture must stop receiving press/drag/release events immediately (the cached layout frame only refreshes on the next paint). One HOST-owned surface deliberately takes the first plain single click away from selection: the long-user disclosure bubble (dsh-pi-tui issue #192 / PR #197) is a local disclosure surface in BOTH its collapsed and expanded states, so double-click word selection is intentionally not promised on that specific bubble — a host decision expressed through onCellClick, NOT a fork click-granularity change (everywhere else the first plain click stays inert and double-click keeps native word selection).",
+   "why": "The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback. Pointer events must also never reach a stale target: an overlay hidden or removed since the last paint, a layout root replaced via setLayoutRoot, or a component removed from a Container mid-gesture must stop receiving press/drag/release events immediately (the cached layout frame only refreshes on the next paint). Host-owned interactive disclosure targets may consume the first plain single click through onCellClick; double-click word selection remains the selection behavior on rows that stay selection-owned. PR #197 deliberately changes the ownership of long-user bubble text rows: the bubble itself, in both collapsed and expanded states, is now a Host disclosure target — ordinary rows that display canonical user text and were previously selection-owned. Those specific user-text rows therefore no longer promise double-click word selection: the first complete plain click runs the local expand/collapse action. This is a Host ownership decision (which painted rows are click-owned controls versus selection-owned text), not a change to the fork's click-granularity classifier.",
    "changedSurface": [
     "onCellClick callback for character-granularity clicks, plus the onCellPress press-half callback (the host records a press-time semantic identity so the release click can reject targets that repainted onto the same cell)",
     "single/double click branch ownership",
@@ -1959,10 +1959,10 @@
     "host": {
      "audited": true,
      "items": [
-      "src/tui-app.ts handleFullscreenClick expands the question/transcript surface, and resolves the long-user disclosure bubble (issue #192 / PR #197) as a whole-bubble local disclosure surface in both states — the first plain single click on it runs the Host expand/collapse action, never selection.",
-      "test/long-user-disclosure.test.ts pins the intentional exception: the first complete click on a long-user bubble (collapsed or expanded) acts immediately, so no deferred double-click window exists on that surface."
+      "src/tui-app.ts handleFullscreenClick expands the question/transcript surface, and resolves the long-user disclosure bubble (issue #192 / PR #197) as a whole-bubble local disclosure surface in both states — its text rows are click-owned, so the first plain single click on them runs the Host expand/collapse action instead of selection.",
+      "test/long-user-disclosure.test.ts pins the ownership change: the first complete click on a long-user bubble (collapsed or expanded) acts immediately, so no deferred double-click window exists on that surface."
      ],
-     "notes": "The callback is a direct host seam. The long-user bubble is the ONE host surface that consumes the first plain click; it is a host ownership decision recorded here so a revendor audit does not mistake it for a click-granularity regression."
+     "notes": "The callback is a direct host seam. The long-user bubble is intentionally different from ordinary selection-owned transcript text: its text rows themselves are now Host disclosure targets, so their first plain click is consumed by local expand/collapse. Recorded here so a revendor audit separates the two contracts: the fork owns single/double/drag gesture classification; the Host owns which painted rows are click-owned controls and which stay selection-owned text."
     },
     "publicExtension": {
      "audited": true,
@@ -2037,7 +2037,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 made the long-user bubble a whole-bubble disclosure surface (both states) — recorded as the intentional first-click exception in why/host above; the fork's click granularity itself is unchanged."
+    "notes": "Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 declared the long-user bubble's ordinary user-text rows (collapsed and expanded alike) Host disclosure targets — a selection-owned → disclosure-owned ownership change recorded in why/host above; the fork's click-granularity classifier itself is unchanged."
    }
   },
   "X019": {
