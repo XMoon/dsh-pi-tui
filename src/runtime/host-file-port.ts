@@ -73,8 +73,9 @@ export interface HostFilePort {
    * when fd is on the Host PATH, the bounded recursive scan otherwise)
    * as an authoritative `ok` — `[]` when nothing matches — or
    * `unavailable` when the capability cannot answer. Cancellation is its
-   * own outcome: an aborted signal REJECTS (both adapters), it is never
-   * folded into `unavailable`. */
+   * own outcome and outranks every other one: an aborted signal REJECTS
+   * (both adapters, entry-time — before any scope/capability decision),
+   * never folded into `unavailable`. */
   listReferences(
     scope: HostFileScope,
     query: string,
@@ -83,7 +84,8 @@ export interface HostFilePort {
   /** Probe one raw mention path (`src/foo.ts`, `~/x`, `/abs/x`) for
    * existence in the scope, resolving it to the absolute Host path
    * (`~` expansion; relative against the scope workspace; absolute kept;
-   * symlinks absolutized, never realpath'd). An aborted signal rejects. */
+   * symlinks absolutized, never realpath'd). An aborted signal rejects
+   * (entry-time, both adapters — cancellation outranks `unavailable`). */
   resolveReference(
     scope: HostFileScope,
     path: string,

@@ -63,6 +63,11 @@ export class RemoteHostFilePort implements HostFilePort {
     query: string,
     options?: { signal?: AbortSignal },
   ): Promise<HostFileListResult> {
+    // Cancellation wins over EVERY other outcome — including the
+    // unsupported workspace scope below (an aborted request rejects, the
+    // M3-3A failure vocabulary).
+    const signal = options?.signal
+    signal?.throwIfAborted()
     if (scope.kind !== 'session') {
       // No official workspace/sessionless carrier exists: an explicit
       // unavailable, never a Client fs scan and never a fake empty success.
@@ -71,8 +76,6 @@ export class RemoteHostFilePort implements HostFilePort {
         reason: 'workspace-scoped Host file discovery has no official Remote carrier',
       }
     }
-    const signal = options?.signal
-    signal?.throwIfAborted()
     const capturedGeneration: RemoteConnectionGeneration | undefined = this.generation.getSnapshot()
     if (capturedGeneration === undefined) {
       return { kind: 'unavailable', reason: 'the Remote connection is not connected' }
@@ -108,8 +111,12 @@ export class RemoteHostFilePort implements HostFilePort {
   async resolveReference(
     _scope: HostFileScope,
     _path: string,
-    _options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal },
   ): Promise<HostFileResolveResult> {
+    // A cancelled probe rejects even though the capability answer is
+    // synchronous — cancellation wins over the unavailable below (M3-3A
+    // failure vocabulary).
+    options?.signal?.throwIfAborted()
     // No public existence/canonicalization verb exists: unavailable, never
     // `missing` (which would assert the Host checked and the path is gone).
     return {

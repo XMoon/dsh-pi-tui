@@ -110,6 +110,21 @@ test('resolveReference honors an already-aborted request as CANCELLATION (no fil
   )
 })
 
+test('a cancelled discovery rejects even with an UNRESOLVABLE scope (cancellation outranks unavailable)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    fallbackPort(root).listReferences({ kind: 'session', sessionId: 'no-such-agent' }, '@file', { signal: controller.signal }),
+    /aborted/u,
+    'the entry-time cancellation check precedes the unresolvable-scope unavailable')
+  await assert.rejects(
+    fallbackPort(root).resolveReference({ kind: 'session', sessionId: 'no-such-agent' }, 'file', { signal: controller.signal }),
+    /aborted/u,
+    'the entry-time cancellation check precedes the unresolvable-scope unavailable (resolve)')
+})
+
 test('an abort mid-scan cancels the fallback discovery (a rejection, never unavailable)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
