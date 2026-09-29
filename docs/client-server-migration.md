@@ -2184,6 +2184,13 @@ the final complete Remote Backend assembly.
   service the wire forwards to; the adapter maps, it does not re-implement
   ranking/bounds/exclusions/caching), Remote maps
   `fileReferences/list(agentId, query, signal)` with generation fencing.
+  The port's candidates are ALREADY filtered, ranked and bounded BY THE
+  HOST AUTHORITY, in the Host's order — the MentionProvider is
+  PRESENTATION-ONLY (quoting, `@` shape, labels, directory continuation)
+  and never re-ranks or re-filters, so a Host-returned subsequence match
+  can never be dropped by a second client-side scorer (regression-locked);
+  the workspace compatibility path completes the legacy ranking INSIDE its
+  adapter to honor the same contract.
   The WORKSPACE scope keeps the legacy fd/fdfind scanner as a Direct-only
   sessionless compatibility path with no official carrier (the wire answers
   `unavailable`); it must not define the session semantics.

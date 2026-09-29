@@ -31,10 +31,10 @@ const abort = new AbortController().signal
 
 /** The fallback-only seam: the real Direct adapter with fd FORCED absent,
  * so the bounded recursive scan is what the completion exercises. */
-/** A Direct adapter whose session scope runs the OFFICIAL search over the
+/** A Direct adapter whose SESSION scope runs the OFFICIAL search over the
  * fixture tree (`WorkspaceFileSearch`: path text after `@`, deterministic
- * ranked path-only candidates). `queries` records the official-form query
- * each service call received. */
+ * ranked path-only candidates — the Host authority's own order). `queries`
+ * records the official-form query each service call received. */
 function officialSeam(root: string, queries?: string[]): DirectHostFilePort {
   const search = new WorkspaceFileSearch(root, {
     maxResults: 20,
@@ -53,7 +53,9 @@ function officialSeam(root: string, queries?: string[]): DirectHostFilePort {
   })
 }
 
-/** A workspace-scoped legacy scanner seam (fd forced absent). */
+/** A workspace-scoped LEGACY-scanner seam (fd forced absent) — the
+ * Direct-only sessionless compatibility path, never the session
+ * semantics. */
 function fallbackSeam(): DirectHostFilePort {
   return new DirectHostFilePort(() => undefined, null)
 }
@@ -128,7 +130,7 @@ test('resolveFdPath honors PATHEXT-style executable suffixes', (t) => {
   }
 })
 
-test('the fallback completes @ mentions from anywhere in the tree', async (t) => {
+test('the session scope completes @ mentions through the OFFICIAL Host service order', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   // SESSION scope through the OFFICIAL service: the provider's scope
@@ -156,10 +158,57 @@ test('the fallback completes @ mentions from anywhere in the tree', async (t) =>
   const none = await provider.getSuggestions(['@zzz-nope'], 0, 9, { signal: abort })
   assert.equal(none, null, 'no match must return null')
   // The port received the OFFICIAL query form on every call — the path
-  // text after `@` — never the at-prefixed editor grammar.
-  assert.ok(queries.includes('file'), `unquoted form must strip: ${JSON.stringify(queries)}`)
-  assert.ok(queries.includes('nested'), `substring form must strip: ${JSON.stringify(queries)}`)
-  assert.ok(queries.includes('zzz-nope'), `no-match form must strip: ${JSON.stringify(queries)}`)
+  // text after `@` — never the at-prefixed editor grammar, including the
+  // QUOTED editor form (the quotes are grammar, not query).
+  const quoted = await provider.getSuggestions(['@"my file'], 0, 9, { signal: abort })
+  assert.ok(quoted !== null, 'the quoted form completes through the official path')
+  assert.ok(queries.includes('my file'), `the quoted form strips to the official query: ${JSON.stringify(queries)}`)
+  assert.ok(queries.every(entry => !entry.startsWith('@')), `no at-prefixed query crosses: ${JSON.stringify(queries)}`)
+})
+
+/** An official-service stand-in that returns FIXED candidates in a FIXED
+ * order (the Host authority's answer for a query), for order/subsequence
+ * preservation proofs. */
+function fixedOfficialSeam(candidates: readonly { path: string; kind: 'file' | 'directory' }[], calls?: string[]): DirectHostFilePort {
+  return new DirectHostFilePort(() => ({ session: { header: { cwd: '/ws' } } }), null, {
+    get: (name: string) => name === 'fileReferences'
+      ? {
+          list: async (_agent: unknown, query: string, _signal: AbortSignal) => {
+            calls?.push(query)
+            return candidates
+          },
+        }
+      : undefined,
+  })
+}
+
+test('Host-ordered candidates pass through UNFILTERED and UNREORDERED (no second ranking authority)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // The Host authority deliberately returns: a SUBSEQUENCE-only match the
+  // official fuzzy accepts (s→src, d→deep, t→nested), then an
+  // alphabetically-earlier candidate — its own ranking, its own order.
+  const hostAnswer: readonly { path: string; kind: 'file' | 'directory' }[] = [
+    { path: 'src/deep-nested.ts', kind: 'file' },
+    { path: 'somedir/other.ts', kind: 'file' },
+  ]
+  const queries: string[] = []
+  const provider = new MentionProvider(
+    [],
+    root,
+    fixedOfficialSeam(hostAnswer, queries),
+    undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }),
+  )
+  const result = await provider.getSuggestions(['@sdt'], 0, 4, { signal: abort })
+  assert.ok(result !== null, 'the Host answer must complete')
+  // 1. The subsequence-only candidate the Host returned is NOT dropped:
+  //    the legacy client scorer would have scored it 0 and filtered it.
+  assert.ok(result.items.some(item => item.value === '@src/deep-nested.ts'),
+    `the Host's subsequence match survives: ${JSON.stringify(result.items.map(item => item.value))}`)
+  // 2. The Host's ORDER is preserved verbatim — no client-side re-sort.
+  assert.deepEqual(result.items.map(item => item.value), ['@src/deep-nested.ts', '@somedir/other.ts'])
+  assert.deepEqual(queries, ['sdt'], 'the official query form crossed')
 })
 
 test('the provider completes the QUOTED @ form through the port (quoted values)', async (t) => {

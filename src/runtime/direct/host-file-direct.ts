@@ -29,7 +29,7 @@ import { statSync } from 'node:fs'
 import { resolveMentionCandidate } from '../../mentions.ts'
 import type { DiscoverySource } from '../../file-completion/discovery.ts'
 import { discoverForQuery, resolveFdPath } from '../../file-completion/discovery.ts'
-import { reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
+import { presentDiscovery, reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
 import type {
   HostFileCandidate,
   HostFileListResult,
@@ -161,23 +161,31 @@ export class DirectHostFilePort implements HostFilePort {
     // scanner (fd/fdfind, bounded recursive fallback) answers behind the
     // same path-only contract; it must not define the session semantics.
     // `query` is already the official form (text following `@`): a literal
-    // `@dir/file` mention normalizes to `@dir/file` — no grammar parsing
-    // here, the scanner engine owns scope resolution for the raw text.
+    // `@@dir/file` mention normalizes to the query `@dir/file` — no grammar
+    // parsing here, the scanner engine owns scope resolution for the raw
+    // text.
     const workDir = scope.cwd
     const signal = options?.signal
     try {
       const resolved = resolveQuery(query, workDir)
       const candidates = await discoverForQuery(resolved, this.discoverySource, signal ?? new AbortController().signal)
       signal?.throwIfAborted()
-      // THE PORT CONTRACT: paths are USER-FACING — the display base the
-      // user typed (`../`, `~/pics/`, `/tmp/`, `src/`) is reattached here
-      // (the engine's pure reattachment), so the client's presentation
-      // (ranking, quoting, the `@`-insertion value) sees final paths.
+      // THE PORT CONTRACT: the candidates cross ALREADY ranked, filtered
+      // and bounded, in the adapter's own order. This compatibility path
+      // has no official authority, so the adapter completes the legacy
+      // ranking itself (the engine's rank/slice, over the reattached
+      // user-facing paths) — the client never re-ranks what a source
+      // returned.
+      const displayed = candidates.map(candidate => reattachDisplayBase(candidate, resolved))
+      const ranked = presentDiscovery(displayed, resolved.searchTerm, { at: false, quoted: false })
       return {
         kind: 'ok',
-        items: candidates.map(candidate => {
-          const display = reattachDisplayBase(candidate, resolved)
-          return { path: display.path, kind: display.kind }
+        items: ranked.map(item => {
+          // presentPathCandidate's label IS the user-facing path (+ the
+          // directory slash marker); the DTO wants the bare path + kind.
+          const path = item.label.endsWith('/') ? item.label.slice(0, -1) : item.label
+          const source = displayed.find(candidate => candidate.path === path)
+          return { path, kind: source?.kind ?? 'file' }
         }),
       }
     } catch {
