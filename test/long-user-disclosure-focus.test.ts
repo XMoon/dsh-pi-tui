@@ -1,10 +1,12 @@
 /**
  * Long-user disclosure inside fullscreen + Focus: the compact marker stays a
  * click-only EXPAND (Ctrl+O owns the Thought-root bulk there), the expanded
- * tail control offers only the click, and Ctrl+O's existing root precedence is
- * preserved — with an expanded Thought root it collapses the roots AND clears
- * the long-user expansion, and it never routes through the generic user
- * viewport helper (which would fight the root's `anchor-turn` contract).
+ * bubble collapses locally by a plain BODY click (or the click-only tail
+ * control) without ever falling through to the Thought-root toggle, and
+ * Ctrl+O's existing root precedence is preserved — with an expanded Thought
+ * root it collapses the roots AND clears the long-user expansion, and it
+ * never routes through the generic user viewport helper (which would fight
+ * the root's `anchor-turn` contract).
  * @module @xmoon76/dsh-pi-tui/long-user-disclosure-focus.test
  */
 
@@ -99,6 +101,42 @@ test('fullscreen Focus: an expanded root wins over an expanded user on Ctrl+O (r
   // its one-line `Action:` summary of the same evidence (2026-09-22 v2
   // addendum), so the assertion targets the card shape, not any trace.
   assert.ok(!view.includes('Read a [ok]'), `the Thought root collapses too (Collapse All):\n${view}`)
+  app.setFullscreen(false)
+  app.setFocusMode(false)
+  app.stop()
+})
+
+test('fullscreen Focus: a body click collapses only the user, the Thought root keeps its state', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(
+    [
+      user(lines(11, 'u-'), 1),
+      { kind: 'tool', turn: 1, name: 'read', args: JSON.stringify({ path: 'a' }), result: 'ok', status: 'ok' },
+    ],
+    new Map([[1, activity(1)]]),
+  )
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  // Expand the Thought root (the Ctrl+O bulk), then the long user via its
+  // marker — the two disclosures coexist.
+  vt.sendInput('\x0f')
+  let rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('Read')), `the root expands:\n${rows.join('\n')}`)
+  const markerY = rows.findIndex(row => row.includes('rows compacted'))
+  assert.ok(markerY >= 0)
+  clickCell(vt, 10, markerY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('u-5')), 'the user expands by the marker click')
+
+  // A plain BODY click collapses ONLY the user — it must never fall through
+  // to the Thought-root toggle.
+  const bodyY = rows.findIndex(row => row.includes('u-2'))
+  assert.ok(bodyY >= 0, `a user body row must be visible:\n${rows.join('\n')}`)
+  clickCell(vt, 10, bodyY)
+  rows = await viewRows(vt)
+  assert.equal(rows.filter(row => row.includes('rows compacted')).length, 1, 'the user collapses back to its marker')
+  assert.ok(!rows.join('\n').includes('u-5'), 'the user middle is hidden again')
+  assert.ok(rows.some(row => row.includes('Read')), 'the Thought root stays expanded (its state is unchanged)')
   app.setFullscreen(false)
   app.setFocusMode(false)
   app.stop()

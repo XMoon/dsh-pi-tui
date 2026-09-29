@@ -446,8 +446,9 @@ rule resolves a trailing blank spacer to the DEEPEST container the row and the
 next VISIBLE row share: an internal Work spacer collapses that Work, a spacer
 between nested Work and a Thought-only row collapses the Thought, a cluster
 spacer collapses the cluster, and a boundary/global blank is inert. Concrete
-row targets (long-user control, PTC sub-call, Workflow, attachment, secondary
-card) always win before the container fallback.
+local targets (the long-user bubble as a whole — collapsed or expanded — its
+tail control, PTC sub-call, Workflow, attachment,
+secondary card) always win before the container fallback.
 
 ### Regular-surface disclosure ownership (F6)
 

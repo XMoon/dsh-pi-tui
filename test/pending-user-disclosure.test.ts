@@ -83,7 +83,7 @@ test('pending: a long text-only steering row folds by visual rows (regular)', as
   assert.ok(!view.includes('p-12'), 'the middle is hidden')
   assert.ok(view.includes('17 rows compacted'))
   assert.ok(view.includes('steering…'), 'the status line always stays visible')
-  assert.ok(view.includes('ctrl+o to expand'), 'regular names the effective key')
+  assert.ok(view.includes('ctrl+o expand/collapse'), 'regular names the effective key as the bidirectional owner')
   app.stop()
 })
 
@@ -143,6 +143,88 @@ test('pending: fullscreen marker expands, keeps the status line, and the tail co
   app.stop()
 })
 
+test('pending: a body click collapses the row and the status row stays inert', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.setTranscript([])
+  steering(app, [longRow('p1', 'p-', 'r1')])
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  const markerY = rows.findIndex(row => row.includes('rows compacted'))
+  clickCell(vt, 10, markerY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('p-12')), 'the pending row is expanded')
+  const statusY = rows.findIndex(row => row.includes('steering…'))
+  assert.ok(statusY >= 0, 'the status line is visible')
+
+  // The status line sits OUTSIDE every hit range: a click on it is inert.
+  clickCell(vt, 10, statusY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('p-12')), 'the status row click must not collapse the row')
+
+  // A plain BODY click collapses the pending row itself (pending parity with
+  // the durable bubble's local block toggle).
+  const bodyY = rows.findIndex(row => row.includes('p-2'))
+  assert.ok(bodyY >= 0 && bodyY < statusY, `a pending body row must be visible above the status:\n${rows.join('\n')}`)
+  clickCell(vt, 10, bodyY)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'the body click restores compact')
+  assert.ok(!rows.some(row => row.includes('p-12')), 'the middle is hidden again')
+  assert.ok(rows.some(row => row.includes('steering…')), 'the status line survives')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('pending: a stale body press never transfers to a replacement row', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.setTranscript([])
+  app.setFullscreen(true)
+  // Turn the Ctrl+O master ON first, so a fresh pending row defaults
+  // EXPANDED and a transferred collapse would be observable.
+  vt.sendInput('\x0f')
+  steering(app, [longRow('a', 'A-', 'ra')])
+  let rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('A-5')), 'row A defaults expanded under the master')
+  assert.equal(compactMarkerCount(rows), 0)
+
+  // Press A's BODY but do NOT release: A is replaced before the release.
+  const bodyY = rows.findIndex(row => row.includes('A-2'))
+  assert.ok(bodyY >= 0)
+  vt.sendInput(`\x1b[<0;10;${bodyY + 1}M`)
+  steering(app, [longRow('b', 'B-', 'rb')])
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('B-5')), 'row B defaults expanded under the master')
+
+  // Release at the pressed cell: the stale A-identity must never collapse B.
+  vt.sendInput(`\x1b[<0;10;${bodyY + 1}m`)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('B-5')), 'the replacement row must stay expanded')
+  assert.equal(compactMarkerCount(rows), 0, 'the stale body press must not collapse the replacement')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('pending: a plain click anywhere on the collapsed bubble expands the row', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.setTranscript([])
+  steering(app, [longRow('p1', 'p-', 'r1')])
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1)
+
+  // The whole pending bubble is the disclosure surface — the head text row
+  // expands it just like the marker does (pending parity with the durable
+  // bubble's local block toggle).
+  const headY = rows.findIndex(row => row.includes('p-1'))
+  assert.ok(headY >= 0)
+  clickCell(vt, 10, headY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('p-12')), 'a head-row click expands the pending row')
+  assert.ok(rows.some(row => row.includes('steering…')), 'the status line stays visible')
+  assert.equal(compactMarkerCount(rows), 0)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('pending: fullscreen Focus defaults compact and advertises click only', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([])
@@ -152,7 +234,7 @@ test('pending: fullscreen Focus defaults compact and advertises click only', asy
   let rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 1, 'pending defaults compact in fullscreen Focus')
   assert.ok(rows.some(row => row.includes('click to expand')))
-  assert.ok(!rows.join('\n').includes('ctrl+o to expand'), 'no dead Ctrl+O promise')
+  assert.ok(!rows.join('\n').includes('ctrl+o expand/collapse'), 'no dead Ctrl+O promise')
 
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   clickCell(vt, 10, markerY)
@@ -242,7 +324,7 @@ test('pending: disclosure state is pruned when the row disappears', async () => 
   app.stop()
 })
 
-test('pending: a stale marker press never transfers to a replacement row', async () => {
+test('pending: a stale collapsed-bubble press never transfers to a replacement row', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([])
   steering(app, [longRow('a', 'A-', 'ra'), longRow('b', 'B-', 'rb')])
@@ -308,7 +390,7 @@ test('pending: a regular Ctrl+O round-trip stays keyboard-only (no copyable tail
   // Regular default: compact with the effective-key hint, no mouse affordance.
   let rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 1, 'regular folds the long pending row')
-  assert.ok(rows.join('\n').includes('ctrl+o to expand'))
+  assert.ok(rows.join('\n').includes('ctrl+o expand/collapse'))
   assert.equal(collapseFooterRows(rows).length, 0, 'no footer while collapsed')
 
   // Ctrl+O expands the pending row in FULL — and regular must not inject a

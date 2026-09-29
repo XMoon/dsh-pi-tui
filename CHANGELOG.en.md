@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The fullscreen long user message bubble is now one local disclosure
+  surface: a single click anywhere on a collapsed bubble (head text, marker,
+  or tail text) expands that message, and a single click anywhere on an
+  expanded bubble collapses it; drag selection remains intact, and the
+  existing tail Collapse control stays available. Double-click word selection
+  is intentionally no longer available on the long-user bubble in either
+  state (the first complete click acts immediately).
+- Regular long-user markers now advertise the effective key as
+  `expand/collapse` instead of only "to expand".
+
 ## [0.5.0] - 2026-09-28
 
 ### Installation and version pairing
