@@ -2070,3 +2070,57 @@ test('ownsFixedKey: space is owned only by the multi-select list mode', () => {
   render(single, 100)
   assert.equal(single.ownsFixedKey(' '), false, 'a single-select list must not own Space')
 })
+
+test('choosing an ordinary single-select option replaces the custom answer', () => {
+  // Plan §5.2: a single-select ordinary option clears custom. Without
+  // it, submit prefers the stale custom text and silently discards the
+  // option the user just chose (Enter, digit, and mouse paths).
+  const flows: Array<{ label: string; choose: (f: QuestionFlow) => void }> = [
+    {
+      label: 'Enter on the option row',
+      choose: (f) => {
+        f.handleInput('\x1b[A')
+        f.handleInput('\x1b[A') // cursor up to option A
+        f.handleInput('\r')
+      },
+    },
+    { label: 'digit', choose: (f) => { f.handleInput('1') } },
+  ]
+  for (const { label, choose } of flows) {
+    let done: unknown
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'Pick one thing', options: [{ label: 'A' }, { label: 'B' }] },
+    ], (answers) => { done = answers }, () => {})
+    f.setMaxRows(24)
+    render(f, 100)
+    f.handleInput('\x1b[B'); f.handleInput('\x1b[B')
+    render(f, 100)
+    f.handleInput('\r') // enter the OTHER edit
+    f.handleInput('alice')
+    f.handleInput('\x1b') // Esc → list (draft.custom = 'alice')
+    render(f, 100)
+    choose(f)
+    render(f, 100)
+    f.handleInput('\r') // submit
+    assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }], `${label} must replace the custom answer`)
+  }
+  // Mouse parity: click option A after a typed custom.
+  let done: unknown
+  const g = new QuestionFlow([
+    { id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  g.setMaxRows(24)
+  let rendered = g.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, 'option A row missing')
+  g.handleInput('\x1b[B'); g.handleInput('\x1b[B')
+  render(g, 100)
+  g.handleInput('\r')
+  g.handleInput('typed')
+  g.handleInput('\x1b') // Esc → list
+  render(g, 100)
+  g.clickRow(rowA)
+  render(g, 100)
+  g.handleInput('\r') // submit
+  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }], 'the mouse click must replace the custom answer')
+})
