@@ -2170,13 +2170,21 @@ the final complete Remote Backend assembly.
   read stay explicit unsupported; `hostLoadsSkillBody` is a composition
   fact (constant), and `onSkillsChange` installs no private event (the
   strong re-read boundaries own freshness).
-- `src/runtime/host-file-port.ts` + `src/runtime/remote/host-file-remote.ts`
-  — `listReferences` now distinguishes an authoritative `ok` (empty included)
-  from `unavailable` (reason carried); `resolveReference` gained the same
-  third state (never fake `missing`). The Remote adapter maps the session
-  scope to the official `fileReferences/list(agentId, query, signal)` with
-  generation fencing; the workspace scope and existence/canonicalization are
-  explicit `unavailable` (no Client fs, no cwd guess, no fake empty).
+- `src/runtime/host-file-port.ts` + both adapters — `listReferences`
+  distinguishes an authoritative `ok` (empty included) from `unavailable`
+  (reason carried); `resolveReference` gained the same third state (never
+  fake `missing`). `query` is the OFFICIAL wire form (the path text
+  following `@`, outside quotes — the grammar stripping is client policy in
+  mentions.ts, never an adapter's). The SESSION scope maps the OFFICIAL
+  Host authority on BOTH sides: Direct calls
+  `ctx.fileReferences.list(agent, query, signal)` (the
+  `dsh-file-reference-local` provider the composition mounts — the same
+  service the wire forwards to; the adapter maps, it does not re-implement
+  ranking/bounds/exclusions/caching), Remote maps
+  `fileReferences/list(agentId, query, signal)` with generation fencing.
+  The WORKSPACE scope keeps the legacy fd/fdfind scanner as a Direct-only
+  sessionless compatibility path with no official carrier (the wire answers
+  `unavailable`); it must not define the session semantics.
   MENTIONS STAY LITERAL ON BOTH BACKENDS — and that is not a missing-carrier
   fallback but the OFFICIAL client contract itself (the official codec is
   `serialize: ref => ref`; the Host's `FILE_REFERENCE_PROMPT` — installed
@@ -2219,8 +2227,8 @@ the final complete Remote Backend assembly.
 | ModelCatalog `listConfigurableProviders` | UNAVAILABLE (`undefined`) | config-schema ownership is M3-3B's ConfigPort |
 | SkillCatalog `listHumanSkills` | READY | `skills/list` |
 | SkillCatalog `standing` / `resolveSkill` / `onSkillsChange` | UNSUPPORTED | session-addressed list-only wire; no `skills/read`; no forwarded `skills/*` event |
-| HostFile session scope | READY | `fileReferences/list(agentId, …)` |
-| HostFile workspace scope / existence | UNSUPPORTED | no official carrier — `unavailable`; `resolveReference` is a Direct-only diagnostic seam, not a cross-backend contract |
+| HostFile session scope | READY | Direct: `ctx.fileReferences.list(agent, query, signal)` (the official provider); Remote: `fileReferences/list(agentId, …)` — both with the official query form |
+| HostFile workspace scope / existence | UNSUPPORTED (wire) / Direct-only compat | no official carrier — `unavailable`; the workspace scanner is a Direct-only compatibility path, `resolveReference` a Direct-only diagnostic seam (neither defines the cross-backend contract) |
 | HostFile mention send semantics | OFFICIAL_LITERAL (both backends) | the official codec + `FILE_REFERENCE_PROMPT`; no send-time probe or rewrite anywhere |
 | PresentationReader `read`/`loadOlder`/`loadThrough` | READY | official Client event window + jump loop |
 | PresetCatalog roster/default/resolve/select | READY (requalified) | `agentPresets/list`/`select` |

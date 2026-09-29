@@ -1,24 +1,25 @@
 /**
  * The Direct Host-file adapter (M1.10, realigned M3-3A) — the in-process
- * implementation of `HostFilePort` over the CURRENT TUI filesystem
- * behavior: the SHARED file-completion engine (fd/fdfind whole-tree fuzzy
- * when a finder is on the Host PATH, scoped-directory discovery otherwise,
- * the bounded recursive fallback as last resort) and stat-based existence
- * checks. This is the ONLY module in the `@`-file path that touches the
- * filesystem; the pure grammar stays in `src/mentions.ts`, and the Remote
- * adapter maps the same interface onto the official fileReferences wire.
- * The interim same-machine discovery answers the same path-only contract
- * the wire serves; the official `dsh-file-reference-local` provider
- * (mounted by the TUI composition) is the Host-side authority.
+ * implementation of `HostFilePort` over the OFFICIAL Host authority:
  *
- * SCOPED QUERIES (plan §19): `@src/de` searches workspace/src + term `de`;
- * `@../../foo` searches the resolved parent scope; `@~/foo` searches the
- * home scope; `@/tmp/foo` searches the absolute scope. NEVER a whole-tree
- * scan filtered by string — the query resolver in the engine owns the
- * scope split, this adapter only answers discovery.
+ * ```text
+ * session scope   -> ctx.fileReferences.list(agent, query, signal)
+ *                    (the official @deepseek-ai/dsh-file-reference-local
+ *                    provider the TUI composition mounts — the same Host
+ *                    service the wire `fileReferences/list` forwards to)
+ * workspace scope -> the Direct-only legacy scanner (fd/fdfind whole-tree
+ *                    fuzzy, the bounded recursive fallback) — a sessionless
+ *                    compatibility path with NO official carrier (the wire
+ *                    answers `unavailable`); it must not define the
+ *                    session `@file` semantics
+ * ```
  *
- * In Direct mode the Client machine IS the Host machine; the session
- * scope resolves through the runner-injected live-agent resolver.
+ * The official service owns the workspace root, ranking, result bounds,
+ * excluded directories, caching and tool-result invalidation — this
+ * adapter maps, it does not re-implement. `query` is the official wire
+ * form (path text following `@`, outside quotes); the `resolveReference`
+ * existence probe is a Direct-only diagnostic seam (the wire has no
+ * carrier and the submission path consumes nothing).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-file-direct
@@ -30,6 +31,7 @@ import type { DiscoverySource } from '../../file-completion/discovery.ts'
 import { discoverForQuery, resolveFdPath } from '../../file-completion/discovery.ts'
 import { reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
 import type {
+  HostFileCandidate,
   HostFileListResult,
   HostFilePort,
   HostFileResolveResult,
@@ -42,18 +44,57 @@ export interface LiveAgentLike {
   readonly session: { readonly header: { readonly cwd?: string } }
 }
 
+/** The structural official `ctx.fileReferences` face (the
+ * `FileReferenceService.list` subset — the exact session Agent, the
+ * official query form, caller cancellation). */
+export interface FileReferencesServiceLike {
+  list(
+    agent: unknown,
+    query: string,
+    signal: AbortSignal,
+  ): Promise<readonly HostFileCandidate[]>
+}
+
+/** The minimal Host context surface (structural — the service resolves
+ * from the dsh installation; never a package dependency). */
+export interface HostContextLike {
+  get(name: string): unknown
+}
+
 /** The Direct backend's Host-file port: the current TUI filesystem
  * mechanics behind the semantic `HostFilePort` interface. */
 export class DirectHostFilePort implements HostFilePort {
+  private readonly ctx: HostContextLike | undefined
   private readonly fdPath: string | null
   private readonly agentFor: (sessionId: string) => unknown | undefined
 
-  /** @param agentFor - the session-id → live-agent resolver (runner
-   *   injected). @param fdPath - the Host's fd/fdfind executable; defaults
-   *   to the PATH probe; tests inject `null` to pin the fallback scan. */
-  constructor(agentFor: (sessionId: string) => unknown | undefined, fdPath: string | null = resolveFdPath()) {
-    this.fdPath = fdPath
+  /** @param ctx - the Host context carrying the official
+   *   `ctx.fileReferences` service (the session scope's authority). A
+   *   ctx-less construction (tests/legacy call sites) answers the session
+   *   scope `unavailable` and keeps only the workspace compatibility
+   *   path. @param agentFor - the session-id → live-agent resolver
+   *   (runner injected). @param fdPath - the Host's fd/fdfind executable
+   *   for the WORKSPACE compatibility scanner; defaults to the PATH probe;
+   *   tests inject `null` to pin the fallback scan. */
+  constructor(
+    agentFor: (sessionId: string) => unknown | undefined,
+    fdPathOrCtx: string | null | HostContextLike = resolveFdPath(),
+    maybeCtx?: HostContextLike,
+  ) {
+    if (typeof fdPathOrCtx === 'string' || fdPathOrCtx === null) {
+      this.fdPath = fdPathOrCtx
+      this.ctx = maybeCtx
+    } else {
+      this.ctx = fdPathOrCtx
+      this.fdPath = resolveFdPath()
+    }
     this.agentFor = agentFor
+  }
+
+  /** The official `ctx.fileReferences` service, when the composition
+   *  mounts it (the `dsh-file-reference-local` row). */
+  private fileReferences(): FileReferencesServiceLike | undefined {
+    return this.ctx?.get('fileReferences') as FileReferencesServiceLike | undefined
   }
 
   /** The discovery seam this adapter answers with (the Host's own fd
@@ -86,28 +127,45 @@ export class DirectHostFilePort implements HostFilePort {
     query: string,
     options?: { signal?: AbortSignal },
   ): Promise<HostFileListResult> {
-    const signal = options?.signal
-    // Cancellation is CANCELLATION and wins over EVERY other outcome
-    // (the M3-3A failure vocabulary: an aborted request rejects — the
-    // Remote adapter's `throwIfAborted` shape) — including the
-    // unresolvable-scope unavailable below.
-    signal?.throwIfAborted()
-    const workDir = this.scopeCwd(scope)
-    // An unresolvable scope is an UNAVAILABLE capability (the adapter cannot
-    // even form the Host-side query), never an authoritative empty answer.
-    if (workDir === undefined) {
-      return { kind: 'unavailable', reason: 'the session scope has no resolvable Host workspace' }
+    // Cancellation wins over EVERY other outcome (the M3-3A failure
+    // vocabulary): an aborted request rejects at entry — before any
+    // scope/capability decision.
+    options?.signal?.throwIfAborted()
+
+    if (scope.kind === 'session') {
+      // The OFFICIAL Host authority: the exact session Agent and the
+      // official query form (path text following `@`) go straight to
+      // `ctx.fileReferences.list` — the same service the wire
+      // `fileReferences/list` forwards to. The service owns the workspace
+      // root, ranking, bounds, excluded directories and caching; this
+      // adapter only detaches the result.
+      const agent = this.agentFor(scope.sessionId)
+      if (agent === undefined) {
+        return { kind: 'unavailable', reason: 'the session scope has no resolvable live Agent' }
+      }
+      const references = this.fileReferences()
+      if (references === undefined) {
+        return { kind: 'unavailable', reason: 'the official Host file-reference service is not mounted' }
+      }
+      const signal = options?.signal ?? new AbortController().signal
+      const candidates = await references.list(agent, query, signal)
+      signal.throwIfAborted()
+      return {
+        kind: 'ok',
+        items: candidates.map(candidate => ({ path: candidate.path, kind: candidate.kind })),
+      }
     }
-    // `query` is the editor's at-prefix INCLUDING the leading `@` (and an
-    // unclosed `"` for the quoted form). The engine strips the `@` and any
-    // trailing quote, resolves the scope and answers discovery with path
-    // facts relative to the query's search base.
+
+    // WORKSPACE scope: a Direct-only sessionless compatibility path with
+    // NO official carrier (the wire answers `unavailable`). The legacy
+    // scanner (fd/fdfind, bounded recursive fallback) answers behind the
+    // same path-only contract; it must not define the session semantics.
+    const workDir = scope.cwd
+    const signal = options?.signal
     const { raw } = stripPrefix(query)
     try {
       const resolved = resolveQuery(raw, workDir)
       const candidates = await discoverForQuery(resolved, this.discoverySource, signal ?? new AbortController().signal)
-      // A cancellation landing mid-discovery outranks any result or local
-      // failure the engine reported alongside it.
       signal?.throwIfAborted()
       // THE PORT CONTRACT: paths are USER-FACING — the display base the
       // user typed (`../`, `~/pics/`, `/tmp/`, `src/`) is reattached here
@@ -121,9 +179,6 @@ export class DirectHostFilePort implements HostFilePort {
         }),
       }
     } catch {
-      // A cancellation that surfaced through the engine stays a
-      // cancellation; only a genuine local discovery failure is an
-      // unavailable answer here (never an authoritative "nothing matches").
       signal?.throwIfAborted()
       return { kind: 'unavailable', reason: 'local file discovery failed' }
     }

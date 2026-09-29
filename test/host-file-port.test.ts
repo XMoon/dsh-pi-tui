@@ -45,6 +45,35 @@ function fallbackPort(root: string): DirectHostFilePort {
     sessionId === 'session-live' ? { session: { header: { cwd: root } } } : undefined, null)
 }
 
+/** A recorded official `ctx.fileReferences` service stand-in. */
+function officialService(candidates: readonly { path: string; kind: 'file' | 'directory' }[] = []) {
+  const calls: Array<{ agent: unknown; query: string; signal: AbortSignal | undefined }> = []
+  return {
+    calls,
+    service: {
+      list: async (agent: unknown, query: string, signal?: AbortSignal) => {
+        calls.push({ agent, query, signal })
+        return candidates
+      },
+    },
+  }
+}
+
+/** A session-scoped adapter over the official service stand-in. */
+function officialPort(candidates?: readonly { path: string; kind: 'file' | 'directory' }[]): {
+  port: DirectHostFilePort
+  calls: Array<{ agent: unknown; query: string; signal: AbortSignal | undefined }>
+} {
+  const official = officialService(candidates)
+  const live = { session: { header: { cwd: '/ws' } } }
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    null,
+    { get: (name: string) => name === 'fileReferences' ? official.service : undefined },
+  )
+  return { port, calls: official.calls }
+}
+
 test('resolveFdPath finds an executable fd on PATH and returns null otherwise', (t) => {
   const life = testLifecycle(t)
   const saved = process.env.PATH
@@ -67,20 +96,20 @@ test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', 
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  const file = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@file'))
+  const file = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'file'))
   assert.ok(file.some(item => item.path === 'file-one.txt' && item.kind === 'file'),
     `file-one missing:\n${JSON.stringify(file)}`)
   assert.ok(file.some(item => item.path === 'file-two.ts' && item.kind === 'file'),
     `file-two missing:\n${JSON.stringify(file)}`)
-  const nested = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@nested'))
+  const nested = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'nested'))
   assert.ok(nested.some(item => item.path === 'src/deep-nested.ts' && item.kind === 'file'),
     `nested file missing:\n${JSON.stringify(nested)}`)
-  const dirs = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@src'))
+  const dirs = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'src'))
   assert.ok(dirs.some(item => item.path === 'src' && item.kind === 'directory'),
     `directory item missing:\n${JSON.stringify(dirs)}`)
   // A query into a nonexistent directory is an AUTHORITATIVE empty ok,
   // never an unavailable capability.
-  assert.deepEqual(await port.listReferences({ kind: 'workspace', cwd: root }, '@no-such-dir-zzz/'),
+  assert.deepEqual(await port.listReferences({ kind: 'workspace', cwd: root }, 'no-such-dir-zzz/'),
     { kind: 'ok', items: [] })
 })
 
@@ -90,7 +119,7 @@ test('the fallback returns RAW paths — quoting and filtering are client-side',
   const port = fallbackPort(root)
   // The port answers "which Host files exist": no `@`, no quotes, no
   // trailing slash, no query filtering (the client ranks and presents).
-  const result = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, '@my'))
+  const result = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'my'))
   assert.ok(result.some(item => item.path === 'my file.txt' && item.kind === 'file'),
     `the spaced path flows through raw:\n${JSON.stringify(result)}`)
   assert.ok(result.every(item => !item.path.startsWith('@') && !item.path.includes('"') && !item.path.endsWith('/')),
@@ -136,18 +165,26 @@ test('an abort mid-scan cancels the fallback discovery (a rejection, never unava
     'a cancelled discovery rejects — Direct and Remote share the one cancellation semantic')
 })
 
-test('the session scope resolves through the live-agent resolver; unresolvable scopes fail closed', async (t) => {
+test('the session scope maps the OFFICIAL service: exact agent, official query form, detached result', async () => {
+  const { port, calls } = officialPort([{ path: 'src/a.ts', kind: 'file' }, { path: 'src', kind: 'directory' }])
+  const result = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'src/fo')
+  assert.deepEqual(result, { kind: 'ok', items: [{ path: 'src/a.ts', kind: 'file' }, { path: 'src', kind: 'directory' }] })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]!.query, 'src/fo', 'the port carries the OFFICIAL query form — path text after `@`, no prefix/quotes')
+  assert.ok(calls[0]!.agent !== undefined, 'the exact live Agent crosses, never a cwd string')
+})
+
+test('the session scope fails closed without the official service or a live agent', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const port = fallbackPort(root)
-  const viaSession = okItems(await port.listReferences({ kind: 'session', sessionId: 'session-live' }, '@file'))
-  assert.ok(viaSession.some(item => item.path === 'file-one.txt'), 'the session cwd drives discovery')
-  // An unresolvable session scope is UNAVAILABLE, never an authoritative
-  // empty list or a proven-missing probe.
-  const unresolvable = await port.listReferences({ kind: 'session', sessionId: 'session-other' }, '@file')
-  assert.equal(unresolvable.kind, 'unavailable')
-  assert.equal((await port.resolveReference({ kind: 'session', sessionId: 'session-other' }, 'file-one.txt')).kind, 'unavailable')
-  assert.equal(await port.canonicalizeMentions({ kind: 'session', sessionId: 'session-other' }, '@file-one.txt'), '@file-one.txt')
+  const { port } = officialPort()
+  const noAgent = await port.listReferences({ kind: 'session', sessionId: 'no-such' }, 'src/fo')
+  assert.equal(noAgent.kind, 'unavailable', 'no live Agent for the session identity')
+  const ctxLess = new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
+  const noService = await ctxLess.listReferences({ kind: 'session', sessionId: 's' }, 'src/fo')
+  assert.equal(noService.kind, 'unavailable', 'the official service must be mounted')
+  assert.equal((await ctxLess.resolveReference({ kind: 'session', sessionId: 's' }, 'file-one.txt')).kind, 'found',
+    'the Direct-only existence seam still resolves through the agent cwd')
 })
 
 test('resolveReference probes existence with the mention resolution rules', async (t) => {
@@ -194,7 +231,7 @@ test('canonicalizeMentions returns the text VERBATIM (the official mention seman
 test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileReferenceCandidate shape)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const [item] = okItems(await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file'))
+  const [item] = okItems(await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, 'file'))
   assert.ok(item !== undefined)
   assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
   assert.equal(typeof item.path, 'string')
@@ -220,7 +257,7 @@ test('the fd branch delegates to the fork fuzzy search and returns path-only can
   const port = new DirectHostFilePort(() => undefined, fakeFd(life,
     `printf 'file-one.txt\\nfile-two.ts\\nsrc/\\nsrc/deep-nested.ts\\n'`))
   const scope = { kind: 'workspace', cwd: root } as const
-  const hits = okItems(await port.listReferences(scope, '@file'))
+  const hits = okItems(await port.listReferences(scope, 'file'))
   const paths = hits.map(candidate => candidate.path)
   assert.ok(paths.includes('file-one.txt') || paths.includes('file-two.ts'),
     `the fd candidates flow through as path-only DTOs:\n${JSON.stringify(paths)}`)
@@ -234,7 +271,7 @@ test('the fd branch returns RAW paths — quoting is client-side', async (t) => 
   const root = fixtureWorkspace(life)
   const port = new DirectHostFilePort(() => undefined, fakeFd(life,
     `printf 'my file.txt\\nsrc/\\nsrc/deep-nested.ts\\n'`))
-  const hits = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, '@"my file'))
+  const hits = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, 'my file'))
   assert.ok(hits.some(candidate => candidate.path === 'my file.txt' && candidate.kind === 'file'),
     `a spaced fd candidate must flow through as a RAW path:\n${JSON.stringify(hits.map(h => h.path))}`)
 })
@@ -257,7 +294,7 @@ test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)
   // contract is fd-FIRST, BOUNDED-FALLBACK — a failure is NOT a valid
   // empty result, so the recursive scan answers.
   const port = new DirectHostFilePort(() => undefined, fakeFd(life, 'exit 3'))
-  const candidates = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, '@file'))
+  const candidates = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, 'file'))
   assert.ok(candidates.length > 0, 'a failed fd must fall back to the bounded scan')
   assert.ok(
     candidates.some(candidate => candidate.path.includes('file-one.txt')),

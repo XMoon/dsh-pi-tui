@@ -84,15 +84,18 @@ export type HostFileListResult =
  *  official mention semantics (the selected reference stays literal; the
  *  Host/model resolves relative paths from the workspace root). */
 export interface HostFilePort {
-  /** Complete one `@`-mention query (the editor's at-prefix INCLUDING the
-   * leading `@`, e.g. `@src/fo` or `@"my file`). Returns the candidates
-   * the current Host filesystem discovery offers (fd whole-tree fuzzy
-   * when fd is on the Host PATH, the bounded recursive scan otherwise)
-   * as an authoritative `ok` — `[]` when nothing matches — or
-   * `unavailable` when the capability cannot answer. Cancellation is its
-   * own outcome and outranks every other one: an aborted signal REJECTS
-   * (both adapters, entry-time — before any scope/capability decision),
-   * never folded into `unavailable`. */
+  /** Complete one `@`-mention query. `query` is the OFFICIAL wire form —
+   * the path text FOLLOWING the `@` (and outside any quotes), e.g.
+   * `src/fo` for `@src/fo` and `my file` for `@"my file` — exactly what
+   * the official `FileReferenceService.list(agent, query, signal)` and
+   * the generated `fileReferences/list` Remote accept. The editor
+   * grammar's `@`/quote stripping is CLIENT policy (mentions.ts), never
+   * an adapter's. Returns the candidates the current Host filesystem
+   * discovery offers as an authoritative `ok` — `[]` when nothing
+   * matches — or `unavailable` when the capability cannot answer.
+   * Cancellation is its own outcome and outranks every other one: an
+   * aborted signal REJECTS (both adapters, entry-time — before any
+   * scope/capability decision), never folded into `unavailable`. */
   listReferences(
     scope: HostFileScope,
     query: string,

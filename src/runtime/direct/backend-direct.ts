@@ -78,7 +78,7 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectInteractionPort(deps.ctx, deps.agentFor),
     new DirectCatalogPort(deps.ctx, deps.agentFor, deps.modelSelections, deps.diag),
     new DirectConfigPort(deps.ctx, deps.tuiSettings, deps.agentFor),
-    new DirectHostFilePort(deps.agentFor),
+    new DirectHostFilePort(deps.agentFor, null, deps.ctx),
     new DirectSessionArchive(deps.ctx),
     new DirectHostCommandPort(deps.ctx, deps.agentFor),
     new DirectPluginManagerPort(deps.ctx),

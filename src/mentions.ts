@@ -581,11 +581,9 @@ export class MentionProvider implements AutocompleteProvider {
     // `scope` is captured at request entry and deliberately threaded through
     // the await. A session switch while the Host request is in flight must
     // fence the old request instead of resolving it against the new session.
-    // The editor's at-prefix INCLUDES the `@` (and an unclosed `"` for the
-    // quoted form): the port's contract keeps the whole prefix (its Direct
-    // adapter strips and resolves the scope). The engine's raw token for
-    // ranking is the stripped form; the port returns the DISPLAY paths
-    // already reattached (its contract: user-facing paths).
+    // The editor's at-prefix INCLUDES the `@`; the discovery step strips the
+    // grammar so the port receives the official query form. The port returns
+    // the DISPLAY paths (its contract: user-facing paths).
     const candidates = await this.discoverMention(scope, atPrefix, signal)
     if (signal.aborted || candidates.length === 0) return null
     if (!sameMentionScope(scope, this.scopeOf())) return null
@@ -600,7 +598,10 @@ export class MentionProvider implements AutocompleteProvider {
     return { prefix: atPrefix, items }
   }
 
-  /** The discovery step (separated for the abort-fence test seam). An
+  /** The discovery step (separated for the abort-fence test seam). The
+   *  editor's `@`/quote grammar is stripped HERE — the port receives the
+   *  OFFICIAL wire query form (the path text following `@`) that
+   *  `FileReferenceService.list` and the generated Remote accept. An
    *  `unavailable` capability (or a transport failure) presents as no
    *  candidates — the port keeps the two states distinct, the completion
    *  surface does not invent rows for either. */
@@ -609,8 +610,9 @@ export class MentionProvider implements AutocompleteProvider {
     atPrefix: string,
     signal: AbortSignal,
   ): Promise<readonly import('./runtime/host-file-port.ts').HostFileCandidate[]> {
+    const { raw: officialQuery } = stripMentionToken(atPrefix)
     try {
-      const result = await this.fileReferences.listReferences(scope, atPrefix, { signal })
+      const result = await this.fileReferences.listReferences(scope, officialQuery, { signal })
       return result.kind === 'ok' ? result.items : []
     } catch {
       return []
