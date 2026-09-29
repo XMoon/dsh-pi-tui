@@ -886,6 +886,11 @@ export class QuestionFlow implements Component, Focusable {
       if (option !== undefined) {
         draft.selected.clear()
         draft.selected.add(option.label)
+        // An ordinary single-select choice REPLACES a custom answer (Web
+        // parity — submit prefers a nonblank custom for single-select, so
+        // leaving it would silently submit the OLD text instead of the
+        // option the user just chose).
+        draft.custom = ''
         draft.skipped = false
         this.advance()
       }
