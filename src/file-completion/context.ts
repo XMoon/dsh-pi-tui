@@ -4,15 +4,17 @@
  *
  * TRIGGER GRAMMAR OWNERSHIP (M3-3A note): the OFFICIAL shared grammar
  * (`activeAtToken` in @deepseek-ai/dsh-file-reference/grammar) accepts
- * an `@` at the start of a line or after whitespace. The rules below
- * are the OFFICIAL BASELINE plus INTENTIONAL TUI TRIGGER EXTENSIONS —
- * a mention may additionally sit glued to CJK text (CJK sentences glue
- * the mention to the previous character) and after a `=` boundary
- * (`key=@src/foo`). These extensions only WIDEN when the terminal
- * opens its completion dropdown; they do not change the query sent to
- * the Host (already the official form) nor the mention serialization
- * (already the official `formatFileMention`). They are TUI UX policy,
- * not the dsh official grammar.
+ * an `@` ONLY at the start of a line or after whitespace (`/(?:^|\s)@/`).
+ * The rules below are that OFFICIAL BASELINE plus FOUR INTENTIONAL TUI
+ * TRIGGER EXTENSIONS — a mention may additionally sit glued to CJK text
+ * (CJK sentences glue the mention to the previous character), or after a
+ * `=`, `"`, or `'` boundary (`key=@src/foo`, `say "@src`, `say '@src`).
+ * The quote boundaries exist so a mention can be typed inside an
+ * opening quote the editor has not closed yet. These extensions only
+ * WIDEN when the terminal opens its completion dropdown; they do not
+ * change the query sent to the Host (already the official form) nor the
+ * mention serialization (already the official `formatFileMention`).
+ * They are TUI UX policy, not the dsh official grammar.
  *
  * File completion is allowed in exactly two contexts:
  *
@@ -39,8 +41,9 @@ import type { FileCompletionContext } from './types.ts'
 export const FILE_ARGUMENT_COMMANDS: ReadonlySet<string> = new Set(['attach', 'image'])
 
 /** Token separators: `@` must sit at the start of the current token.
- * The whitespace/newline/quote entries are the OFFICIAL baseline; `=` is
- * an INTENTIONAL TUI trigger extension (see the module header). */
+ * Whitespace (incl. tab/newline) is the OFFICIAL baseline; `"`, `'` and
+ * `=` are the three non-CJK INTENTIONAL TUI trigger extensions (see the
+ * module header). */
 const PATH_DELIMITERS = new Set([' ', '\t', '\n', '\r', '"', "'", '='])
 
 /** Whether the char is CJK (ideographs, kana, hangul, CJK punctuation,
