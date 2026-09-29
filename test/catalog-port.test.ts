@@ -117,6 +117,38 @@ test('loadDirectory keeps a failing provider as an isolated failure beside usabl
   assert.deepEqual(directory.routableProviders, ['good'])
 })
 
+test('a successful provider that loads ZERO models is present but NOT routable', async () => {
+  let saved: unknown
+  const models = port({
+    llm: {
+      resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+      listProviders: () => [
+        { id: 'full', name: 'Full' },
+        { id: 'empty', name: 'Empty' },
+      ],
+      listModels: async (providerId: string) => providerId === 'full'
+        ? [{ id: 'm1', name: 'M1' }]
+        : [],
+      resolveModelInfo: async () => ({}),
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'full', model: 'm1' }),
+      saveSelection: async (next: unknown) => { saved = next },
+    },
+  }).models
+  const directory = await models.loadDirectory()
+  // The official rule's BOTH exclusion conditions, distinctly locked:
+  // a SUCCESSFUL empty load contributes NO group and is NOT routable
+  // (exactly like the failed provider — but through the empty filter,
+  // not the failure row); only the non-empty loaded group is routable.
+  assert.deepEqual(directory.groups.map(group => group.id), ['full'])
+  assert.deepEqual(directory.routableProviders, ['full'])
+  assert.deepEqual(directory.failures, [], 'an empty success is not a failure row')
+  void saved
+})
+
 test('model catalog separates global default from live Session selection', async () => {
   const appended: unknown[] = []
   let liveSelection: { provider: string; model: string; reasoningEffort?: string } = {

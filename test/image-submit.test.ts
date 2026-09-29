@@ -7,9 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { expandFileMentionsForSubmit } from '../src/mentions.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { consumeDraftImages, draftHasImages, prepareUserMessage, type PrepareInputDeps } from '../src/image/submit.ts'
 import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/image/errors.ts'
@@ -58,18 +57,11 @@ function depsOf(overrides: Partial<PrepareInputDeps> = {}): PrepareInputDeps {
     } as LlmLike,
     currentModel: () => ({ provider: 'provider', model: 'model' }),
     sessionCwd,
-    // The Host-owned canonicalization seam (migration M1.10): the pure
-    // mentions rewrite with a stat-backed existence probe over the
-    // session cwd (the Direct adapter wires the same probe).
-    canonicalizeMentions: async (text) =>
-      expandFileMentionsForSubmit(text, sessionCwd(), (candidate) => {
-        try {
-          statSync(candidate)
-          return true
-        } catch {
-          return false
-        }
-      }),
+    // The send seam under the OFFICIAL mention semantics (M3-3A): the
+    // submitted text stays LITERAL — `serialize: ref => ref` plus the
+    // Host's FILE_REFERENCE_PROMPT — exactly what the Direct/Remote
+    // adapters return.
+    canonicalizeMentions: async (text) => text,
     ...overrides,
   }
 }
@@ -173,26 +165,27 @@ function mentionWorkspace(life: TestLifecycle): string {
   return root
 }
 
-test('prepareUserMessage canonicalizes @-mentions in the text-only fast path', async (t) => {
+test('prepareUserMessage keeps @-mentions LITERAL in the text-only fast path (official semantics)', async (t) => {
   const life = testLifecycle(t)
   const store = new DraftImageStore()
   const root = mentionWorkspace(life)
   const message = await prepareUserMessage('look at @src/main.ts', store, depsOf({ sessionCwd: () => root }))
   const block = message.content[0]
   assert.equal(block!.type, 'text')
-  // The mention is rewritten to the absolute path; the text-only branch
-  // must NOT see the raw relative form.
-  assert.equal((block as { text: string }).text, `look at @${join(root, 'src', 'main.ts')}`)
+  // The official client contract: the mention is literal prompt text (the
+  // Host's FILE_REFERENCE_PROMPT resolves relative paths); no absolute
+  // rewrite on any backend.
+  assert.equal((block as { text: string }).text, 'look at @src/main.ts')
 })
 
-test('prepareUserMessage canonicalizes @-mentions alongside image placeholders', async (t) => {
+test('prepareUserMessage keeps @-mentions literal alongside image placeholders', async (t) => {
   const life = testLifecycle(t)
   const store = new DraftImageStore()
   const root = mentionWorkspace(life)
   const one = staged(store, 'a.png')
   const message = await prepareUserMessage(`see @file.ts then ${one.placeholder}`, store, depsOf({ sessionCwd: () => root }))
   assert.deepEqual(message.content.map(block => block.type), ['text', 'image'])
-  assert.equal((message.content[0] as { text: string }).text, `see @${join(root, 'file.ts')} then `)
+  assert.equal((message.content[0] as { text: string }).text, 'see @file.ts then ')
 })
 
 test('prepareUserMessage keeps nonexistent mentions verbatim', async (t) => {
