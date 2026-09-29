@@ -459,6 +459,25 @@ test('a latest think-only span defaults to Activity + Think (identity is not bak
   assert.match(rows[1] ?? '', /Think:/, 'the latest think-only span keeps its Think preview')
 })
 
+test('a historical span with an orphan tool result stays Activity, not Thought', () => {
+  // An orphan tool result (explicit callCount 0) owns the collapsed Action
+  // slot as an `Unpaired … result` diagnostic while counting ZERO actions.
+  // The span therefore has real Action evidence and must never be renamed
+  // `Thought` when it goes historical — the header-only policy still hides
+  // the preview, only the identity stays `Activity`.
+  const orphan: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'read', args: '', result: 'orphan payload', status: 'ok', callCount: 0,
+  }
+  const span = projectCompact([thinking(0, 'reasoning before the orphan'), orphan], noOptions)[0]
+  assert.ok(span !== undefined && span.kind === 'work')
+  const summary = summarizeWorkSpan(span.span)
+  assert.equal(summary.actionStats.total, 0, 'fixture: the orphan counts zero actions')
+  assert.equal(summary.action?.kind, 'orphan-tool-result', 'fixture: the orphan still owns the Action source')
+  const rows = new CompactWorkComponent({ span: span.span, expanded: false, showPreview: false, iconStyle: 'symbols' }).render(80)
+  assert.equal(rows.length, 1, 'the historical policy still hides the preview')
+  assert.match(strip(rows[0]!), /^▸ Activity(?: |$)/, 'a span with Action evidence is never Thought')
+})
+
 test('the cluster component renders the header and a width-aware summary', () => {
   const a = contextRow(0, 'instructions', 'AGENTS.md')
   const b = contextRow(0, 'catalog', 'skill catalog')

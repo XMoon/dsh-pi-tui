@@ -150,10 +150,13 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
  *
  * The identity is `Thought` ONLY for the historical think-only span (the
  * 2026-09-29 compact historical compaction plan §2.2): a settled Work with
- * reasoning and zero actions whose collapsed preview is hidden renders
- * `Thought <duration>` instead of a semantically empty `Activity` — a
- * presentation-only identity over the SAME `TranscriptWorkSpan`, reusing the
- * exact Activity width-degradation ladder (§5.1D: no second algorithm).
+ * reasoning and NO Action evidence at all — neither an Action presentation
+ * source (an orphan tool result owns the collapsed Action slot while
+ * counting zero actions) nor a counted action — whose collapsed preview is
+ * hidden renders `Thought <duration>` instead of a semantically empty
+ * `Activity` — a presentation-only identity over the SAME
+ * `TranscriptWorkSpan`, reusing the exact Activity width-degradation ladder
+ * (§5.1D: no second algorithm).
  */
 export type CompactWorkHeaderIdentity = 'activity' | 'thought'
 
@@ -278,12 +281,17 @@ export class CompactWorkComponent implements Component {
   render(width: number): string[] {
     const contentWidth = Math.max(1, width)
     // `Thought` is derived from the SAME facts that hide the preview (the
-    // 2026-09-29 plan §2.2): historical + think present + zero actions. It
+    // 2026-09-29 plan §2.2): historical + think present + no Action evidence
+    // at all. The Action check reads the presentation source, not the stats:
+    // an orphan tool result owns the collapsed Action slot
+    // (`Action: Unpaired tool result`) while deliberately counting as zero
+    // actions, so such a span is NOT think-only and stays `Activity`. It
     // never depends on `expanded` — a manually opened historical span keeps
     // the `Thought` identity (no Thought → Activity jump, §2.4).
     const historicalThinkOnly =
       !this.showPreview
       && this.summary.think !== undefined
+      && this.summary.action === undefined
       && this.summary.actionStats.total === 0
     const header = formatWorkHeaderLine(
       this.summary,
