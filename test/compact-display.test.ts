@@ -582,8 +582,9 @@ test('a latest think-only Work stays Activity with its Think preview', async () 
   show(app, folder)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  // §7.7: the live identity stays stable — `Thought` appears only in
-  // history, so the header never flips Thought → Activity while streaming.
+  // §7.7: the live identity stays stable — `Thought` appears only on
+  // historical Compact spans, so the header never flips Thought → Activity
+  // while streaming.
   assert.ok(!/Thought/.test(view), `a latest think-only Work is never Thought:\n${view}`)
   assert.match(view, /Think:\s+only reasoning so far/)
 })
