@@ -1,10 +1,15 @@
 /**
  * Long user-message disclosure: a text-only durable user prompt whose
  * render-time VISUAL ROW COUNT exceeds the threshold renders head + compact
- * marker + tail, `Ctrl+O` expands it (recent-turn fold master), the
- * fullscreen compact marker row alone is clickable, and a search hit in the
- * hidden middle expands the bubble. The canonical `TranscriptMessage.text`
- * is never touched — compaction is a UserBubble presentation only.
+ * marker + tail, `Ctrl+O` expands it (recent-turn fold master), and in
+ * fullscreen the WHOLE bubble is the local disclosure surface — a plain click
+ * anywhere on a collapsed bubble expands that message, a plain click anywhere
+ * on an expanded bubble collapses it (the tail control row remains an
+ * explicit fallback) — the Claude-style local block toggle. Drag selection
+ * never mutates the disclosure; double-click word selection is deliberately
+ * NOT available on the long-user bubble in either state (the first complete
+ * click acts immediately). The canonical `TranscriptMessage.text` is never
+ * touched — compaction is a UserBubble presentation only.
  * @module @xmoon76/dsh-pi-tui/long-user-disclosure.test
  */
 
@@ -14,7 +19,7 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import type { ExtensionView } from '../src/extension/public-types.ts'
-import type { TranscriptMessage } from '../src/transcript.ts'
+import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import { TuiApp, UserBubbleComponent } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { Text } from '@xmoon76/pi-tui'
@@ -168,7 +173,7 @@ test('regular: a long prompt shows head + marker + tail with the Ctrl+O hint', a
   assert.ok(view.includes('line38') && view.includes('line40'), 'tail rows visible')
   assert.ok(!view.includes('line20'), 'the middle is hidden')
   assert.ok(view.includes('33 rows compacted'), 'the marker counts the hidden VISUAL rows')
-  assert.ok(view.includes('ctrl+o to expand'), 'the regular hint resolves the effective key')
+  assert.ok(view.includes('ctrl+o expand/collapse'), 'the regular hint names the bidirectional key owner')
   app.stop()
 })
 
@@ -208,8 +213,8 @@ test('regular: remapping toggleExpand updates the compact marker key', async () 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'ctrl+p' }))
   app.setTranscript([user(lines(11))])
   const view = (await viewRows(vt)).join('\n')
-  assert.ok(view.includes('ctrl+p to expand'), `the marker must use the remapped key:\n${view}`)
-  assert.ok(!view.includes('ctrl+o to expand'), 'the stale default must not survive')
+  assert.ok(view.includes('ctrl+p expand/collapse'), `the marker must use the remapped key:\n${view}`)
+  assert.ok(!view.includes('ctrl+o expand/collapse'), 'the stale default must not survive')
   app.stop()
 })
 
@@ -265,7 +270,7 @@ test('fullscreen Focus: the marker is click-only (Ctrl+O owns the Thought bulk)'
   app.setFullscreen(true)
   const view = (await viewRows(vt)).join('\n')
   assert.ok(view.includes('click to expand'), `click-only hint missing:\n${view}`)
-  assert.ok(!view.includes('ctrl+o to expand'), 'the dead Ctrl+O hint must not appear inside a fullscreen Focus')
+  assert.ok(!view.includes('ctrl+o expand/collapse'), 'the dead Ctrl+O hint must not appear inside a fullscreen Focus')
   app.setFullscreen(false)
   app.setFocusMode(false)
   app.stop()
@@ -289,17 +294,33 @@ test('fullscreen: clicking the marker expands only that long message', async () 
   app.stop()
 })
 
-test('fullscreen: clicking ordinary user text never expands', async () => {
+test('fullscreen: a plain click anywhere on collapsed long-user text expands that message', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([user(lines(11))])
   app.setFullscreen(true)
-  const rows = await viewRows(vt)
+  let rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1)
+
+  // The whole bubble is the disclosure surface: a head-row click expands.
   const headY = rows.findIndex(row => row.endsWith('line1'))
   assert.ok(headY >= 0)
   clickCell(vt, 10, headY)
-  const after = await viewRows(vt)
-  assert.ok(!after.some(row => row.includes('line5')), 'ordinary text stays collapsed')
-  assert.equal(compactMarkerCount(after), 1, 'the marker remains the only affordance')
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('line5')), 'a head-row click expands the message')
+  assert.equal(compactMarkerCount(rows), 0)
+
+  // Collapse back via the expanded body click, then a visible TAIL-row click
+  // expands too (the first complete click acts immediately in both states).
+  const bodyY = rows.findIndex(row => row.includes('line2'))
+  clickCell(vt, 10, bodyY)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'the body click collapses back')
+  const tailY = rows.findIndex(row => row.includes('line11'))
+  assert.ok(tailY >= 0)
+  clickCell(vt, 10, tailY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('line5')), 'a tail-row click expands the message too')
+  assert.equal(compactMarkerCount(rows), 0)
   app.setFullscreen(false)
   app.stop()
 })
@@ -1025,22 +1046,31 @@ test('fullscreen: a disabled toggleExpand key still round-trips entirely by mous
   app.stop()
 })
 
-test('fullscreen: a plain click on expanded user BODY stays inert', async () => {
+test('fullscreen: a plain click on expanded long-user BODY collapses only that message', async () => {
   const { vt, app } = startApp(100, 40)
-  app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
+  app.setTranscript([user(lines(11, 'alpha'), 0), user(lines(11, 'beta'), 1)])
   app.setFullscreen(true)
   let rows = await viewRows(vt)
-  const markerY = rows.findIndex(row => row.includes('rows compacted'))
-  clickCell(vt, 10, markerY)
-  rows = await viewRows(vt)
-  assert.ok(rows.some(row => row.includes('line5')))
+  assert.equal(compactMarkerCount(rows), 2, 'both long users start compact')
 
-  const bodyY = rows.findIndex(row => row.includes('line2'))
-  assert.ok(bodyY >= 0)
-  clickCell(vt, 10, bodyY)
+  // Expand BOTH messages via their markers (the second marker moves after the
+  // first expansion, so resolve it from the repainted view).
+  const markerAY = rows.findIndex(row => row.includes('rows compacted'))
+  clickCell(vt, 10, markerAY)
   rows = await viewRows(vt)
-  assert.ok(rows.some(row => row.includes('line5')), 'body clicks never collapse the message')
-  assert.equal(compactMarkerCount(rows), 0)
+  const markerBY = rows.findIndex(row => row.includes('rows compacted'))
+  clickCell(vt, 10, markerBY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('alpha5')) && rows.some(row => row.includes('beta5')), 'both are expanded')
+
+  // A plain click on A's BODY collapses ONLY A — never the bulk Ctrl+O owner.
+  const bodyAY = rows.findIndex(row => row.includes('alpha2'))
+  assert.ok(bodyAY >= 0, `an A body row must be visible:\n${rows.join('\n')}`)
+  clickCell(vt, 10, bodyAY)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'A returns to its compact marker')
+  assert.ok(!rows.some(row => row.includes('alpha5')), 'the clicked message collapses')
+  assert.ok(rows.some(row => row.includes('beta5')), 'the other message keeps its own expansion (not a bulk collapse)')
   app.setFullscreen(false)
   app.stop()
 })
@@ -1062,6 +1092,27 @@ test('fullscreen: search reveal shows the tail control and it restores compact',
   rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 1, 'the tail click restores compact')
   assert.ok(!rows.some(row => row.includes('line5')))
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen: clicking the body of a search-revealed long user collapses and suppresses the reveal', async () => {
+  const { vt, app } = startApp(100, 40)
+  const message = user(lines(11))
+  app.setTranscript([message, { kind: 'assistant', turn: 0, text: 'done' }])
+  app.setFullscreen(true)
+  assert.equal(compactMarkerCount(await viewRows(vt)), 1)
+
+  app.revealSearchMatch(message)
+  let rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('line5')), 'the hidden middle is revealed')
+
+  const bodyY = rows.findIndex(row => row.includes('line2'))
+  assert.ok(bodyY >= 0)
+  clickCell(vt, 10, bodyY)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'the body click restores compact')
+  assert.ok(!rows.some(row => row.includes('line5')), 'the explicit collapse suppresses the current search reveal')
   app.setFullscreen(false)
   app.stop()
 })
@@ -1089,7 +1140,13 @@ test('fullscreen: drag selection across user text never mutates the disclosure',
   app.stop()
 })
 
-test('fullscreen: double-click on user text stays word selection (no disclosure)', async () => {
+// Intentional trade-off: the expanded long-user body is a local disclosure
+// surface, so the FIRST complete plain click collapses it immediately.
+// There is deliberately NO deferred single-click window (no timer, no click
+// latency, no gesture state machine) that would keep double-click word
+// selection available on that surface — drag selection remains the copy
+// affordance (the test above).
+test('fullscreen: the first complete click on an expanded body collapses immediately (no deferred double-click window)', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
   app.setFullscreen(true)
@@ -1097,16 +1154,14 @@ test('fullscreen: double-click on user text stays word selection (no disclosure)
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
-  assert.ok(rows.some(row => row.includes('line5')))
+  assert.ok(rows.some(row => row.includes('line5')), 'the prompt is expanded')
 
   const bodyY = rows.findIndex(row => row.includes('line2'))
-  vt.sendInput(`\x1b[<0;4;${bodyY + 1}M`)
-  vt.sendInput(`\x1b[<0;4;${bodyY + 1}m`)
-  vt.sendInput(`\x1b[<0;4;${bodyY + 1}M`)
-  vt.sendInput(`\x1b[<0;4;${bodyY + 1}m`)
+  assert.ok(bodyY >= 0)
+  clickCell(vt, 10, bodyY)
   rows = await viewRows(vt)
-  assert.ok(rows.some(row => row.includes('line5')), 'a double-click must not collapse the message')
-  assert.equal(compactMarkerCount(rows), 0)
+  assert.equal(compactMarkerCount(rows), 1, 'the first complete click must collapse immediately')
+  assert.ok(!rows.some(row => row.includes('line5')), 'the middle is hidden again')
   app.setFullscreen(false)
   app.stop()
 })
@@ -1216,7 +1271,7 @@ test('fullscreen: a persisted Ctrl+O master stays mouse-round-trippable after th
   app.stop()
 })
 
-test('fullscreen: a stale collapsed-marker press never collapses via the tail that repainted onto its cell', async () => {
+test('fullscreen: a stale collapsed-bubble press never collapses via the tail that repainted onto its cell', async () => {
   const { vt, app } = startApp(100, 40)
   const message = user(lines(11), 0)
   app.setTranscript([message, { kind: 'assistant', turn: 0, text: lines(60, 'a-') }])
@@ -1255,6 +1310,45 @@ test('fullscreen: a stale collapsed-marker press never collapses via the tail th
   vt.sendInput(`\x1b[<0;10;${markerY + 1}m`)
   rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 0, 'the stale press must not collapse the message')
+  assert.equal(collapseFooterRows(rows).length, 1, 'the message stays expanded')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen: a stale body press never collapses via the tail scrolled onto its cell', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.setTranscript([user(lines(11), 0), { kind: 'assistant', turn: 0, text: lines(60, 'a-') }])
+  app.setFullscreen(true)
+  app.scrollToBottom()
+  for (let i = 0; i < 3; i += 1) {
+    vt.sendInput('\x1b[5~')
+    await viewRows(vt)
+  }
+  let rows = await viewRows(vt)
+  // The Ctrl+O master expands the recent user from the start.
+  vt.sendInput('\x0f')
+  rows = await viewRows(vt)
+  const bodyY = rows.findIndex(row => row.includes('line2'))
+  const tailY = rows.findIndex(row => row.includes('▴ Collapse'))
+  assert.ok(bodyY >= 0 && tailY > bodyY, `the expanded body and its tail control must be in view:\n${rows.join('\n')}`)
+
+  // Press the BODY but do NOT release.
+  vt.sendInput(`\x1b[<0;10;${bodyY + 1}M`)
+
+  // Scroll the tail control onto the pressed cell (one wheel step is one
+  // line): the reflow must not transfer the body gesture to the tail slot.
+  for (let i = 0; i < tailY - bodyY; i += 1) {
+    vt.sendInput(`\x1b[<65;10;${bodyY + 1}M`)
+    await viewRows(vt)
+  }
+  rows = await viewRows(vt)
+  assert.ok(rows[bodyY]!.includes('▴ Collapse'), `the tail must now sit on the pressed cell:\n${rows.join('\n')}`)
+
+  // Release at the pressed cell: the stale BODY identity must never run the
+  // TAIL control that scrolled onto the same cell.
+  vt.sendInput(`\x1b[<0;10;${bodyY + 1}m`)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 0, 'the stale body press must not collapse the message')
   assert.equal(collapseFooterRows(rows).length, 1, 'the message stays expanded')
   app.setFullscreen(false)
   app.stop()
@@ -1381,14 +1475,65 @@ test('an unrelated long-user collapse does not revoke the current search reveal'
   assert.ok(aRow >= 0, 'the search target expands A')
   assert.ok(!vt.getCellInverse(aRow, rows[aRow]!.indexOf('a-5')), 'precondition: a long bubble is anchor-only (no guessed strong)')
 
-  // Collapse the UNRELATED B via its tail control.
-  const footers = collapseFooterRows(rows)
-  assert.equal(footers.length, 2, `both expanded prompts offer a tail control:\n${rows.join('\n')}`)
-  clickCell(vt, 50, footers[footers.length - 1]!)
+  // Collapse the UNRELATED B by clicking its BODY (the local collapse surface).
+  const bBodyY = rows.findIndex(row => row.includes('b-2'))
+  assert.ok(bBodyY >= 0, `a B body row must be visible:\n${rows.join('\n')}`)
+  clickCell(vt, 10, bBodyY)
   rows = await viewRows(vt)
   assert.ok(!rows.some(row => row.includes('b-5')), 'B collapsed')
   aRow = rows.findIndex(row => row.includes('a-5'))
   assert.ok(aRow >= 0, 'the unrelated collapse must NOT revoke A search reveal (A stays expanded)')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+function runningActivity(turn: number): TurnActivity {
+  return {
+    turn,
+    completed: false,
+    assistantMessages: 0,
+    toolCalls: 1,
+    tools: new Map([['read', 1]]),
+    revision: 1,
+  } as TurnActivity
+}
+
+test('fullscreen Compact: a body click collapses only the user, the Work bulk keeps its state', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset: 'compact' } })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript(
+    [
+      user(lines(11, 'u-'), 1),
+      { kind: 'tool', turn: 1, name: 'read', args: JSON.stringify({ path: 'a' }), result: 'ok', status: 'ok' },
+    ],
+    new Map([[1, runningActivity(1)]]),
+  )
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  const workY = rows.findIndex(row => /▸ Activity/.test(row))
+  assert.ok(workY >= 0, `the collapsed Work span header must be visible:\n${rows.join('\n')}`)
+
+  // Expand the Work span (Ctrl+O owns the Work bulk in fullscreen Compact).
+  clickCell(vt, 10, workY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('Read')), `the Work span expands:\n${rows.join('\n')}`)
+
+  // Expand the long user via its marker, then collapse it by a plain body click.
+  const markerY = rows.findIndex(row => row.includes('rows compacted'))
+  assert.ok(markerY >= 0, `the long user stays compact:\n${rows.join('\n')}`)
+  clickCell(vt, 10, markerY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('u-5')), 'the user expands by the marker click')
+
+  const bodyY = rows.findIndex(row => row.includes('u-2'))
+  assert.ok(bodyY >= 0)
+  clickCell(vt, 10, bodyY)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'only the user collapses')
+  assert.ok(!rows.some(row => row.includes('u-5')), 'the user middle is hidden again')
+  assert.ok(rows.some(row => row.includes('Read')), 'the Work bulk state is unchanged (still expanded)')
   app.setFullscreen(false)
   app.stop()
 })

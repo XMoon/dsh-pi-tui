@@ -1433,9 +1433,19 @@ A regular surface WITH the key keeps its reveal across the swap. A search
 reveal is not a permanent pin: the next explicit Ctrl+O collapse hides it
 again, and a later search jump reveals it afresh.
 
-Only the marker row and the tail control row are click targets; every other
-row of the bubble has an inert hit identity so ordinary user text keeps
-selection/copy semantics. A search hit inside the collapsed middle expands the
+The long-user bubble is ONE local disclosure surface in fullscreen: collapsed,
+a plain single click anywhere on the bubble (head text, compact marker, or
+tail text) expands that message; expanded, a plain single click anywhere on
+the bubble collapses it, with the existing tail Collapse row as an explicit
+fallback. The compact marker stays as the visual affordance naming the
+behavior — it is not the only hit target. Every non-bubble row (the pending
+status line included) has an inert hit identity. Drag selection retains
+selection ownership, and the bubble intentionally gives plain single-click to
+disclosure in BOTH states, so double-click word selection is not available on
+the long-user bubble in either state. Regular remains keyboard-only and
+terminal-native: its marker advertises the effective key as the bidirectional
+`expand/collapse` verb instead of an expand-only promise. A search hit inside
+the collapsed middle expands the
 message on jump, including outside Focus mode, because the search corpus is the
 full text.
 

@@ -2339,8 +2339,9 @@ test('Question modal inspection allowlist separates presentation from mutation',
   startedApps.add(app)
   const internals = app as unknown as { isModalInspectionSafeHit(hitId: string): boolean }
   const allowed = [
-    'user:expand:1',
-    'pending-user:collapse:key',
+    'user:expand:bubble:1',
+    'pending-user:collapse:tail:key',
+    'user:collapse:bubble:2',
     'focus:toggle:1',
     'focus:collapse:1',
     'ptc:1:call-1',

@@ -496,7 +496,7 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
       return toolName === 'ask_user_question' ? view.includes('● q0 → B') : view.includes('Plan approved')
     }
     assert.ok(cardFull(), `regular Focus fails open (card full, no coupled fold):\n${vt.getViewport().join('\n')}`)
-    assert.ok(!vt.getViewport().join('\n').includes('ctrl+o to expand'),
+    assert.ok(!vt.getViewport().join('\n').includes('ctrl+o expand/collapse'),
       `no Ctrl+O affordance is advertised for the fail-open card:\n${vt.getViewport().join('\n')}`)
 
     // Expanding/collapsing the root must never change the card's own state.

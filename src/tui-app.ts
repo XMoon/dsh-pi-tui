@@ -1653,6 +1653,15 @@ export class UserBubbleComponent implements Component {
     return this.lastCollapseEligible
   }
 
+  /** The rendered row count of the user-text bubble at the last render — the
+   * fullscreen bubble hit range in EITHER disclosure state (collapsed or
+   * expanded). For the durable bubble this is the whole component; the
+   * pending wrapper delegates so its appended status row is excluded without
+   * structural guessing (`rendered.length - 1`). */
+  disclosureBodyRowCount(): number {
+    return this.cached?.length ?? 0
+  }
+
   render(width: number): string[] {
     const inner = Math.max(1, width - this.markerWidth)
     const child = this.child.render(inner)
@@ -1710,8 +1719,9 @@ export class UserBubbleComponent implements Component {
  * accepted-but-not-yet-materialized rather than as durable transcript content.
  * `PendingUserComponent` is presentation-only and is never inserted into the
  * transcript folder. It exposes the same disclosure geometry as the durable
- * bubble (the compact marker row and the expanded collapse-control
- * eligibility) so the row map shares ONE hit model for both.
+ * bubble (the compact marker row, the expanded collapse-control eligibility,
+ * and the bubble row count) so the row map shares ONE hit model for both —
+ * with the pending status line explicitly OUTSIDE the bubble hit range.
  */
 class PendingUserComponent implements Component {
   private readonly container: Container
@@ -1747,6 +1757,10 @@ class PendingUserComponent implements Component {
 
   showsCollapseControl(): boolean {
     return this.bubble.showsCollapseControl()
+  }
+
+  disclosureBodyRowCount(): number {
+    return this.bubble.disclosureBodyRowCount()
   }
 }
 
@@ -3374,17 +3388,24 @@ type FullscreenRowEntry = {
   containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-  /** The ONE visible long-user disclosure control (entry-relative): the
-   * compact marker when collapsed (expand) or the tail control row when
-   * expanded (collapse). Every other row of the bubble stays inert so
-   * ordinary user text keeps selection/copy semantics and never becomes an
+  /** The visible long-user disclosure hit ranges (entry-relative): the WHOLE
+   * user-text bubble in either state (expand while collapsed, collapse while
+   * expanded) plus the tail control row when expanded. Rows matching no hit
+   * stay inert so chrome like the pending status line never becomes an
    * implicit button. */
-  userDisclosureHit?: UserDisclosureHit
+  userDisclosureHits?: ReadonlyArray<UserDisclosureHit>
   hasTrailingSpacer: boolean
 }
 
 /** The direction one visible long-user disclosure control performs. */
 type UserDisclosureAction = 'expand' | 'collapse'
+
+/** Which part of the long-user bubble one disclosure hit covers: the bubble
+ * itself (collapsed or expanded — the whole local disclosure surface) or the
+ * expanded tail control row. Part of the press/release identity so a stale
+ * gesture can never transfer between parts that repainted onto the same
+ * cell. */
+type UserDisclosureHitSlot = 'bubble' | 'tail'
 
 /** What one long-user disclosure control acts on: a durable transcript
  * message or an ephemeral pending-user row (identified by its stable key). */
@@ -3392,12 +3413,16 @@ type UserDisclosureTarget =
   | { readonly kind: 'durable'; readonly message: TranscriptMessage }
   | { readonly kind: 'pending'; readonly key: string }
 
-/** One bidirectional long-user disclosure control. `row` is entry-relative;
- * the action is explicit so a stale press/release fence can never confuse an
- * expand target with a collapse target that repainted onto the same cell. */
+/** One bidirectional long-user disclosure hit: the entry-relative row range
+ * [startRow, endRow), the direction, the slot it covers, and the target. The
+ * action and slot are explicit so a stale press/release fence can never
+ * confuse an expand target with a collapse target — or a bubble gesture with
+ * the tail control — that repainted onto the same cell. */
 type UserDisclosureHit = {
-  readonly row: number
+  readonly startRow: number
+  readonly endRow: number
   readonly action: UserDisclosureAction
+  readonly slot: UserDisclosureHitSlot
   readonly target: UserDisclosureTarget
 }
 
@@ -3413,6 +3438,17 @@ function userDisclosureComponentOf(
     return component
   }
   return undefined
+}
+
+/** The mount-shape signature of one block's long-user disclosure hits: the
+ * mounted tree differs between the collapsed marker render and the expanded
+ * body/tail render (the tail control child vs the spacer), so a change must
+ * take the structural rebuild path instead of an in-place content refresh. */
+function userDisclosureMountAction(
+  hits: ReadonlyArray<UserDisclosureHit> | undefined,
+): UserDisclosureAction | undefined {
+  if (hits === undefined || hits.length === 0) return undefined
+  return hits.some(hit => hit.action === 'collapse') ? 'collapse' : 'expand'
 }
 
 /** One transcript block rendered once for the current Focus projection. The
@@ -3439,7 +3475,7 @@ type RenderedTranscriptBlock = {
   containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-  userDisclosureHit?: UserDisclosureHit
+  userDisclosureHits?: ReadonlyArray<UserDisclosureHit>
 }
 
 /** Presentation-only high-water for one running Focus turn. The activity
@@ -9629,10 +9665,10 @@ export class TuiApp {
       let subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
-      let userDisclosureHit: UserDisclosureHit | undefined
+      let userDisclosureHits: readonly UserDisclosureHit[] | undefined
       const containerPath = this.rowContainerPath(block)
       if (block.kind === 'pending-user') {
-        userDisclosureHit = this.userDisclosureHitFor(component, rendered, truncatedMarker, {
+        userDisclosureHits = this.userDisclosureHitsFor(component, rendered, truncatedMarker, {
           kind: 'pending',
           key: pendingUserDisclosureKey(block.row),
         })
@@ -9640,7 +9676,7 @@ export class TuiApp {
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
         if (isUserMessageDisclosureCandidate(block.message)) {
-          userDisclosureHit = this.userDisclosureHitFor(component, rendered, truncatedMarker, {
+          userDisclosureHits = this.userDisclosureHitsFor(component, rendered, truncatedMarker, {
             kind: 'durable',
             message: block.message,
           })
@@ -9685,7 +9721,7 @@ export class TuiApp {
         ...(containerPath === undefined ? {} : { containerPath }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
-        ...(userDisclosureHit === undefined ? {} : { userDisclosureHit }),
+        ...(userDisclosureHits === undefined ? {} : { userDisclosureHits }),
       }
   }
 
@@ -9836,28 +9872,41 @@ export class TuiApp {
     return undefined
   }
 
-  /** The ONE bidirectional disclosure control of a long-user bubble (durable
-   * or pending): the compact marker while collapsed, the tail row while an
-   * expanded compact-capable bubble needs one. The tail is FULLSCREEN-only:
-   * regular draws into the terminal main screen, where an app-owned copy
-   * filter cannot exist, so a visible label there WOULD be copied by the
-   * terminal's native selection — Ctrl+O stays the regular collapse owner. In
-   * fullscreen the tail row is the trailing separator row when one follows,
-   * or one dedicated presentation row charged to the final block (the height
-   * rule mirrors it). */
-  private userDisclosureHitFor(
+  /** The visible long-user disclosure hit ranges of a long-user bubble
+   * (durable or pending): the WHOLE bubble is the local disclosure surface in
+   * either state — a plain single click anywhere on a collapsed bubble (head
+   * text, marker, or tail text) expands that one message, and a plain single
+   * click anywhere on an expanded bubble collapses it (the Claude-style local
+   * block toggle), with the existing tail control row as the explicit
+   * fallback. The compact marker stays as the visual affordance naming the
+   * behavior; it is not the only hit target. The pending wrapper's status
+   * line (`steering…` / `sending…` / `waiting…`) sits outside every hit
+   * range. The tail is FULLSCREEN-only: regular draws into the terminal main
+   * screen, where an app-owned copy filter cannot exist, so a visible label
+   * there WOULD be copied by the terminal's native selection — Ctrl+O stays
+   * the regular collapse owner, and regular text stays terminal-native
+   * selection (regular never mounts mouse hit targets at all). In fullscreen
+   * the tail row is the trailing separator row when one follows, or one
+   * dedicated presentation row charged to the final block (the height rule
+   * mirrors it). */
+  private userDisclosureHitsFor(
     component: Component,
     rendered: readonly string[],
     truncatedMarker: boolean,
     target: UserDisclosureTarget,
-  ): UserDisclosureHit | undefined {
+  ): readonly UserDisclosureHit[] | undefined {
     const bubble = userDisclosureComponentOf(component)
     if (bubble === undefined) return undefined
-    const markerRow = bubble.compactMarkerRow()
-    if (markerRow !== undefined) return { row: markerRow, action: 'expand', target }
+    if (bubble.compactMarkerRow() !== undefined) {
+      return [{ startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'expand', target, slot: 'bubble' }]
+    }
     if (this.fullscreen === undefined) return undefined
     if (!bubble.showsCollapseControl()) return undefined
-    return { row: rendered.length + (truncatedMarker ? 1 : 0), action: 'collapse', target }
+    const tailRow = rendered.length + (truncatedMarker ? 1 : 0)
+    return [
+      { startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'collapse', target, slot: 'bubble' },
+      { startRow: tailRow, endRow: tailRow + 1, action: 'collapse', target, slot: 'tail' },
+    ]
   }
 
   /**
@@ -9874,22 +9923,22 @@ export class TuiApp {
     return mounted.map(entry => {
       const rendered = entry.component.render(width)
       if (entry.block.kind === 'pending-user') {
-        const userDisclosureHit = this.userDisclosureHitFor(entry.component, rendered, entry.truncatedMarker, {
+        const userDisclosureHits = this.userDisclosureHitsFor(entry.component, rendered, entry.truncatedMarker, {
           kind: 'pending',
           key: pendingUserDisclosureKey(entry.block.row),
         })
         return {
           ...entry,
           rendered,
-          ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
+          ...(userDisclosureHits === undefined ? { userDisclosureHits: undefined } : { userDisclosureHits }),
         }
       }
       if (entry.block.kind !== 'message') {
         return { ...entry, rendered }
       }
       const attachments = this.attachmentRangesOf(entry.component, width)
-      const userDisclosureHit = isUserMessageDisclosureCandidate(entry.block.message)
-        ? this.userDisclosureHitFor(entry.component, rendered, entry.truncatedMarker, {
+      const userDisclosureHits = isUserMessageDisclosureCandidate(entry.block.message)
+        ? this.userDisclosureHitsFor(entry.component, rendered, entry.truncatedMarker, {
             kind: 'durable',
             message: entry.block.message,
           })
@@ -9921,7 +9970,7 @@ export class TuiApp {
         ...(searchPresentation.selector === undefined ? { searchSelector: undefined } : { searchSelector: searchPresentation.selector }),
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
         ...(workflowHits === undefined ? { workflowHits: undefined } : { workflowHits }),
-        ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
+        ...(userDisclosureHits === undefined ? { userDisclosureHits: undefined } : { userDisclosureHits }),
       }
     })
   }
@@ -9951,7 +10000,7 @@ export class TuiApp {
   ): number {
     if (entry.rendered.length === 0 && !entry.truncatedMarker) return 0
     const trailing = index < total - 1 ? 1 : 0
-    const tailControl = entry.userDisclosureHit?.action === 'collapse' && trailing === 0 ? 1 : 0
+    const tailControl = entry.userDisclosureHits?.some(hit => hit.action === 'collapse' && hit.slot === 'tail') === true && trailing === 0 ? 1 : 0
     return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + trailing + tailControl
   }
 
@@ -10059,7 +10108,7 @@ export class TuiApp {
       attachments: entry.attachments,
       ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
       ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
-      ...(entry.userDisclosureHit === undefined ? {} : { userDisclosureHit: entry.userDisclosureHit }),
+      ...(entry.userDisclosureHits === undefined ? {} : { userDisclosureHits: entry.userDisclosureHits }),
       hasTrailingSpacer,
     }
   }
@@ -10097,7 +10146,7 @@ export class TuiApp {
             this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
           }
           const hasTrailingSpacer = index < renderedBlocks.length - 1
-          if (entry.userDisclosureHit?.action === 'collapse') {
+          if (entry.userDisclosureHits?.some(hit => hit.action === 'collapse' && hit.slot === 'tail') === true) {
             this.messagesView.addChild(new TranscriptGutterComponent(this.userCollapseControlText(width)))
           } else if (hasTrailingSpacer) {
             this.messagesView.addChild(new Spacer())
@@ -10199,7 +10248,7 @@ export class TuiApp {
       const nextZero = next.rendered.length === 0 && !next.truncatedMarker
       if (oldZero !== nextZero
         || previous.truncatedMarker !== next.truncatedMarker
-        || previous.userDisclosureHit?.action !== next.userDisclosureHit?.action) {
+        || userDisclosureMountAction(previous.userDisclosureHits) !== userDisclosureMountAction(next.userDisclosureHits)) {
         return { kind: 'structural', dirtyBlocks, mountReplacements }
       }
       if (nextZero) {
@@ -10884,8 +10933,11 @@ export class TuiApp {
       const freshCopyBlankRows = new Set<number>()
       let rowTop = welcomeHeight
       for (const entry of this.messageRows) {
-        const hit = entry.userDisclosureHit
-        if (hit !== undefined && hit.action === 'collapse') freshCopyBlankRows.add(rowTop + hit.row)
+        // Only the TAIL control row is copy chrome (X057): the expanded body
+        // rows are real user text and must keep copying verbatim.
+        for (const hit of entry.userDisclosureHits ?? []) {
+          if (hit.action === 'collapse' && hit.slot === 'tail') freshCopyBlankRows.add(rowTop + hit.startRow)
+        }
         rowTop += entry.height
       }
       const hitsStart = this.scrollProfiler.enabled ? performance.now() : 0
@@ -10978,15 +11030,16 @@ export class TuiApp {
     inMessage: number,
     nextVisible: FullscreenRowEntry | undefined,
   ): string {
-    // The long-user disclosure control wins FIRST: it sits on the trailing
-    // separator row (or one dedicated final row), which the generic blank-row
-    // escape hatch would otherwise consume. Only the EXACT control row is a
-    // target; every other bubble row is INERT so ordinary user text keeps
-    // selection/copy semantics and never becomes an implicit button.
-    if (entry.userDisclosureHit !== undefined) {
-      return inMessage === entry.userDisclosureHit.row
-        ? this.userDisclosureHitIdentity(entry.userDisclosureHit)
-        : 'inert'
+    // The long-user disclosure targets win FIRST: the tail control sits on
+    // the trailing separator row (or one dedicated final row), which the
+    // generic blank-row escape hatch would otherwise consume, and the bubble
+    // is the local disclosure surface that must never fall through to a
+    // Work/Thought container owner. Only rows inside a hit range act; every
+    // other row of the entry (the pending status line) is INERT so chrome
+    // never becomes an implicit button.
+    if (entry.userDisclosureHits !== undefined) {
+      const hit = this.userDisclosureHitAt(entry, inMessage)
+      return hit === undefined ? 'inert' : this.userDisclosureHitIdentity(hit)
     }
     // The blank-row escape hatch: the click collapses the NEAREST shared
     // semantic container of this row and the next VISIBLE row (the boundary
@@ -11057,16 +11110,29 @@ export class TuiApp {
     return `cluster:collapse:${this.identityToken(owner.owner)}`
   }
 
-  /** The press/release semantic identity of one long-user disclosure control:
+  /** Resolve the long-user disclosure hit covering one entry-relative row,
+   * or undefined when that row is inert (the pending status line, the
+   * truncation marker row). The ONE resolver shared by the hit-identity map,
+   * the click path, and the modal inspection path. */
+  private userDisclosureHitAt(
+    entry: Readonly<{ userDisclosureHits?: ReadonlyArray<UserDisclosureHit> }>,
+    inMessage: number,
+  ): UserDisclosureHit | undefined {
+    const hits = entry.userDisclosureHits
+    if (hits === undefined) return undefined
+    return hits.find(hit => inMessage >= hit.startRow && inMessage < hit.endRow)
+  }
+
+  /** The press/release semantic identity of one long-user disclosure hit:
    * the durable message token or the stable pending key, ALWAYS qualified by
-   * the direction. A stale press must never transfer an expand target to a
-   * collapse target (or to a different pending row) that repainted onto the
-   * same cell. */
+   * the direction AND the slot. A stale press must never transfer an expand
+   * target to a collapse target — or a bubble gesture to the tail control (or
+   * to a different pending row) — that repainted onto the same cell. */
   private userDisclosureHitIdentity(hit: UserDisclosureHit): string {
     if (hit.target.kind === 'durable') {
-      return `user:${hit.action}:${this.identityToken(hit.target.message)}`
+      return `user:${hit.action}:${hit.slot}:${this.identityToken(hit.target.message)}`
     }
-    return `pending-user:${hit.action}:${hit.target.key}`
+    return `pending-user:${hit.action}:${hit.slot}:${hit.target.key}`
   }
 
   /** The semantic identity of one Workflow card row hit (the durable
@@ -11199,8 +11265,9 @@ export class TuiApp {
    * has no fallback to the ordinary fullscreen action ladder. */
   private applyModalInspectionHit(entry: FullscreenRowEntry, entryIndex: number, inMessage: number): void {
     const nextVisible = this.nextVisibleRowEntry(entryIndex)
-    if (entry.userDisclosureHit !== undefined) {
-      if (inMessage === entry.userDisclosureHit.row) this.applyUserDisclosureHit(entry.userDisclosureHit)
+    if (entry.userDisclosureHits !== undefined) {
+      const hit = this.userDisclosureHitAt(entry, inMessage)
+      if (hit !== undefined) this.applyUserDisclosureHit(hit)
       return
     }
     if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
@@ -11653,13 +11720,15 @@ export class TuiApp {
     }
     this.fullscreenCellGesture = undefined
     {
-      // The long-user disclosure control is resolved FIRST (it shares the
-      // trailing separator row with the generic blank-row escape hatch, and
-      // the user disclosure target wins there). Only the EXACT control row
-      // acts; every other bubble row has an inert identity and never reaches
-      // this branch.
-      if (entry.userDisclosureHit !== undefined) {
-        if (inMessage === entry.userDisclosureHit.row) this.applyUserDisclosureHit(entry.userDisclosureHit)
+      // The long-user disclosure targets are resolved FIRST (the tail control
+      // shares the trailing separator row with the generic blank-row escape
+      // hatch, and the bubble must not fall through to a container owner).
+      // Only rows inside a hit range act — the bubble, or the tail; every
+      // other row of the entry has an inert identity and never reaches this
+      // branch.
+      if (entry.userDisclosureHits !== undefined) {
+        const hit = this.userDisclosureHitAt(entry, inMessage)
+        if (hit !== undefined) this.applyUserDisclosureHit(hit)
         return
       }
       // NEW: the Thought internal blank-row escape hatch (plan §9/§23)
@@ -11840,11 +11909,11 @@ export class TuiApp {
     this.fullscreenScroll.scrollTo(welcomeHeight + row - FOCUS_ANCHOR_TOP_PADDING, { disableFollow: true })
   }
 
-  /** Apply one bidirectional long-user disclosure control click (fullscreen
-   * compact marker → expand, expanded tail control → collapse). The durable
-   * override reuses the per-message disclosure state; the pending override is
-   * presentation-only ephemeral state keyed by the stable pending identity.
-   * The canonical `message.text` is never touched. */
+  /** Apply one bidirectional long-user disclosure hit (a collapsed bubble row
+   * → expand; an expanded bubble row or the tail control → collapse). The
+   * durable override reuses the per-message disclosure state; the pending
+   * override is presentation-only ephemeral state keyed by the stable pending
+   * identity. The canonical `message.text` is never touched. */
   private applyUserDisclosureHit(hit: UserDisclosureHit): void {
     const expanded = hit.action === 'expand'
     this.mutateTranscriptDisclosure(() => {
@@ -17619,14 +17688,19 @@ export class TuiApp {
     return expand === '' ? 'the expand key' : expand.toLowerCase()
   }
 
-  /** The collapsed long-user bubble's marker row. It names the count as
-   * VISUAL rows (never logical lines) and resolves the expand verb from the
-   * message's fold-hint owner: fullscreen is click-owned (with the effective
-   * key when Ctrl+O is still live there), regular is the Ctrl+O master (the
-   * effective key). Narrow bubbles drop the verb and keep only the count so
-   * the marker never wraps. */
+  /** The collapsed long-user bubble's marker row: the VISUAL affordance that
+   * names the count as VISUAL rows (never logical lines) and the expand verb
+   * resolved from the message's fold-hint owner. It is a hint, not the only
+   * hit target — the whole bubble is the local disclosure surface. Fullscreen
+   * is click-owned (with the effective key when Ctrl+O is still live there);
+   * regular names the Ctrl+O master as the bidirectional `expand/collapse`
+   * verb (regular never mounts mouse hit targets). Narrow bubbles drop the
+   * verb and keep only the count so the marker never wraps. */
   private userCompactMarker(hiddenRows: number, availableWidth: number, hint: ExpandHint): string {
-    const full = `── ${hiddenRows} rows compacted · ${this.expandHint(hint)} to expand ──`
+    const verb = this.fullscreen === undefined
+      ? `${this.expandHint(hint)} expand/collapse`
+      : `${this.expandHint(hint)} to expand`
+    const full = `── ${hiddenRows} rows compacted · ${verb} ──`
     if (visibleWidth(full) <= availableWidth) return color.textDim(full)
     return color.textDim(`── ${hiddenRows} rows compacted ──`)
   }
