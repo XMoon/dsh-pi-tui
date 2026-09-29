@@ -36,6 +36,7 @@ import type {
   UserQuestionProvider,
 } from '../../runtime/interaction-port.ts'
 import { QuestionAnswerError, QUESTION_BAD_ANSWER, QUESTION_REPLY_QUEUED } from '../../runtime/interaction-port.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { Diag } from '../../diag.ts'
 import { runDetached } from '../../detached.ts'
 import type { TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
@@ -205,6 +206,8 @@ export class QuestionSurfaceController {
     let timedOut = false
     let frozen = false
     let settled = false
+    /** The Host/claim lifetime ended our foreground attempt (never the user). */
+    let hostEnded = false
     let deadline = 0
     let timer: ReturnType<typeof setInterval> | undefined
     const stopTimer = (): void => {
@@ -226,18 +229,28 @@ export class QuestionSurfaceController {
       status.text = `Foreground wait ${remainingTimeText(remaining)} — Esc to answer later`
       this.deps.repaint()
     }
+    // Declared BEFORE the teardown hook: teardown reads it, and a surface
+    // dispose can run while the claim's opening frame is still in flight
+    // (`claim` still undefined). A `const` declared after the hook would sit in
+    // its temporal dead zone exactly then and throw instead of releasing.
+    let claim: Awaited<ReturnType<QuestionInteractionPort['claimTimedWait']>>
     const teardown = (): void => {
       stopTimer()
+      // Aborting the combined signal releases an IN-FLIGHT claim opening
+      // (the adapter's caller-lifetime wiring) and ends the mounted flow;
+      // `release()` covers the already-claimed case.
       local.abort()
       claim?.release()
     }
     this.activeCleanups.add(teardown)
-    let claim: Awaited<ReturnType<QuestionInteractionPort['claimTimedWait']>>
     if (timed && callId !== undefined) {
       status.text = 'Claiming this question’s foreground wait…'
       this.deps.repaint()
       try {
-        claim = await this.deps.port.claimTimedWait(request.sessionId, callId)
+        // The combined signal covers surface teardown, the local countdown,
+        // and the request's own abort, so the claim attempt itself is
+        // cancellable from the first moment (never a leaked Host claim).
+        claim = await this.deps.port.claimTimedWait(request.sessionId, callId, signal)
       } catch (error) {
         // A claim failure must never lose the question: the live waterfall
         // still stands, only the countdown is unavailable.
@@ -257,12 +270,15 @@ export class QuestionSurfaceController {
           status.text = 'Editing — the Agent continues when the wait ends; your answer is still accepted'
           this.deps.repaint()
         }
-        // A claim that ends for any OTHER reason (stream loss, a wait the
-        // Host closed) must also end the foreground attempt; the durable
-        // question survives in the projection either way. The observation is
-        // an owned detached task (never a bare void chain).
+        // A claim that ends for any OTHER reason (the Host closed the wait,
+        // stream loss) must also end the foreground attempt — and it is NOT a
+        // user cancel: the durable question survives in the projection and the
+        // rejection must stay truthful (ASK_ABORTED, never ASK_CANCELLED). The
+        // observation is an owned detached task (never a bare void chain).
         runDetached('question: claim lifetime', () => claim!.ended.then(() => {
-          if (!settled && !timedOut) local.abort()
+          if (settled || timedOut) return
+          hostEnded = true
+          local.abort()
         }), { diag: this.deps.diag, sessionId: () => request.sessionId })
         timer = setInterval(tick, this.tickMs)
       } else {
@@ -270,23 +286,31 @@ export class QuestionSurfaceController {
       }
       this.deps.repaint()
     }
+    // A surface disposed while the claim was still opening must NOT mount a
+    // flow (the countdown UI would outlive its owner). This is a Host-side
+    // abort from the surface's point of view, never a user cancel.
+    if (this.disposed) throw questionRejection(ASK_ABORTED)
     try {
       const answers = await this.deps.ask(request.questions.map(toTuiQuestion), signal, status)
       return { answers: answers.map(toAnswerItem) }
     } catch (error) {
       if (timedOut) throw questionRejection(ASK_TIMED_OUT)
-      // A Host/delivery abort or our own teardown is ABORTED; anything else
-      // left the flow through the user's cancel (Esc / Ctrl+C).
-      if (this.disposed || request.signal?.aborted === true) throw questionRejection(ASK_ABORTED)
+      // A Host/delivery abort, a claim the Host ended, or our own teardown is
+      // ABORTED; anything else left the flow through the user's cancel
+      // (Esc / Ctrl+C). Reporting a Host-driven end as a user cancel would
+      // record a cancellation the human never made.
+      if (hostEnded || this.disposed || request.signal?.aborted === true) throw questionRejection(ASK_ABORTED)
       throw questionRejection(ASK_CANCELLED)
     } finally {
       settled = true
       this.activeCleanups.delete(teardown)
       stopTimer()
       claim?.release()
-      if (timed && callId !== undefined && timedOut) {
-        // The question stays durably answerable: let the projection settle,
-        // then offer the continued editable answer.
+      if (timed && callId !== undefined && (timedOut || hostEnded)) {
+        // The foreground attempt ended without an answer (timeout OR a Host
+        // wait the Host closed): the question may be durably answerable, so
+        // let the projection settle and then offer it. A call the Host
+        // actually settled offers nothing (the projection lists it settled).
         runDetached('question: continued reachability', () => this.awaitContinued(request.sessionId, callId, request.questions), {
           diag: this.deps.diag,
           sessionId: () => request.sessionId,
@@ -350,6 +374,10 @@ export class QuestionSurfaceController {
       }
     } catch (error) {
       if (this.disposed) return
+      // A superseded completion must not touch the CURRENT Question surface
+      // (plan §7.3 stale-generation row): the answer may or may not have
+      // reached the Host, and the new generation re-derives its own truth.
+      if (error instanceof SupersededReadError) return
       const code = error instanceof QuestionAnswerError ? error.code : undefined
       if (code === QUESTION_REPLY_QUEUED) {
         // Preserve the intent: a reply is already durably queued, so the

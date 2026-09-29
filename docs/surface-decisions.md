@@ -1565,3 +1565,15 @@ Decisions (all terminal-native; none of them copies a Web button):
 7. **Question still owns the response seat.** The modal keeps its seat and
    read-only context inspection stays available; `Esc` hides only the
    presentation, never the Host question.
+8. **The claim outlives nothing it shouldn't.** The claim attempt receives the
+   caller's lifetime from the first moment, so a surface teardown (or a
+   countdown end) during the opening frame releases the Host wait instead of
+   leaving it held; a torn-down surface never mounts a countdown after the
+   fact. A Host-driven claim end is reported as `ASK_ABORTED` — never as
+   `ASK_CANCELLED`, which would record a cancellation the human never made —
+   and the call is then re-derived from the projection.
+9. **A superseded completion is silent.** A late answer whose Connection
+   generation was replaced reports nothing: no "answer queued" line and no
+   repaint, because the answer no longer describes the live surface (the new
+   generation re-derives its own truth). A disconnected Connection likewise
+   presents no answerable card from a last-known binding.

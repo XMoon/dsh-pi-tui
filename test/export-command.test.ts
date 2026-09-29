@@ -118,6 +118,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
     },
     config: {
+      configReadiness: () => 'ready' as const,
       tuiSettings: undefined,
       footerCommandTrust: {
         userFooterMode: undefined,

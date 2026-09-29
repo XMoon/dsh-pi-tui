@@ -67,6 +67,7 @@ import type {
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
   TuiSettingsDoc,
+  ConfigReadiness,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
 import type { RemoteCommandsSource } from './host-command-remote.ts'
@@ -265,6 +266,17 @@ function piAiProvidersOf(section: unknown): Record<string, { apiKeyEnv?: string 
   return out
 }
 
+/**
+ * The forwarded-event seat MUST stay method-bound to its service: the Client
+ * `$on` reads its own service state (`this.events`), so a detached reference
+ * (`const on = source.remote.$on`) throws
+ * `Cannot read properties of undefined (reading 'subscribe')` on the first
+ * subscription. `RemoteConfigPort` therefore binds it ONCE and hands the
+ * bound seat to both the mirror and the credential listeners; the cast only
+ * restores the overload set the structural declaration carries (the same
+ * discipline the M3-3A assembly applies to its shared event seat).
+ */
+
 /* ------------------------------------------------------------------------- *
  * The serialized, generation-aware mirror.
  * ------------------------------------------------------------------------- */
@@ -385,9 +397,20 @@ class RemoteConfigMirror {
     )
   }
 
-  /** The last invalidation-triggered rerun failure, or undefined. */
+  /** The last refresh failure (invalidation rerun OR explicit read), or undefined. */
   lastRefreshFailure(): unknown {
     return this.refreshFailure
+  }
+
+  /** Record one failed refresh so `lastRefreshFailure()` stays truthful even
+   *  when nobody awaited the read (the assembly's initial-read barrier). */
+  recordFailure(error: unknown): void {
+    this.refreshFailure = error
+  }
+
+  /** Clear a recorded failure after a successful read. */
+  recordSuccess(): void {
+    this.refreshFailure = undefined
   }
 
   /** Whether the backend can be read at all (a Connection generation exists). */
@@ -561,7 +584,12 @@ class RemoteConfigMirror {
       await this.ensureCurrent()
       const snapshot = this.lastKnown()
       if (snapshot === undefined || !this.isCurrent()) {
-        throw new Error('the settings mirror is unavailable on this connection')
+        // §9.1: a write against a non-current backend fails IMMEDIATELY with
+        // an explicit reason — never a silent no-op and never an optimistic
+        // local success (the pre-flight refresh above already had its chance).
+        throw new Error(this.readiness() === 'unavailable'
+          ? 'the Remote configuration is unavailable on this connection; the change was not saved'
+          : 'the Remote configuration is not current; the change was not saved')
       }
       const descriptor = snapshot.namespaces.get(ns)
       if (descriptor === undefined) {
@@ -1250,14 +1278,20 @@ export class RemoteConfigPort implements ConfigPort {
   }
 
   constructor(source: RemoteConfigRuntimeSource) {
-    this.mirror = new RemoteConfigMirror(source)
+    // Bind the event seat to its service BEFORE anything subscribes.
+    const on = source.remote.$on.bind(source.remote) as unknown as RemoteConfigEventsSource['$on']
+    const bound: RemoteConfigRuntimeSource = {
+      remote: { ...source.remote, $on: on },
+      connection: source.connection,
+    }
+    this.mirror = new RemoteConfigMirror(bound)
     this.tuiSettingsWrapper = new RemoteTuiSettingsConfig(this.mirror)
     this.footerCommandTrust = new RemoteFooterCommandTrust(this.mirror)
     this.footerCustomItems = new RemoteFooterCustomItems(this.mirror)
     this.providers = new RemoteProviderProfileConfig(this.mirror)
     this.credentialConfig = new RemoteCredentialConfig(
-      source.remote.credentials,
-      source.remote.$on,
+      bound.remote.credentials,
+      on,
       source.connection.generation,
     )
     this.credentials = this.credentialConfig
@@ -1267,13 +1301,28 @@ export class RemoteConfigPort implements ConfigPort {
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
   }
 
-  /** Commit one fresh mirror snapshot (or leave the last-known value). */
-  describe(): Promise<void> {
-    return this.mirror.describe()
+  /** Commit one fresh mirror snapshot (or leave the last-known value). A
+   *  failure is RECORDED as well as thrown, so `readiness()` stays truthful
+   *  and `lastRefreshFailure()` explains why even when the caller only
+   *  awaited the assembly's read barrier. */
+  async describe(): Promise<void> {
+    try {
+      await this.mirror.describe()
+      this.mirror.recordSuccess()
+    } catch (error) {
+      this.mirror.recordFailure(error)
+      throw error
+    }
   }
 
   /** The truthfulness of the current snapshot. */
   readiness(): RemoteConfigReadiness {
+    return this.mirror.readiness()
+  }
+
+  /** The semantic currentness signal (§9.1): the UI marks last-known values
+   *  non-current and refuses writes while this is not `ready`. */
+  configReadiness(): ConfigReadiness {
     return this.mirror.readiness()
   }
 

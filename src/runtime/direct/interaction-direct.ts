@@ -168,20 +168,56 @@ class DirectQuestionInteractionPort implements QuestionInteractionPort {
     return { sessionId, active, settled, queuedReplyCallIds }
   }
 
-  async claimTimedWait(sessionId: string, callId: string): Promise<QuestionWaitClaim | undefined> {
+  async claimTimedWait(
+    sessionId: string,
+    callId: string,
+    signal?: AbortSignal,
+  ): Promise<QuestionWaitClaim | undefined> {
     const userQuestions = this.ctx.get('userQuestions') as UserQuestionServiceLike | undefined
     const agent = this.agentFor(sessionId)
     if (userQuestions === undefined || agent === undefined) return undefined
+    if (signal?.aborted === true) return undefined
     const lifetime = new AbortController()
-    const iterator = userQuestions.attachWait(agent, callId, lifetime.signal)[Symbol.asyncIterator]()
-    const opening = await iterator.next()
-    // No first frame: no live timed wait for this call (settled, continued,
-    // or never timed). Never a fabricated remaining duration.
-    if (opening.done === true) return undefined
+    // The caller's claim lifetime is wired to the Host wait from the FIRST
+    // moment: aborting it releases the claim even while the opening frame is
+    // still in flight (`attach()` observes the signal), so a teardown can
+    // never leave the Host waiting on a claim nobody will release.
+    const onCallerAbort = (): void => { lifetime.abort() }
+    // Read the caller's abort state through a function: the early guard above
+    // narrows the parameter, and the flag can change while we await.
+    const callerAborted = (): boolean => signal !== undefined && signal.aborted
+    signal?.addEventListener('abort', onCallerAbort, { once: true })
+    let opening: IteratorResult<{ remainingMs: number }>
+    let iterator: AsyncIterator<{ remainingMs: number }>
+    try {
+      // Setup is INSIDE the cleanup region: a synchronous throw from
+      // `attachWait`/`Symbol.asyncIterator` must still release the caller
+      // listener and the claim lifetime.
+      const stream = userQuestions.attachWait(agent, callId, lifetime.signal)
+      iterator = stream[Symbol.asyncIterator]()
+      opening = await iterator.next()
+    } catch (error) {
+      signal?.removeEventListener('abort', onCallerAbort)
+      lifetime.abort()
+      // A caller abort that surfaces as a stream rejection is the ordinary
+      // "no claim" outcome the port documents (`undefined`), not a transport
+      // failure; only a real error propagates.
+      if (callerAborted() || lifetime.signal.aborted) return undefined
+      throw error
+    }
+    // No first frame: no live timed wait for this call (already settled,
+    // continued, or never timed — including a caller abort). Never a
+    // fabricated remaining duration.
+    if (opening.done === true) {
+      signal?.removeEventListener('abort', onCallerAbort)
+      lifetime.abort()
+      return undefined
+    }
     let released = false
     const release = (): void => {
       if (released) return
       released = true
+      signal?.removeEventListener('abort', onCallerAbort)
       // Aborting the claim lifetime ends the Host wait for this holder; the
       // drain below then settles `ended`.
       lifetime.abort()

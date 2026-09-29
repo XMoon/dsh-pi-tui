@@ -29,8 +29,14 @@ M7  NOT STARTED   (default flip; direct rollback kept for >= 1 release)
 M8  NOT STARTED   (Direct ownership retirement — only after concurrency proof)
 
 Current production backend: direct
-Experimental backend:      none (no complete Backend(kind=remote))
-Experimental Remote:        reads + selected ordinary writes + Plugin Manager / Job observation (adapters proven in tests/smoke, NOT composed)
+Experimental backend:      ONE complete Backend(kind='remote') assembly exists (M3-3B:
+                           M3-3A semantics + interaction + config + archive + Plugin
+                           Manager + Job observation); constructed/tested only, never
+                           selected by normal startup
+Experimental Remote:        reads + selected ordinary writes + interaction (approval +
+                           rc.2 Question lifecycle) + ConfigPort settings mirror +
+                           session archive (adapters proven in tests/smoke; the
+                           assembly has NO production bootstrap call site)
 Remote writes:              experimental/test only (no production wiring)
 Remote attach:              unsupported
 Direct rollback:           available
@@ -2427,7 +2433,22 @@ still reaches the Remote graph only through the dynamic
   revision and followed by an authoritative refresh (never an optimistic
   local patch), a generation change marks the snapshot non-current and a
   stale result never commits, and every subscription/listener is disposed
-  exactly once. Sub-domains: `tuiSettings` (raw
+  exactly once.
+- **First-read barrier (§2.3/§4.1).** `createRemoteBackendRuntime` awaits the
+  mirror's first `describe()` as part of construction (after the M3-1 runtime
+  already awaited its own readiness), so a freshly assembled Remote backend's
+  settings/providers/permissions are readable instead of permanently stale. A
+  transient failure is RECORDED (never swallowed): `readiness()` stays `stale`,
+  `lastRefreshFailure()` carries the cause, and the next invalidation, write
+  pre-flight or explicit read retries.
+- **Currentness is semantic (§9.1).** `ConfigPort.configReadiness()` exposes
+  `ready | stale | unavailable` (Direct is always `ready`; Remote reports the
+  mirror). `/settings` announces a non-`ready` backend explicitly and the
+  write path refuses immediately with an explicit unavailable reason instead of
+  presenting last-known values as authoritative or silently no-op'ing. A
+  reconnect refreshes from authority first: once that read commits, the write
+  proceeds and the mirror is current again; when the refresh cannot succeed the
+  write fails with the real reason and dispatches nothing. Sub-domains: `tuiSettings` (raw
   `keybindings`/`footerCustomItems`/`footerCommand`/`footerLayout` ride
   verbatim; a shared `mutationQueueKey`), footer USER-layer trust + custom
   items (never the merged value), provider profiles with ONE adapter-owned

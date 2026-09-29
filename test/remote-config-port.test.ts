@@ -47,6 +47,7 @@ interface FakeState {
   readonly presetRoster: { id: string; isDefault?: boolean }[]
   describeCalls: number
   describeGate: (() => void | Promise<void>) | undefined
+  describeFailure: { code: string; message: string } | undefined
   readonly mutateCalls: FakeMutateCall[]
   mutateGate: (() => Promise<void>) | undefined
   mutateFailure: unknown
@@ -132,6 +133,7 @@ function createBackend(seed?: (state: FakeState) => void) {
     presetRoster: [],
     describeCalls: 0,
     describeGate: undefined,
+    describeFailure: undefined,
     mutateCalls: [],
     mutateGate: undefined,
     mutateFailure: undefined,
@@ -163,6 +165,7 @@ function createBackend(seed?: (state: FakeState) => void) {
       describe: async () => {
         state.describeCalls += 1
         state.order.push('describe')
+        if (state.describeFailure !== undefined) return { ok: false as const, error: state.describeFailure }
         // Snapshot the authority BEFORE the gate so a raced invalidation can
         // leave the first read with genuinely stale data.
         const value = {
@@ -244,7 +247,13 @@ function createBackend(seed?: (state: FakeState) => void) {
         : { ok: true as const, value: state.providers.map(entry => ({ ...entry, settingsPath: [...entry.settingsPath] })) },
       discoverModels: async () => ({ ok: true as const, value: [] }),
     },
-    $on: (event: string, listener: EventListener) => {
+    // A METHOD with a real `this`, like the generated Client `$on`: it reads
+    // its own service state, so a detached reference must throw. This is the
+    // regression lock for the P11-class bug (an unbound event seat).
+    $on(this: unknown, event: string, listener: EventListener) {
+      if (this !== remote) {
+        throw new TypeError("Cannot read properties of undefined (reading 'subscribe')")
+      }
       state.order.push(`$on:${event}`)
       let set = listeners.get(event)
       if (set === undefined) {
@@ -763,4 +772,100 @@ test('tuiSettings is undefined until the tui-app namespace is present', async ()
   const { port } = createBackend()
   await port.describe()
   assert.equal(port.tuiSettings, undefined)
+})
+
+test('the event seat stays method-bound: credential change events and mirror invalidation work', async () => {
+  // `onChanged` and the mirror's invalidation listeners both go through the
+  // Client `$on`, which reads its own service state. The fake `$on` above
+  // throws when called detached, so this test fails if the adapter extracts
+  // the seat without binding it.
+  const { port, state, emit, generation } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
+  })
+  await port.describe()
+  assert.equal(state.describeCalls, 1)
+
+  // A forwarded document update re-reads from authority (invalidation fence).
+  emit('settings/document-updated')
+  await new Promise<void>(resolve => { setTimeout(resolve, 5) })
+  assert.ok(state.describeCalls >= 2, 'the invalidation triggered a re-describe')
+
+  // Credential change events notify the local listener exactly once each and
+  // the returned disposer removes both subscriptions.
+  let notifications = 0
+  const off = port.credentials.onChanged(() => { notifications += 1 })
+  emit('credentials/reference-updated')
+  emit('credentials/record-updated')
+  assert.equal(notifications, 2, 'one notification per credential event')
+  off()
+  emit('credentials/reference-updated')
+  emit('credentials/record-updated')
+  assert.equal(notifications, 2, 'a disposed listener never fires again')
+  off()
+  assert.equal(state.order.filter(entry => entry === 'off:credentials/reference-updated').length, 1,
+    'the disposer releases each subscription exactly once')
+
+  // A generation replacement also invalidates the mirror (a new Host may have
+  // a different document).
+  const before = state.describeCalls
+  generation.set({ id: 'gen-2' })
+  await new Promise<void>(resolve => { setTimeout(resolve, 5) })
+  assert.ok(state.describeCalls > before, 'a replaced generation re-reads')
+  assert.equal(port.readiness(), 'ready', 'the committed snapshot belongs to the new generation')
+
+  // dispose() releases the remaining subscriptions exactly once: the two
+  // credential listeners were already released by the explicit `off()` above,
+  // so only the three mirror subscriptions remain. A second dispose() is a
+  // no-op (never a double-off).
+  const offsBefore = [...state.order].filter(entry => entry.startsWith('off:')).length
+  port.dispose()
+  port.dispose()
+  assert.equal([...state.order].filter(entry => entry.startsWith('off:')).length, offsBefore + 3,
+    'each remaining subscription (3 mirror seats) is released exactly once')
+})
+
+test('configReadiness reports the mirror currentness truthfully and refuses writes explicitly', async () => {
+  // §9.1: a consumer must be able to tell "this is the value" from "this was
+  // the value", and a write against a non-current backend must fail with an
+  // explicit reconnecting reason instead of a silent no-op.
+  const { port, state, generation } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
+  })
+  assert.equal(port.configReadiness(), 'stale', 'no read yet: the mirror is not current')
+  await port.describe()
+  assert.equal(port.configReadiness(), 'ready')
+
+  // A disconnected Connection has no authority at all.
+  generation.set(undefined)
+  assert.equal(port.configReadiness(), 'unavailable')
+  await assert.rejects(
+    async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
+    /unavailable on this connection; the change was not saved/u,
+  )
+
+  // A reconnect leaves the last-known snapshot non-current until a read
+  // commits. A write then REFRESHES from authority first (never an optimistic
+  // local patch): once the refresh succeeds the write proceeds and the mirror
+  // is current again.
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.configReadiness(), 'stale')
+  const mutationsBefore = state.mutateCalls.length
+  await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' })
+  assert.equal(state.mutateCalls.length, mutationsBefore + 1, 'the write refreshed and dispatched')
+  assert.equal(port.configReadiness(), 'ready', 'the post-write authoritative refresh re-currents the mirror')
+  assert.equal(port.tuiSettings!.get().theme, 'light')
+
+  // When the pre-flight refresh CANNOT succeed, the write fails with the real
+  // reason and dispatches nothing — never a silent no-op and never a local
+  // success (no optimistic authority).
+  state.describeFailure = { code: 'gateway/unavailable', message: 'host is reconnecting' }
+  generation.set({ id: 'gen-3' })
+  const mutationsAfter = state.mutateCalls.length
+  await assert.rejects(
+    async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'dark' }) },
+    /settings\.describe failed: host is reconnecting/u,
+  )
+  assert.equal(state.mutateCalls.length, mutationsAfter, 'a refused write dispatches no mutate')
+  assert.equal(port.configReadiness(), 'stale', 'the failed refresh leaves the mirror non-current')
+  assert.ok(port.lastRefreshFailure() !== undefined, 'the failure is recorded for the UI')
 })

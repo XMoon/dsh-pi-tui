@@ -27,6 +27,7 @@ import type {
   UserQuestionProvider,
 } from '../src/runtime/interaction-port.ts'
 import { QuestionAnswerError, QUESTION_REPLY_QUEUED } from '../src/runtime/interaction-port.ts'
+import { SupersededReadError } from '../src/runtime/read-error.ts'
 import type { TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../src/tui-app.ts'
 import type { Diag } from '../src/diag.ts'
 
@@ -44,6 +45,8 @@ type AskRecord = {
 /** A controllable fake Question port + ask hook. */
 function harness(options: {
   claim?: QuestionWaitClaim | undefined
+  /** Gate the claim opening so a test can abort while the first frame is in flight. */
+  claimGate?: Promise<void>
   snapshot?: QuestionSurfaceSnapshot | undefined
   answerContinued?: (sessionId: string, callId: string, answer: AskUserQuestionAnswer) => Promise<'queued' | 'not-continued'>
 } = {}) {
@@ -52,10 +55,22 @@ function harness(options: {
   const notices: string[] = []
   const answered: Array<{ sessionId: string; callId: string }> = []
   let clock = 1_000
+  const claimSignals: Array<AbortSignal | undefined> = []
   const port: QuestionInteractionPort = {
     onRequest: (next) => { provider = next; return true },
     snapshot: () => options.snapshot,
-    claimTimedWait: async () => options.claim,
+    claimTimedWait: async (_sessionId, _callId, signal) => {
+      claimSignals.push(signal)
+      // A real adapter resolves `undefined` once its caller lifetime aborts
+      // (the Host wait is released), which is what a teardown must see. The
+      // ungated case keeps the plain microtask shape the other cases rely on.
+      if (signal?.aborted === true) return undefined
+      if (options.claimGate === undefined) return options.claim
+      const aborted = new Promise<undefined>((resolve) => {
+        signal?.addEventListener('abort', () => { resolve(undefined) }, { once: true })
+      })
+      return await Promise.race([options.claimGate.then(() => options.claim), aborted])
+    },
     answerContinued: async (sessionId, callId, answer) => {
       answered.push({ sessionId, callId })
       return options.answerContinued === undefined ? 'queued' : options.answerContinued(sessionId, callId, answer)
@@ -85,6 +100,7 @@ function harness(options: {
   return {
     controller,
     port,
+    claimSignals,
     asks,
     notices,
     answered,
@@ -268,4 +284,92 @@ test('dispose releases controller state and stops offering questions', async () 
   h.controller.reconcile()
   await Promise.resolve()
   assert.equal(h.asks.length, 0)
+})
+
+test('dispose during the claim opening aborts the attempt and never mounts a stale countdown', async () => {
+  // The claim's first frame is still in flight when the surface tears down.
+  // Without a cancellable claim the controller would keep awaiting, and the
+  // Host wait would stay held by a claim nobody releases (plan §15.2).
+  const gate = Promise.withResolvers<void>()
+  const claim: QuestionWaitClaim = { remainingMs: 60_000, ended: new Promise(() => {}), release: () => { released += 1 } }
+  let released = 0
+  const h = harness({ claim, claimGate: gate.promise })
+  const pending = h.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
+  await Promise.resolve()
+  assert.equal(h.asks.length, 0, 'the flow waits for the claim before mounting')
+  assert.equal(h.claimSignals.length, 1, 'the claim received the caller lifetime signal')
+  assert.equal(h.claimSignals[0]?.aborted, false)
+
+  h.controller.dispose()
+  assert.equal(h.claimSignals[0]?.aborted, true, 'teardown aborts the in-flight claim opening')
+
+  // The live waterfall still has to settle: the abort reaches it through the
+  // same combined signal, so the request never hangs.
+  gate.resolve()
+  await assert.rejects(() => pending, (error: unknown) => {
+    assert.equal((error as { code?: string }).code, ASK_ABORTED)
+    return true
+  })
+  assert.equal(h.asks.length, 0, 'a torn-down surface never mounts the countdown')
+  assert.equal(released, 0, 'the Host-side claim was released by the abort, not by a returned handle')
+})
+
+test('a Host-ended claim rejects ASK_ABORTED, never the user-cancel code, and stays answerable', async () => {
+  // The Host/claim lifetime ends the foreground attempt (stream loss or a wait
+  // the Host closed). That is NOT a user cancel: reporting ASK_CANCELLED would
+  // record a cancellation the human never made, and the question must remain
+  // durably answerable as `continued`.
+  const ended = Promise.withResolvers<void>()
+  let released = 0
+  const claim: QuestionWaitClaim = { remainingMs: 60_000, ended: ended.promise, release: () => { released += 1 } }
+  const snapshot: QuestionSurfaceSnapshot = {
+    sessionId: 'session-a',
+    active: [{ callId: 'call-1', sessionId: 'session-a', questions: QUESTIONS, state: 'continued' }],
+    settled: [],
+    queuedReplyCallIds: new Set(),
+  }
+  const h = harness({ claim, snapshot })
+  const pending = h.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
+  await Promise.resolve(); await Promise.resolve()
+  assert.equal(h.asks.length, 1)
+
+  const expectsAbort = assert.rejects(() => pending, (error: unknown) => {
+    assert.equal((error as { code?: string }).code, ASK_ABORTED, 'a Host-driven end is an abort, not a user cancel')
+    assert.notEqual((error as { code?: string }).code, ASK_CANCELLED)
+    return true
+  })
+  ended.resolve()
+  await expectsAbort
+  assert.equal(released, 1, 'the claim is released when the Host ends it')
+
+  // The expired/closed wait leaves the call durably answerable: the controller
+  // offers the continued late answer from the projection.
+  await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+  assert.equal(h.asks.length, 2, 'the continued late-answer surface is offered again')
+  h.submit([{ id: 'q1', selected: ['a'] }])
+  await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+  assert.deepEqual(h.answered, [{ sessionId: 'session-a', callId: 'call-1' }])
+})
+
+test('a superseded late-answer completion does not touch the current Question surface', async () => {
+  // The Remote adapter fences the answer on the Connection generation and
+  // throws a superseded read when it was replaced. The controller must stay
+  // silent: the new generation owns its own truth, and notifying "Answer
+  // queued" would repaint a surface the completion no longer describes.
+  const snapshot: QuestionSurfaceSnapshot = {
+    sessionId: 'session-a',
+    active: [{ callId: 'call-continued', sessionId: 'session-a', questions: QUESTIONS, state: 'continued' }],
+    settled: [],
+    queuedReplyCallIds: new Set(),
+  }
+  const h = harness({
+    snapshot,
+    answerContinued: async () => { throw new SupersededReadError('the generation changed') },
+  })
+  h.controller.reconcile()
+  await Promise.resolve()
+  assert.equal(h.asks.length, 1)
+  h.submit([{ id: 'q1', selected: ['a'] }])
+  await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
+  assert.deepEqual(h.notices, [], 'a superseded completion produces no user-facing claim')
 })

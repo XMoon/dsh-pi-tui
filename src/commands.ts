@@ -1988,6 +1988,20 @@ export function registerTuiCommands(
       // retargets to a replacement session. Never creates a Session.
       const liveScope = runner.captureLiveSessionScope()
       const tuiSettings = runner.tuiSettings
+      // §9.1 currentness: a backend whose config reads are not current must
+      // say so. The rows below show LAST KNOWN values, so the panel announces
+      // the staleness explicitly (and every write is refused with an explicit
+      // reconnecting reason by the port itself) instead of presenting
+      // last-known values as authoritative.
+      const configReadiness = runner.config.configReadiness()
+      if (configReadiness !== 'ready') {
+        app.notify(
+          configReadiness === 'unavailable'
+            ? 'the configuration backend is unavailable — values shown are the last known ones and changes cannot be saved'
+            : 'the configuration is not current (reconnecting) — values shown are the last known ones; changes will be refused until it reconnects',
+          'error',
+        )
+      }
       let settingsDoc: TuiSettingsDoc | undefined
       if (tuiSettings !== undefined) {
         try {

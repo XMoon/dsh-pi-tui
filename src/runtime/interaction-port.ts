@@ -173,8 +173,15 @@ export interface QuestionInteractionPort {
    * `undefined` when no live timed wait exists for the call (already
    * settled, continued, or never timed), and rejects on real transport
    * failure.
+   *
+   * `signal` is the caller's claim lifetime (surface teardown, countdown
+   * end, or the request's own abort). It must cancel the claim attempt from
+   * the very FIRST moment — including while the opening frame is still in
+   * flight — so a teardown can never leave the Host wait held by a claim the
+   * surface will never release. An aborted signal releases the attempt and
+   * resolves `undefined`.
    */
-  claimTimedWait(sessionId: string, callId: string): Promise<QuestionWaitClaim | undefined>
+  claimTimedWait(sessionId: string, callId: string, signal?: AbortSignal): Promise<QuestionWaitClaim | undefined>
   /**
    * Answer a CONTINUED question (the late-answer path). Resolves the
    * official outcome: `'queued'` when the Host accepted and steered the

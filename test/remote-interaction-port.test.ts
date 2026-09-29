@@ -259,3 +259,100 @@ test('setApprovalPolicy fails closed (no public rc.2 carrier) and approval rides
     .call({}, { toolName: 'bash' }, () => {})
   assert.deepEqual(seen, [{ toolName: 'bash' }])
 })
+
+test('answerContinued refuses to report an outcome once the Connection generation was replaced', async () => {
+  // A late answer is a write whose completion must not repaint a NEWER
+  // Question surface (plan §7.3 stale-generation row): the adapter captures
+  // the generation before dispatch and throws a superseded read afterwards, so
+  // the controller stays silent about an outcome it cannot vouch for.
+  const remote = fakeRemote({
+    answer: async () => {
+      // The replace lands while the answer is in flight.
+      generation.set({ id: 'gen-2' })
+      return { ok: true, value: true }
+    },
+  })
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  const port = new RemoteInteractionPort({
+    sessions: { scopeOf: () => undefined, binding: () => undefined },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  await assert.rejects(
+    () => port.questions.answerContinued('session-a', 'call-1', { answers: [] }),
+    (error: unknown) => {
+      assert.equal((error as Error).name, 'SupersededReadError')
+      return true
+    },
+  )
+})
+
+test('answerContinued is not dispatched at all without a current Connection generation', async () => {
+  const calls: number[] = []
+  const remote = fakeRemote({ answer: async () => { calls.push(1); return { ok: true, value: true } } })
+  const port = new RemoteInteractionPort({
+    sessions: { scopeOf: () => undefined, binding: () => undefined },
+    remote: remote as never,
+    connection: { generation: { getSnapshot: () => undefined, subscribe: () => () => {} } },
+  })
+  await assert.rejects(
+    () => port.questions.answerContinued('session-a', 'call-1', { answers: [] }),
+    (error: unknown) => {
+      assert.equal((error as Error).name, 'SupersededReadError')
+      return true
+    },
+  )
+  assert.deepEqual(calls, [], 'a disconnected Connection never dispatches the write')
+})
+
+test('snapshot presents no answerable surface while the Connection has no generation', () => {
+  // A disconnected Connection cannot vouch for a last-known continuation: the
+  // synchronous projection read follows the established sync convention and
+  // reports absence, so reconcile() mounts nothing from a stale binding.
+  const remote = fakeRemote()
+  const port = new RemoteInteractionPort({
+    sessions: {
+      scopeOf: () => undefined,
+      binding: () => ({
+        session: {
+          projections: {
+            faceOf: (key: string) => ({
+              getSnapshot: () => key === 'userQuestions'
+                ? { active: [{ callId: 'call-continued', questions: [{ id: 'q1', question: 'A' }], state: 'continued' }], settled: [] }
+                : { 'next-step': [], 'next-turn': [] },
+            }),
+          },
+        },
+      }),
+    },
+    remote: remote as never,
+    connection: { generation: { getSnapshot: () => undefined, subscribe: () => () => {} } },
+  })
+  assert.equal(port.questions.snapshot('session-a'), undefined)
+})
+
+test('claimTimedWait resolves undefined when the caller aborts during the opening frame', async () => {
+  const remote = fakeRemote({
+    attachWait: (_sessionId, _callId, signal) => ({
+      dispose: () => {},
+      async *[Symbol.asyncIterator]() {
+        // Reject the opening because the caller aborted: the port documents
+        // this as the ordinary "no claim" outcome, not a transport failure.
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('stream aborted')), { once: true })
+        })
+        yield { remainingMs: 1 }
+      },
+    }) as never,
+  })
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  const controller = new AbortController()
+  const port = new RemoteInteractionPort({
+    sessions: { scopeOf: () => undefined, binding: () => undefined },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  const pending = port.questions.claimTimedWait('session-a', 'call-1', controller.signal)
+  controller.abort()
+  assert.equal(await pending, undefined, 'a caller abort is a normal absent claim')
+})

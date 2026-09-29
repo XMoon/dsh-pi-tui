@@ -98,6 +98,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
   }
   const config = {
+    configReadiness: () => 'ready' as const,
     tuiSettings: undefined,
     footerCommandTrust: {
       userFooterMode: undefined,

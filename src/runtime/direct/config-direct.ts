@@ -59,6 +59,7 @@ import type {
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
+  ConfigReadiness,
 } from '../config-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -117,6 +118,12 @@ export interface AgentPresetsServiceLike {
 /** The Direct backend's config: the `ctx` services behind the semantic
  * `ConfigPort` interfaces. */
 export class DirectConfigPort implements ConfigPort {
+  /** Direct reads hit the in-process Host authority, so its config facts are
+   *  always the current ones (§9.1). */
+  configReadiness(): ConfigReadiness {
+    return 'ready'
+  }
+
   readonly tuiSettings: TuiSettingsConfig | undefined
   readonly footerCommandTrust: FooterCommandTrust
   readonly footerCustomItems: FooterCustomItemsConfig

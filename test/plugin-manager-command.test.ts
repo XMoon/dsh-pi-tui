@@ -61,6 +61,7 @@ function proxyRunner(ctx: Context, app: TuiApp, commands: Record<string, unknown
       return { render: () => [], invalidate: () => {} }
     },
     config: {
+      configReadiness: () => 'ready' as const,
       permissions: {
         presetNames: () => [],
         defaultPreset: () => undefined,

@@ -151,12 +151,31 @@ export interface RemoteBackendRuntime {
  * Remote ConfigPort mirror, and the Remote session archive. It is NOT a
  * production cutover: normal startup still selects Direct.
  */
-export function createRemoteBackendRuntime(options: RemoteBackendRuntimeOptions): RemoteBackendRuntime {
+export async function createRemoteBackendRuntime(
+  options: RemoteBackendRuntimeOptions,
+): Promise<RemoteBackendRuntime> {
   const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
     promptSerializer: options.promptSerializer,
   })
   const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
   const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
+  // §2.3/§4.1 config readiness barrier: the mirror's invalidation listeners
+  // are already installed (the port's constructor), the M3-1 Client runtime
+  // already awaited its own initial readiness (so a Connection generation
+  // exists), and THIS is the first read. Awaiting it here is what makes a
+  // freshly assembled Remote backend's settings/providers/permissions
+  // readable instead of permanently 'stale'.
+  //
+  // A transient failure must not prevent the backend from existing: the mirror
+  // RECORDS it (`lastRefreshFailure()`), `readiness()` stays 'stale', and the
+  // next invalidation / write pre-flight / explicit read retries. The
+  // consumer then shows a truthful unavailable state instead of fabricated
+  // values (docs/m3-entry-contract.md §9.1).
+  try {
+    await config.describe()
+  } catch {
+    // Recorded by `RemoteConfigPort.describe()`; construction continues.
+  }
   let disposed = false
   return {
     backend: createRemoteBackend({ ...semantics, config, sessionArchive }),

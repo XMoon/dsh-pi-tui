@@ -45,6 +45,7 @@ import type {
 } from '../interaction-port.ts'
 import { QuestionAnswerError } from '../interaction-port.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
+import { SupersededReadError } from '../read-error.ts'
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 
@@ -205,6 +206,14 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
   }
 
   snapshot(sessionId: string): QuestionSurfaceSnapshot | undefined {
+    // A Connection with no current generation has NO authority to present:
+    // this is a SYNCHRONOUS projection read, so it cannot capture-then-compare
+    // a generation the way the async read/write paths do; the established sync
+    // convention (`RemoteSessionReader.measureContext`/`turnOutline`/
+    // `sessionStatus`) is that a missing generation is capability absence. A
+    // disconnected surface must therefore present NO answerable card rather
+    // than a last-known one (plan §7.3 reconnect/stale rows).
+    if (this.generation.getSnapshot() === undefined) return undefined
     const binding = this.sessions.binding(sessionId)
     // A missing binding is "not available", never an authoritative empty
     // surface: a detached/replaced Connection must not close a live card.
@@ -222,27 +231,53 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     }
   }
 
-  async claimTimedWait(sessionId: string, callId: string): Promise<QuestionWaitClaim | undefined> {
+  async claimTimedWait(
+    sessionId: string,
+    callId: string,
+    signal?: AbortSignal,
+  ): Promise<QuestionWaitClaim | undefined> {
     const capturedGeneration = this.generation.getSnapshot()
     if (capturedGeneration === undefined) return undefined
+    if (signal?.aborted === true) return undefined
     const lifetime = new AbortController()
-    const handle = this.remote.userQuestions.attachWait(sessionId, callId, lifetime.signal)
-    const iterator = handle[Symbol.asyncIterator]()
+    // Wire the caller's claim lifetime to the stream from the FIRST moment:
+    // aborting it cancels the opening too, so a surface teardown can never
+    // leave the Host holding a claim nobody will release.
+    const onCallerAbort = (): void => { lifetime.abort() }
+    // Read the caller's abort state through a function: the early guard above
+    // narrows the parameter, and the flag can change while we await.
+    const callerAborted = (): boolean => signal !== undefined && signal.aborted
+    signal?.addEventListener('abort', onCallerAbort, { once: true })
     let opening: IteratorResult<{ readonly remainingMs: number }>
+    let handle: RemoteQuestionWaitStream | undefined
+    let iterator: AsyncIterator<{ readonly remainingMs: number }>
     try {
+      // Setup is INSIDE the cleanup region: a synchronous throw from
+      // `attachWait`/`Symbol.asyncIterator` must still release the caller
+      // listener and the stream handle.
+      handle = this.remote.userQuestions.attachWait(sessionId, callId, lifetime.signal)
+      iterator = handle[Symbol.asyncIterator]()
       opening = await iterator.next()
     } catch (error) {
-      handle.dispose()
+      signal?.removeEventListener('abort', onCallerAbort)
+      handle?.dispose()
+      // A caller abort that surfaces as a stream rejection is the ordinary
+      // "no claim" outcome the port documents (`undefined`), not a transport
+      // failure; only a real error propagates.
+      if (callerAborted() || lifetime.signal.aborted) return undefined
       throw error
     }
-    // No first frame: no live timed wait for this call (settled, continued,
-    // or never timed). Never a fabricated remaining duration.
+    // No first frame: no live timed wait for this call (already settled,
+    // continued, never timed — including a caller abort). Never a fabricated
+    // remaining duration.
     if (opening.done === true) {
+      signal?.removeEventListener('abort', onCallerAbort)
       handle.dispose()
       return undefined
     }
     // A replaced Connection must not surface a stale claim into a new UI.
     if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
+      signal?.removeEventListener('abort', onCallerAbort)
       handle.dispose()
       return undefined
     }
@@ -250,6 +285,7 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     const release = (): void => {
       if (released) return
       released = true
+      signal?.removeEventListener('abort', onCallerAbort)
       lifetime.abort()
       handle.dispose()
     }
@@ -275,7 +311,19 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     callId: string,
     answer: AskUserQuestionAnswer,
   ): Promise<'queued' | 'not-continued'> {
+    // A late answer is a WRITE whose completion must not repaint a newer
+    // Question surface (plan §7.3 stale-generation row): capture the
+    // Connection generation before dispatch and refuse to report an outcome
+    // once it was replaced. The Host still owns the durable fact — this
+    // adapter only declines to speak for a superseded UI.
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) {
+      throw new SupersededReadError('the question answer was not dispatched: no current Connection generation')
+    }
     const result = await this.remote.userQuestions.answer(sessionId, callId, answer)
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
+      throw new SupersededReadError('the question answer completed after the Connection generation changed')
+    }
     if (!result.ok) {
       // Preserve the Host taxonomy (REPLY_QUEUED / BAD_ANSWER / transport) in
       // the shared port vocabulary so both backends recover identically.

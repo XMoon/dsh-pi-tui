@@ -64,6 +64,7 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
       return { render: () => [], invalidate: () => {} }
     },
     config: {
+      configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
       subagentModelSelection: { available: () => false },
     },

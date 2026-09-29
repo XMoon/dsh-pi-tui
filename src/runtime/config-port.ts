@@ -409,10 +409,31 @@ export interface PresetDefaultConfig {
   set(id: string): Promise<void>
 }
 
+/**
+ * How current this backend's config reads are (M3-3B, plan §9.1).
+ *
+ * `ready` — the values below are authoritative for the live backend;
+ * `stale` — they are the LAST KNOWN values of a backend that is reconnecting
+ * or whose authority just changed; the UI must mark them non-current and
+ * refuse writes until a read makes them current again;
+ * `unavailable` — there is no authority to read at all (disconnected).
+ *
+ * This is deliberately part of the SEMANTIC contract rather than a
+ * Remote-adapter detail: a consumer must be able to tell "this is the value"
+ * from "this was the value", and a backend that cannot know must say so.
+ */
+export type ConfigReadiness = 'ready' | 'stale' | 'unavailable'
+
 /** The config assembly — one narrow sub-interface per config domain.
  * Consumers depend on the sub-interface they use, never on the whole
  * assembly (no generic settings god API). */
 export interface ConfigPort {
+  /** How current the reads below are (§9.1). Direct is always `ready`: its
+   *  reads hit the in-process Host authority. A Remote backend reports its
+   *  settings mirror's currentness, and a non-`ready` value means the UI
+   *  must mark the values non-current and refuse writes with an explicit
+   *  reason instead of presenting last-known values as authoritative. */
+  configReadiness(): ConfigReadiness
   /** The TUI settings document (theme/footer/...). */
   readonly tuiSettings: TuiSettingsConfig | undefined
   /** The M5 footer-command trust read (USER-layer only). */
