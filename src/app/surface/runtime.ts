@@ -121,6 +121,7 @@ import type { TaskBrowserViewState, TaskPanelItem } from '../../task-panel.ts'
 import type { TaskBrowserHandle, WorkflowAction } from '../../tui-app.ts'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
+import { QuestionSurfaceController } from './question-controller.ts'
 import type { JobObservationPort, JobObservedSnapshot } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
@@ -863,6 +864,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // (which compaction bracket is live for the presentation), not Direct state.
   let routingSource: SurfaceEventRoutingSource<Event> | undefined
   let compactingId: string | undefined
+  /** The ONE Question surface owner (M3-3B timed/continued lifecycle). */
+  let questionController: QuestionSurfaceController | undefined
 
   /** The injected event-routing source; only reachable while attached. */
   const routing = (): SurfaceEventRoutingSource<Event> => {
@@ -2128,6 +2131,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     if (mainEvent) {
       const observed = source.observeMainEvent(session.id, event)
       settledViewChildId = observed.settledViewChildId
+      // M3-3B continued-question reachability: any activity on the current
+      // Session re-derives answerability from the authoritative projection
+      // (never from a local timer or the transcript). Mounting only happens
+      // when a continued call is actually awaiting an answer.
+      questionController?.reconcile()
       // The subagent tool/call refresh is a surface-owned presentation
       // decision; the runner only reports the intent (A4-7 P2).
       if (observed.refreshAgents) refreshAgents()
@@ -2848,25 +2856,29 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         })
       })
       // The interactive question answerer: ask_user_question tool calls
-      // become dialog flows; the tool receives the structured answers.
-      port.registerQuestionProvider(async (request) => {
-        const answers = await mounted().askQuestions(request.questions.map(question => ({
-          id: question.id,
-          question: question.question,
-          ...question.header !== undefined ? { header: question.header } : {},
-          ...question.detail !== undefined ? { detail: question.detail } : {},
-          ...question.options !== undefined ? { options: question.options } : {},
-          ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
-          ...question.intent !== undefined ? { intent: question.intent } : {},
-        })), request.signal)
-        return {
-          answers: answers.map(answer => ({
-            id: answer.id,
-            selected: answer.selected,
-            ...answer.custom !== undefined ? { custom: answer.custom } : {},
-          })),
-        }
+      // become dialog flows; the tool receives the structured answers. M3-3B
+      // layers the timed/continued lifecycle AROUND the same QuestionFlow
+      // (`QuestionSurfaceController`): the live request is the only mount
+      // path, the controller owns the claim/countdown, and a timed-out
+      // question stays reachable as a continued late answer.
+      // M3-3B: the settled `userQuestions` projection is the authoritative
+      // final answer of a timed-out call, so the transcript card renders what
+      // the user finally answered instead of the timeout payload.
+      mounted().setSettledQuestionAnswersLookup((callId) => {
+        const sessionId = routingSource?.currentSessionId()
+        if (sessionId === undefined) return undefined
+        return port.questions.snapshot(sessionId)?.settled.find(entry => entry.callId === callId)?.answers
       })
+      const controller = new QuestionSurfaceController({
+        port: port.questions,
+        ask: (questions, signal, status) => mounted().askQuestions(questions, signal, status),
+        notify: (message, level) => { mounted().notify(message, level) },
+        repaint: () => schedulePaint(),
+        currentSessionId: () => routingSource?.currentSessionId(),
+        diag: taskDiag(),
+      })
+      controller.attach()
+      questionController = controller
     },
     attachEventRouting(source) {
       routingSource = source
@@ -2936,6 +2948,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     dispose() {
       if (disposed) return
       disposed = true
+      questionController?.dispose()
+      questionController = undefined
+      app?.setSettledQuestionAnswersLookup(undefined)
       // The mounted app is released first (its options captured the extension
       // host), then the extension surface resources in the runner's original
       // cleanup order.

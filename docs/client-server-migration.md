@@ -20,7 +20,7 @@ M3-0 DONE          (entry contract frozen — the M3 architecture contract is do
 M3-1 DONE          (experimental in-process wire composition spine: reusable `RemoteHostRuntime` + `RemoteClientRuntime` + `backend-loader.ts` dynamic boundary, zero product cutover — see the M3-1 status section)
 M3-2 DONE          (Remote Session owner spine: exact-`SessionBinding` `SessionOwnerAccess`/`SessionOwnerRetirement` provider, transport-neutral app/session runtime, Remote fork publication→open adoption — zero product cutover, see the M3-2 status section)
 M3-3A DONE         (Remote session/runtime/catalog/host-file semantic closure: official contextPressure + turnOutline + sessionStatus projection reads, subagent allowlist on the official model directory, Remote skills/list + fileReferences/list adapters, truthful Host-file unavailable states, PresentationReader.loadThrough, one-source M3-3A semantic bundle — zero product cutover, see the M3-3A status section)
-M3-3B NEXT         (Remote ConfigPort, settings mirror, approval/question flow, session-log export, final Remote Backend assembly + BackendKind 'remote')
+M3-3B DONE         (rc.2 retarget + frozen-contract reconvergence; rc.2 Question semantics in the semantic port on BOTH backends with a timed/continued UI lifecycle; Remote ConfigPort settings mirror; Remote `/api/session.export` archive; complete experimental Remote `Backend` + `BackendKind 'remote'` — zero product cutover, see the M3-3B status section)
 M3 product composition NOT STARTED (Direct production/default behavior unchanged; Remote composition NOT active)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -2347,3 +2347,159 @@ confirmed break.
   the gate baseline in the same PR.
 - Every new blocker or removed blocker: update the table.
 
+## M3-3B status (COMPLETE, zero product cutover)
+
+M3-3B closed the **rc.2 contract reconvergence + config / interaction /
+archive / Remote-backend assembly**. The DSH family floor moved as one unit
+(peers `>=0.2.0-rc.2`, development/source target exact `0.2.0-rc.2` at
+`639ed015…`) because the Question lifecycle consumes rc.2-only published
+contracts; `0.5.0` remains the published pairing for rc.1 and older. Direct is
+still the production default, no backend selector exists, and normal startup
+still reaches the Remote graph only through the dynamic
+`runtime/backend-loader.ts` boundary.
+
+### rc.2 uplift + frozen-contract reconvergence
+
+- `package.json` (all `@deepseek-ai/dsh-*` peers `>=0.2.0-rc.2`; all DSH dev
+  deps exact `0.2.0-rc.2`), `pnpm-lock.yaml`, `test/compat/dsh-source.json`
+  (`639ed015397290b3745d163aafe02ffee4aa3f84`), `test/dsh-peer-window.test.mjs`
+  (accepts rc.2, explicitly rejects rc.1/0.1.7), `src/dsh-compat-matrix.json`
+  (reserved `0.5.1` row `dshFrom 0.2.0-rc.2`; the published `0.5.0` row keeps
+  its `0.1.7-rc.2 … 0.2.0-rc.1` history), `docs/dsh-compatibility.md`,
+  `README*.md`, `CHANGELOG*.md`.
+- `docs/m3-entry-contract.md` §2.1 now carries SEPARATE Approval and Question
+  authority matrices (the old combined "waterfall only" row was stale for
+  Question on rc.2).
+- `test/remote-official-contract.test.ts` is the rc.2 published-surface gate:
+  it proves `remote.userQuestions.attachWait/answer`, `Session
+  userQuestions`, the `settings`/`credentials` Remote faces, the
+  `/api/session.export` route constant and the composition-owned archive fetch
+  still exist, so a future rc that renames or drops one fails HERE.
+
+### Question semantics + UI lifecycle
+
+- `src/runtime/interaction-port.ts` splits the interaction capability:
+  `onApprovalRequest` + the fail-closed `setApprovalPolicy` stay, while the
+  new `questions` sub-domain carries the rc.2 lifecycle — a detached
+  `QuestionRequestView` (sessionId + callId + timed + detached question DTOs),
+  `snapshot(sessionId)` (`userQuestions` projection + Inbox
+  `user-question-reply` queued-reply fact), `claimTimedWait` (the
+  transport-neutral `QuestionWaitClaim`: Host-seeded `remainingMs`, `ended`,
+  `release`), and `answerContinued` (the official `answer` taxonomy via the
+  shared `QuestionAnswerError`). Approval and Question are separate concerns
+  and no Typert/Agent object crosses the port.
+- `src/runtime/direct/interaction-direct.ts` maps the SAME semantics from the
+  in-process Host: `user-questions/request` with the Session identity read
+  from the request's Agent scope, `ctx.userQuestions.attachWait/answer`, and
+  the official `sessionProjections` `userQuestions` + `inbox` reads (the one
+  Direct coupling delta this stage adds).
+- `src/runtime/remote/interaction-remote.ts` maps them over the wire:
+  `$on('user-questions/request')` with the Session identity from the official
+  Client scope, `remote.userQuestions.attachWait/answer`, and the
+  `session.projections.faceOf('userQuestions'|'inbox')` reads, all generation
+  fenced (a replaced Connection makes a claim absent, never stale).
+- `src/app/surface/question-controller.ts` is the ONE TUI Question surface
+  owner: claim-before-countdown, a presentation-only countdown that rejects
+  the forwarded waterfall with the wire-preserved `ASK_TIMED_OUT` (never a
+  Turn or question cancel), the first-real-answer-mutation freeze,
+  projection-driven continued-question reachability, queued-reply read-only
+  suppression, `REPLY_QUEUED`/`BAD_ANSWER` recovery, and claim release on
+  settle/teardown. It layers AROUND the unchanged `QuestionFlow` (no fork, no
+  second draft store, reentrancy fences intact).
+- `src/tui-app.ts` gained a caller-owned status line on the flow and carries
+  the primary `callId` on a settled tool card (`src/transcript.ts`), so
+  `present.ts`'s existing summary/answer-line renderer is fed the
+  authoritative `userQuestions.settled` batch — a presentation enrichment over
+  the unchanged durable transcript event (no synthetic tool result).
+- Activation note: the timed path is exercised when the composed agent preset
+  declares the timed `ask_user_question` schema
+  (`@deepseek-ai/dsh-tool-ask-user` with `mode: timed`). The generated preset
+  mirror is a verbatim copy of the official assets and is never hand-edited,
+  so the TUI is timed-CAPABLE while the shipped presets keep the official
+  default; the blocking (legacy) flow is unchanged and still first-class.
+
+### Remote ConfigPort
+
+- `src/runtime/remote/config-remote.ts` implements the whole `ConfigPort`
+  over ONE generation-aware, serialized settings mirror: listeners installed
+  before the first `describe`, invalidation-during-read discarded and
+  re-read (bounded), writes FIFO-serialized through the descriptor's
+  revision and followed by an authoritative refresh (never an optimistic
+  local patch), a generation change marks the snapshot non-current and a
+  stale result never commits, and every subscription/listener is disposed
+  exactly once. Sub-domains: `tuiSettings` (raw
+  `keybindings`/`footerCustomItems`/`footerCommand`/`footerLayout` ride
+  verbatim; a shared `mutationQueueKey`), footer USER-layer trust + custom
+  items (never the merged value), provider profiles with ONE adapter-owned
+  `canProvisionProfile` rule driving both the flag and write admission,
+  credentials reference read/write, permissions (catalog/default/apply
+  through `/permission <preset>`, `approvalOverrideOf` ALWAYS `undefined` —
+  no `?? 'ask'`), preset default, and subagent model selection.
+- Explicit unsupported (docs/m3-entry-contract.md §10): `listRecords()` /
+  `deleteRecord()` REJECT with a truthful unavailable error (never an empty
+  record list), and the whole authorization sub-domain fails closed
+  (`available()===false`, no fake targets, no private auth RPC).
+
+### Remote session archive
+
+- `src/runtime/remote/session-archive-remote.ts` maps `SessionArchivePort`
+  onto `GET /api/session.export` through the composition-owned fetch: the
+  upstream `content-disposition` filename is authoritative, the returned
+  stream is the live body (never buffered Client-side), 404 → `none`, the
+  missing-services 500 → `unavailable`, anything else → a real failure, and
+  the caller's abort travels through the same fetch signal. The existing
+  `src/app/command/artifacts.ts` save UX is unchanged and remains the sole
+  owner of the destination/local path/stream-to-file.
+
+### Complete experimental Remote Backend
+
+- `src/runtime/remote/backend-remote.ts` +
+  `src/app/remote/runtime.ts#createRemoteBackendRuntime` assemble ONE
+  `Backend` (`BackendKind` now `'direct' | 'remote'`) from the M3-3A bundle
+  plus the M3-3B interaction, config and archive adapters, with the exact
+  `REMOTE_IMPLEMENTED_CAPABILITIES` advertisement. There is no Direct
+  fallback, no second Connection and no production selection: M3-4 owns the
+  main-application cutover.
+- `src/app/remote/host-runtime.ts` mounts the rc.2 `UserQuestionService`
+  (publishing the `userQuestions` Typert namespace + Session projection) and
+  `src/app/remote/client-runtime.ts` mounts the
+  `@deepseek-ai/dsh-user-questions/remote` contribution.
+- The forwarded-event seat is passed METHOD-BOUND: the Client `$on` reads its
+  own service state, so a detached reference loses `this` (caught by the P11
+  same-Host smoke).
+- `docs/m3-entry-contract.md` §1.3/§2.1 `interaction` row is reconverged:
+  rc.2 publishes the full Question contract, no capability detection and no
+  rc.1 fallback lane exists.
+
+### M3-3B semantic / UI impact matrix
+
+| Capability | User-visible state/action | M3-3B disposition | Authority |
+|---|---|---|---|
+| ordinary Question (blocking) | current QuestionFlow | `IMPLEMENTED`, preserved | forwarded waterfall |
+| timed Question claim | claim opening + remaining time | `IMPLEMENTED` | Host `attachWait` frame + Client clock |
+| timed timeout | Agent continues; Question remains answerable | `IMPLEMENTED` (no Turn/question cancel) | Host wait + projection |
+| continued late answer | editable Question reachable after continuation | `IMPLEMENTED` | `userQuestions` projection + `answer` Remote |
+| queued late reply | no duplicate editable submit; read-only notice | `IMPLEMENTED` | Inbox projection |
+| final late answer card | final answer text/summary | `IMPLEMENTED` | `userQuestions.settled` |
+| Question reconnect | answerability re-derived, no local reconstruction | `IMPLEMENTED` | Session projection + Inbox |
+| Question draft | current TUI draft semantics | `IMPLEMENTED`, local-only | QuestionFlow/controller |
+| approval request | current panel | `TERMINAL_NATIVE_EQUIVALENT` | forwarded waterfall |
+| approval policy Remote | settings row unavailable | `INTENTIONALLY_UNSUPPORTED_WITH_REASON` | no public carrier |
+| TUI settings | current values + writes | `IMPLEMENTED` | settings mirror |
+| config reconnect | current/last-known/reconnecting truthfulness | `IMPLEMENTED` | Connection generation + mirror |
+| API-key login | works | `IMPLEMENTED` | credentials Remote |
+| OAuth/device login Remote | explicit unavailable | `INTENTIONALLY_UNSUPPORTED_WITH_REASON` | no public carrier |
+| credential record list/delete | explicit limitation (rejects, never empty) | `INTENTIONALLY_UNSUPPORTED_WITH_REASON` | no public carrier |
+| permission presets | selectable/apply/default | `IMPLEMENTED` | permissionPresets + settings + commands |
+| Session export | same save UX on Remote | `TERMINAL_NATIVE_EQUIVALENT` | `/api/session.export` |
+| Remote Backend existence | no production UI switch yet | `NO_USER_VISIBLE_CHANGE` | architecture stage only |
+| generic Queue per-row actions | not implemented here | `DEFERRED_WITH_OWNER: Post-M3 Q1` | official inbox semantics |
+| clientTimeZone | not corrected here | `DEFERRED_WITH_OWNER: Post-M3 T1` | official Client request metadata |
+
+### Validation evidence
+
+`test:product` (6436 passing) + `test:fork` (1178), `typecheck:*`, the
+client-boundary and naming/architecture/keybinding gates, `gen:dsh-presets` +
+parity, `compat:dsh:npm` (tarball × DSH 0.2.0-rc.2), the same-Host Remote
+parity smokes, and the source-mode verification against the exact rc.2
+release commit.

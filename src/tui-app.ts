@@ -2539,6 +2539,16 @@ export interface TuiQuestionAnswer {
   custom?: string
 }
 
+/** Caller-owned presentation status of one live Question flow (M3-3B timed
+ * lifecycle): a mutable status line plus the real-answer-mutation hook the
+ * countdown freeze observes. The flow never derives either from a guess. */
+export interface TuiQuestionStatus {
+  /** Status line rendered above the tabs; `undefined` renders none. */
+  text?: string
+  /** Fired on the FIRST real answer mutation (selection / text / skip). */
+  onAnswerMutation?: () => void
+}
+
 /** Live state of one user-questions flow (the QuestionFlow seat). */
 interface QuestionState {
   flow: QuestionFlow
@@ -2555,6 +2565,8 @@ interface QuestionState {
   reject: (error: unknown) => void
   signal?: AbortSignal
   onAbort?: () => void
+  /** Caller-owned status line for this flow (timed claim / remaining time). */
+  status?: TuiQuestionStatus
   /** Latched by settle/cancel: every askQuestions promise settles exactly once. */
   settled?: boolean
 }
@@ -3567,6 +3579,13 @@ export class TuiApp {
   private activeApproval: PendingApproval | undefined
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
+  /**
+   * M3-3B final-answer enrichment: the authoritative settled answers of one
+   * timed `ask_user_question` call (the `userQuestions.settled` projection),
+   * keyed by the card's `callId`. A timed-out call's own tool result records
+   * the timeout, so the FINAL (possibly late) answers come from here.
+   */
+  private settledQuestionAnswers: ((callId: string) => readonly { id: string; selected: string[]; custom?: string }[] | undefined) | undefined
   /** The press-time question gesture (mouse parity): the release click
    * validates it before acting — a question advance / repaint between
    * press and release must never transfer the click. */
@@ -15322,7 +15341,7 @@ export class TuiApp {
         // shows no summary at all (its error identity is the verdict), and
         // an unparseable result shows no preview either — the no-JSON
         // contract holds even for malformed text.
-        const summary = message.error === undefined ? askAnswersSummary(message.result) : undefined
+        const summary = message.error === undefined ? askAnswersSummary(this.questionAnswerText(message)) : undefined
         resultPreview = summary === undefined ? '' : ` — ${summary}`
       } else if (GOAL_TOOL_NAMES.has(message.name)) {
         // Same rule for the goal family: the folded preview summarizes the
@@ -15967,18 +15986,23 @@ export class TuiApp {
     // This branch precedes the empty-result early return so a cancelled flow
     // (which carries an error and an empty result) still renders its verdict.
     if (message.name === 'ask_user_question') {
-      if (message.error !== undefined) {
+      // M3-3B: the authoritative settled batch (a late answer) outranks the
+      // call's own recorded result, which for a timed-out call is the
+      // timeout payload rather than the answer.
+      const answerText = this.questionAnswerText(message)
+      const authoritative = answerText !== message.result
+      if (message.error !== undefined && !authoritative) {
         card.addChild(new Text(color.textDim(`${message.error.name}: ${message.error.code}`), 0, 0))
         return
       }
-      const summary = message.status === 'ok' ? askAnswersSummary(message.result) : undefined
+      const summary = message.status === 'ok' || authoritative ? askAnswersSummary(answerText) : undefined
       if (summary !== undefined) {
         card.addChild(new Text(color.textDim(summary), 0, 0))
         // The expanded card carries the actual answers, one line per
         // question (`● id → answer`; skipped questions dimmed) — the
         // count alone would leave the user unable to recall their choices
         // once the question flow closed.
-        const answerLines = askAnswersLines(message.result)
+        const answerLines = askAnswersLines(answerText)
         if (answerLines !== undefined) {
           for (const line of answerLines) {
             card.addChild(new Text(`  ${line.skipped ? color.textMuted(line.text) : color.textDim(line.text)}`, 0, 0))
@@ -19527,7 +19551,35 @@ export class TuiApp {
    * @param signal - optional abort; settles the flow rejected.
    * @returns the answers, in question order.
    */
-  askQuestions(questions: readonly TuiQuestion[], signal?: AbortSignal): Promise<TuiQuestionAnswer[]> {
+  /**
+   * Install the authoritative settled-answer lookup (M3-3B): the surface
+   * wires it to the `userQuestions` projection so a timed-out question's card
+   * shows what the user finally answered. `undefined` clears it (teardown).
+   */
+  setSettledQuestionAnswersLookup(
+    lookup: ((callId: string) => readonly { id: string; selected: string[]; custom?: string }[] | undefined) | undefined,
+  ): void {
+    this.settledQuestionAnswers = lookup
+  }
+
+  /**
+   * The result text a settled `ask_user_question` card should render: the
+   * authoritative projection batch when one exists, else the card's own
+   * recorded result. Presentation-only enrichment — persisted Session events
+   * are never rewritten.
+   */
+  private questionAnswerText(message: { readonly callId?: string; readonly result: string }): string {
+    if (message.callId === undefined || this.settledQuestionAnswers === undefined) return message.result
+    const answers = this.settledQuestionAnswers(message.callId)
+    if (answers === undefined || answers.length === 0) return message.result
+    return JSON.stringify({ answers })
+  }
+
+  askQuestions(
+    questions: readonly TuiQuestion[],
+    signal?: AbortSignal,
+    status?: TuiQuestionStatus,
+  ): Promise<TuiQuestionAnswer[]> {
     // A disposed surface must never leave the caller hanging: settle
     // rejected immediately (M0 stale-generation contract — the runner's
     // questions provider may fire during exit teardown).
@@ -19553,12 +19605,15 @@ export class TuiApp {
           })),
           (answers) => this.settleQuestions(state, answers),
           () => this.settleQuestions(state, undefined),
+          status?.onAnswerMutation,
         ),
         suspendedOverlays: new Set(),
         resolve,
         reject,
         signal,
+        ...status === undefined ? {} : { status },
       }
+      state.flow.setStatus(status)
       if (signal?.aborted === true) {
         reject(cancellationError('question flow aborted'))
         return
@@ -19666,6 +19721,7 @@ export class TuiApp {
       // between two queued flows (a restore would flash the editor row and
       // reveal overlays that must stay hidden under the question).
       next.suspendedOverlays = state.suspendedOverlays
+      next.flow.setStatus(next.status)
       state.suspendedOverlays = new Set()
       const frame = new QuestionFrame(next.flow, () => this.terminal.rows)
       next.frame = frame

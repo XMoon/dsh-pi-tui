@@ -1,0 +1,315 @@
+/**
+ * The Remote interaction adapter (M3-3B) — the official rc.2 wire mapping of
+ * `InteractionPort` over ONE M3-1 `RemoteClientRuntime`. It implements the
+ * SAME semantic contract as `src/runtime/direct/interaction-direct.ts`; no
+ * Remote-only Question semantics and no Direct fallback exist.
+ *
+ * Published mapping (docs/m3-entry-contract.md §2.1 interaction rows):
+ *
+ * ```text
+ * live request     -> remote.$on('user-questions/request')   (forwarded waterfall)
+ * session identity -> sessions.scopeOf(owner scope)          (official Client scope)
+ * timed claim      -> remote.userQuestions.attachWait(sessionId, callId, signal)
+ *                      (first frame = Host-computed remainingMs)
+ * durable state    -> binding(sessionId).session.projections.faceOf('userQuestions')
+ * queued reply     -> the same binding's 'inbox' face, source.kind == 'user-question-reply'
+ * late answer      -> remote.userQuestions.answer(sessionId, callId, answer)
+ * ```
+ *
+ * Explicitly unsupported on the wire (docs/m3-entry-contract.md §10):
+ * `setApprovalPolicy` has no dedicated approval-policy Remote and no
+ * synchronous exact-equivalent carrier in rc.2, so it returns `false` — the
+ * Remote `/settings` approval row is shown unavailable, never guessed as
+ * `ask`. No private Host seam, no event-log reconstruction and no preset-name
+ * inference back it.
+ *
+ * The adapter never leaks a generated Typert stream object: `QuestionWaitClaim`
+ * is the transport-neutral lifetime and this class owns the underlying
+ * `attachWait` handle. A replaced Connection generation makes a claim absent
+ * rather than surfacing a stale claim into a new UI.
+ *
+ * @module @xmoon76/dsh-pi-tui/runtime/remote/interaction-remote
+ */
+
+import type { ApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
+import type {
+  ApprovalRequestListener,
+  InteractionPort,
+  PendingQuestionView,
+  QuestionInteractionPort,
+  QuestionSurfaceSnapshot,
+  QuestionWaitClaim,
+  SettledQuestionView,
+  UserQuestionProvider,
+} from '../interaction-port.ts'
+import { QuestionAnswerError } from '../interaction-port.ts'
+import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
+import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
+import type { RemoteResultLike } from './session-writer-remote.ts'
+
+/** One forwarded `user-questions/request` as the Client projection carries it
+ * (the Agent becomes the resolved owner Context; `signal` is the delivery
+ * lifetime the Connection materializes). */
+export interface RemoteQuestionRequestLike {
+  readonly questions: readonly AskUserQuestionItem[]
+  readonly wait?: { readonly callId?: unknown; readonly timed?: unknown }
+  readonly signal?: AbortSignal
+}
+
+/** The official generated `userQuestions` namespace subset consumed here. */
+export interface RemoteUserQuestionRemotes {
+  readonly userQuestions: {
+    attachWait(sessionId: string, callId: string, signal?: AbortSignal): RemoteQuestionWaitStream
+    answer(sessionId: string, callId: string, answer: AskUserQuestionAnswer): Promise<RemoteResultLike<boolean>>
+  }
+}
+
+/** The official `RemoteStreamHandle` subset: downlink items plus cancellation. */
+export interface RemoteQuestionWaitStream extends AsyncIterable<{ readonly remainingMs: number }> {
+  dispose(): void
+}
+
+/** The forwarded interaction events this adapter subscribes to (both arrive
+ * through the same official allowlist as waterfalls). */
+export interface RemoteInteractionEventsSource {
+  $on(
+    event: 'user-questions/request',
+    listener: (
+      this: unknown,
+      request: RemoteQuestionRequestLike,
+      next: () => Promise<AskUserQuestionAnswer>,
+    ) => Promise<AskUserQuestionAnswer>,
+  ): () => void
+  $on(
+    event: 'approval/request',
+    listener: (this: unknown, request: unknown, next: unknown) => unknown,
+  ): () => void
+}
+
+/** One Client projection face (value deliberately `unknown`). */
+export interface RemoteQuestionProjectionFace {
+  getSnapshot(): unknown
+}
+
+/** The official Client Session binding subset consumed here. */
+export interface RemoteQuestionBinding {
+  readonly session: {
+    readonly projections: {
+      faceOf(key: string): RemoteQuestionProjectionFace
+    }
+  }
+}
+
+/** The official `ClientSessions` identity + binding face. */
+export interface RemoteQuestionSessionsSource {
+  scopeOf(owner: unknown): string | undefined
+  binding(sessionId: string): RemoteQuestionBinding | undefined
+}
+
+/** The narrow one-source runtime face this adapter consumes. */
+export interface RemoteInteractionRuntimeSource {
+  readonly sessions: RemoteQuestionSessionsSource
+  readonly remote: RemoteUserQuestionRemotes & RemoteInteractionEventsSource
+  readonly connection: { readonly generation: RemoteConnectionGenerationSource }
+}
+
+const USER_QUESTIONS_PROJECTION_KEY = 'userQuestions'
+const INBOX_PROJECTION_KEY = 'inbox'
+
+/** Read one inbox message's `user-question-reply` call id, or undefined. */
+function queuedReplyCallId(message: unknown): string | undefined {
+  if (typeof message !== 'object' || message === null) return undefined
+  const source = (message as { readonly source?: unknown }).source
+  if (typeof source !== 'object' || source === null) return undefined
+  const record = source as { readonly kind?: unknown; readonly callId?: unknown }
+  return record.kind === 'user-question-reply' && typeof record.callId === 'string' ? record.callId : undefined
+}
+
+/** Detach the official `userQuestions` wire view (`{active, settled}`). */
+function readQuestionView(value: unknown): {
+  readonly active: readonly PendingQuestionView[]
+  readonly settled: readonly SettledQuestionView[]
+} | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const view = value as { readonly active?: unknown; readonly settled?: unknown }
+  if (!Array.isArray(view.active) || !Array.isArray(view.settled)) return undefined
+  const active: PendingQuestionView[] = []
+  for (const entry of view.active) {
+    if (typeof entry !== 'object' || entry === null) return undefined
+    const row = entry as { readonly callId?: unknown; readonly questions?: unknown; readonly state?: unknown }
+    if (typeof row.callId !== 'string' || !Array.isArray(row.questions)) return undefined
+    if (row.state !== 'open' && row.state !== 'continued') return undefined
+    active.push({
+      callId: row.callId,
+      sessionId: '',
+      questions: row.questions as readonly AskUserQuestionItem[],
+      state: row.state,
+    })
+  }
+  const settled: SettledQuestionView[] = []
+  for (const entry of view.settled) {
+    if (typeof entry !== 'object' || entry === null) return undefined
+    const row = entry as { readonly callId?: unknown; readonly answers?: unknown }
+    if (typeof row.callId !== 'string' || !Array.isArray(row.answers)) return undefined
+    settled.push({ callId: row.callId, sessionId: '', answers: row.answers as SettledQuestionView['answers'] })
+  }
+  return { active, settled }
+}
+
+/** Detach the queued-reply call ids from the official `inbox` wire state. */
+function readQueuedReplyCallIds(value: unknown): Set<string> {
+  const queued = new Set<string>()
+  if (typeof value !== 'object' || value === null) return queued
+  const inbox = value as { readonly 'next-step'?: unknown; readonly 'next-turn'?: unknown }
+  for (const lane of [inbox['next-step'], inbox['next-turn']]) {
+    if (!Array.isArray(lane)) continue
+    for (const message of lane) {
+      const callId = queuedReplyCallId(message)
+      if (callId !== undefined) queued.add(callId)
+    }
+  }
+  return queued
+}
+
+/** The Remote Question sub-domain over the official wire. */
+class RemoteQuestionInteractionPort implements QuestionInteractionPort {
+  private readonly sessions: RemoteQuestionSessionsSource
+  private readonly remote: RemoteUserQuestionRemotes & RemoteInteractionEventsSource
+  private readonly generation: RemoteConnectionGenerationSource
+
+  constructor(source: RemoteInteractionRuntimeSource) {
+    this.sessions = source.sessions
+    this.remote = source.remote
+    this.generation = source.connection.generation
+  }
+
+  onRequest(provider: UserQuestionProvider): boolean {
+    // The official Client scope is the ONLY Session identity source on the
+    // wire: the forwarded request's Agent became the resolved owner Context.
+    const sessions = this.sessions
+    this.remote.$on('user-questions/request', function (this: unknown, request, next) {
+      const sessionId = sessions.scopeOf(this)
+      // A request with no owned Session cannot be keyed by a durable card.
+      if (sessionId === undefined) return next()
+      const callId = request.wait?.callId
+      return provider({
+        sessionId,
+        callId: typeof callId === 'string' ? callId : undefined,
+        timed: request.wait?.timed === true,
+        questions: request.questions,
+        ...request.signal === undefined ? {} : { signal: request.signal },
+      }, next)
+    })
+    return true
+  }
+
+  snapshot(sessionId: string): QuestionSurfaceSnapshot | undefined {
+    const binding = this.sessions.binding(sessionId)
+    // A missing binding is "not available", never an authoritative empty
+    // surface: a detached/replaced Connection must not close a live card.
+    if (binding === undefined) return undefined
+    const view = readQuestionView(binding.session.projections.faceOf(USER_QUESTIONS_PROJECTION_KEY).getSnapshot())
+    if (view === undefined) return undefined
+    const queuedReplyCallIds = readQueuedReplyCallIds(
+      binding.session.projections.faceOf(INBOX_PROJECTION_KEY).getSnapshot(),
+    )
+    return {
+      sessionId,
+      active: view.active.map(entry => ({ ...entry, sessionId })),
+      settled: view.settled.map(entry => ({ ...entry, sessionId })),
+      queuedReplyCallIds,
+    }
+  }
+
+  async claimTimedWait(sessionId: string, callId: string): Promise<QuestionWaitClaim | undefined> {
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) return undefined
+    const lifetime = new AbortController()
+    const handle = this.remote.userQuestions.attachWait(sessionId, callId, lifetime.signal)
+    const iterator = handle[Symbol.asyncIterator]()
+    let opening: IteratorResult<{ readonly remainingMs: number }>
+    try {
+      opening = await iterator.next()
+    } catch (error) {
+      handle.dispose()
+      throw error
+    }
+    // No first frame: no live timed wait for this call (settled, continued,
+    // or never timed). Never a fabricated remaining duration.
+    if (opening.done === true) {
+      handle.dispose()
+      return undefined
+    }
+    // A replaced Connection must not surface a stale claim into a new UI.
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
+      handle.dispose()
+      return undefined
+    }
+    let released = false
+    const release = (): void => {
+      if (released) return
+      released = true
+      lifetime.abort()
+      handle.dispose()
+    }
+    // The stream ends when the wait settles/expires, this claim releases, or
+    // the carrier fails. The drain IS the claim's `ended` lifetime, so no
+    // detached fire-and-forget promise exists: a consumer that never awaits
+    // `ended` leaves no unhandled rejection, and durable answerability comes
+    // from the projection rather than this stream.
+    const ended = (async () => {
+      try {
+        await iterator.next()
+      } catch {
+        // A stream failure ends the claim like any other settlement.
+      } finally {
+        release()
+      }
+    })()
+    return { remainingMs: opening.value.remainingMs, ended, release }
+  }
+
+  async answerContinued(
+    sessionId: string,
+    callId: string,
+    answer: AskUserQuestionAnswer,
+  ): Promise<'queued' | 'not-continued'> {
+    const result = await this.remote.userQuestions.answer(sessionId, callId, answer)
+    if (!result.ok) {
+      // Preserve the Host taxonomy (REPLY_QUEUED / BAD_ANSWER / transport) in
+      // the shared port vocabulary so both backends recover identically.
+      throw new QuestionAnswerError(
+        remoteFailureCode(result.error) ?? 'question/answer-failed',
+        remoteFailureMessage(result.error),
+      )
+    }
+    return result.value ? 'queued' : 'not-continued'
+  }
+}
+
+/** The Remote backend's interaction port over ONE Client runtime source. */
+export class RemoteInteractionPort implements InteractionPort {
+  readonly questions: QuestionInteractionPort
+  private readonly remote: RemoteInteractionEventsSource
+
+  constructor(source: RemoteInteractionRuntimeSource) {
+    this.remote = source.remote
+    this.questions = new RemoteQuestionInteractionPort(source)
+  }
+
+  onApprovalRequest(listener: ApprovalRequestListener): void {
+    // Approval rides the forwarded `approval/request` waterfall; the
+    // transport-neutral listener receives the same Agent-free shape.
+    this.remote.$on('approval/request', function (this: unknown, request: unknown, next: unknown) {
+      return listener(request as Parameters<ApprovalRequestListener>[0], next)
+    })
+  }
+
+  setApprovalPolicy(_sessionId: string, _policy: ApprovalPolicy): boolean {
+    // INTENTIONAL_UNSUPPORTED_IN_M3 (docs/m3-entry-contract.md §10): rc.2 has
+    // no dedicated approval-policy Remote and no synchronous exact carrier.
+    // Never a silent fallback to a different semantic.
+    return false
+  }
+}

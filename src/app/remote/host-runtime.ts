@@ -22,6 +22,7 @@ import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import { apply as applyApiRemotes, inject as apiRemotesInject } from '@deepseek-ai/dsh-api-remotes'
 import SettingsController from '@deepseek-ai/dsh-api-settings-controller'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import * as sessionLogExport from '@deepseek-ai/dsh-session-log-export'
@@ -200,6 +201,13 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     const settingsFiber = hostContext.plugin(SettingsController)
     fibers.push(settingsFiber)
     await settingsFiber
+    // 6b. The rc.2 user-questions service (M3-3B): its TypertRemoteService
+    //     binding publishes the `userQuestions` namespace over the gateway and
+    //     registers the `userQuestions` Session projection every Client reads.
+    //     `agents`/`sessionProjections` are asserted Host prerequisites above.
+    const userQuestionsFiber = hostContext.plugin(UserQuestionService)
+    fibers.push(userQuestionsFiber)
+    await userQuestionsFiber
     // 7. Forwarded-event source over the existing gateway.
     const remotesFiber = hostContext.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
     fibers.push(remotesFiber)

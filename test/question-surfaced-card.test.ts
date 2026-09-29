@@ -599,3 +599,32 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
     assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no Thought-root promotion for an already-visible card')
   })
 }
+
+test('M3-3B a timed-out question card renders the authoritative late answer from the projection', async () => {
+  // The call's own result recorded the timeout; the answer arrived later and
+  // lives in the `userQuestions.settled` projection. The card must show what
+  // the user finally answered — the durable transcript event is unchanged.
+  const card: TranscriptMessage = {
+    kind: 'tool', turn: TURN, callId: 'call-late', name: 'ask_user_question',
+    args: JSON.stringify({ questions: [{ id: 'q0', question: 'Use A or B?' }] }),
+    result: JSON.stringify({ pending: true, callId: 'call-late' }), status: 'ok',
+  }
+  const enriched = startApp('full')
+  enriched.app.setSettledQuestionAnswersLookup(
+    callId => callId === 'call-late' ? [{ id: 'q0', selected: ['B'] }] : undefined,
+  )
+  enriched.app.setTranscript([card], new Map())
+  await enriched.vt.waitForRender()
+  const view = enriched.vt.getViewport().join('\n')
+  assert.ok(view.includes('1/1 answered'), `the late answer replaces the timeout preview:\n${view}`)
+  assert.ok(!view.includes('pending'), `the timeout payload is not shown once the answer is known:\n${view}`)
+
+  // Without the projection (capability absence) the card never presents the
+  // timed-out payload as if it were an answer. A fresh card object forces the
+  // presentation cache to re-derive from the now-cleared lookup.
+  enriched.app.setSettledQuestionAnswersLookup(undefined)
+  enriched.app.setTranscript([{ ...card }], new Map())
+  await enriched.vt.waitForRender()
+  assert.ok(!enriched.vt.getViewport().join('\n').includes('1/1 answered'),
+    'without the projection the timed-out payload is not presented as an answer')
+})

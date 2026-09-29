@@ -153,7 +153,12 @@ function harness(options: {
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },

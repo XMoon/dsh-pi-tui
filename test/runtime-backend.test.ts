@@ -60,7 +60,12 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     fork: async () => ({}) as never,
   }
   const interaction = {
-    registerQuestionProvider: () => true,
+    questions: {
+      onRequest: () => true,
+      snapshot: () => undefined,
+      claimTimedWait: async () => undefined,
+      answerContinued: async () => 'not-continued' as const,
+    },
     onApprovalRequest: () => {},
     setApprovalPolicy: () => true,
   }

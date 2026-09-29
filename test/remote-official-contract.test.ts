@@ -2,14 +2,16 @@
  * DRAFT (Pre-M3 PR3) — test/remote-official-contract.test.ts
  *
  * The centralized compile-time compatibility gate for every Remote adapter the
- * TUI intends to bring into M3. Each `officialX` function below is a REAL
- * structural assignability proof: the pinned installed DSH PUBLIC Client /
- * generated Remote face must satisfy the adapter's declared source type with NO
- * cast. The pre-existing adapter proofs were frozen against 0.1.7-rc.2 and
- * carry over unchanged; the M3-3A additions (context below) are proven
- * against 0.2.0-rc.1 — the M3-3A requalification record
- * (docs/m3-entry-contract.md §1.1) names the per-stage version for each. The functions are never called at runtime; `assert.equal(typeof …, 'function')`
- * keeps them referenced so the compiler must keep checking them.
+ * TUI intends to bring into M3, plus the rc.2 published-surface gate M3-3B
+ * depends on. Each `officialX` function below is a REAL structural
+ * assignability proof: the pinned installed DSH PUBLIC Client / generated
+ * Remote face must satisfy the adapter's declared source type with NO cast.
+ * The pre-existing adapter proofs were frozen against 0.1.7-rc.2 and carry
+ * over unchanged; the M3-3A additions were proven against 0.2.0-rc.1 and the
+ * M3-3B additions are proven against 0.2.0-rc.2 — the per-stage requalification
+ * record lives in docs/m3-entry-contract.md §1.1/§2.1. The functions are never
+ * called at runtime; `assert.equal(typeof …, 'function')` keeps them referenced
+ * so the compiler must keep checking them.
  *
  * Contract matrix (adapter -> official face):
  *
@@ -29,6 +31,9 @@
  * | RemoteSubmissionPresentation   | `ISessions`                                     |
  * | RemotePluginManagerPort        | `ClientRemote` (methods + forwarded events)     |
  * | RemoteJobObservationPort       | `IJobs`                                         |
+ * | RemoteInteractionPort          | `ISessions` + `ClientRemote` (userQuestions + $on) |
+ * | RemoteSessionArchive          | the composition-owned `Fetch`                   |
+ * | RemoteConfigPort               | `ClientRemote['settings']` + `['credentials']`   |
  *
  * @module @xmoon76/dsh-pi-tui/remote-official-contract.test
  */
@@ -61,6 +66,7 @@ import { RemoteJobObservationPort } from '../src/runtime/remote/job-observation-
 import { RemoteSkillCatalog } from '../src/runtime/remote/skill-remote.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf } from '../src/app/remote/m3a-semantics.ts'
 import { RemoteHostFilePort } from '../src/runtime/remote/host-file-remote.ts'
+import { RemoteInteractionPort } from '../src/runtime/remote/interaction-remote.ts'
 import type { ContextPressureProjection, ContextBreakdownProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter'
 import type { TurnOutlineEntry } from '@deepseek-ai/dsh-session-turn-outline/types'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
@@ -231,7 +237,7 @@ function officialM3ASemanticSurfaces(
   }
 }
 
-test('every Remote adapter accepts the published DSH public Client/Remote face (0.1.7-rc.2 proofs carried, M3-3A additions on 0.2.0-rc.1)', () => {
+test('every Remote adapter accepts the published DSH public Client/Remote face (0.1.7-rc.2 proofs carried, M3-3A on 0.2.0-rc.1, M3-3B on 0.2.0-rc.2)', () => {
   // A compile-time proof only runs when the compiler keeps the function in the
   // program; this reference is that keep-alive.
   for (const proof of [
@@ -251,9 +257,21 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     officialJobObservationPort,
     officialSkillCatalog,
     officialHostFilePort,
+    officialRemoteInteractionPort,
   ]) {
     assert.equal(typeof proof, 'function')
   }
+})
+
+test('the M3-3B additions consume the published 0.2.0-rc.2 contract', () => {
+  // The rc.2 published surfaces M3-3B is allowed to consume. A future rc that
+  // renames or drops one of these must fail HERE rather than at runtime.
+  assert.equal(USER_QUESTIONS_REMOTE_NAMESPACE, 'userQuestions')
+  assert.equal(SESSION_LOG_EXPORT_PATH, '/api/session.export')
+  assert.equal(typeof officialRemoteInteractionPort, 'function')
+  assert.equal(typeof officialSettingsRemoteFace, 'function')
+  assert.equal(typeof officialCredentialsRemoteFace, 'function')
+  assert.equal(typeof officialArchiveFetchFace, 'function')
 })
 
 test('the M3-3A semantic additions consume the published 0.2.0-rc.1 contract', () => {
@@ -272,4 +290,59 @@ test('the M3-3A semantic additions consume the published 0.2.0-rc.1 contract', (
  * Remote catalog's `discoverModels` maps `ClientRemote['llm']` directly. */
 function officialLlmDiscoverModelsSource(llm: ClientRemote['llm']): RemoteLlmRemotes {
   return llm
+}
+
+
+/** The rc.2 `userQuestions` namespace the M3-3B interaction adapter maps. */
+const USER_QUESTIONS_REMOTE_NAMESPACE = 'userQuestions' as const
+
+/** The official `GET/HEAD /api/session.export` route the archive adapter
+ *  addresses; a rename upstream must fail this gate. */
+import { SESSION_LOG_EXPORT_PATH } from '@deepseek-ai/dsh-session-log-export'
+
+/** The M3-3B Remote interaction adapter constructs from the REAL Client
+ *  runtime faces with no cast: the published `userQuestions` namespace and
+ *  the forwarded-event `$on` seat must satisfy the adapter's narrow source. */
+function officialRemoteInteractionPort(
+  sessions: ISessions,
+  remote: ClientRemote,
+  generation: ConnectionGenerationState,
+): RemoteInteractionPort {
+  return new RemoteInteractionPort({
+    sessions,
+    remote: { userQuestions: remote.userQuestions, $on: remote.$on },
+    connection: { generation },
+  })
+}
+
+/** The published settings Remote face the Remote ConfigPort maps (the mirror
+ *  reads `describe`/`update`/`mutate`/`replace`). */
+function officialSettingsRemoteFace(settings: ClientRemote['settings']): {
+  describe: ClientRemote['settings']['describe']
+  update: ClientRemote['settings']['update']
+  mutate: ClientRemote['settings']['mutate']
+  replace: ClientRemote['settings']['replace']
+} {
+  return {
+    describe: settings.describe,
+    update: settings.update,
+    mutate: settings.mutate,
+    replace: settings.replace,
+  }
+}
+
+/** The published credentials Remote face the Remote ConfigPort maps. */
+function officialCredentialsRemoteFace(credentials: ClientRemote['credentials']): {
+  describe: ClientRemote['credentials']['describe']
+  set: ClientRemote['credentials']['set']
+  unset: ClientRemote['credentials']['unset']
+} {
+  return { describe: credentials.describe, set: credentials.set, unset: credentials.unset }
+}
+
+/** The composition-owned archive Fetch face (never `document.baseURI`). */
+function officialArchiveFetchFace(fetch: (input: string | URL, init?: RequestInit) => Promise<Response>): {
+  fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
+} {
+  return { fetch }
 }

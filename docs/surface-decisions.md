@@ -1514,3 +1514,54 @@ tool whose outcome was not durably recorded stays a normal Tool card with
 error outcome. Pinned by `test/session-v4-tool-result.test.ts`,
 `test/transcript-semantics.test.ts`, `test/compact-process-preview.test.ts`,
 `test/compact-display.test.ts`, and `test/focus-ui.test.ts`.
+
+## Timed / continued Question (M3-3B terminal-native contract)
+
+The rc.2 `ask_user_question` tool may declare a FOREGROUND WAIT (`timeout`
+seconds). The Host keeps the durable deadline and the durable answerability;
+the Client owns only presentation while it holds a claim. The TUI therefore
+splits the lifecycle into three explicit layers:
+
+```text
+userQuestions projection  -> whether a question is open / continued / settled
+inbox projection          -> whether a late reply is durably queued
+QuestionSurfaceController -> the mounted card, the local countdown, the
+                             wire-preserved rejection, reachability
+QuestionFlow              -> the current form state / navigation only
+```
+
+Decisions (all terminal-native; none of them copies a Web button):
+
+1. **Claim before countdown.** A timed request claims the Host wait
+   (`userQuestions.attachWait`) and only then starts its local clock, seeded
+   from the first frame's Host-computed `remainingMs`. Until that frame
+   arrives the flow shows a non-destructive "claiming" line and NEVER guesses
+   a duration. A refused/absent claim keeps the blocking flow without a
+   countdown.
+2. **The countdown is presentation only.** A local countdown reaching zero
+   ends the FOREGROUND answer attempt. It never cancels the Turn and never
+   cancels the question: the provider rejects the forwarded waterfall with
+   the wire-preserved `ASK_TIMED_OUT` (matching the released Client), the Host
+   returns pending, and the question stays durably answerable as `continued`.
+   `Esc` rejects `ASK_CANCELLED`; a Host/delivery abort rejects `ASK_ABORTED`.
+3. **First real answer mutation freezes the clock.** A selection toggle, a
+   real free-text change, or a skip freezes the local deadline into indefinite
+   local editing while the claim remains held; cursor moves, focus changes and
+   other read-only operations never freeze it. No synthetic Host timer write is
+   made. Focus/blur never releases the claim; teardown/disconnect does.
+4. **Reachability is projection-driven.** After a timeout (and on any activity
+   of the current Session) the controller re-derives answerability from the
+   `userQuestions` projection: a `continued` call with no durably queued reply
+   is offered again as the SAME editable `QuestionFlow`. Nothing is
+   reconstructed from a local timer, an old transcript card or a local store.
+5. **A queued late reply withdraws the editable surface.** While the Inbox
+   holds a `user-question-reply` for the call, the controller presents no
+   editable submission; `REPLY_QUEUED` keeps the intent as a read-only notice.
+   Discarding the queued reply (Host-side) makes the call offerable again.
+6. **Final answers come from the projection.** A settled card renders the
+   authoritative `userQuestions.settled` batch — a timed-out call's own tool
+   result records the timeout, not the answer — as a presentation enrichment
+   over the unchanged durable transcript event.
+7. **Question still owns the response seat.** The modal keeps its seat and
+   read-only context inspection stays available; `Esc` hides only the
+   presentation, never the Host question.

@@ -640,6 +640,10 @@ export interface TranscriptToolMessage {
   resultBlocks?: readonly ContentBlock[]
   /** The tool-private presentation payload from the tool/result event. */
   meta?: JsonValue
+  /** The PRIMARY model `tool/call` identity (M3-3B): lets a presentation
+   *  consumer key authoritative out-of-band evidence (the `userQuestions`
+   *  settled projection) to this exact card. Absent on synthetic rows. */
+  callId?: string
   /** The structured internal failure identity (`{name, code}`), when the
    * tool/result event carried one (e.g. `UserQuestionError` with
    * `ASK_CANCELLED` / `ASK_ABORTED` for a cancelled question flow). */
@@ -5200,6 +5204,7 @@ export class TranscriptFolder {
         const card: TranscriptMessage = {
           kind: 'tool',
           turn: callTurn,
+          callId: key,
           name: event.data.name,
           args: event.data.arguments,
           result: '',

@@ -194,7 +194,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),

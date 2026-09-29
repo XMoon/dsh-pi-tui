@@ -101,7 +101,12 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort(() => undefined),
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },

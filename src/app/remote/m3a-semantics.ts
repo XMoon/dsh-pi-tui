@@ -40,6 +40,15 @@ import type { RemoteSkillRemotes } from '../../runtime/remote/skill-remote.ts'
 import type { RemoteHostFileRemotes } from '../../runtime/remote/host-file-remote.ts'
 import type { RemoteCommandsSource } from '../../runtime/remote/host-command-remote.ts'
 import type { RemotePresentationSessionsSource } from '../../runtime/remote/presentation-read-remote.ts'
+import type { RemoteInteractionRuntimeSource } from '../../runtime/remote/interaction-remote.ts'
+import { RemoteInteractionPort } from '../../runtime/remote/interaction-remote.ts'
+import type { RemotePluginManagerSource } from '../../runtime/remote/plugin-manager-remote.ts'
+import { RemotePluginManagerPort } from '../../runtime/remote/plugin-manager-remote.ts'
+import type { RemoteJobObservationSource } from '../../runtime/remote/job-observation-remote.ts'
+import { RemoteJobObservationPort } from '../../runtime/remote/job-observation-remote.ts'
+import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
+import type { JobObservationPort } from '../../runtime/job-observation-port.ts'
+import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { RemoteSessionReader } from '../../runtime/remote/session-reader-remote.ts'
 import { RemotePendingInputReader } from '../../runtime/remote/pending-input-reader-remote.ts'
 import { RemoteSessionWriter, type RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
@@ -63,6 +72,15 @@ export interface RemoteM3ASemantics {
   readonly hostFile: HostFilePort
   readonly hostCommand: HostCommandPort
   readonly presentationReader: PresentationReader
+  /** The interaction domain port (M3-3B): the forwarded approval waterfall,
+   *  the rc.2 Question contract (timed claim, late answer, durable surface,
+   *  queued-reply fact) and the explicitly unsupported approval-policy write. */
+  readonly interaction: InteractionPort
+  /** The Plugin Manager port (P1-A): the already-proven Remote adapter. */
+  readonly pluginManager: PluginManagerPort
+  /** The selected-Job observation port (P1-B): the already-proven Remote
+   *  adapter over the shared `IJobs` service. */
+  readonly jobObservation: JobObservationPort
   /** Drop adapter-owned caches/subscriptions. Runs BEFORE the Client
    *  Context disposal (`RemoteClientRuntime.dispose()`). */
   dispose(): void
@@ -83,6 +101,7 @@ export type RemoteM3ASessionsSource = RemoteSessionsReadSource
   & RemoteLifecycleSessions
   & RemoteModelSessionsSource
   & RemotePresentationSessionsSource
+  & RemoteInteractionRuntimeSource['sessions']
 
 /** The NARROW one-source runtime face the assembly consumes — exactly what
  * `RemoteClientRuntime` provides (the official-contract gate proves that
@@ -99,7 +118,18 @@ export interface RemoteM3ARuntimeSource {
     readonly fileReferences: RemoteHostFileRemotes
     readonly commands: RemoteCommandsSource
     readonly subagents: RemoteSubagentSource
+    /** The rc.2 generated `userQuestions` namespace + the forwarded
+     *  interaction-event source (M3-3B). */
+    readonly userQuestions: RemoteInteractionRuntimeSource['remote']['userQuestions']
+    /** The Plugin Manager namespace + its forwarded install events. */
+    readonly pluginManager: RemotePluginManagerSource['pluginManager']
+    /** The forwarded-event seat shared by every adapter: the intersection of
+     *  the event declarations each one subscribes to (the real generated
+     *  `$on` is one generic method and satisfies the whole intersection). */
+    readonly $on: RemoteInteractionRuntimeSource['remote']['$on'] & RemotePluginManagerSource['$on']
   }
+  /** The ONE shared Client jobs service (the Job observation adapter). */
+  readonly jobs: RemoteJobObservationSource
   /** The ONE shared Connection generation source. */
   readonly connection: { readonly generation: RemoteConnectionGenerationSource }
 }
@@ -123,6 +153,12 @@ export function createRemoteM3ASemantics(
   const sessions = runtime.sessions
   const remote = runtime.remote
   const generation = runtime.connection.generation
+  // The forwarded-event seat is kept METHOD-BOUND: the Client `$on` reads its
+  // own service state, so passing the bare reference would lose `this` (the
+  // P11 same-Host wire smoke caught exactly that). The cast only restores the
+  // overload set of the two per-adapter event declarations.
+  const forwardedEvents = remote.$on.bind(remote) as unknown as
+    RemoteInteractionRuntimeSource['remote']['$on'] & RemotePluginManagerSource['$on']
   const modelCatalog = new RemoteModelCatalog(remote.session, sessions, generation, remote.llm)
   const presetCatalog = new RemotePresetCatalog(remote.agentPresets, generation)
   let disposed = false
@@ -140,6 +176,13 @@ export function createRemoteM3ASemantics(
     hostFile: new RemoteHostFilePort(remote.fileReferences, generation),
     hostCommand: new RemoteHostCommandPort(remote.commands),
     presentationReader: new RemotePresentationReader(sessions, generation),
+    interaction: new RemoteInteractionPort({
+      sessions,
+      remote: { userQuestions: remote.userQuestions, $on: forwardedEvents },
+      connection: { generation },
+    }),
+    pluginManager: new RemotePluginManagerPort({ pluginManager: remote.pluginManager, $on: forwardedEvents }),
+    jobObservation: new RemoteJobObservationPort(runtime.jobs),
     dispose(): void {
       if (disposed) return
       disposed = true

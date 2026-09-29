@@ -10,7 +10,9 @@
  * projection · P3 modelCatalog grouped directory · P4 llm/discoverModels ·
  * P5 skills/list · P6 Session-scoped fileReferences/list · P7
  * PresentationReader.loadThrough · P8 turnOutline projection · P9 retained
- * child Session projection read · P10 reconnect/generation replacement.
+ * child Session projection read · P10 reconnect/generation replacement ·
+ * P11 rc.2 Question wire surfaces (the live forwarded request, the
+ * `attachWait` claim, the non-cancelling timeout, the late-answer mapping).
  *
  * @module @xmoon76/dsh-pi-tui/remote-m3a-semantics-smoke.test
  */
@@ -38,7 +40,8 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { createUserMessage, LlmAdapter, MessageId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
@@ -400,3 +403,80 @@ async function waitFor(label: string, predicate: () => boolean, timeoutMs = 15_0
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
+
+test('P11: the rc.2 Question wire surfaces (live request → claim → timeout → late-answer mapping)', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  const { runtime, semantics } = await compose(host)
+  try {
+    const agent = await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+    acquireMainSurfaceReference(runtime.client.sessions, SessionId(MAIN))
+    await waitFor('the MAIN window to open', () =>
+      runtime.client.sessions.binding(SessionId(MAIN))?.session.getSnapshot().openState === 'open')
+
+    const questions = [{ id: 'q1', question: 'Continue?', options: [{ label: 'yes' }, { label: 'no' }] }]
+    const captured: Array<{ sessionId: string; callId: string | undefined; timed: boolean }> = []
+    const resolvers = new Map<string, (answer: AskUserQuestionAnswer) => void>()
+    const registered = semantics.interaction.questions.onRequest((request) => {
+      captured.push({ sessionId: request.sessionId, callId: request.callId, timed: request.timed })
+      return new Promise((resolve, reject) => {
+        if (request.callId !== undefined) resolvers.set(request.callId, resolve)
+        // Mirror the real client: the delivery lifetime ends the attempt with
+        // the wire-preserved abort code when the Host closes the wait.
+        request.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('ask_user_question was aborted before the user answered'), {
+            name: 'UserQuestionError', code: 'ASK_ABORTED',
+          }))
+        }, { once: true })
+      })
+    })
+    assert.equal(registered, true, 'the forwarded user-questions waterfall is subscribed')
+
+    const service = host.ctx.get('userQuestions') as unknown as {
+      askTimed(
+        request: { questions: readonly unknown[]; agent: unknown; signal?: AbortSignal },
+        callId: unknown,
+        timeoutMs: number,
+      ): Promise<unknown>
+      attachWait(agent: unknown, callId: unknown, signal: AbortSignal): AsyncIterable<{ remainingMs: number }>
+    }
+
+    // A — an UNCLAIMED timed request reaches its Host deadline: the question
+    // stays durably answerable as `continued` and never cancels the Turn.
+    const callA = ToolCallId('m3b-call-a')
+    const pendingA = await service.askTimed({ questions, agent }, callA, 40)
+    assert.deepEqual(pendingA, { pending: true, callId: callA }, 'the Host returns the pending result, not an error')
+    await waitFor('the captured live request', () => captured.length >= 1)
+    assert.deepEqual(captured[0], { sessionId: MAIN, callId: 'm3b-call-a', timed: true },
+      'the live request carries the derived Session identity, call identity and timed flag')
+
+    // A timed-out call is no longer answerable through the FOREGROUND path:
+    // the same semantic call is not "continued" without the durable tool
+    // events that produce the projection row, so the wire answers truthfully
+    // instead of inventing a queue.
+    assert.equal(
+      await semantics.interaction.questions.answerContinued(MAIN, 'm3b-call-a', { answers: [{ id: 'q1', selected: ['yes'] }] }),
+      'not-continued',
+      'the late-answer boolean maps truthfully when the call is not durably continued',
+    )
+
+    // B — a CLAIMED timed request: the first attachWait frame carries the
+    // Host-computed remaining duration and the foreground answer settles it.
+    const callB = ToolCallId('m3b-call-b')
+    const askB = service.askTimed({ questions, agent }, callB, 5_000)
+    await waitFor('the second captured request', () => captured.length >= 2)
+    const claim = await semantics.interaction.questions.claimTimedWait(MAIN, 'm3b-call-b')
+    assert.ok(claim !== undefined, 'a live timed wait yields a claim')
+    assert.ok(claim.remainingMs > 0 && claim.remainingMs <= 5_000, `the first frame seeds the Host remaining duration: ${String(claim.remainingMs)}`)
+    resolvers.get('m3b-call-b')?.({ answers: [{ id: 'q1', selected: ['no'] }] })
+    const answered = await askB
+    assert.deepEqual(answered, { answers: [{ id: 'q1', selected: ['no'] }] }, 'the foreground answer reaches the Host')
+    claim.release()
+    await claim.ended
+    assert.equal(semantics.interaction.setApprovalPolicy(MAIN, 'ask'), false,
+      'the Remote approval-policy write fails closed (no public rc.2 carrier)')
+  } finally {
+    semantics.dispose()
+    await runtime.dispose()
+  }
+})

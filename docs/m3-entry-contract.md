@@ -96,7 +96,8 @@ without its own capability-name entry, so the two inventories are deliberately n
 | `pendingInputReader` | `PendingInputReader` (queue/steering lanes) | `runtime/direct/pending-input-reader-direct.ts` | `runtime/remote/pending-input-reader-remote.ts` | `session.projections.faceOf('inbox')` (`dsh-agent/lib/types/types.d.ts:52-55`) | READY | M3-3A | L3 `test/remote-pending-input-reader.test.ts` |
 | `sessionWriter` | `SessionWriter` (ordinary prompt, Ctrl+S steer, Alt+Up remove, cancel, rename) | `runtime/direct/session-writer-direct.ts` | `runtime/remote/session-writer-remote.ts` | `SessionFace.beginSubmission/prompt/updateQueue/cancel/rename` (`.../client/contract/session.d.ts:73-140`); `session/prompt\|updateQueue\|cancel\|rename` Remotes | READY. `refreshTitle` = INTENTIONAL_UNSUPPORTED_IN_M3; generic client-local file attachment needs the D4 upload receipt and fails closed before dispatch | M3-3A | L3 `test/remote-session-writer.test.ts`; D4 relief exists at `fileUploads/upload` (`dsh-client-file-upload/lib/typert.remote-client.d.ts:14`) |
 | `sessionLifecycle` | `SessionLifecycle` (create/open/fork) | `runtime/direct/session-lifecycle-direct.ts` | `runtime/remote/session-lifecycle-remote.ts` | `ISessions.create/retain/fork` (`.../contract/sessions.d.ts:80/52/124`); `session.create\|fork` Remotes | READY | M3-2 (owner handoff) + M3-3A (adapter) | L3 `test/remote-session-lifecycle.test.ts`; L5 `smoke:remote-session-lifecycle-parity` |
-| `interaction` | `InteractionPort` (approval prompt, `ask_user_question` provider, session approval policy) | `runtime/direct/interaction-direct.ts` | **none** | approval + question claim/settle = forwarded **waterfall** events `approval/request`, `user-questions/request` (`dsh-api-remotes/lib/types/remote-events.d.ts:16,91`; subscriber `ctx.remote.$on`, `dsh-typert-protocol/lib/types/types.d.ts:367`). There is **no** `approval/*`/`question/*` Remote endpoint. `setApprovalPolicy(sessionId, policy)` is a synchronous boolean semantic method, while rc.2 exposes neither a dedicated approval-policy Remote nor a synchronous exact-equivalent carrier | NEEDS_ADAPTER for approval/question presentation; `setApprovalPolicy` = INTENTIONAL_UNSUPPORTED_IN_M3 on the Remote backend and returns `false`. The Remote `/settings` approval row is omitted/disabled rather than guessing a current value or changing the semantic port to async | M3-3B | L3 test that forwarded approval/question waterfalls settle through the TUI prompt; L3/L6 prove Remote `setApprovalPolicy` fails closed and the approval settings row is unavailable with no hidden Host fallback |
+| `interaction` (Approval) | approval prompt + session approval policy | `runtime/direct/interaction-direct.ts` | approval live request = forwarded `approval/request` **waterfall** (`dsh-api-remotes` forwarded allowlist); `setApprovalPolicy(sessionId, policy)` has **no** dedicated approval-policy Remote and no synchronous exact-equivalent carrier in rc.2 | approval presentation NEEDS_ADAPTER over the forwarded waterfall; `setApprovalPolicy` = INTENTIONAL_UNSUPPORTED_IN_M3 on the Remote backend and returns `false`. The Remote `/settings` approval row is omitted/disabled rather than guessing a current value or changing the semantic port to async | M3-3B | L3 test that the forwarded approval waterfall settles through the TUI prompt; L3/L6 prove Remote `setApprovalPolicy` fails closed and the approval settings row is unavailable with no hidden Host fallback |
+| `interaction` (Question) | live request, timed claim, durable continued state, queued reply, late answer, settled evidence | `runtime/direct/interaction-direct.ts` | **rc.2 publishes the full contract**: live request = forwarded `user-questions/request` **waterfall**; timed claim = `remote.userQuestions.attachWait(sessionId, callId, signal)` stream whose first frame carries Host-computed `remainingMs`; durable state = `userQuestions` Session projection (`active` open/continued + `settled` with final answers); queued late reply = `inbox` projection entries with source `kind == 'user-question-reply'` + same `callId`; late answer = `remote.userQuestions.answer(sessionId, callId, answer)` (Host `REPLY_QUEUED`/`BAD_ANSWER` taxonomy); timeout = Host `TimedQuestionWait` (timeout ≠ Turn cancellation ≠ question cancellation — a timed-out question stays durably answerable as `continued`) | READY — the M3-3B plan consumes exactly these published surfaces; no private RPC and no Direct-only fallback is permitted | M3-3B | L3 adapter contract tests + L5 same-Host wire proof for claim/countdown/continued/queued-reply/late-answer/reconnect; the structural contract gate must reject a future rc that renames or drops these surfaces |
 | `catalog` | `Catalog` = `models` + `presets` + `skills` | `runtime/direct/catalog-direct.ts` | models `model-remote.ts`, presets `preset-remote.ts`; **no complete skills adapter** | see §2.2 | NEEDS_ADAPTER | M3-3A | per §2.2 |
 | `config` | `ConfigPort` = 9 sub-domains | `runtime/direct/config-direct.ts` | **none** | see §2.3 | NEEDS_ADAPTER | M3-3B | per §2.3 |
 | `hostFile` | `HostFilePort` (`@`-mention discovery, send-time existence resolution, draft canonicalization) | `runtime/direct/host-file-direct.ts` | **none** | session/agent-scoped `fileReferences/list(agentId, query, signal)` (`dsh-api-session-controller/lib/typert.remote-client.d.ts:40,68`; `lib/types/file-references.d.ts:24`). Sessionless/workspace-scoped discovery, and existence-based canonicalization, have **no** rc.2 expression | NEEDS_ADAPTER for the session scope; sessionless/workspace scope + existence probe = INTENTIONAL_UNSUPPORTED_IN_M3 (fail closed, §10) | M3-3A (session scope) / M3-5 (viewer scope preference) | L3 test over `fileReferences/list`; a viewer-child prompt must resolve through the child Session identity rather than a cwd string |
@@ -976,8 +977,12 @@ Each stage declares its L1–L6 test layer
 - **Files/owners**: new `src/runtime/remote/config-remote.ts` (generation-aware
   serialized settings mirror, footer trust/custom items, providers,
   credentials, permissions, preset default, subagent-model-selection), new
-  `src/runtime/remote/interaction-remote.ts` (forwarded waterfalls;
-  Remote `setApprovalPolicy` is the explicit fail-closed unsupported method), new
+  `src/runtime/remote/interaction-remote.ts` (the forwarded approval waterfall
+  plus the rc.2 Question contract: `userQuestions.attachWait` timed claim,
+  `userQuestions.answer` late answer, and the `userQuestions`/`inbox`
+  projections for durable answerability and queued-reply detection —
+  Remote `setApprovalPolicy` stays the explicit fail-closed unsupported
+  method), new
   `src/runtime/remote/session-archive-remote.ts` (`/api/session.export` through
   the composition-owned fetch), `BackendKind` gains `remote`, Remote `Backend`
   assembly + exact capability advertisement.
@@ -992,6 +997,19 @@ Each stage declares its L1–L6 test layer
 - **Entry**: M3-2 + M3-3A. **Exit**: complete Remote backend or explicit
   unsupported classification; no Direct Host fallback. **Rollback**: keep
   `BackendKind = 'direct'`.
+- **Status: DONE (zero product cutover).** Delivered: the rc.2 family floor
+  (`>=0.2.0-rc.2` peers, exact `0.2.0-rc.2` dev/source target at
+  `639ed015…`); the reconverged Approval/Question matrices in §2.1; the rc.2
+  published-surface gate in `test/remote-official-contract.test.ts`; the
+  `QuestionInteractionPort` on BOTH backends plus the timed/continued UI
+  lifecycle (`src/app/surface/question-controller.ts`, documented in
+  `docs/surface-decisions.md`); the Remote ConfigPort settings mirror with
+  the explicit unsupported subsets; the `/api/session.export` Remote archive;
+  and ONE experimental Remote `Backend` (`BackendKind 'remote'`,
+  `REMOTE_IMPLEMENTED_CAPABILITIES`). Direct remains production/default and no
+  production bootstrap selects Remote. See the M3-3B status section of
+  `docs/client-server-migration.md` for the file map, the semantic/UI impact
+  matrix and the validation evidence.
 
 ### M3-4 — main application / command / surface Remote composition
 
