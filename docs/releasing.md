@@ -341,8 +341,8 @@ Release, and artifact. If a release is not meant to be published yet, stop after
 the local commit and tag and leave the tag unpushed.
 
 ```sh
-# latest channel (including RC releases on latest)
-git ls-remote --tags origin vX.Y.Z
+# latest channel (an RC release published to latest)
+git ls-remote --tags origin vX.Y.Z-rc.N
 npm view @xmoon76/dsh-pi-tui@latest version
 gh release view vX.Y.Z-rc.N --repo XMoon/dsh-pi-tui
 
