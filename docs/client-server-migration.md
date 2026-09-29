@@ -2194,10 +2194,10 @@ the final complete Remote Backend assembly.
   mention VALUE is the OFFICIAL shared grammar's (`formatFileMention` —
   quoting rules and safety refusals; a quoted directory keeps its quote
   open). The completion TRIGGER keeps the official `activeAtToken`
-  baseline plus two INTENTIONAL TUI extensions (CJK-glued mentions and a
-  `=` boundary), documented in `src/file-completion/context.ts` — they
-  only widen when the dropdown opens, never the Host query or the
-  serialization.
+  baseline (start-of-line/whitespace only) plus FOUR INTENTIONAL TUI
+  trigger extensions — CJK-glued mentions and `"`, `'`, `=` boundaries —
+  documented in `src/file-completion/context.ts`; they only widen when
+  the dropdown opens, never the Host query or the serialization.
   The WORKSPACE scope keeps the legacy fd/fdfind scanner as a Direct-only
   sessionless compatibility path with no official carrier (the wire answers
   `unavailable`); it must not define the session semantics.
