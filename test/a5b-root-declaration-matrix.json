@@ -1191,7 +1191,7 @@
         "a5b-bootstrap-closure.test.ts",
         "busy-enter.test.ts",
         "child-view.test.ts",
-        "compact-display.test.ts"
+        "compact-performance-hardening.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
