@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Question tool's input semantics now split into selection / editing /
+  progression: multi-select questions toggle checkboxes with `Space` (or
+  digits / clicks), while `Enter` only continues like `→` (skipping when
+  unanswered); digits and clicks still toggle in multi-select and still
+  select-and-advance in single-select. Free text saves live: an un-Enter-ed
+  draft survives `Esc` and cross-question navigation and stays editable; a
+  saved custom answer shows its value in the option list on revisit (masked
+  questions show bullets) instead of the bare placeholder. Hints now read
+  `space toggle · ↵ continue/review`, with the last question and the review
+  page distinguishing continue/review/submit.
+
 ### Fixed
 
 - The fullscreen long user message bubble is now one local disclosure
