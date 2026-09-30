@@ -618,6 +618,23 @@ test('the M3-4 application-runtime aggregate is the exact second sanctioned targ
   assert.equal(other[0].rule, 'remote-dynamic-import-owner')
 })
 
+test('the REAL production tree carries the bootstrap -> backend-loader edge and stays Remote-clean (M3-4 PR1)', () => {
+  // The M3-4 selection seam is not a synthetic allowance: the real
+  // `app/bootstrap.ts` statically imports the loader, the loader owns the
+  // only two dynamic edges, and the whole production tree stays violation-free
+  // (the startup graph included — verified by the full findViolations scan in
+  // the other real-tree tests).
+  const bootstrap = collectSourceEntries().find(e => e.rel === 'app/bootstrap.ts')
+  assert.ok(bootstrap !== undefined, 'app/bootstrap.ts must exist in the scanned tree')
+  const edges = parseImportSpecifiers(bootstrap.source)
+    .map(spec => resolveRelativeImport('app/bootstrap.ts', spec.specifier))
+    .filter(resolved => resolved === 'runtime/backend-loader.ts')
+  assert.equal(edges.length, 1, 'the real bootstrap statically imports runtime/backend-loader.ts exactly once (the M3-4 selection seam reach)')
+  const tree = collectSourceEntries()
+  assert.deepEqual(findViolations(tree), [], 'the real tree stays clean with the real seam edge')
+  assert.deepEqual(findRemoteDynamicImportViolations(tree), [], 'the real tree keeps the exact dynamic-import owners')
+})
+
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
   const specs = parseValueDynamicImports(
     [

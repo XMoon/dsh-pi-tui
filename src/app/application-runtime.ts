@@ -44,11 +44,38 @@ export interface SelectedApplicationRuntime {
   disposeTransport(): Promise<void>
 }
 
+/**
+ * The Remote application-runtime composition input for the selection seam
+ * (M3-4 PR1): exactly the arguments the Remote aggregate needs. The seam owns
+ * the LOADING (`runtime/backend-loader.ts` — the sole sanctioned dynamic
+ * boundary into the Remote composition); the composition input itself stays
+ * transport-descriptive, so this module imports no Remote code.
+ */
+export interface RemoteApplicationSelection {
+  /** The already-running ordinary Host Context (never disposed by the graph). */
+  readonly hostContext: object
+  /** Host bootstrap prerequisite barrier owned by the caller (M3-0 ordering
+   *  contract: the Remote composition must not race the Host-local
+   *  legacy-settings migration). */
+  readonly waitForHostPrerequisites: () => Promise<void>
+  /** Lifecycle signal observed between the Host prerequisite and composition. */
+  readonly signal?: AbortSignal
+  /**
+   * The application-owned prompt serializer (the D2.2 writer dependency).
+   * PR1 supplies a real one only in composition tests; the production
+   * serializer is completed in the M3-4 submission PR. There is deliberately
+   * NO default here: a missing serializer is a composition error, never a
+   * fabricated partial Remote writer.
+   */
+  readonly promptSerializer: object
+}
+
 /** The internal application runtime-selection seam input (M3-4 PR1): which
- *  branch to select and HOW to construct it. Both branches take FACTORIES,
- *  never pre-built runtimes: a Remote selection must not have a Direct
- *  runtime already constructed (plan §10.2 "no Direct factory invoked"), and
- *  a Direct selection must not even load the Remote module. */
+ *  branch to select and HOW to construct it. The Direct branch takes a
+ *  FACTORY, never a pre-built runtime; the Remote branch takes the
+ *  composition INPUT — the seam itself reaches the Remote aggregate through
+ *  the lazy `runtime/backend-loader.ts` boundary, making this seam the sole
+ *  product-level Remote application runtime construction owner (plan §5). */
 export interface ApplicationRuntimeSelection {
   readonly kind: BackendKind
   /** Construct the Direct application runtime (the Direct branch's source). */
@@ -57,6 +84,6 @@ export interface ApplicationRuntimeSelection {
     readonly owners: SessionOwnerAccess
     readonly retirement: SessionOwnerRetirement
   }
-  /** Lazily construct the Remote application runtime (internal/test M3-4). */
-  readonly createRemote: (() => Promise<SelectedApplicationRuntime>) | undefined
+  /** The Remote composition input (internal/test M3-4 paths only). */
+  readonly remote: RemoteApplicationSelection | undefined
 }

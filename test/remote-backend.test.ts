@@ -120,3 +120,48 @@ test('a failing config first read is recorded and still yields a backend (never 
   assert.equal(config.tuiSettings, undefined, 'no fabricated namespace is served')
   runtime.dispose()
 })
+
+test('M3-4 PR1 §12: a post-adapter construction failure reverse-unwinds every constructed part (backend partial state does not survive)', async () => {
+  // The injection lands EXACTLY in the "adapters already constructed, factory
+  // has not returned" window: `options.fetch` is read AFTER the semantics
+  // bundle and the ConfigPort (with its mirror subscriptions) are
+  // constructed, but BEFORE the backend object is assembled and returned. A
+  // throwing getter there rejects the factory with both parts alive.
+  //
+  // The unwind is observed through the REAL subscription lifecycle: the
+  // fake runtime's `$on` hands out subscribes whose unsubscribes count —
+  // `config.dispose()` releasing the mirror/credential listeners is the
+  // observable proof that the config port's subscriptions did not survive.
+  const fake = fakeRuntime(async () => ({
+    ok: true,
+    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'tui-app', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
+  }))
+  const induced = new Error('induced post-adapter construction failure')
+  let activeSubscriptions = 0
+  let totalSubscriptions = 0
+  const runtime = fake.runtime as unknown as { remote: { $on: () => () => {} } }
+  const originalOn = runtime.remote.$on
+  runtime.remote.$on = (() => {
+    activeSubscriptions += 1
+    totalSubscriptions += 1
+    return () => { activeSubscriptions -= 1 }
+  }) as never
+  try {
+    await assert.rejects(
+      createRemoteBackendRuntime({
+        runtime: fake.runtime,
+        promptSerializer: { preflight: () => ({ kind: 'unsupported', reason: 'test' }), serialize: async () => ({ kind: 'unsupported', reason: 'test' }) },
+        get fetch(): typeof fetch { throw induced },
+      } as never),
+      (error: unknown) => {
+        assert.equal(error, induced, 'the original construction failure surfaces unmasked')
+        return true
+      },
+    )
+    assert.ok(totalSubscriptions >= 1, 'the config port installed its mirror subscriptions before the failure')
+    assert.equal(activeSubscriptions, 0,
+      'the reverse-unwind released every construction-time subscription (no surviving backend partial state)')
+  } finally {
+    runtime.remote.$on = originalOn
+  }
+})
