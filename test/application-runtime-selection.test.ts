@@ -27,7 +27,7 @@
  * simulated.
  *
  * TEST STAND-INS / SUBSTITUTIONS
- * - the Direct runtime and the Remote loader callback are doubles (identity
+ * - the Direct factory and the Remote loader callback are doubles (counting
  *   probes); no Host Context is composed in this suite.
  *
  * DELIBERATELY ABSENT
@@ -42,48 +42,52 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { selectApplicationRuntime } from '../src/app/bootstrap.ts'
-import type { SelectedApplicationRuntime } from '../src/app/application-runtime.ts'
+import type { ApplicationRuntimeSelection, SelectedApplicationRuntime } from '../src/app/application-runtime.ts'
 
-/** A minimal Direct application runtime double: identity probes for the
- *  backend/owners/retirement the selected core must carry EXACTLY, with
- *  access observation so a Remote selection can prove it read nothing. */
-function directDouble() {
-  const backend = { kind: 'direct', sessionLifecycle: {} }
-  const owners = { fromHandle: () => undefined }
-  const retirement = { retire: async () => ({ failures: [], durabilityFailure: undefined }) }
-  let reads = 0
-  const observed = {
-    get backend() { reads += 1; return backend },
-    get owners() { reads += 1; return owners },
-    get retirement() { reads += 1; return retirement },
+/** A counting Direct factory double: proves whether the seam invoked the
+ *  Direct construction at all, and hands out identity probes for the exact
+ *  backend/owners/retirement the selected core must carry. */
+function directFactoryDouble() {
+  let constructions = 0
+  const parts = {
+    backend: { kind: 'direct', sessionLifecycle: {} },
+    owners: { fromHandle: () => undefined },
+    retirement: { retire: async () => ({ failures: [], durabilityFailure: undefined }) },
   }
-  return { runtime: observed as never, readCount: () => reads }
+  const createDirect: ApplicationRuntimeSelection['createDirect'] = () => {
+    constructions += 1
+    return parts as never
+  }
+  return { createDirect, parts, constructionCount: () => constructions }
+}
+
+/** A counting Remote loader double. */
+function remoteLoaderDouble(selected: SelectedApplicationRuntime) {
+  let loads = 0
+  const createRemote = () => {
+    loads += 1
+    return Promise.resolve(selected)
+  }
+  return { createRemote, loadCount: () => loads }
 }
 
 test('Direct selection: the Remote loader is never invoked and the exact Direct instances are carried', async () => {
-  const direct = directDouble()
-  let remoteLoads = 0
-  const selected = await selectApplicationRuntime({
-    kind: 'direct',
-    direct: direct.runtime,
-    loadRemote: () => {
-      remoteLoads += 1
-      return Promise.resolve({ kind: 'remote' } as never)
-    },
-  })
-  assert.equal(remoteLoads, 0, 'a Direct selection must not even load the Remote module')
+  const direct = directFactoryDouble()
+  const remote = remoteLoaderDouble({ kind: 'remote' } as never)
+  const selected = await selectApplicationRuntime({ kind: 'direct', createDirect: direct.createDirect, createRemote: remote.createRemote })
+  assert.equal(remote.loadCount(), 0, 'a Direct selection must not even load the Remote module')
+  assert.equal(direct.constructionCount(), 1, 'the Direct factory ran exactly once')
   assert.equal(selected.kind, 'direct')
-  assert.equal(selected.backend, (direct.runtime as { backend: object }).backend, 'the exact Direct backend instance')
-  assert.equal(selected.owners, (direct.runtime as { owners: object }).owners, 'the exact Direct owner provider instance')
-  assert.equal(selected.retirement, (direct.runtime as { retirement: object }).retirement, 'the exact Direct retirement instance')
+  assert.equal(selected.backend, direct.parts.backend, 'the exact Direct backend instance')
+  assert.equal(selected.owners, direct.parts.owners, 'the exact Direct owner provider instance')
+  assert.equal(selected.retirement, direct.parts.retirement, 'the exact Direct retirement instance')
   // The no-op transport disposer settles without effect and is idempotent.
   await assert.doesNotReject(selected.disposeTransport())
   await assert.doesNotReject(selected.disposeTransport())
 })
 
-test('Remote selection: the loader is invoked exactly once, no Direct part is read, and the ONE application runtime is returned', async () => {
-  const direct = directDouble()
-  let remoteLoads = 0
+test('Remote selection: the loader is invoked exactly once, the Direct factory is NEVER invoked, and the ONE application runtime is returned', async () => {
+  const direct = directFactoryDouble()
   const remoteSelected: SelectedApplicationRuntime = {
     kind: 'remote',
     backend: { kind: 'remote' } as never,
@@ -91,37 +95,51 @@ test('Remote selection: the loader is invoked exactly once, no Direct part is re
     retirement: {} as never,
     disposeTransport: async () => {},
   }
+  const remote = remoteLoaderDouble(remoteSelected)
   const selected = await selectApplicationRuntime({
     kind: 'remote',
-    direct: direct.runtime,
-    loadRemote: () => {
-      remoteLoads += 1
-      return Promise.resolve(remoteSelected)
-    },
+    createDirect: direct.createDirect,
+    createRemote: remote.createRemote,
   })
-  assert.equal(remoteLoads, 1, 'the Remote aggregate is constructed exactly once')
-  assert.equal(direct.readCount(), 0, 'a Remote selection must not read or construct any Direct part (no Direct factory invoked)')
+  assert.equal(remote.loadCount(), 1, 'the Remote aggregate is constructed exactly once')
+  assert.equal(direct.constructionCount(), 0,
+    'a Remote selection must not invoke the Direct factory (plan §10.2: no Direct graph constructed)')
   assert.equal(selected, remoteSelected, 'the selected core IS the aggregate the loader returned — no second graph')
   assert.equal(selected.kind, 'remote')
 })
 
-test('Remote selection without the lazy boundary fails closed', async () => {
+test('a Direct factory failure propagates (no partial selected core)', async () => {
   await assert.rejects(
-    selectApplicationRuntime({ kind: 'remote', direct: directDouble().runtime, loadRemote: undefined }),
-    /requires the lazy backend-loader boundary/,
-    'the Remote branch must never fall back to constructing the Remote graph itself',
+    selectApplicationRuntime({
+      kind: 'direct',
+      createDirect: () => { throw new Error('induced direct construction failure') },
+      createRemote: undefined,
+    }),
+    /induced direct construction failure/,
   )
 })
 
-test('the Remote selection propagates a loader failure (no partial selected core)', async () => {
+test('Remote selection without the lazy boundary fails closed (and still invokes no Direct factory)', async () => {
+  const direct = directFactoryDouble()
+  await assert.rejects(
+    selectApplicationRuntime({ kind: 'remote', createDirect: direct.createDirect, createRemote: undefined }),
+    /requires the lazy backend-loader boundary/,
+    'the Remote branch must never fall back to constructing the Remote graph itself',
+  )
+  assert.equal(direct.constructionCount(), 0, 'failing closed must not construct a Direct graph either')
+})
+
+test('the Remote selection propagates a loader failure (no partial selected core, no Direct fallback)', async () => {
+  const direct = directFactoryDouble()
   await assert.rejects(
     selectApplicationRuntime({
       kind: 'remote',
-      direct: directDouble().runtime,
-      loadRemote: () => Promise.reject(new Error('induced remote construction failure')),
+      createDirect: direct.createDirect,
+      createRemote: () => Promise.reject(new Error('induced remote construction failure')),
     }),
     /induced remote construction failure/,
   )
+  assert.equal(direct.constructionCount(), 0, 'a Remote failure must not fall back to constructing Direct')
 })
 
 test('the production bootstrap calls the seam with the Direct branch only (no user-visible selector)', async () => {
@@ -129,7 +147,17 @@ test('the production bootstrap calls the seam with the Direct branch only (no us
   const seamCall = bootstrapSource.match(/const selectedRuntime = await selectApplicationRuntime\(\{[\s\S]*?\}\)/)
   assert.ok(seamCall !== null, 'the bootstrap must construct its selected runtime through the seam')
   assert.ok(seamCall[0].includes("kind: 'direct'"), 'the production bootstrap selects Direct')
-  assert.ok(seamCall[0].includes('loadRemote: undefined'), 'the production bootstrap passes no Remote loader')
+  assert.ok(seamCall[0].includes('createRemote: undefined'), 'the production bootstrap passes no Remote constructor')
+  assert.ok(bootstrapSource.includes('const directRuntime = createDirectApplicationRuntime({'),
+    'the Direct runtime construction stays the bootstrap composition step it always was')
+  // The seam's Direct branch is a factory over that one construction: the
+  // bootstrap hands the ALREADY-BUILT directRuntime through createDirect, so
+  // the production path constructs exactly ONE Direct runtime (below the
+  // seam), and a would-be Remote selection through this seam shape would
+  // have to skip that call site — which is exactly what the factory shape
+  // makes testable.
+  assert.ok(seamCall[0].includes('createDirect: () => directRuntime'),
+    'the production seam call supplies the Direct runtime through the factory')
   // No public/config/env Remote selector exists: the only Remote
   // construction reachability is the lazy boundary function in backend-loader.
   assert.ok(!/DSH_PI_TUI_BACKEND|PI_TUI_REMOTE|--remote/.test(bootstrapSource),

@@ -37,7 +37,7 @@ import {
   type ExperimentalRemoteRuntime,
   type RemoteBackendRuntime,
 } from './runtime.ts'
-import { createRemoteSessionOwnerServices } from './session-owners.ts'
+import { createRemoteSessionOwnerServices, type RemoteSessionOwnerServices } from './session-owners.ts'
 
 /** Start input for the Remote application runtime aggregate. */
 export interface RemoteApplicationRuntimeOptions {
@@ -101,30 +101,36 @@ export async function createRemoteApplicationRuntime(
     signal: options.signal,
   })
 
-  let backendRuntime: RemoteBackendRuntime
+  let backendRuntime: RemoteBackendRuntime | undefined
+  let ownerServices: RemoteSessionOwnerServices
   try {
     backendRuntime = await createRemoteBackendRuntime({
       runtime: wire.client,
       fetch: wire.host.carrier.fetch,
       promptSerializer: options.promptSerializer,
     })
+    // ONE owner registry shared by owners + retirement (never constructed
+    // independently — that would create a second owner truth).
+    ownerServices = createRemoteSessionOwnerServices(wire.client.sessions)
   } catch (error) {
     // Unwind the partial graph: the wire (Client first, then Host additive
-    // fibers) must not survive a backend construction failure. A disposal
-    // failure rides the original error's cause chain; the original rethrows.
-    const disposeErrors = await collectDisposeErrors(() => wire.dispose())
+    // fibers) must not survive a backend/owner construction failure after the
+    // Client exists — and a backend that WAS constructed is disposed first, so
+    // its partial adapter state does not survive either. A disposal failure
+    // rides the original error's cause chain; the original rethrows.
+    const constructed = backendRuntime
+    const disposeErrors = [
+      ...constructed !== undefined ? await collectDisposeErrors(() => constructed.dispose()) : [],
+      ...await collectDisposeErrors(() => wire.dispose()),
+    ]
     if (disposeErrors.length > 0) {
       const secondary = disposeErrors.length === 1
         ? disposeErrors[0]
-        : new AggregateError(disposeErrors, 'remote application runtime: wire disposal failures during backend-failure unwind')
+        : new AggregateError(disposeErrors, 'remote application runtime: disposal failures during construction-failure unwind')
       throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
     }
     throw error
   }
-
-  // ONE owner registry shared by owners + retirement (never constructed
-  // independently — that would create a second owner truth).
-  const ownerServices = createRemoteSessionOwnerServices(wire.client.sessions)
 
   let transportDisposed = false
   return {

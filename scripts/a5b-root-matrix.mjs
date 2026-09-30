@@ -242,7 +242,7 @@ const SWEEP_NOTES = {
   directRuntime: 'createDirectApplicationRuntime(...) — the Direct composition runtime.',
   model: 'createModelSelectionOwner<ModelSelection>(...) — the A5b-3b model-selection owner.',
   sessionRuntime: 'bindSessionRuntime(...) — the bound session runtime owner.',
-  backend: 'directRuntime.backend — the semantic Backend port bundle.',
+  backend: 'selectedRuntime.backend (the M3-4 PR1 selection seam) — the semantic Backend port bundle; today the exact Direct instance.',
   settings: 'createSettingsRuntime(...) — the A5b-2b settings/footer/display owner.',
   presentation: 'createSessionPresentation(...) — the A5b-1 live-session presentation owner.',
   clientActions: 'createClientActions() — the A5b-5 client-local platform owner.',
