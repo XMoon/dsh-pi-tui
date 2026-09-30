@@ -1725,6 +1725,7 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await vt.waitForRender()
   const quickByKey = vt.getViewport().join('\n')
   assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick Tasks:\n${quickByKey}`)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'Quick owns keyboard focus while open')
   assert.ok(quickByKey.includes('Needs attention'), `with the attention group:\n${quickByKey}`)
   assert.ok(quickByKey.includes('Use staging or production?'), `and the parked Question row:\n${quickByKey}`)
   assert.ok(quickByKey.includes('awaiting answer'), `marked as awaiting an answer:\n${quickByKey}`)
@@ -1734,28 +1735,67 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.equal(app.overlayGraphState().handles, 0, 'Enter reopens the Question from Quick')
   const fromQuick = vt.getViewport().join('\n')
   assert.ok(fromQuick.includes('Type your answer…'), `the QuestionFlow is reopened:\n${fromQuick}`)
-  // Esc parks it again: the Question survives and the affordance comes back.
-  // Esc is LAYERED inside the flow (the reopened form restores the review
-  // page, where the first Esc steps back and the next one cancels the flow);
-  // only the flow's own cancel parks the continued Question.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    vt.sendInput('\x1b')
-    await settle()
-    await vt.waitForRender()
-    if (!vt.getViewport().join('\n').includes('Type your answer…')) break
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the reopened Question owns keyboard focus')
+  // Esc is LAYERED inside the flow (the reopened form restores the review page,
+  // where the first Esc steps back and the next one cancels the flow); only the
+  // flow's own cancel parks the continued Question.
+  const editableFlows = (): number => (vt.getViewport().join('\n').match(/Type your answer…/gu) ?? []).length
+  const parkQuestion = async (): Promise<void> => {
+    for (let attempt = 0; attempt < 3 && editableFlows() > 0; attempt += 1) {
+      vt.sendInput('\x1b')
+      await settle()
+      await vt.waitForRender()
+    }
+    assert.equal(editableFlows(), 0, 'the Question is parked')
   }
+
+  // VISIBLE Question + Full Task Center: `/tasks` mounts the browser beneath the
+  // Question, which keeps its seat and its single flow; parking the Question
+  // reveals the browser, and selecting that row returns focus to the SAME flow.
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  assert.equal(editableFlows(), 1, 'the Question is visible before the transition')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'the browser mounts beneath the visible Question')
+  assert.equal(editableFlows(), 1, 'and no second flow was created')
+  await parkQuestion()
+  const revealed = vt.getViewport().join('\n')
+  assert.ok(revealed.includes('awaiting answer'), `parking reveals the Full row:\n${revealed}`)
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'Enter returns to the original flow')
+  assert.equal(editableFlows(), 1, 'exactly one flow has focus again')
+
+  // VISIBLE -> Esc -> literal ↓ -> Quick: the missing transition, with the
+  // affordance restored by the park.
+  await parkQuestion()
   const parkedAgain = vt.getViewport().join('\n')
   assert.ok(parkedAgain.includes('? 1 awaiting'), `parking restores the attention figure:\n${parkedAgain}`)
   assert.ok(parkedAgain.includes('↓ view'), `and the trigger:\n${parkedAgain}`)
+  // Ownership round-trip: Quick -> Question capture -> park -> the CURRENT
+  // editor-seat occupant gets physical focus back.
+  assert.equal(app.focusSeatForTest(), 'editor', 'parking restores the editor keyboard seat')
+  assert.equal(
+    app.focusedComponentForTest(),
+    app.seatEditorForTest().component,
+    'parking restores physical focus to the current editor-seat occupant',
+  )
+  vt.sendInput('\x1b[B')
+  await settle()
+  await vt.waitForRender()
+  const quickAfterPark = vt.getViewport().join('\n')
+  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick after the park:\n${quickAfterPark}`)
+  assert.ok(quickAfterPark.includes('Use staging or production?'), `with the Question row:\n${quickAfterPark}`)
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(editableFlows(), 1, 'and Enter reopens the QuestionFlow')
 
-  // `/tasks` covers the same open path through the Full surface:
-  // end-to-end: the row, the live removal, the visible-Question focus and the
-  // re-park cycle. The literal `↓` keypress is not drivable in this headless
-  // fixture (the runner mount has no focused editor seat, so the terminal key
-  // is dropped); the frame-level assertion above proves the trigger is armed
-  // and advertised, and the Quick row rules are covered by the panel tests.
-  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
-  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  // Park it once more so the row/live-removal leg below starts parked.
+  await parkQuestion()
   await tasksHandler()
   await settle()
   await vt.waitForRender()
@@ -1822,10 +1862,4 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.equal(app.isTasksActive(), false, 'nothing is reachable any more')
 
 
-  // The literal `↓` keypress is NOT drivable here: the runner mount never puts
-  // an editor seat in the focused input path, so the terminal key is dropped
-  // before the keybinding predicate is consulted. What IS asserted is the
-  // production affordance (a parked Question alone advertises `↓`) plus the
-  // whole open -> select -> reopen path through the same surface entry the
-  // trigger calls.
 })

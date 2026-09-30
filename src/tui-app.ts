@@ -17201,7 +17201,11 @@ export class TuiApp {
     this.renderFooter()
   }
 
-  /** Whether active jobs/subagents or unacknowledged failures are available. */
+  /**
+   * Whether the Task Center has anything to show: active jobs/subagents,
+   * unacknowledged failures, or parked human-required Question attention (a
+   * Questions-only session must still reach its reopen path).
+   */
   isTasksActive(): boolean {
     return this.tasksActive
   }

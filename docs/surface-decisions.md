@@ -1311,7 +1311,18 @@ detached presentation model (`QuestionAttentionRow`); the pure
 `task-center-attention.ts` maps it onto panel rows (stable
 `question:<sessionId>:<callId>` identity, `Needs attention` group, `?` glyph,
 `awaiting answer` / `answering`), and the surface composes attention ABOVE the
-work rows before the browser's first frame. Question rows are NOT work rows:
+work rows before the browser's first frame.
+
+**Footer attention fact.** A parked actionable Question publishes its own `?N`
+figure in the Task Center badge (`[? 1 awaiting · ↓ view]`, compact `[?1·↓]`),
+together with the `↓ view` hint when the editor seat is available. It is a
+fourth independent fact: it never joins the task/agent counts or the failure
+count, and a visible Question is NOT counted because it already owns the
+response seat (queued/settled/unavailable Questions are not counted either). A
+Questions-only session therefore still advertises — and can open — its Task
+Center reopen path.
+
+Question rows are NOT work rows:
 they carry no `startedAt`, never join the active-work count, never inherit stop
 semantics, and the panel includes them by an explicit rule so a running Job can
 never hide a pending Question. `Enter` on such a row reopens the controller

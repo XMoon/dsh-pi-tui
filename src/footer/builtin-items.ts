@@ -129,7 +129,7 @@ const modelItem: FooterItemDefinition = {
 const tasksItem: FooterItemDefinition = {
   id: 'tasks',
   label: 'Tasks',
-  description: 'The Task Center active/tracked badge with failure attention and the ↓ view hint.',
+  description: 'The Task Center active/tracked badge with failure attention, parked human Question attention and the ↓ view hint.',
   defaultZone: 'left',
   defaultImportance: 85,
   formats: ['badge'],
