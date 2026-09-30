@@ -236,9 +236,10 @@ test('REAL CHAIN: selectApplicationRuntime -> backend-loader -> the real Remote 
   const host = await createRemoteApplicationHostFixture(life, 'm3-4-pr1-preset')
   host.ctx.sessions.create(SessionId('m3-4-pr1-selection-seed'), { meta: { cwd: host.anchorDir } })
   let prerequisites = 0
-  // The production seam, the production loader, the production aggregate —
-  // only the prompt serializer is the test stand-in (the manifest's single
-  // substitution), plus the counting Direct factory proving no Direct graph.
+  // The production seam, the production loader, the production aggregate.
+  // Stand-ins per the manifest above: the prompt serializer plus the shared
+  // fixture's readiness inputs (never invoked by these proofs); the counting
+  // Direct factory additionally proves no Direct graph is constructed.
   const direct = directFactoryDouble()
   const selected = await selectApplicationRuntime({
     kind: 'remote',
