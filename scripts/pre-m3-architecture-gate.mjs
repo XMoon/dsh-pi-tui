@@ -63,11 +63,12 @@
  *      cannot be resolved statically and is out of scope for this gate.
  *   6. (M3-1 + M3-4 PR1) `app/remote/**` — the Remote composition — may be
  *      reached by a VALUE dynamic `import()` only through the single
- *      sanctioned owner (`runtime/backend-loader.ts`) into its EXACT two
- *      targets (`app/remote/runtime.ts`, `app/remote/application-runtime.ts`);
- *      any other src module dynamically importing `app/remote/**`, and the
- *      owner importing any other `app/remote/**` module, fails. Dynamic
- *      imports outside the Remote composition boundary stay out of scope.
+ *      sanctioned boundary edge (`runtime/backend-loader.ts` ->
+ *      `app/remote/runtime.ts`, the entry module that statically re-exports
+ *      the application-runtime aggregate); any other src module dynamically
+ *      importing `app/remote/**` fails, and so does a second dynamic target
+ *      under the owner. Dynamic imports outside the Remote composition
+ *      boundary stay out of scope.
  *
  * Existing historical exceptions, when a phase proves one, are recorded in
  * {@link ARCHITECTURE_ALLOWLIST} (file + resolved target, TYPE-ONLY only); new
@@ -99,16 +100,15 @@ export const REMOTE_COMPOSITION_SPECIFIER =
   /^@deepseek-ai\/dsh-(?:(?:client-|api-)[^/]*$|[^/]+\/(?:client|remote)$)/u
 
 /**
- * The only sanctioned value dynamic-import owner into the Remote composition
+ * The only sanctioned value dynamic-import edge into the Remote composition
  * (M3-1 + M3-4 PR1): `runtime/backend-loader.ts` may dynamically import
- * exactly {@link REMOTE_DYNAMIC_IMPORT_TARGETS}; any other src module
- * dynamically importing `app/remote/**` violates the boundary.
+ * exactly `app/remote/runtime.ts` — the single entry module that also
+ * statically re-exports the application-runtime aggregate; any other src
+ * module dynamically importing `app/remote/**` violates the boundary, and so
+ * does a second dynamic target.
  */
 export const REMOTE_DYNAMIC_IMPORT_OWNER = 'runtime/backend-loader.ts'
-/** The sanctioned dynamic-import targets under the single owner (M3-1 + M3-4
- *  PR1): the Remote wire/backend composition module and the Remote application
- *  runtime aggregate reached by the internal runtime-selection seam. */
-export const REMOTE_DYNAMIC_IMPORT_TARGETS = ['app/remote/runtime.ts', 'app/remote/application-runtime.ts']
+export const REMOTE_DYNAMIC_IMPORT_TARGET = 'app/remote/runtime.ts'
 
 /**
  * Existing historical exceptions as `"<src-relative file>:<resolved target>"`.
@@ -277,10 +277,11 @@ export function parseValueDynamicImports(source) {
 
 /**
  * Rule: `app/remote/**` may be reached by a VALUE dynamic import only through
- * the sanctioned lazy boundary edges — the single owner
- * (`runtime/backend-loader.ts`) and its exact two M3-4 targets. The check is
- * scoped to the Remote composition boundary — dynamic imports of anything
- * else stay out of scope.
+ * the sanctioned lazy boundary edge — the single owner
+ * (`runtime/backend-loader.ts`) and its ONE target (`app/remote/runtime.ts`,
+ * the entry module that statically re-exports the application-runtime
+ * aggregate). The check is scoped to the Remote composition boundary —
+ * dynamic imports of anything else stay out of scope.
  * @param {Array<{ rel: string, source: string }>} entries
  * @returns {Array<{ file: string, line: number, rule: string, detail: string }>}
  */
@@ -293,12 +294,12 @@ export function findRemoteDynamicImportViolations(entries) {
       if (resolved === undefined) continue
       const target = staticImportCandidates(resolved).find(candidate => known.has(candidate)) ?? resolved
       if (!target.startsWith('app/remote/')) continue
-      if (rel === REMOTE_DYNAMIC_IMPORT_OWNER && REMOTE_DYNAMIC_IMPORT_TARGETS.includes(target)) continue
+      if (rel === REMOTE_DYNAMIC_IMPORT_OWNER && target === REMOTE_DYNAMIC_IMPORT_TARGET) continue
       violations.push({
         file: rel,
         line,
         rule: 'remote-dynamic-import-owner',
-        detail: `only ${REMOTE_DYNAMIC_IMPORT_OWNER} may dynamically import ${REMOTE_DYNAMIC_IMPORT_TARGETS.join(' | ')} `
+        detail: `only ${REMOTE_DYNAMIC_IMPORT_OWNER} may dynamically import ${REMOTE_DYNAMIC_IMPORT_TARGET} `
           + `(found ${rel} -> ${specifier})`,
       })
     }

@@ -235,3 +235,14 @@ export async function createRemoteBackendRuntime(
     throw error
   }
 }
+
+// M3-4 PR1 single-entry re-export: the ONE dynamic boundary
+// (`runtime/backend-loader.ts`) imports THIS module; the application-runtime
+// aggregate joins through this intra-`app/remote` STATIC edge instead of a
+// second dynamic target, keeping the frozen "ONE dynamic edge into
+// app/remote/**" contract intact.
+export {
+  createRemoteApplicationRuntime,
+  type RemoteApplicationRuntime,
+  type RemoteApplicationRuntimeOptions,
+} from './application-runtime.ts'

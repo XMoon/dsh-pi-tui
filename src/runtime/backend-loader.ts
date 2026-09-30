@@ -7,10 +7,13 @@
  * var or cordis.patch backend row that selects Remote, and normal package
  * `apply()` stays Direct.
  *
- * It owns the only value dynamic imports of the experimental Remote
- * composition, so `src/startup.ts` and its static import graph can never
- * reach the Remote graph — the architecture gate enforces exactly these
- * owners and targets.
+ * It owns the ONE value dynamic import into the experimental Remote
+ * composition — `app/remote/runtime.ts`, the single entry module that also
+ * statically re-exports the application-runtime aggregate — so
+ * `src/startup.ts` and its static import graph can never reach the Remote
+ * graph, and the frozen "ONE dynamic edge into app/remote/**" contract stays
+ * intact (ONE import expression, ONE target; the architecture gate enforces
+ * exactly this owner, this single expression and this target).
  *
  * The loader results are intentionally inferred: a static type import of the
  * Remote composition would re-create the static edge this boundary exists to
@@ -19,12 +22,28 @@
  * @module runtime/backend-loader
  */
 
-/** Load the experimental Remote composition module (dynamic, non-static edge). */
+/**
+ * Load the experimental Remote composition module (dynamic, non-static
+ * edge). The module carries BOTH composition entries: the wire/backend
+ * runtime constructors and the statically re-exported application-runtime
+ * aggregate. The dynamic import happens exactly ONCE per process (cached);
+ * both loaders below share it.
+ */
+const loadRemoteComposition = () => import('../app/remote/runtime.ts')
+
+/** Load the experimental Remote composition module (the single dynamic edge). */
 export function loadExperimentalRemoteRuntime() {
-  return import('../app/remote/runtime.ts')
+  return loadRemoteComposition()
 }
 
-/** Load the Remote application runtime aggregate (dynamic, non-static edge). */
+/**
+ * Load the Remote application runtime aggregate through the SAME single
+ * dynamic edge: `app/remote/runtime.ts` statically re-exports
+ * `createRemoteApplicationRuntime` (an intra-`app/remote` static edge, never
+ * a second dynamic boundary).
+ */
 export function loadRemoteApplicationRuntime() {
-  return import('../app/remote/application-runtime.ts')
+  return loadRemoteComposition().then(module => ({
+    createRemoteApplicationRuntime: module.createRemoteApplicationRuntime,
+  }))
 }

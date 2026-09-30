@@ -29,9 +29,12 @@
  * TEST STAND-INS / SUBSTITUTIONS
  * - unit lane: the Direct factory and the Remote loader are counting
  *   doubles; no Host Context is composed.
- * - real-chain lane: the prompt serializer only (PR1 does not own production
- *   submission serialization); everything else is real (official
- *   Client/Gateway path, M3 additive Host composition).
+ * - real-chain lane: the prompt serializer (PR1 does not own production
+ *   submission serialization), plus the shared fixture's minimal readiness
+ *   inputs (`StubLlmAdapter` smoke route, hand-provided agentDefaultModel /
+ *   attachments / webServer — the proven M3-1 L5 shape, none on the composed
+ *   Client/Host graph under test); the official Client/Gateway path and the
+ *   M3 additive Host composition are real.
  *
  * DELIBERATELY ABSENT
  * - any mounted TUI main surface / secondary surfaces.
@@ -214,8 +217,13 @@ test('the seam reaches the Remote aggregate ONLY through the backend-loader boun
   assert.ok(!/from '\.\.\/app\/remote\//.test(bootstrapSource) && !/from '\.\.\/runtime\/remote\//.test(bootstrapSource),
     'the bootstrap holds no static Remote composition edge of its own')
   const loaderSource = readFileSync(new URL('../src/runtime/backend-loader.ts', import.meta.url), 'utf8')
-  assert.ok(loaderSource.includes("import('../app/remote/application-runtime.ts')"),
-    'the loader owns the dynamic edge to the aggregate')
+  assert.ok(loaderSource.includes("import('../app/remote/runtime.ts')"),
+    'the loader owns the ONE dynamic edge into the entry module')
+  assert.ok(!loaderSource.includes("import('../app/remote/application-runtime.ts')"),
+    'the loader must NOT carry a second dynamic target (ONE edge, frozen contract)')
+  const entrySource = readFileSync(new URL('../src/app/remote/runtime.ts', import.meta.url), 'utf8')
+  assert.ok(/export\s*\{[^}]*createRemoteApplicationRuntime[^}]*\}\s*from\s*'\.\/application-runtime\.ts'/.test(entrySource),
+    'the entry module statically re-exports the aggregate constructor (the single-entry join)')
 })
 
 // ---------------------------------------------------------------------------

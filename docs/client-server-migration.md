@@ -2959,11 +2959,13 @@ Remote-ready):
   currently selected Session (`app/session` keeps that ownership). A backend
   construction failure after the wire exists disposes the wire (original
   error surfaces, disposal failures ride its cause chain).
-- `src/runtime/backend-loader.ts` stays the only dynamic-import owner and
-  gained the exact second sanctioned target
-  (`app/remote/application-runtime.ts`); the architecture gate enforces the
-  single owner with its exact two targets. No static Remote edge exists
-  anywhere (startup graph unchanged).
+- `src/runtime/backend-loader.ts` stays the only dynamic-import owner with
+  the ONE frozen dynamic edge into `app/remote/**`: the single entry module
+  `app/remote/runtime.ts`, which statically re-exports the application
+  runtime aggregate (an intra-`app/remote` static edge, never a second
+  dynamic target). The architecture gate enforces the single owner, the
+  single import expression and the single target. No static Remote edge
+  exists anywhere reachable from `startup.ts` (its graph is unchanged).
 - `src/app/bootstrap.ts`: the internal application runtime-selection seam
   (`selectApplicationRuntime`). The Remote branch is the SEAM's own
   ownership: it loads the Remote application aggregate through
@@ -3028,6 +3030,20 @@ Closure evidence for PR1:
   `test/session-runtime-remote-owner-handoff.test.ts`,
   `test/a2-ownership-cutover.test.ts`, `test/a5b-root-matrix.test.ts` all
   green on the adapted seam.
+
+Frozen-plan reconciliation (explicit deviations, review-driven):
+- Dynamic boundary: the plan's "ONE dynamic edge into `app/remote/**`" is
+  preserved LITERALLY — one owner, one import expression, one target. The
+  aggregate is reached through `app/remote/runtime.ts` (the single entry,
+  which statically re-exports it), NOT through a widened two-target gate; a
+  regression test fails on any second dynamic target or expression.
+- L5 fixture substitutions: beyond the plan-sanctioned prompt serializer,
+  the composition fixtures carry the proven M3-1 L5 minimal readiness inputs
+  (`StubLlmAdapter` smoke route; hand-provided `agentDefaultModel` /
+  `attachments` / `webServer`). These are declared in the fixture manifests
+  (not presented as "serializer-only"): none sits on the composed
+  Client/Host graph under test, so the composition-identity /
+  disposal-ordering / failure-unwind proofs are unaffected.
 
 What PR1 does NOT claim: the TUI does not run remotely yet. Remote transcript
 hydration, eventSource presentation, status projection, the production
