@@ -129,6 +129,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     interaction: {
       questions: {
         onRequest: () => true,
+        subscribe: () => undefined,
         snapshot: () => undefined,
         claimTimedWait: async () => undefined,
         answerContinued: async () => 'not-continued' as const,

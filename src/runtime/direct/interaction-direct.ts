@@ -87,6 +87,11 @@ interface QuestionProjectionStateLike {
 /** The structural `sessionProjections` registry read the adapter needs. */
 export interface SessionProjectionRegistryLike {
   stateOf(session: unknown, key: 'userQuestions' | 'inbox'): unknown
+  /** The registry's own change feed: one call per CHANGED client-visible unit
+   *  per committed event, with the owning Session and the unit key. */
+  onChanged(
+    listener: (session: unknown, key: string, value: unknown, seq: number) => void,
+  ): () => void
 }
 
 /** The structural durable inbox state (only the `source` facts are read). */
@@ -168,6 +173,20 @@ class DirectQuestionInteractionPort implements QuestionInteractionPort {
     return { sessionId, active, settled, queuedReplyCallIds }
   }
 
+  subscribe(sessionId: string, listener: () => void): (() => void) | undefined {
+    const projections = this.ctx.get('sessionProjections') as SessionProjectionRegistryLike | undefined
+    // No registry = no durable Question projection to observe (the same
+    // capability absence `snapshot` reports).
+    if (projections === undefined || typeof projections.onChanged !== 'function') return undefined
+    return projections.onChanged((session, key) => {
+      // Only the two units this port projects matter; every other unit's change
+      // (todos, status, ...) must not schedule a Question reconcile.
+      if (key !== 'userQuestions' && key !== 'inbox') return
+      if ((session as { readonly id?: unknown } | undefined)?.id !== sessionId) return
+      listener()
+    })
+  }
+
   async claimTimedWait(
     sessionId: string,
     callId: string,
@@ -209,6 +228,14 @@ class DirectQuestionInteractionPort implements QuestionInteractionPort {
     // continued, or never timed — including a caller abort). Never a
     // fabricated remaining duration.
     if (opening.done === true) {
+      signal?.removeEventListener('abort', onCallerAbort)
+      lifetime.abort()
+      return undefined
+    }
+    // The caller may have aborted between the opening frame resolving and this
+    // return (the released Client checks its claim signal at exactly this
+    // point): handing back such a claim would be a claim nobody owns.
+    if (callerAborted() || lifetime.signal.aborted) {
       signal?.removeEventListener('abort', onCallerAbort)
       lifetime.abort()
       return undefined

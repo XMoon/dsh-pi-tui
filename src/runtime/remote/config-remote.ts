@@ -1178,6 +1178,13 @@ class RemotePermissionConfig implements PermissionConfig {
     ])
   }
 
+  approvalOverrideAvailable(): boolean {
+    // INTENTIONAL_UNSUPPORTED_IN_M3 (§10): no public Client read of the session
+    // approval override and no synchronous policy carrier exist on rc.2, so the
+    // UI must HIDE/DISABLE the row instead of showing a guessed `ask`.
+    return false
+  }
+
   approvalOverrideOf(_sessionId: string): undefined {
     // INTENTIONAL_UNSUPPORTED_IN_M3 (docs/m3-entry-contract.md §10): rc.2 has
     // no public Client read of the independent session `approval/policy`

@@ -125,8 +125,17 @@ export class QuestionSurfaceController {
   private readonly now: () => number
   private readonly tickMs: number
   private readonly continuedDeadlineMs: number
-  /** One local presentation per live call (a call is never double-mounted). */
-  private readonly presentedCalls = new Set<string>()
+  /**
+   * The OWNED abort controller of each presented late-answer panel, keyed by
+   * (sessionId, callId). Ownership is what makes the durable lifecycle
+   * reactive: authority can WITHDRAW a mounted form (a reply queued by another
+   * client, the question settled elsewhere, the session/binding replaced)
+   * instead of leaving it editable forever.
+   */
+  private readonly presentedPanels = new Map<string, AbortController>()
+  /** The port subscription observing the CURRENT session's durable surface. */
+  private subscription: (() => void) | undefined
+  private subscribedSessionId: string | undefined
   /** Teardown hooks of in-flight live requests (countdown + claim release). */
   private readonly activeCleanups = new Set<() => void>()
   private disposal: (() => void) | undefined
@@ -139,24 +148,69 @@ export class QuestionSurfaceController {
     this.continuedDeadlineMs = deps.continuedDeadlineMs ?? 5_000
   }
 
-  /** Register the live request channel. `false` = no question capability. */
+  /**
+   * Register the live request channel and perform the COLD recovery read.
+   *
+   * The cold read is why attach() owns the first reconcile: the surface's
+   * bootstrap hydrates the Session projections (`initLiveSession`) BEFORE the
+   * interaction controller exists, so a question that is ALREADY durably
+   * `continued` at attach time can never have gone through a routing callback
+   * — waiting for the next Session event would leave it unoffered until an
+   * unrelated event happens to arrive. Re-reading authority here is the same
+   * projection-driven rule as every later reconcile, never a local guess.
+   *
+   * `false` = no question capability (nothing to reconcile against).
+   */
   attach(): boolean {
     if (this.disposed) return false
     const provider: UserQuestionProvider = (request, next) => this.handleLive(request, next)
-    return this.deps.port.onRequest(provider)
+    const registered = this.deps.port.onRequest(provider)
+    if (registered) {
+      // Observe BEFORE the cold read, so a projection change landing between
+      // the read and the subscription can never be lost.
+      this.ensureSubscription()
+      this.reconcile()
+    }
+    return registered
   }
 
-  /** Release controller-owned state (the port subscription is surface-owned:
-   *  a Direct `ctx.on` has no disposer and dies with the Context). Surface
-   *  teardown releases every held claim and stops every countdown. */
+  /** Release every controller-owned registration: the port subscription, the
+   *  mounted late-answer panels (their owned abort controllers) and every held
+   *  claim / countdown. */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
     this.disposal?.()
     this.disposal = undefined
+    this.releaseSubscription()
+    for (const controller of [...this.presentedPanels.values()]) controller.abort()
+    this.presentedPanels.clear()
     for (const cleanup of [...this.activeCleanups]) cleanup()
     this.activeCleanups.clear()
-    this.presentedCalls.clear()
+  }
+
+  /**
+   * Keep exactly ONE observation registered, for the session this surface is
+   * showing. A session switch re-arms it (the controller must never keep
+   * observing a session it no longer presents), and a backend that cannot
+   * subscribe yet (the Remote binding is not available on the first read) is
+   * retried on the next reconcile instead of being latched as absent.
+   */
+  private ensureSubscription(): void {
+    const sessionId = this.deps.currentSessionId()
+    if (sessionId === this.subscribedSessionId) return
+    this.releaseSubscription()
+    if (sessionId === undefined) return
+    const subscription = this.deps.port.subscribe(sessionId, () => this.reconcile())
+    if (subscription === undefined) return
+    this.subscription = subscription
+    this.subscribedSessionId = sessionId
+  }
+
+  private releaseSubscription(): void {
+    this.subscription?.()
+    this.subscription = undefined
+    this.subscribedSessionId = undefined
   }
 
   /**
@@ -166,22 +220,75 @@ export class QuestionSurfaceController {
    */
   reconcile(): void {
     if (this.disposed) return
+    this.ensureSubscription()
     const sessionId = this.deps.currentSessionId()
-    if (sessionId === undefined) return
+    if (sessionId === undefined) {
+      // No session owns a panel any more: a session switch must never leave
+      // the previous session's form mounted.
+      this.withdrawAll()
+      return
+    }
     const snapshot = this.deps.port.snapshot(sessionId)
-    // An absent surface is capability absence / a detached Connection — never
-    // an authoritative "no questions".
-    if (snapshot === undefined) return
+    if (snapshot === undefined) {
+      // No authority to present (capability absence, or a detached/replaced
+      // Connection). Fail closed: withdraw rather than keep an editable form
+      // whose submission cannot be checked against the Host truth.
+      this.withdrawAll()
+      return
+    }
+    const answerable = new Set<string>()
     for (const call of snapshot.active) {
       if (call.state !== 'continued') continue
       if (snapshot.queuedReplyCallIds.has(call.callId)) continue
-      const key = this.callKey(call.sessionId, call.callId)
-      if (this.presentedCalls.has(key)) continue
-      runDetached('question: continued late answer', () => this.presentContinued(call.sessionId, call.callId, call.questions), {
-        diag: this.deps.diag,
-        sessionId: () => call.sessionId,
-      })
+      answerable.add(this.callKey(call.sessionId, call.callId))
     }
+    // Authority WITHDRAWS before it offers: a panel for a call that is no
+    // longer answerable as continued (another client queued the reply, the
+    // question settled elsewhere, the call vanished with its session) must not
+    // stay editable. The notice names the fact the projection owns.
+    for (const key of [...this.presentedPanels.keys()]) {
+      if (answerable.has(key)) continue
+      const callId = key.slice(key.indexOf('\u0000') + 1)
+      if (snapshot.queuedReplyCallIds.has(callId)) {
+        this.withdraw(key, 'A reply for this question is already queued; the local form was withdrawn.')
+      } else if (snapshot.settled.some(entry => entry.callId === callId)) {
+        this.withdraw(key, 'This question is no longer awaiting an answer.')
+      } else {
+        this.withdraw(key, undefined)
+      }
+    }
+    for (const call of snapshot.active) {
+      if (call.state !== 'continued') continue
+      if (snapshot.queuedReplyCallIds.has(call.callId)) continue
+      this.present(call.sessionId, call.callId, call.questions)
+    }
+  }
+
+  /** Withdraw one presented panel, aborting the form it owns. */
+  private withdraw(key: string, notice: string | undefined): void {
+    const controller = this.presentedPanels.get(key)
+    if (controller === undefined) return
+    this.presentedPanels.delete(key)
+    controller.abort()
+    if (notice !== undefined && !this.disposed) this.deps.notify(notice, 'info')
+  }
+
+  /** Withdraw every presented panel (session switch / absent authority). */
+  private withdrawAll(): void {
+    for (const key of [...this.presentedPanels.keys()]) this.withdraw(key, undefined)
+  }
+
+  /** Mount the editable late answer for one continued call under an OWNED
+   *  abort controller, so authority can withdraw it later. */
+  private present(sessionId: string, callId: string, questions: readonly AskUserQuestionItem[]): void {
+    const key = this.callKey(sessionId, callId)
+    if (this.presentedPanels.has(key) || this.disposed) return
+    const controller = new AbortController()
+    this.presentedPanels.set(key, controller)
+    runDetached('question: continued late answer', () => this.presentContinued(sessionId, callId, questions, controller), {
+      diag: this.deps.diag,
+      sessionId: () => sessionId,
+    })
   }
 
   private callKey(sessionId: string, callId: string): string {
@@ -339,7 +446,7 @@ export class QuestionSurfaceController {
         if (call !== undefined) {
           if (call.state !== 'continued') return
           if (snapshot.queuedReplyCallIds.has(callId)) return
-          await this.presentContinued(sessionId, callId, call.questions.length > 0 ? call.questions : questions)
+          this.present(sessionId, callId, call.questions.length > 0 ? call.questions : questions)
           return
         }
         // A settled call (or one that vanished) is no longer ours to offer.
@@ -349,20 +456,21 @@ export class QuestionSurfaceController {
     }
   }
 
-  /** Offer the editable late answer for one continued call. */
+  /** Offer the editable late answer for one continued call under the OWNED
+   *  abort controller registered by {@link present}. */
   private async presentContinued(
     sessionId: string,
     callId: string,
     questions: readonly AskUserQuestionItem[],
+    controller: AbortController,
   ): Promise<void> {
-    const key = this.callKey(sessionId, callId)
-    if (this.presentedCalls.has(key) || this.disposed) return
-    this.presentedCalls.add(key)
     const status: TuiQuestionStatus = {
       text: 'The Agent continued. Your answer will arrive as a new turn; Esc to answer later.',
     }
     try {
-      const answers = await this.deps.ask(questions.map(toTuiQuestion), undefined, status)
+      // The panel is withdrawn through THIS signal when authority changes, so
+      // the form can never outlive the fact that made it answerable.
+      const answers = await this.deps.ask(questions.map(toTuiQuestion), controller.signal, status)
       const outcome = await this.deps.port.answerContinued(sessionId, callId, { answers: answers.map(toAnswerItem) })
       if (!this.disposed) {
         this.deps.notify(
@@ -373,6 +481,9 @@ export class QuestionSurfaceController {
         )
       }
     } catch (error) {
+      // A WITHDRAWN panel is not an outcome: the reconciler already told the
+      // user why (queued elsewhere / settled), and the answer was never sent.
+      if (controller.signal.aborted) return
       if (this.disposed) return
       // A superseded completion must not touch the CURRENT Question surface
       // (plan §7.3 stale-generation row): the answer may or may not have
@@ -391,14 +502,19 @@ export class QuestionSurfaceController {
         )
       } else if (this.isUserDismissal(error)) {
         // Dismissing a continued panel never cancels the question: the next
-        // session navigation / reconnect reconcile offers it again.
+        // session navigation / reconnect reconcile offers it again — and the
+        // projection subscription offers it again the moment authority changes.
         this.deps.notify('A continued question is still awaiting your answer.', 'info')
       } else if (error instanceof QuestionAnswerError) {
         this.deps.notify(`could not deliver the answer: ${error.message}`, 'error')
       }
       // Any other rejection is the user's own cancel: stay silent.
     } finally {
-      this.presentedCalls.delete(key)
+      // Only OUR registration is removed: a withdrawal may have installed a
+      // newer panel for the same call in the meantime.
+      if (this.presentedPanels.get(this.callKey(sessionId, callId)) === controller) {
+        this.presentedPanels.delete(this.callKey(sessionId, callId))
+      }
     }
   }
 

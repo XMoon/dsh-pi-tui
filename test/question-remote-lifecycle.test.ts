@@ -47,7 +47,6 @@ function harness(options: {
   claim?: QuestionWaitClaim | undefined
   /** Gate the claim opening so a test can abort while the first frame is in flight. */
   claimGate?: Promise<void>
-  snapshot?: QuestionSurfaceSnapshot | undefined
   answerContinued?: (sessionId: string, callId: string, answer: AskUserQuestionAnswer) => Promise<'queued' | 'not-continued'>
 } = {}) {
   let provider: UserQuestionProvider | undefined
@@ -56,9 +55,26 @@ function harness(options: {
   const answered: Array<{ sessionId: string; callId: string }> = []
   let clock = 1_000
   const claimSignals: Array<AbortSignal | undefined> = []
+  // The projection read is installed by the test AFTER construction, so each
+  // test chooses whether the COLD attach-time reconcile sees a snapshot
+  // (production always has one by then — `initLiveSession` precedes
+  // `attachInteraction`).
+  let snapshot: QuestionSurfaceSnapshot | undefined
+  let currentSession: string | undefined = 'session-a'
+  const subscribed: string[] = []
+  const unsubscribed: string[] = []
+  let subscribers: Array<() => void> = []
   const port: QuestionInteractionPort = {
     onRequest: (next) => { provider = next; return true },
-    snapshot: () => options.snapshot,
+    subscribe: (sessionId, listener) => {
+      subscribed.push(sessionId)
+      subscribers.push(listener)
+      return () => {
+        unsubscribed.push(sessionId)
+        subscribers = subscribers.filter(entry => entry !== listener)
+      }
+    },
+    snapshot: () => snapshot,
     claimTimedWait: async (_sessionId, _callId, signal) => {
       claimSignals.push(signal)
       // A real adapter resolves `undefined` once its caller lifetime aborts
@@ -89,18 +105,30 @@ function harness(options: {
     }),
     notify: (message) => { notices.push(message) },
     repaint: () => {},
-    currentSessionId: () => 'session-a',
+    currentSessionId: () => currentSession,
     diag: SILENT_DIAG,
     now: () => clock,
     tickMs: 5,
     continuedDeadlineMs: 100,
   })
   let pendingAsk: { resolve: (answers: TuiQuestionAnswer[]) => void; reject: (error: unknown) => void } | undefined
-  controller.attach()
   return {
     controller,
     port,
     claimSignals,
+    /** Install the projection the port serves (call BEFORE attach to model the
+     *  cold path, or after to model a later reconcile). */
+    setSnapshot: (next: QuestionSurfaceSnapshot | undefined) => { snapshot = next },
+    /** Register the live channel (production: `attachInteraction`). */
+    attach: () => controller.attach(),
+    /** The sessions this controller is observing right now. */
+    subscribed: () => [...subscribed],
+    unsubscribed: () => [...unsubscribed],
+    /** Fire the port's projection notification (production: the Client/Host
+     *  projection change feed) WITHOUT any Session event or manual reconcile. */
+    notifyChange: () => { for (const listener of [...subscribers]) listener() },
+    /** Switch the current session like a real session navigation. */
+    setSession: (sessionId: string | undefined) => { currentSession = sessionId },
     asks,
     notices,
     answered,
@@ -128,6 +156,8 @@ test('a timed request claims the Host wait BEFORE the countdown starts', async (
   const claim: QuestionWaitClaim = { remainingMs: 90_000, ended: new Promise(() => {}), release: () => { released += 1 } }
   let released = 0
   const h = harness({ claim })
+  h.attach()
+  h.attach()
   const pending = h.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
   await Promise.resolve()
   await Promise.resolve()
@@ -143,6 +173,8 @@ test('the local countdown reaching zero rejects ASK_TIMED_OUT without cancelling
   let released = 0
   const claim: QuestionWaitClaim = { remainingMs: 1_000, ended: new Promise(() => {}), release: () => { released += 1 } }
   const h = harness({ claim })
+  h.attach()
+  h.attach()
   const pending = h.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
   await Promise.resolve(); await Promise.resolve()
   // Attach the rejection expectation BEFORE the tick can reject, then
@@ -160,6 +192,7 @@ test('the local countdown reaching zero rejects ASK_TIMED_OUT without cancelling
 
 test('a user cancel rejects ASK_CANCELLED and a Host abort rejects ASK_ABORTED', async () => {
   const cancelled = harness({ claim: undefined })
+  cancelled.attach()
   const pendingCancel = cancelled.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
   await Promise.resolve(); await Promise.resolve()
   cancelled.cancel()
@@ -171,6 +204,7 @@ test('a user cancel rejects ASK_CANCELLED and a Host abort rejects ASK_ABORTED',
 
   const aborted = harness({ claim: undefined })
   const hostAbort = new AbortController()
+  aborted.attach()
   const pendingAbort = aborted.live({
     sessionId: 'session-a',
     callId: 'call-2',
@@ -191,6 +225,8 @@ test('the first real answer mutation freezes the countdown and the claim stays h
   let released = 0
   const claim: QuestionWaitClaim = { remainingMs: 60_000, ended: new Promise(() => {}), release: () => { released += 1 } }
   const h = harness({ claim })
+  h.attach()
+  h.attach()
   const pending = h.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
   await Promise.resolve(); await Promise.resolve()
   const status = h.asks[0]!.status
@@ -210,7 +246,9 @@ test('reconcile offers a continued call without a queued reply exactly once', as
     settled: [],
     queuedReplyCallIds: new Set(),
   }
-  const h = harness({ snapshot })
+  const h = harness()
+  h.setSnapshot(snapshot)
+  h.attach()
   h.controller.reconcile()
   h.controller.reconcile()
   await Promise.resolve()
@@ -228,14 +266,17 @@ test('reconcile never offers a continued call whose reply is durably queued', as
     settled: [],
     queuedReplyCallIds: new Set(['call-continued']),
   }
-  const h = harness({ snapshot })
+  const h = harness()
+  h.setSnapshot(snapshot)
+  h.attach()
   h.controller.reconcile()
   await Promise.resolve()
   assert.equal(h.asks.length, 0, 'a queued reply withdraws the editable surface')
 })
 
 test('reconcile does nothing without an authoritative surface (capability absence)', async () => {
-  const h = harness({ snapshot: undefined })
+  const h = harness()
+  h.attach()
   h.controller.reconcile()
   await Promise.resolve()
   assert.equal(h.asks.length, 0)
@@ -248,7 +289,9 @@ test('an open call is never offered as a continued late answer', async () => {
     settled: [],
     queuedReplyCallIds: new Set(),
   }
-  const h = harness({ snapshot })
+  const h = harness()
+  h.setSnapshot(snapshot)
+  h.attach()
   h.controller.reconcile()
   await Promise.resolve()
   assert.equal(h.asks.length, 0, 'the live waterfall, not reconcile, owns the open case')
@@ -262,9 +305,10 @@ test('REPLY_QUEUED on a late answer preserves intent as a read-only notice', asy
     queuedReplyCallIds: new Set(),
   }
   const h = harness({
-    snapshot,
     answerContinued: async () => { throw new QuestionAnswerError(QUESTION_REPLY_QUEUED, 'a reply is already queued') },
   })
+  h.setSnapshot(snapshot)
+  h.attach()
   h.controller.reconcile()
   await Promise.resolve()
   h.submit([{ id: 'q1', selected: ['a'] }])
@@ -279,8 +323,10 @@ test('dispose releases controller state and stops offering questions', async () 
     settled: [],
     queuedReplyCallIds: new Set(),
   }
-  const h = harness({ snapshot })
+  const h = harness()
+  h.setSnapshot(snapshot)
   h.controller.dispose()
+  h.attach()
   h.controller.reconcile()
   await Promise.resolve()
   assert.equal(h.asks.length, 0)
@@ -294,6 +340,8 @@ test('dispose during the claim opening aborts the attempt and never mounts a sta
   const claim: QuestionWaitClaim = { remainingMs: 60_000, ended: new Promise(() => {}), release: () => { released += 1 } }
   let released = 0
   const h = harness({ claim, claimGate: gate.promise })
+  h.attach()
+  h.attach()
   const pending = h.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
   await Promise.resolve()
   assert.equal(h.asks.length, 0, 'the flow waits for the claim before mounting')
@@ -328,16 +376,20 @@ test('a Host-ended claim rejects ASK_ABORTED, never the user-cancel code, and st
     settled: [],
     queuedReplyCallIds: new Set(),
   }
-  const h = harness({ claim, snapshot })
+  const h = harness({ claim })
+  h.attach()
   const pending = h.live({ sessionId: 'session-a', callId: 'call-1', timed: true, questions: QUESTIONS })
   await Promise.resolve(); await Promise.resolve()
-  assert.equal(h.asks.length, 1)
+  assert.equal(h.asks.length, 1, 'only the live request is mounted while the wait is open')
 
   const expectsAbort = assert.rejects(() => pending, (error: unknown) => {
     assert.equal((error as { code?: string }).code, ASK_ABORTED, 'a Host-driven end is an abort, not a user cancel')
     assert.notEqual((error as { code?: string }).code, ASK_CANCELLED)
     return true
   })
+  // The projection exposes the call as `continued` only once the Host closed
+  // the wait — that is the authority the late answer is offered from.
+  h.setSnapshot(snapshot)
   ended.resolve()
   await expectsAbort
   assert.equal(released, 1, 'the claim is released when the Host ends it')
@@ -363,13 +415,198 @@ test('a superseded late-answer completion does not touch the current Question su
     queuedReplyCallIds: new Set(),
   }
   const h = harness({
-    snapshot,
     answerContinued: async () => { throw new SupersededReadError('the generation changed') },
   })
+  h.setSnapshot(snapshot)
+  h.attach()
   h.controller.reconcile()
   await Promise.resolve()
   assert.equal(h.asks.length, 1)
   h.submit([{ id: 'q1', selected: ['a'] }])
   await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
   assert.deepEqual(h.notices, [], 'a superseded completion produces no user-facing claim')
+})
+
+test('attach() offers an already-continued question WITHOUT any session event (cold recovery)', async () => {
+  // Production ordering: the surface's bootstrap hydrates the Session
+  // projections BEFORE the interaction controller exists (initLiveSession ->
+  // attachInteraction), so the cold case can never be reached by a routing
+  // callback. The owner must therefore reconcile at attach time; waiting for
+  // the next Session event would leave the question unoffered indefinitely.
+  const snapshot: QuestionSurfaceSnapshot = {
+    sessionId: 'session-a',
+    active: [{ callId: 'call-continued', sessionId: 'session-a', questions: QUESTIONS, state: 'continued' }],
+    settled: [],
+    queuedReplyCallIds: new Set(),
+  }
+  const h = harness()
+  h.setSnapshot(snapshot)
+  // Attach like the surface does; assert the panel is offered with NO Session
+  // event and NO manual reconcile() on top of it.
+  h.attach()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(h.asks.length, 1, 'the cold continued question is offered at attach time')
+
+  h.submit([{ id: 'q1', selected: ['a'] }])
+  await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
+  assert.deepEqual(h.answered, [{ sessionId: 'session-a', callId: 'call-continued' }],
+    'answering it delivers the late answer without any session event')
+})
+
+test('attach() does not offer anything when no question capability is registered', async () => {
+  const snapshot: QuestionSurfaceSnapshot = {
+    sessionId: 'session-a',
+    active: [{ callId: 'call-continued', sessionId: 'session-a', questions: QUESTIONS, state: 'continued' }],
+    settled: [],
+    queuedReplyCallIds: new Set(),
+  }
+  // onRequest reports absence (e.g. a deployment without the questions
+  // service): the cold read must not run against a capability that is not
+  // there.
+  let providerRegistered = false
+  const port = {
+    onRequest: () => false,
+    subscribe: () => undefined,
+    snapshot: () => snapshot,
+    claimTimedWait: async () => undefined,
+    answerContinued: async () => 'queued' as const,
+  }
+  const asks: unknown[] = []
+  const controller = new QuestionSurfaceController({
+    port,
+    ask: async () => { asks.push(1); return [] },
+    notify: () => {},
+    repaint: () => {},
+    currentSessionId: () => 'session-a',
+    diag: SILENT_DIAG,
+  })
+  assert.equal(controller.attach(), false)
+  await Promise.resolve(); await Promise.resolve()
+  assert.equal(asks.length, 0)
+  assert.equal(providerRegistered, false)
+})
+
+/** One authoritative surface with a single continued call. */
+function continuedSurface(options: { queued?: readonly string[]; settled?: boolean } = {}): QuestionSurfaceSnapshot {
+  const settled = options.settled === true
+  return {
+    sessionId: 'session-a',
+    active: settled ? [] : [{ callId: 'call-continued', sessionId: 'session-a', questions: QUESTIONS, state: 'continued' }],
+    settled: settled
+      ? [{ callId: 'call-continued', sessionId: 'session-a', answers: [{ id: 'q1', selected: ['a'] }] }]
+      : [],
+    queuedReplyCallIds: new Set(options.queued ?? []),
+  }
+}
+
+const settleFrames = async (): Promise<void> => {
+  await Promise.resolve()
+  await Promise.resolve()
+  await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+}
+
+test('the port subscription drives reconcile with NO session event', async () => {
+  // The durable lifecycle must be REACTIVE: a projection change (a late reply
+  // queued by another client, a question settled elsewhere, a reconnect that
+  // re-hydrated the projects) reaches the surface without waiting for an
+  // unrelated Session event.
+  const h = harness()
+  h.attach()
+  await settleFrames()
+  assert.equal(h.asks.length, 0, 'nothing is offered before authority says so')
+  assert.deepEqual(h.subscribed(), ['session-a'], 'attach observes the current session')
+
+  h.setSnapshot(continuedSurface())
+  h.notifyChange()
+  await settleFrames()
+  assert.equal(h.asks.length, 1, 'the port notification alone offers the continued question')
+})
+
+test('a reply queued elsewhere WITHDRAWS the open late-answer form', async () => {
+  const h = harness()
+  h.setSnapshot(continuedSurface())
+  h.attach()
+  await settleFrames()
+  assert.equal(h.asks.length, 1)
+  const signal = h.asks[0]!.signal
+  assert.ok(signal !== undefined, 'the continued form owns a signal (withdrawable)')
+
+  h.setSnapshot(continuedSurface({ queued: ['call-continued'] }))
+  h.notifyChange()
+  await settleFrames()
+  assert.equal(signal.aborted, true, 'the owned controller withdrew the mounted form')
+  assert.match(h.notices.join('\n'), /reply for this question is already queued/u)
+  assert.deepEqual(h.answered, [], 'a withdrawn form never delivers an answer')
+})
+
+test('a question settled elsewhere WITHDRAWS the open late-answer form', async () => {
+  const h = harness()
+  h.setSnapshot(continuedSurface())
+  h.attach()
+  await settleFrames()
+  const signal = h.asks[0]!.signal!
+
+  h.setSnapshot(continuedSurface({ settled: true }))
+  h.notifyChange()
+  await settleFrames()
+  assert.equal(signal.aborted, true, 'the settled authority withdrew the form')
+  assert.match(h.notices.join('\n'), /no longer awaiting an answer/u)
+  assert.deepEqual(h.answered, [])
+})
+
+test('a vanished authority (detached surface) withdraws the open panel', async () => {
+  const h = harness()
+  h.setSnapshot(continuedSurface())
+  h.attach()
+  await settleFrames()
+  const signal = h.asks[0]!.signal!
+
+  // The port answers `undefined` when it cannot vouch for the surface (a
+  // detached Connection / replaced generation): fail closed, never keep an
+  // editable form whose submission cannot be checked.
+  h.setSnapshot(undefined)
+  h.notifyChange()
+  await settleFrames()
+  assert.equal(signal.aborted, true)
+  assert.deepEqual(h.answered, [])
+})
+
+test('a session switch withdraws the previous panel and re-arms the observation', async () => {
+  const h = harness()
+  h.setSnapshot(continuedSurface())
+  h.attach()
+  await settleFrames()
+  const signal = h.asks[0]!.signal!
+
+  h.setSession('session-b')
+  h.setSnapshot(undefined)
+  h.notifyChange()
+  await settleFrames()
+  assert.equal(signal.aborted, true, 'the previous session form is withdrawn')
+  assert.deepEqual(h.unsubscribed(), ['session-a'], 'the old observation is released')
+
+  // The new session's own authority is observed in its place.
+  h.setSnapshot({
+    sessionId: 'session-b',
+    active: [{ callId: 'call-b', sessionId: 'session-b', questions: QUESTIONS, state: 'continued' }],
+    settled: [],
+    queuedReplyCallIds: new Set(),
+  })
+  h.notifyChange()
+  await settleFrames()
+  assert.deepEqual(h.subscribed(), ['session-a', 'session-b'], 'the new session is observed')
+  assert.equal(h.asks.length, 2, 'the new session\'s continued question is offered')
+})
+
+test('dispose releases the port subscription and withdraws every panel', async () => {
+  const h = harness()
+  h.setSnapshot(continuedSurface())
+  h.attach()
+  await settleFrames()
+  const signal = h.asks[0]!.signal!
+  h.controller.dispose()
+  await settleFrames()
+  assert.equal(signal.aborted, true)
+  assert.deepEqual(h.unsubscribed(), ['session-a'], 'dispose releases the observation exactly once')
 })

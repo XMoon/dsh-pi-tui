@@ -144,6 +144,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     interaction: {
       questions: {
         onRequest: () => true,
+        subscribe: () => undefined,
         snapshot: () => undefined,
         claimTimedWait: async () => undefined,
         answerContinued: async () => 'not-continued' as const,

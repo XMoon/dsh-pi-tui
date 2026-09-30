@@ -364,12 +364,25 @@ export interface PermissionConfig {
   defaultPreset(): string | undefined
   /** Persist the default preset for future sessions. */
   setDefaultPreset(name: string): Promise<void>
+  /**
+   * Whether this backend READS and WRITES the session's independent
+   * approval-policy override at all. Direct: yes (the official approval
+   * service). Remote rc.2: NO — no public Client read of the override and no
+   * synchronous policy carrier exist, so the UI must hide/disable the row.
+   *
+   * This is what keeps `undefined` from `approvalOverrideOf` unambiguous: on a
+   * backend where the capability is absent, "undefined" is UNAVAILABLE and
+   * must never be rendered as the consumer's own `ask` default (docs/
+   * m3-entry-contract.md §10).
+   */
+  approvalOverrideAvailable(): boolean
   /** The session's own approval-policy override, resolved from the EXACT
    * live Agent of `sessionId` (the official approval service's
    * `overrideOf(session)` read — alpha.4; the configured default is
    * deliberately NOT applied, an override-less session answers undefined
    * and the consumer shows its own default). Degrades to undefined when
-   * the approval service is absent or the session has no live Agent. */
+   * the approval service is absent or the session has no live Agent — which
+   * is only meaningful while `approvalOverrideAvailable()` is true. */
   approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
@@ -383,15 +396,15 @@ export interface PermissionConfig {
 }
 
 /** One official allowed child-LLM route (the exact provider+model pair
- * the official `subagent-model-selection` section authorizes). */
+ * the official `subagent-model-selection-settings` section authorizes). */
 export interface SubagentAllowedModelRoute {
   readonly provider: string
   readonly model: string
 }
 
 /** The official subagent model-selection preference (the DSH
- * `subagent-model-selection` settings section, owned Host-side by the
- * `subagent-model-selection-settings` service). The TUI reads and writes
+ * `subagent-model-selection-settings` settings namespace, whose values the
+ * `subagent-model-selection` service owns Host-side). The TUI reads and writes
  * the OFFICIAL section through this sub-domain — it never maintains a
  * parallel TUI-owned subagent routing setting. Sampling is per NEW
  * session composition: a settings change never rewrites the tool schema

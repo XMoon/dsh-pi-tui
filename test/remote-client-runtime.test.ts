@@ -41,6 +41,7 @@ import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import { JobId } from '@deepseek-ai/dsh-jobs'
@@ -141,6 +142,9 @@ async function createHostFixture(
       admitPromptContent: async (content: unknown) => content,
     } as never)
     ctx.provide('webServer', { registerUpgrade: () => () => {} })
+    // Host prerequisite for the M3 Remote composition (see the smoke fixture):
+    // the production Host mounts it from `@deepseek-ai/dsh-base`.
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
     await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3 L5 preset', plugins: [] })

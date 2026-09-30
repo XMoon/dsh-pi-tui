@@ -22,7 +22,6 @@ import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import { apply as applyApiRemotes, inject as apiRemotesInject } from '@deepseek-ai/dsh-api-remotes'
 import SettingsController from '@deepseek-ai/dsh-api-settings-controller'
-import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import * as sessionLogExport from '@deepseek-ai/dsh-session-log-export'
@@ -36,6 +35,14 @@ import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
  */
 const HOST_PREREQUISITE_SERVICES = [
   'credentials',
+  // The rc.2 user-questions service: `@deepseek-ai/dsh-base` already mounts
+  // `id: user-questions -> @deepseek-ai/dsh-user-questions`, and this bundle
+  // layers ON TOP of that base without disabling it, so the M3 composition
+  // must REUSE the existing service (its TypertRemoteService binding publishes
+  // the `userQuestions` namespace and registers the `userQuestions` Session
+  // projection every Client reads). Mounting a second one would double-register
+  // the namespace and duplicate the projection unit.
+  'userQuestions',
   'typert',
   'typertGateway',
   'agents',
@@ -146,6 +153,7 @@ function createInProcessCarrier(hostContext: Context): InProcessHostCarrier {
 export async function createRemoteHostRuntime(hostContext: Context): Promise<RemoteHostRuntime> {
   assertHostPrerequisites(hostContext)
   const jobControllerBefore = hostContext.reflect.get('jobController') as { typertRemote?: unknown }
+  const userQuestionsBefore = hostContext.reflect.get('userQuestions') as { typertRemote?: unknown }
 
   const fibers: Fiber[] = []
   let carrier: InProcessHostCarrier | undefined
@@ -201,13 +209,6 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
     const settingsFiber = hostContext.plugin(SettingsController)
     fibers.push(settingsFiber)
     await settingsFiber
-    // 6b. The rc.2 user-questions service (M3-3B): its TypertRemoteService
-    //     binding publishes the `userQuestions` namespace over the gateway and
-    //     registers the `userQuestions` Session projection every Client reads.
-    //     `agents`/`sessionProjections` are asserted Host prerequisites above.
-    const userQuestionsFiber = hostContext.plugin(UserQuestionService)
-    fibers.push(userQuestionsFiber)
-    await userQuestionsFiber
     // 7. Forwarded-event source over the existing gateway.
     const remotesFiber = hostContext.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
     fibers.push(remotesFiber)
@@ -229,6 +230,18 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
       || jobControllerAfter.typertRemote !== jobControllerBefore.typertRemote
     ) {
       throw new Error('remote host runtime: the existing jobController service was replaced by the M3 composition')
+    }
+    // The user-questions service is REUSED, never re-mounted: its stable Typert
+    // binding must be the very same one the caller had before this composition
+    // (a second mount would replace the namespace owner and duplicate the
+    // projection unit).
+    const userQuestionsAfter = hostContext.reflect.get('userQuestions') as { typertRemote?: unknown } | undefined
+    if (
+      userQuestionsAfter === undefined
+      || userQuestionsAfter.typertRemote === undefined
+      || userQuestionsAfter.typertRemote !== userQuestionsBefore?.typertRemote
+    ) {
+      throw new Error('remote host runtime: the existing userQuestions service was replaced by the M3 composition')
     }
 
     // The carrier is part of construction: a failure here must unwind the

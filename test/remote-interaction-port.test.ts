@@ -70,7 +70,7 @@ function portWith(remote: FakeRemote, surfaces: {
       binding: () => surfaces.bindingPresent === false ? undefined : {
         session: {
           projections: {
-            faceOf: (key: string) => ({ getSnapshot: () => surfaces.projection?.('session-a', key) }),
+            faceOf: (key: string) => ({ getSnapshot: () => surfaces.projection?.('session-a', key), subscribe: () => () => {} }),
           },
         },
       },
@@ -212,7 +212,7 @@ test('questions.claimTimedWait drops a claim whose Connection generation was rep
   const port = new RemoteInteractionPort({
     sessions: {
       scopeOf: () => undefined,
-      binding: () => ({ session: { projections: { faceOf: () => ({ getSnapshot: () => undefined }) } } }),
+      binding: () => ({ session: { projections: { faceOf: () => ({ getSnapshot: () => undefined, subscribe: () => () => {} }) } } }),
     },
     remote: remote as never,
     connection: { generation: generation.source },
@@ -320,6 +320,7 @@ test('snapshot presents no answerable surface while the Connection has no genera
               getSnapshot: () => key === 'userQuestions'
                 ? { active: [{ callId: 'call-continued', questions: [{ id: 'q1', question: 'A' }], state: 'continued' }], settled: [] }
                 : { 'next-step': [], 'next-turn': [] },
+              subscribe: () => () => {},
             }),
           },
         },
@@ -386,4 +387,80 @@ test('dispose releases every forwarded-event subscription exactly once', () => {
   port.dispose()
   assert.deepEqual(offs.sort(), ['approval/request', 'user-questions/request'],
     'each subscription is released exactly once')
+})
+
+test('claimTimedWait drops the claim when the caller aborts between frame and return', async () => {
+  // The released Client re-checks its claim signal after the opening frame; a
+  // caller abort landing in that window must not hand back a dead claim.
+  let disposed = 0
+  const controller = new AbortController()
+  const remote = fakeRemote({
+    attachWait: () => ({
+      dispose: () => { disposed += 1 },
+      async *[Symbol.asyncIterator]() {
+        // The abort is queued BEFORE the frame is delivered, so it lands in the
+        // window between the frame resolving and the adapter returning the
+        // claim (the microtask precedes the adapter's await continuation).
+        queueMicrotask(() => { controller.abort() })
+        yield { remainingMs: 5_000 }
+        await new Promise(() => {})
+      },
+    }) as never,
+  })
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  const port = new RemoteInteractionPort({
+    sessions: { scopeOf: () => undefined, binding: () => undefined },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  const claim = await port.questions.claimTimedWait('session-a', 'call-1', controller.signal)
+  assert.equal(claim, undefined, 'a claim whose caller already aborted is not handed back')
+  assert.equal(disposed, 1, 'the dead stream is disposed')
+})
+
+test('subscribe observes BOTH durable projects and releases them exactly once (Remote)', () => {
+  // The Client projection faces are the session-scoped observables; the
+  // adapter registers one per projected unit and hands back a disposer that
+  // releases them exactly once (a reconnect keeps the face identity, so the
+  // registration stays valid and the re-hydrated value notifies through it).
+  const registered: string[] = []
+  const released: string[] = []
+  const remote = fakeRemote()
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  const port = new RemoteInteractionPort({
+    sessions: {
+      scopeOf: () => undefined,
+      binding: () => ({
+        session: {
+          projections: {
+            faceOf: (key: string) => ({
+              getSnapshot: () => key === 'userQuestions' ? { active: [], settled: [] } : { 'next-step': [], 'next-turn': [] },
+              subscribe: (listener: () => void) => {
+                registered.push(key)
+                listener // the face notifies with no arguments
+                return () => { released.push(key) }
+              },
+            }),
+          },
+        },
+      }),
+    },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  let notified = 0
+  const off = port.questions.subscribe('session-a', () => { notified += 1 })
+  assert.ok(off !== undefined)
+  assert.deepEqual(registered.sort(), ['inbox', 'userQuestions'], 'both durable projects are observed')
+  off()
+  assert.deepEqual(released.sort(), ['inbox', 'userQuestions'], 'each registration is released once')
+  assert.equal(notified, 0)
+
+  // No binding (detached connection) reports that it cannot observe.
+  const detached = new RemoteInteractionPort({
+    sessions: { scopeOf: () => undefined, binding: () => undefined },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  assert.equal(detached.questions.subscribe('session-a', () => {}), undefined)
 })

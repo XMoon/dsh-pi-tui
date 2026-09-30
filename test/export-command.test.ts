@@ -84,6 +84,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     interaction: {
       questions: {
         onRequest: () => true,
+        subscribe: () => undefined,
         snapshot: () => undefined,
         claimTimedWait: async () => undefined,
         answerContinued: async () => 'not-continued' as const,
@@ -155,6 +156,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         cancel: async () => {},
       },
       permissions: {
+        approvalOverrideAvailable: () => true,
         presetNames: () => [],
         defaultPreset: () => undefined,
         setDefaultPreset: async () => {},

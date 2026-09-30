@@ -37,6 +37,7 @@ import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
@@ -130,6 +131,11 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     ctx.provide('fileReferences', {
       list: async () => [{ path: 'anchor/notes.md', kind: 'file' as const }],
     } as never)
+    // The rc.2 user-questions service is a HOST PREREQUISITE of the M3 Remote
+    // composition (the production Host gets it from `@deepseek-ai/dsh-base`),
+    // so the fixture mounts the official service itself — the composition must
+    // REUSE it, never mount a second one.
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
     await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3-3A smoke preset', plugins: [] })
@@ -479,4 +485,29 @@ test('P11: the rc.2 Question wire surfaces (live request → claim → timeout �
     semantics.dispose()
     await runtime.dispose()
   }
+})
+
+test('P12: the M3 composition REUSES the existing userQuestions service (never a second mount)', async (t) => {
+  // `@deepseek-ai/dsh-base` already mounts `id: user-questions ->
+  // @deepseek-ai/dsh-user-questions`, and this bundle layers on top of that
+  // base without disabling it. The M3 additive closure therefore must not
+  // mount a second service: the Host's stable Typert binding has to be the
+  // very same one after the composition (docs/m3-entry-contract.md §2.4.1).
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  const before = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote
+  assert.ok(before !== undefined, 'the fixture Host already provides the rc.2 userQuestions service')
+
+  const { runtime, semantics } = await compose(host)
+  try {
+    const after = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote
+    assert.equal(after, before, 'the composition reuses the existing service binding')
+    // The Remote Client still reaches the namespace that binding publishes.
+    assert.equal(typeof semantics.interaction.questions.onRequest, 'function')
+  } finally {
+    semantics.dispose()
+    await runtime.dispose()
+  }
+  const afterDispose = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote
+  assert.equal(afterDispose, before, 'disposal leaves the Host service untouched')
 })

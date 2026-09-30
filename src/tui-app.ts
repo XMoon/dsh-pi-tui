@@ -19571,7 +19571,12 @@ export class TuiApp {
   private questionAnswerText(message: { readonly callId?: string; readonly result: string }): string {
     if (message.callId === undefined || this.settledQuestionAnswers === undefined) return message.result
     const answers = this.settledQuestionAnswers(message.callId)
-    if (answers === undefined || answers.length === 0) return message.result
+    // ONLY an absent settled entry falls back to the call's own recorded
+    // result. An EMPTY answer batch is a real rc.2 outcome (a late reply
+    // settled the question without a readable batch), so the settled entry is
+    // the authoritative fact and the card must not keep showing the timeout /
+    // pending payload it recorded earlier.
+    if (answers === undefined) return message.result
     return JSON.stringify({ answers })
   }
 

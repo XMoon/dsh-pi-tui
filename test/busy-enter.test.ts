@@ -192,6 +192,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     interaction: {
       questions: {
         onRequest: () => true,
+        subscribe: () => undefined,
         snapshot: () => undefined,
         claimTimedWait: async () => undefined,
         answerContinued: async () => 'not-continued' as const,

@@ -109,6 +109,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     interaction: {
       questions: {
         onRequest: () => true,
+        subscribe: () => undefined,
         snapshot: () => undefined,
         claimTimedWait: async () => undefined,
         answerContinued: async () => 'not-continued' as const,

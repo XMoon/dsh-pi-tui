@@ -2098,7 +2098,12 @@ export function registerTuiCommands(
       let settingsOpen = true
       const closeSettings = app.openSettings(
         [
-          ...liveScope === undefined ? [] : [{
+          // The independent session approval override exists only where the
+          // backend can actually read AND write it. On a backend without the
+          // capability the row is OMITTED: rendering the consumer's own `ask`
+          // default would present an unavailable policy as a real one
+          // (§9.2/§10).
+          ...liveScope === undefined || !runner.config.permissions.approvalOverrideAvailable() ? [] : [{
             id: 'approval',
             label: 'Approval policy (this session)',
             description: 'How tool approvals are handled in this session',

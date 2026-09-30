@@ -62,6 +62,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const interaction = {
     questions: {
       onRequest: () => true,
+      subscribe: () => undefined,
       snapshot: () => undefined,
       claimTimedWait: async () => undefined,
       answerContinued: async () => 'not-continued' as const,
@@ -135,6 +136,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       cancel: async () => {},
     },
     permissions: {
+      approvalOverrideAvailable: () => true,
       presetNames: () => [],
       defaultPreset: () => undefined,
       setDefaultPreset: async () => {},

@@ -91,6 +91,10 @@ export interface RemoteInteractionEventsSource {
 /** One Client projection face (value deliberately `unknown`). */
 export interface RemoteQuestionProjectionFace {
   getSnapshot(): unknown
+  /** Snapshot invalidation subscription — the Client's OWN inbox observer uses
+   *  exactly this seam, so a face without it is not a face this adapter can
+   *  treat as observable. */
+  subscribe(listener: () => void): () => void
 }
 
 /** The official Client Session binding subset consumed here. */
@@ -238,6 +242,29 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     }
   }
 
+  subscribe(sessionId: string, listener: () => void): (() => void) | undefined {
+    // The Client projection faces are the session-scoped observables and keep
+    // their identity across a binding/generation replacement, so ONE
+    // registration per unit stays valid across a reconnect; the re-hydrated
+    // value notifies through it and the consumer re-reads the (generation
+    // fenced) snapshot.
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    const owned: Array<() => void> = []
+    try {
+      for (const key of [USER_QUESTIONS_PROJECTION_KEY, INBOX_PROJECTION_KEY]) {
+        owned.push(binding.session.projections.faceOf(key).subscribe(listener))
+      }
+    } catch (error) {
+      // A face that cannot be observed must not leak the first registration.
+      for (const off of owned.splice(0)) off()
+      throw error
+    }
+    return () => {
+      for (const off of owned.splice(0)) off()
+    }
+  }
+
   async claimTimedWait(
     sessionId: string,
     callId: string,
@@ -278,6 +305,14 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     // continued, never timed — including a caller abort). Never a fabricated
     // remaining duration.
     if (opening.done === true) {
+      signal?.removeEventListener('abort', onCallerAbort)
+      handle.dispose()
+      return undefined
+    }
+    // The caller may have aborted between the opening frame resolving and this
+    // return (the released Client checks its claim signal at exactly this
+    // point): handing back such a claim would be a claim nobody owns.
+    if (callerAborted() || lifetime.signal.aborted) {
       signal?.removeEventListener('abort', onCallerAbort)
       handle.dispose()
       return undefined

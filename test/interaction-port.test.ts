@@ -241,3 +241,55 @@ test('setApprovalPolicy reports unavailable when the service or the session is a
   const p2 = port({})
   assert.equal(p2.setApprovalPolicy('session-a', 'never'), false, 'no approval service')
 })
+
+test('questions.claimTimedWait drops the claim when the caller aborts between frame and return (Direct)', async () => {
+  // Same window as the Remote adapter: the caller signal can abort after the
+  // opening frame resolves but before the claim is handed back.
+  const controller = new AbortController()
+  const streams = {
+    attachWait: (_agent: unknown, _callId: string, signal: AbortSignal) => {
+      return (async function* () {
+        queueMicrotask(() => { controller.abort() })
+        yield { remainingMs: 7_000 }
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      })()
+    },
+  }
+  const p = port({ userQuestions: streams }, () => ({ session: { id: 'session-a' } }))
+  const claim = await p.questions.claimTimedWait('session-a', 'call-1', controller.signal)
+  assert.equal(claim, undefined, 'a claim whose caller already aborted is not handed back')
+})
+
+test('questions.subscribe observes only the owning session and the two projected units (Direct)', () => {
+  // The Host registry change feed fires once per CHANGED unit per committed
+  // event; the adapter must filter both the session and the unit, and hand back
+  // the registry's own disposer.
+  const seen: Array<{ session: unknown; key: string }> = []
+  let disposed = 0
+  const listeners: Array<(session: unknown, key: string, value: unknown, seq: number) => void> = []
+  const projections = {
+    stateOf: () => undefined,
+    onChanged: (listener: (session: unknown, key: string, value: unknown, seq: number) => void) => {
+      listeners.push(listener)
+      return () => { disposed += 1 }
+    },
+  }
+  const p = port({ userQuestions: {}, sessionProjections: projections }, () => ({ session: { id: 'session-a' } }))
+  const off = p.questions.subscribe('session-a', () => { seen.push({ session: 'notified', key: 'listener' }) })
+  assert.ok(off !== undefined)
+
+  for (const listener of listeners) {
+    listener({ id: 'session-a' }, 'todos', undefined, 1)          // other unit
+    listener({ id: 'session-b' }, 'userQuestions', undefined, 2)  // other session
+    listener({ id: 'session-a' }, 'inbox', undefined, 3)          // ours
+  }
+  assert.deepEqual(seen, [{ session: 'notified', key: 'listener' }], 'exactly the owning session + projected unit notifies')
+  off()
+  assert.equal(disposed, 1, 'the registry disposer is handed back and called once')
+
+  // No registry (capability absence) reports that it cannot observe.
+  const absent = port({ userQuestions: {} }, () => ({ session: { id: 'session-a' } }))
+  assert.equal(absent.questions.subscribe('session-a', () => {}), undefined)
+})

@@ -628,3 +628,30 @@ test('M3-3B a timed-out question card renders the authoritative late answer from
   assert.ok(!enriched.vt.getViewport().join('\n').includes('1/1 answered'),
     'without the projection the timed-out payload is not presented as an answer')
 })
+
+test('M3-3B an EMPTY settled batch is authoritative and replaces the recorded timeout', async () => {
+  // rc.2 allows a settled entry whose answers batch is empty (a late reply
+  // settled the question without a readable batch). The settled entry is the
+  // authority: falling back to the call's own result would keep presenting the
+  // timeout/pending payload as the outcome.
+  const card: TranscriptMessage = {
+    kind: 'tool', turn: TURN, callId: 'call-empty', name: 'ask_user_question',
+    args: JSON.stringify({ questions: [{ id: 'q0', question: 'Use A or B?' }] }),
+    result: JSON.stringify({ pending: true, callId: 'call-empty' }), status: 'ok',
+  }
+  const { vt, app } = startApp('full')
+  app.setSettledQuestionAnswersLookup(callId => callId === 'call-empty' ? [] : undefined)
+  app.setTranscript([card], new Map())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('pending'), `the recorded timeout is not the outcome any more:\n${view}`)
+  assert.ok(view.includes('0/0 answered'), `the settled entry renders its (empty) authoritative batch:\n${view}`)
+
+  // With NO settled entry the card still shows its own recorded result — the
+  // enrichment never invents a settled state.
+  app.setSettledQuestionAnswersLookup(undefined)
+  app.setTranscript([{ ...card }], new Map())
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('0/0 answered'),
+    'no settled entry means no settled rendering')
+})

@@ -886,6 +886,11 @@ export class DirectPermissionConfig implements PermissionConfig {
     ])
   }
 
+  approvalOverrideAvailable(): boolean {
+    // Direct reads and writes the official session approval policy in-process.
+    return true
+  }
+
   approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined {
     const approval = this.ctx.get('approval') as ApprovalServiceLike | undefined
     if (approval === undefined) return undefined

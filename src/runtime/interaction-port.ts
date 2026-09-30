@@ -168,6 +168,22 @@ export interface QuestionInteractionPort {
    */
   snapshot(sessionId: string): QuestionSurfaceSnapshot | undefined
   /**
+   * Observe the DURABLE Question surface of one Session: `listener` fires
+   * whenever the authoritative `userQuestions` project, the Inbox queued-reply
+   * fact, or the owning Session binding/generation changes, and the consumer
+   * re-reads {@link snapshot} to reconcile. `undefined` = this backend cannot
+   * observe it (no questions capability / no projection seam), in which case
+   * the consumer keeps its event-driven reads.
+   *
+   * This is what makes the durable lifecycle REACTIVE rather than
+   * event-opportunistic: a late reply queued by another client, a question
+   * settled elsewhere, or a reconnect that re-hydrates the projections all
+   * reach the surface without waiting for an unrelated Session event. The
+   * returned disposer is owned by the caller (the surface releases it on
+   * teardown / session switch).
+   */
+  subscribe(sessionId: string, listener: () => void): (() => void) | undefined
+  /**
    * Claim the foreground timed wait for one question call. Resolves the
    * claim (whose first frame carries the Host-computed `remainingMs`),
    * `undefined` when no live timed wait exists for the call (already

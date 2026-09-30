@@ -138,7 +138,7 @@ assembly that advertises exactly the capabilities it serves
 | `authorization` | `available`, `listTargets`, `begin`, `onEvent`, `respond`, `cancel` | **not found** — `dsh-authorization` publishes no `./client`/`./remote`/`./typert`; no `authorization` namespace and no authorization event in the forwarded allowlist | INTENTIONAL_UNSUPPORTED_IN_M3 — provider sign-in flows (`/login` device/OAuth path) are unavailable on the experimental backend; the API-key path still works through `credentials/set`. Owner M3-3B, fail closed with an explicit notice. Closest public relief: `account/startSignIn\|cancelSignIn` (a different, DeepSeek-account semantic) |
 | `permissions` | `presetNames`, `defaultPreset`, `setDefaultPreset`, `applyPermissionPreset`, `approvalOverrideOf` | `permissionPresets/catalog()` (`dsh-permission-presets/lib/typert.remote-client.d.ts:13`) supplies selectable/default preset metadata; the public per-session `permissions` projection exposes **only** `PermissionSelection.currentValue` (`dsh-permission-presets/lib/types/types.d.ts:35-57`); preset apply = `commands/execute` of the official `/permission <preset>` line; default = settings. rc.2 exposes no public Client read for the independent session `approval/policy` override | NEEDS_ADAPTER for preset catalog/default/apply. `approvalOverrideOf(sessionId)` = INTENTIONAL_UNSUPPORTED_IN_M3 on Remote and returns `undefined` only as “unavailable”, never as evidence that the effective policy is `ask`; Remote UI MUST hide/disable the session approval row instead of applying `?? 'ask'` |
 | `presetDefault` | `available`, `get`, `set` | `agentPresets/list` default + `settings/*` on `agent-preset-registry.selectedDefault` | NEEDS_ADAPTER |
-| `subagentModelSelection` | `available`, `get`, `set` | `settings/describe` + `settings/update\|replace` on the official `subagent-model-selection` section | NEEDS_ADAPTER |
+| `subagentModelSelection` | `available`, `get`, `set` | `settings/describe` + `settings/update\|replace` on the exact official namespace `subagent-model-selection-settings` (the `subagent-model-selection` service owns it Host-side) | NEEDS_ADAPTER |
 
 ### 2.4 Official Host + Client composition closure
 
@@ -180,7 +180,14 @@ not mount a second job controller. The additive closure is:
 
 `@deepseek-ai/dsh-api-job-controller` is part of the required Host capability
 set but is **reused** from the already-mounted TUI row (`jobController`); the
-M3 owner asserts it exists and never duplicates it.
+M3 owner asserts it exists and never duplicates it. The same rule applies to
+the rc.2 user-questions service: `@deepseek-ai/dsh-base` already mounts
+`id: user-questions -> @deepseek-ai/dsh-user-questions`, and the pi-tui bundle
+layers on that base without disabling it, so the M3 composition **reuses**
+`userQuestions` (asserted as a prerequisite, with the stable Typert binding
+identity verified before/after) instead of adding a second row. A second mount
+would replace the namespace owner and duplicate the `userQuestions` Session
+projection unit.
 
 This table is dependency-closed: `session-controller` is not allowed to be
 mounted with a test-only `fileUploads` stand-in, and the archive adapter is not
@@ -976,7 +983,8 @@ Each stage declares its L1–L6 test layer
 
 - **Files/owners**: new `src/runtime/remote/config-remote.ts` (generation-aware
   serialized settings mirror, footer trust/custom items, providers,
-  credentials, permissions, preset default, subagent-model-selection), new
+  credentials, permissions, preset default, the exact
+  `subagent-model-selection-settings` namespace), new
   `src/runtime/remote/interaction-remote.ts` (the forwarded approval waterfall
   plus the rc.2 Question contract: `userQuestions.attachWait` timed claim,
   `userQuestions.answer` late answer, and the `userQuestions`/`inbox`
