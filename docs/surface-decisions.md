@@ -1293,7 +1293,30 @@ fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
 
 Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
 Task Center in Tracked scope. Both surfaces consume the same durable preorder and
-runtime projection. Scope, type, search, selection, and disclosure are
+runtime projection.
+
+**Attention dataset (M3-3B).** Task Center is current actionable state, not
+execution history, and different sources own their own retention:
+
+```text
+Work dataset:       the shared Job/Subagent catalog + runtime projection
+Attention dataset:  surface-composed current human interactions
+                    (M3-3B starts with the continued Question)
+Quick:              hidden actionable attention + active work
+Full:               every current actionable attention row + tracked work
+```
+
+The Question controller owns the authority interpretation and exposes a
+detached presentation model (`QuestionAttentionRow`); the pure
+`task-center-attention.ts` maps it onto panel rows (stable
+`question:<sessionId>:<callId>` identity, `Needs attention` group, `?` glyph,
+`awaiting answer` / `answering`), and the surface composes attention ABOVE the
+work rows before the browser's first frame. Question rows are NOT work rows:
+they carry no `startedAt`, never join the active-work count, never inherit stop
+semantics, and the panel includes them by an explicit rule so a running Job can
+never hide a pending Question. `Enter` on such a row reopens the controller
+entry (closing the browser and returning the seat); a row that went stale
+between rendering and selection fails closed and keeps the browser usable. Scope, type, search, selection, and disclosure are
 presentation state, so promoting Quick to Full never reorders or deduplicates
 rows and Esc can restore the prior context. Their keyboard ownership is
 deliberately asymmetric: Quick is navigation-only (arrows, `←`/`→` tree,
@@ -1549,22 +1572,50 @@ Decisions (all terminal-native; none of them copies a Web button):
    local editing while the claim remains held; cursor moves, focus changes and
    other read-only operations never freeze it. No synthetic Host timer write is
    made. Focus/blur never releases the claim; teardown/disconnect does.
-4. **Reachability is projection-driven.** After a timeout (and on any activity
-   of the current Session) the controller re-derives answerability from the
-   `userQuestions` projection: a `continued` call with no durably queued reply
-   is offered again as the SAME editable `QuestionFlow`. Nothing is
-   reconstructed from a local timer, an old transcript card or a local store.
-5. **A queued late reply withdraws the editable surface.** While the Inbox
-   holds a `user-question-reply` for the call, the controller presents no
+4. **Reachability is projection-driven and REACTIVE.** The port exposes
+   `snapshot(sessionId)` plus `subscribe(sessionId, listener)`: Direct observes
+   the Host projection registry's change feed, Remote observes BOTH Client
+   projection faces (`userQuestions` + `inbox`) AND the Connection generation
+   (a disconnect notifies even though the Client only clears its stores when a
+   NEW generation connects; a generation change re-arms the faces against the
+   current binding). The controller keeps exactly one registration for the
+   session it presents and re-derives answerability from authority — never from
+   a local timer, an old transcript card or a local store.
+5. **A queued late reply removes the interaction.** While the Inbox holds a
+   `user-question-reply` for the call, the controller keeps no entry and no
    editable submission; `REPLY_QUEUED` keeps the intent as a read-only notice.
-   Discarding the queued reply (Host-side) makes the call offerable again.
+   Discarding the queued reply (Host-side) makes the call answerable again.
 6. **Final answers come from the projection.** A settled card renders the
    authoritative `userQuestions.settled` batch — a timed-out call's own tool
    result records the timeout, not the answer — as a presentation enrichment
-   over the unchanged durable transcript event.
-7. **Question still owns the response seat.** The modal keeps its seat and
-   read-only context inspection stays available; `Esc` hides only the
-   presentation, never the Host question.
+   over the unchanged durable transcript event. An EMPTY settled batch is a
+   real authoritative outcome (a late reply settled the call with no readable
+   batch): only an ABSENT settled entry falls back to the call's own result.
+7. **The Question outlives its editor seat (park / reopen).** Answerability and
+   seat ownership are separate facts, exactly as in the released Web client:
+   the controller keeps one `ContinuedQuestionEntry` per `(sessionId, callId)`
+   with local presentation state `visible | parked`, and an entry outlives the
+   mounted `QuestionFlow`.
+   - `Esc` on a continued form PARKS it: the Host question is untouched, no
+     `ASK_CANCELLED` is sent, the editor seat returns, and the user's answers /
+     free text / current question are preserved.
+   - **A parked Question never auto-reopens.** Projection invalidation, session
+     events, assistant chunks, job updates, agent status, Task Center refreshes
+     and repaints may update the row or remove the interaction, but only an
+     explicit human reopen turns it back into a panel. Cold recovery (a
+     reconnect, a session switch, or the initial attach discovering a
+     still-continued call) creates the entry PARKED; only a live foreground
+     interaction that locally transitions into `continued` keeps its form
+     visible, because the user was already handling it.
+   - The keyboard reopen path is the Task Center (`↓` Quick / `/tasks` Full):
+     a parked actionable Question appears as a `Needs attention` row and
+     `Enter` reopens the SAME entry (with its preserved draft). No `/answer`
+     command and no dedicated global Question shortcut exist.
+   - A queued reply, a settlement, a vanished call, or an unreadable authority
+     removes the entry and its rows immediately; the transcript remains the
+     durable historical/context anchor.
+   - The mounted form owns an abort controller: authority withdrawal and user
+     parking are different outcomes, and neither is reported as the other.
 8. **The claim outlives nothing it shouldn't.** The claim attempt receives the
    caller's lifetime from the first moment, so a surface teardown (or a
    countdown end) during the opening frame releases the Host wait instead of

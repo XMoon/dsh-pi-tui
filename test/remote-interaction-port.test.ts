@@ -451,9 +451,9 @@ test('subscribe observes BOTH durable projects and releases them exactly once (R
   let notified = 0
   const off = port.questions.subscribe('session-a', () => { notified += 1 })
   assert.ok(off !== undefined)
-  assert.deepEqual(registered.sort(), ['inbox', 'userQuestions'], 'both durable projects are observed')
+  assert.deepEqual([...registered].sort(), ['inbox', 'userQuestions'], 'both durable projects are observed')
   off()
-  assert.deepEqual(released.sort(), ['inbox', 'userQuestions'], 'each registration is released once')
+  assert.deepEqual([...released].sort(), ['inbox', 'userQuestions'], 'each registration is released once')
   assert.equal(notified, 0)
 
   // No binding (detached connection) reports that it cannot observe.
@@ -463,4 +463,97 @@ test('subscribe observes BOTH durable projects and releases them exactly once (R
     connection: { generation: generation.source },
   })
   assert.equal(detached.questions.subscribe('session-a', () => {}), undefined)
+})
+
+test('the subscription owns the CONNECTION generation, so a disconnect notifies', () => {
+  // Nothing in the Client notifies on DISCONNECT (its projection stores are
+  // cleared only when a NEW generation connects). A continued panel would
+  // therefore stay editable through a disconnect and only discover it on
+  // submit. Owning the generation registration is what turns the loss of
+  // authority into an immediate reconcile → snapshot() === undefined →
+  // withdraw.
+  const remote = fakeRemote()
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  const port = new RemoteInteractionPort({
+    sessions: {
+      scopeOf: () => undefined,
+      binding: () => ({
+        session: {
+          projections: {
+            faceOf: (key: string) => ({
+              getSnapshot: () => key === 'userQuestions' ? { active: [], settled: [] } : { 'next-step': [], 'next-turn': [] },
+              subscribe: () => () => {},
+            }),
+          },
+        },
+      }),
+    },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  const notifications: string[] = []
+  const off = port.questions.subscribe('session-a', () => {
+    notifications.push(generation.source.getSnapshot() === undefined ? 'disconnected' : 'connected')
+  })
+  assert.ok(off !== undefined)
+  assert.deepEqual(port.questions.snapshot('session-a')?.active, [], 'authority while connected')
+
+  generation.set(undefined)
+  assert.equal(port.questions.snapshot('session-a'), undefined, 'no generation means no authority to present')
+  generation.set({ id: 'gen-2' })
+  off()
+  generation.set(undefined)
+  assert.deepEqual(notifications, ['disconnected', 'connected'],
+    'the generation registration notifies on both edges and is released exactly once')
+})
+
+test('a generation change RE-ARMS the face subscriptions against the current binding', () => {
+  // A reconnect keeps the retained binding identity-stable, but a full retire +
+  // same-id rebuild produces a NEW session owner and therefore NEW faces: the
+  // old registrations would be attached to a dead store. Re-arming on every
+  // generation change is what covers that case.
+  const released: string[] = []
+  const armed: string[] = []
+  const remote = fakeRemote()
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  let bindingEpoch = 1
+  const port = new RemoteInteractionPort({
+    sessions: {
+      scopeOf: () => undefined,
+      binding: () => ({
+        session: {
+          projections: {
+            faceOf: (key: string) => ({
+              getSnapshot: () => key === 'userQuestions' ? { active: [], settled: [] } : { 'next-step': [], 'next-turn': [] },
+              subscribe: () => {
+                const id = `epoch${bindingEpoch}:${key}`
+                armed.push(id)
+                return () => { released.push(id) }
+              },
+            }),
+          },
+        },
+      }),
+    },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  let notifications = 0
+  const off = port.questions.subscribe('session-a', () => { notifications += 1 })
+  assert.ok(off !== undefined)
+  assert.deepEqual([...armed].sort(), ['epoch1:inbox', 'epoch1:userQuestions'])
+
+  // A same-id rebuild: new owner, new faces.
+  bindingEpoch = 2
+  generation.set({ id: 'gen-2' })
+  assert.equal(notifications, 1, 'the generation change notifies the consumer')
+  assert.deepEqual([...released].sort(), ['epoch1:inbox', 'epoch1:userQuestions'],
+    'the registrations of the retired owner are released')
+  assert.deepEqual([...armed].sort(), ['epoch1:inbox', 'epoch1:userQuestions', 'epoch2:inbox', 'epoch2:userQuestions'],
+    'the current binding is observed')
+
+  off()
+  assert.deepEqual([...released].sort(),
+    ['epoch1:inbox', 'epoch1:userQuestions', 'epoch2:inbox', 'epoch2:userQuestions'],
+    'disposal releases every registration exactly once')
 })

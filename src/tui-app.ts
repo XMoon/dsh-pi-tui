@@ -140,7 +140,7 @@ import { CompactTextPreview } from './compact-text-preview.ts'
 import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
-import { QuestionFlow } from './question.ts'
+import { QuestionFlow, type QuestionFlowDraft } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
@@ -2547,6 +2547,14 @@ export interface TuiQuestionStatus {
   text?: string
   /** Fired on the FIRST real answer mutation (selection / text / skip). */
   onAnswerMutation?: () => void
+  /**
+   * Fired on EVERY real answer mutation with the flow's current local
+   * progress, so an owner that parks the flow (M3-3B continued Question) can
+   * keep the user's answers, free text and current question across reopen.
+   */
+  onDraftChange?: (draft: QuestionFlowDraft) => void
+  /** Local progress to seed the flow with (reopening the SAME parked call). */
+  initialDraft?: QuestionFlowDraft
 }
 
 /** Live state of one user-questions flow (the QuestionFlow seat). */
@@ -19611,6 +19619,8 @@ export class TuiApp {
           (answers) => this.settleQuestions(state, answers),
           () => this.settleQuestions(state, undefined),
           status?.onAnswerMutation,
+          status?.onDraftChange,
+          status?.initialDraft,
         ),
         suspendedOverlays: new Set(),
         resolve,
@@ -19715,6 +19725,11 @@ export class TuiApp {
     if (this.activeQuestions !== state || state.settled === true) return
     this.keybindings.cancelLeader()
     state.settled = true
+    // M3-3B park/reopen: the owner receives the flow's FINAL local progress
+    // before the seat is torn down, so parking a continued Question keeps the
+    // user's answers, free text and current question exactly as they left them
+    // (a mutation-time notification alone would miss tab/page moves).
+    state.status?.onDraftChange?.(state.flow.draftSnapshot())
     this.clearFullscreenPointerGestures()
     if (state.onAbort !== undefined && state.signal !== undefined) {
       state.signal.removeEventListener('abort', state.onAbort)

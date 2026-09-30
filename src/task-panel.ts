@@ -119,6 +119,9 @@ function displayGroup(group: string | undefined, longLabels: boolean): string | 
 }
 
 function stateGlyph(item: TaskPanelItem): string {
+  // Human-required Question attention has its own glyph: it is not work, so
+  // neither the active dot nor the completed marker applies.
+  if (item.source === 'question') return '?'
   if (item.status === 'stopping') return '◐'
   if (isTaskItemFailure(item.status)) return '×'
   if (item.status === 'completed') return '○'

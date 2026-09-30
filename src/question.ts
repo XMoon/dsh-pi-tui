@@ -59,6 +59,23 @@ interface Draft {
   skipped: boolean
 }
 
+/**
+ * The serializable local progress of one QuestionFlow (M3-3B park/reopen,
+ * addendum §6): which question the user was on and every draft they had built.
+ * It is deliberately detached from the live flow — a parked continued Question
+ * is destroyed with its editor seat, so the controller owns the snapshot and
+ * seeds it back when the SAME `(sessionId, callId)` is reopened.
+ */
+export interface QuestionFlowDraft {
+  /** Current question index; `questions.length` is the review page. */
+  readonly tab: number
+  readonly answers: readonly {
+    readonly selected: readonly string[]
+    readonly custom: string
+    readonly skipped: boolean
+  }[]
+}
+
 /** The "type your own answer" row shown below options (pi isOther parity). */
 const OTHER_ROW = '\u0000other'
 /** The scroll-marker row's hit identity (mouse parity): the marker is a
@@ -379,18 +396,33 @@ export class QuestionFlow implements Component, Focusable {
    * changes and other read-only operations never fire it.
    */
   private readonly onAnswerMutation: (() => void) | undefined
+  private readonly onDraftChange: ((draft: QuestionFlowDraft) => void) | undefined
 
   constructor(
     questions: readonly QuestionFlowQuestion[],
     onDone: (answers: QuestionFlowAnswer[]) => void,
     onCancel: () => void,
     onAnswerMutation?: () => void,
+    onDraftChange?: (draft: QuestionFlowDraft) => void,
+    /** Local progress to restore (park/reopen of the SAME call). */
+    initialDraft?: QuestionFlowDraft,
   ) {
     this.questions = questions
     this.onDone = onDone
     this.onCancel = onCancel
     this.onAnswerMutation = onAnswerMutation
-    this.drafts = questions.map(() => ({ selected: new Set<string>(), custom: '', skipped: false }))
+    this.onDraftChange = onDraftChange
+    this.drafts = questions.map((_question, index) => {
+      const seed = initialDraft?.answers[index]
+      return {
+        selected: new Set(seed?.selected ?? []),
+        custom: seed?.custom ?? '',
+        skipped: seed?.skipped ?? false,
+      }
+    })
+    if (initialDraft !== undefined) {
+      this.tab = Math.min(Math.max(0, initialDraft.tab), questions.length)
+    }
     // The free-text input keeps the last answer for re-entry.
     this.otherInput.onSubmit = (value) => this.commitOther(value)
     // The Input's generic cancel (Esc/Ctrl+C) ALWAYS leaves the text
@@ -437,9 +469,24 @@ export class QuestionFlow implements Component, Focusable {
     this.status = status
   }
 
-  /** Fire the real-answer-mutation hook (timed-lifecycle countdown freeze). */
+  /** Fire the real-answer-mutation hooks: the timed-lifecycle countdown freeze
+   *  and the controller's draft keeper (park preserves in-progress answers). */
   private notifyMutation(): void {
     this.onAnswerMutation?.()
+    this.onDraftChange?.(this.draftSnapshot())
+  }
+
+  /** Snapshot the local progress for a park (addendum §6). Kept separate from
+   *  the internal per-question `draft()` accessor. */
+  draftSnapshot(): QuestionFlowDraft {
+    return {
+      tab: this.tab,
+      answers: this.drafts.map(entry => ({
+        selected: [...entry.selected],
+        custom: entry.custom,
+        skipped: entry.skipped,
+      })),
+    }
   }
 
   /** Whether the panel is expanded (the frame grows toward 80% of the

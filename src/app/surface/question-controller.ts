@@ -31,6 +31,7 @@
 
 import type { AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
+  PendingQuestionView,
   QuestionInteractionPort,
   QuestionRequestView,
   UserQuestionProvider,
@@ -40,6 +41,8 @@ import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { Diag } from '../../diag.ts'
 import { runDetached } from '../../detached.ts'
 import type { TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
+import type { QuestionFlowDraft } from '../../question.ts'
+import type { QuestionAttentionRow } from '../../task-center-attention.ts'
 
 /** Client rejection codes the forwarded waterfall preserves across the wire. */
 export const ASK_ABORTED = 'ASK_ABORTED'
@@ -58,6 +61,30 @@ function questionRejection(code: string): Error {
   error.name = 'UserQuestionError'
   error.code = code
   return error
+}
+
+/**
+ * Local presentation state of one answerable continued Question. `visible`
+ * owns the editor seat; `parked` does not, while the HOST question stays
+ * exactly as answerable as before (addendum §4.1/§8.1).
+ */
+type ContinuedPresentationState = 'visible' | 'parked'
+
+/** One continued Question the surface knows about, keyed by (sessionId, callId). */
+interface ContinuedEntry {
+  readonly sessionId: string
+  readonly callId: string
+  /** The authoritative question payload (updated when authority replaces it). */
+  questions: readonly AskUserQuestionItem[]
+  state: ContinuedPresentationState
+  /** Owned lifetime of the MOUNTED form; `undefined` while parked. */
+  mounted: AbortController | undefined
+  /**
+   * The user's local progress, kept across park/reopen (§6). The flow reports
+   * it on every mutation and at teardown, so parking never loses answers, free
+   * text or the current question.
+   */
+  draft: QuestionFlowDraft | undefined
 }
 
 /** The controller's surface-side hooks (all injected; no Host access). */
@@ -126,13 +153,15 @@ export class QuestionSurfaceController {
   private readonly tickMs: number
   private readonly continuedDeadlineMs: number
   /**
-   * The OWNED abort controller of each presented late-answer panel, keyed by
-   * (sessionId, callId). Ownership is what makes the durable lifecycle
-   * reactive: authority can WITHDRAW a mounted form (a reply queued by another
-   * client, the question settled elsewhere, the session/binding replaced)
-   * instead of leaving it editable forever.
+   * Every continued Question this surface knows about, keyed by
+   * (sessionId, callId). The entry — not the mounted form — is the unit of
+   * state: it outlives its editor seat so parking preserves the user's work,
+   * and it disappears the moment authority says the call is not answerable
+   * (queued reply, settled, vanished).
    */
-  private readonly presentedPanels = new Map<string, AbortController>()
+  private readonly entries = new Map<string, ContinuedEntry>()
+  /** Task Center attention observers (presentation-only invalidation). */
+  private readonly attentionListeners = new Set<() => void>()
   /** The port subscription observing the CURRENT session's durable surface. */
   private subscription: (() => void) | undefined
   private subscribedSessionId: string | undefined
@@ -183,8 +212,9 @@ export class QuestionSurfaceController {
     this.disposal?.()
     this.disposal = undefined
     this.releaseSubscription()
-    for (const controller of [...this.presentedPanels.values()]) controller.abort()
-    this.presentedPanels.clear()
+    for (const entry of this.entries.values()) entry.mounted?.abort()
+    this.entries.clear()
+    this.attentionListeners.clear()
     for (const cleanup of [...this.activeCleanups]) cleanup()
     this.activeCleanups.clear()
   }
@@ -214,80 +244,213 @@ export class QuestionSurfaceController {
   }
 
   /**
-   * Re-derive reachability from the authoritative projection: a `continued`
-   * call with no durably queued reply is offered again as an editable late
-   * answer. Nothing is reconstructed from a local timer or transcript.
+   * Re-derive the continued-Question MODEL from authority. Nothing is
+   * reconstructed from a local timer or the transcript:
+   *
+   * 1. entries whose call is no longer answerable are deleted (queued reply,
+   *    settled, vanished) — the notice names the fact the projection owns;
+   * 2. entries of another session are dropped, so a session switch never
+   *    leaks a form or a Task Center row into the new session;
+   * 3. missing entries are created **parked**: cold recovery must not steal
+   *    the editor seat merely because a pending Question was discovered
+   *    (addendum §13.2);
+   * 4. an existing entry keeps its presentation — authority NEVER turns
+   *    `parked` back into `visible` on its own (§4.2).
+   *
+   * Only a live foreground transition (see {@link awaitContinued}) or an
+   * explicit {@link reopen} may make a continued Question visible.
    */
   reconcile(): void {
     if (this.disposed) return
     this.ensureSubscription()
     const sessionId = this.deps.currentSessionId()
     if (sessionId === undefined) {
-      // No session owns a panel any more: a session switch must never leave
-      // the previous session's form mounted.
-      this.withdrawAll()
+      // No session owns the surface: whatever is mounted belongs to a session
+      // that is no longer shown.
+      this.parkMounted()
+      this.notifyAttention()
       return
+    }
+    let changed = false
+    // 2. another session's entries are not this surface's business any more.
+    for (const [key, entry] of [...this.entries]) {
+      if (entry.sessionId === sessionId) continue
+      this.removeEntry(key, undefined)
+      changed = true
     }
     const snapshot = this.deps.port.snapshot(sessionId)
     if (snapshot === undefined) {
       // No authority to present (capability absence, or a detached/replaced
-      // Connection). Fail closed: withdraw rather than keep an editable form
-      // whose submission cannot be checked against the Host truth.
-      this.withdrawAll()
+      // Connection): fail closed. A mounted form is withdrawn and parked —
+      // `attentionRows()` hides every row while authority stays unreadable.
+      this.parkMounted()
+      this.notifyAttention()
       return
     }
-    const answerable = new Set<string>()
+    const answerable = new Map<string, PendingQuestionView>()
     for (const call of snapshot.active) {
       if (call.state !== 'continued') continue
       if (snapshot.queuedReplyCallIds.has(call.callId)) continue
-      answerable.add(this.callKey(call.sessionId, call.callId))
+      answerable.set(this.callKey(call.sessionId, call.callId), call)
     }
-    // Authority WITHDRAWS before it offers: a panel for a call that is no
-    // longer answerable as continued (another client queued the reply, the
-    // question settled elsewhere, the call vanished with its session) must not
-    // stay editable. The notice names the fact the projection owns.
-    for (const key of [...this.presentedPanels.keys()]) {
+    // 1. authority ends the interaction.
+    for (const [key, entry] of [...this.entries]) {
       if (answerable.has(key)) continue
-      const callId = key.slice(key.indexOf('\u0000') + 1)
-      if (snapshot.queuedReplyCallIds.has(callId)) {
-        this.withdraw(key, 'A reply for this question is already queued; the local form was withdrawn.')
-      } else if (snapshot.settled.some(entry => entry.callId === callId)) {
-        this.withdraw(key, 'This question is no longer awaiting an answer.')
+      if (snapshot.queuedReplyCallIds.has(entry.callId)) {
+        this.removeEntry(key, 'A reply for this question is already queued; the local form was withdrawn.')
+      } else if (snapshot.settled.some(settled => settled.callId === entry.callId)) {
+        this.removeEntry(key, 'This question is no longer awaiting an answer.')
       } else {
-        this.withdraw(key, undefined)
+        this.removeEntry(key, undefined)
+      }
+      changed = true
+    }
+    // 3./4. create parked; update the payload; never auto-reveal.
+    for (const [key, call] of answerable) {
+      const entry = this.entries.get(key)
+      if (entry === undefined) {
+        this.entries.set(key, {
+          sessionId: call.sessionId,
+          callId: call.callId,
+          questions: call.questions,
+          state: 'parked',
+          mounted: undefined,
+          draft: undefined,
+        })
+        changed = true
+        continue
+      }
+      if (entry.questions !== call.questions) {
+        entry.questions = call.questions
+        changed = true
       }
     }
-    for (const call of snapshot.active) {
-      if (call.state !== 'continued') continue
-      if (snapshot.queuedReplyCallIds.has(call.callId)) continue
-      this.present(call.sessionId, call.callId, call.questions)
+    if (changed) this.notifyAttention()
+  }
+
+  /**
+   * The current session's answerable continued Questions, in authority order —
+   * the detached model Task Center composes from. Empty while authority is
+   * unreadable: the rows must never outlive the truth that produced them.
+   */
+  attentionRows(): readonly QuestionAttentionRow[] {
+    if (this.disposed) return []
+    const sessionId = this.deps.currentSessionId()
+    if (sessionId === undefined) return []
+    if (this.deps.port.snapshot(sessionId) === undefined) return []
+    const rows: QuestionAttentionRow[] = []
+    for (const entry of this.entries.values()) {
+      if (entry.sessionId !== sessionId) continue
+      rows.push({
+        sessionId: entry.sessionId,
+        callId: entry.callId,
+        questions: entry.questions,
+        presentation: entry.state,
+      })
+    }
+    return rows
+  }
+
+  /** Observe Question attention changes (presentation-only invalidation). */
+  subscribeAttention(listener: () => void): () => void {
+    this.attentionListeners.add(listener)
+    return () => { this.attentionListeners.delete(listener) }
+  }
+
+  private notifyAttention(): void {
+    for (const listener of [...this.attentionListeners]) listener()
+  }
+
+  /**
+   * Reopen the SAME logical continued Question (Task Center row -> Enter).
+   * Rechecks authority FIRST, so a row that went stale between rendering and
+   * selection fails closed without creating a panel, and never creates a
+   * second concurrent form for one call.
+   */
+  reopen(sessionId: string, callId: string): boolean {
+    if (this.disposed) return false
+    // The row must belong to the session this surface currently owns.
+    if (this.deps.currentSessionId() !== sessionId) return false
+    const snapshot = this.deps.port.snapshot(sessionId)
+    if (snapshot === undefined) return false
+    const call = snapshot.active.find(entry => entry.callId === callId && entry.state === 'continued')
+    if (call === undefined || snapshot.queuedReplyCallIds.has(callId)) return false
+    const key = this.callKey(sessionId, callId)
+    const entry = this.entries.get(key)
+    if (entry === undefined) return false
+    if (entry.state === 'visible') {
+      // Already on screen: reassert it (repaint) instead of mounting a second
+      // flow for one call.
+      this.deps.repaint()
+      return true
+    }
+    entry.questions = call.questions
+    entry.state = 'visible'
+    this.mountEntry(entry)
+    this.notifyAttention()
+    return true
+  }
+
+  /** Withdraw a mounted form without ending answerability: the entry, its
+   *  draft and the Host question all survive as `parked`. */
+  private parkMounted(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.state !== 'visible') continue
+      entry.state = 'parked'
+      const mounted = entry.mounted
+      entry.mounted = undefined
+      mounted?.abort()
     }
   }
 
-  /** Withdraw one presented panel, aborting the form it owns. */
-  private withdraw(key: string, notice: string | undefined): void {
-    const controller = this.presentedPanels.get(key)
-    if (controller === undefined) return
-    this.presentedPanels.delete(key)
-    controller.abort()
+  /** Park ONE entry after its form was torn down (Esc). */
+  private park(entry: ContinuedEntry): void {
+    if (!this.entries.has(this.callKey(entry.sessionId, entry.callId))) return
+    entry.state = 'parked'
+    this.notifyAttention()
+  }
+
+  /** Delete one entry (authority ended it, or the surface is done with it) and
+   *  abort the form it owned. */
+  private removeEntry(key: string, notice: string | undefined): void {
+    const entry = this.entries.get(key)
+    if (entry === undefined) return
+    this.entries.delete(key)
+    const mounted = entry.mounted
+    entry.mounted = undefined
+    mounted?.abort()
     if (notice !== undefined && !this.disposed) this.deps.notify(notice, 'info')
   }
 
-  /** Withdraw every presented panel (session switch / absent authority). */
-  private withdrawAll(): void {
-    for (const key of [...this.presentedPanels.keys()]) this.withdraw(key, undefined)
+  /** Ensure an entry exists (parked) for one answerable call. */
+  private ensureEntry(
+    sessionId: string,
+    callId: string,
+    questions: readonly AskUserQuestionItem[],
+  ): ContinuedEntry {
+    const key = this.callKey(sessionId, callId)
+    const existing = this.entries.get(key)
+    if (existing !== undefined) return existing
+    const entry: ContinuedEntry = {
+      sessionId,
+      callId,
+      questions,
+      state: 'parked',
+      mounted: undefined,
+      draft: undefined,
+    }
+    this.entries.set(key, entry)
+    return entry
   }
 
-  /** Mount the editable late answer for one continued call under an OWNED
-   *  abort controller, so authority can withdraw it later. */
-  private present(sessionId: string, callId: string, questions: readonly AskUserQuestionItem[]): void {
-    const key = this.callKey(sessionId, callId)
-    if (this.presentedPanels.has(key) || this.disposed) return
+  /** Mount the editable late answer for one entry under an OWNED abort
+   *  controller, so authority can withdraw it and the user can park it. */
+  private mountEntry(entry: ContinuedEntry): void {
     const controller = new AbortController()
-    this.presentedPanels.set(key, controller)
-    runDetached('question: continued late answer', () => this.presentContinued(sessionId, callId, questions, controller), {
+    entry.mounted = controller
+    runDetached('question: continued late answer', () => this.presentContinued(entry, controller), {
       diag: this.deps.diag,
-      sessionId: () => sessionId,
+      sessionId: () => entry.sessionId,
     })
   }
 
@@ -446,7 +609,20 @@ export class QuestionSurfaceController {
         if (call !== undefined) {
           if (call.state !== 'continued') return
           if (snapshot.queuedReplyCallIds.has(callId)) return
-          this.present(sessionId, callId, call.questions.length > 0 ? call.questions : questions)
+          // The live foreground interaction just transitioned into `continued`,
+          // so the user was ALREADY handling this call: the entry is offered
+          // visible instead of parked (addendum §4.1). A cold discovery, by
+          // contrast, parks (see reconcile).
+          const entry = this.ensureEntry(
+            sessionId,
+            callId,
+            call.questions.length > 0 ? call.questions : questions,
+          )
+          if (entry.state !== 'visible') {
+            entry.state = 'visible'
+            this.mountEntry(entry)
+            this.notifyAttention()
+          }
           return
         }
         // A settled call (or one that vanished) is no longer ours to offer.
@@ -456,22 +632,30 @@ export class QuestionSurfaceController {
     }
   }
 
-  /** Offer the editable late answer for one continued call under the OWNED
-   *  abort controller registered by {@link present}. */
-  private async presentContinued(
-    sessionId: string,
-    callId: string,
-    questions: readonly AskUserQuestionItem[],
-    controller: AbortController,
-  ): Promise<void> {
+  /**
+   * Offer the editable late answer for one entry under the OWNED abort
+   * controller created by {@link mountEntry}. The entry — not this promise —
+   * owns the state: a rejection caused by authority (or by the surface) leaves
+   * the entry alone, and a user park keeps it as `parked` with its draft.
+   */
+  private async presentContinued(entry: ContinuedEntry, controller: AbortController): Promise<void> {
+    const key = this.callKey(entry.sessionId, entry.callId)
     const status: TuiQuestionStatus = {
       text: 'The Agent continued. Your answer will arrive as a new turn; Esc to answer later.',
+      // Keep the user's progress live while they work, and restore it when this
+      // is a reopen of the SAME call (§6).
+      onDraftChange: (draft) => { entry.draft = draft },
+      ...entry.draft === undefined ? {} : { initialDraft: entry.draft },
     }
     try {
-      // The panel is withdrawn through THIS signal when authority changes, so
-      // the form can never outlive the fact that made it answerable.
-      const answers = await this.deps.ask(questions.map(toTuiQuestion), controller.signal, status)
-      const outcome = await this.deps.port.answerContinued(sessionId, callId, { answers: answers.map(toAnswerItem) })
+      // The panel is withdrawn through THIS signal when authority changes or
+      // the user parks, so the form never outlives its answerability.
+      const answers = await this.deps.ask(entry.questions.map(toTuiQuestion), controller.signal, status)
+      const outcome = await this.deps.port.answerContinued(
+        entry.sessionId,
+        entry.callId,
+        { answers: answers.map(toAnswerItem) },
+      )
       if (!this.disposed) {
         this.deps.notify(
           outcome === 'queued'
@@ -480,9 +664,12 @@ export class QuestionSurfaceController {
           'info',
         )
       }
+      // Submitted: the interaction is spent (authority will confirm).
+      this.removeEntry(key, undefined)
     } catch (error) {
-      // A WITHDRAWN panel is not an outcome: the reconciler already told the
-      // user why (queued elsewhere / settled), and the answer was never sent.
+      // A WITHDRAWN/parked form is not an outcome: the owner already decided
+      // (authority ended it, the surface is disposing, or the user parked it),
+      // and no answer was sent.
       if (controller.signal.aborted) return
       if (this.disposed) return
       // A superseded completion must not touch the CURRENT Question surface
@@ -491,30 +678,31 @@ export class QuestionSurfaceController {
       if (error instanceof SupersededReadError) return
       const code = error instanceof QuestionAnswerError ? error.code : undefined
       if (code === QUESTION_REPLY_QUEUED) {
-        // Preserve the intent: a reply is already durably queued, so the
-        // editable surface is withdrawn until that reply is admitted or
-        // discarded (the projection owns the fact).
-        this.deps.notify('A reply is already queued for this question; it will reach the Agent as a new turn.', 'info')
+        // Preserve the intent: a reply is already durably queued, so the entry
+        // is withdrawn until that reply is admitted or discarded (the
+        // projection owns the fact).
+        this.removeEntry(key, 'A reply is already queued for this question; it will reach the Agent as a new turn.')
       } else if (code === QUESTION_BAD_ANSWER) {
-        this.deps.notify(
-          'The Agent rejected that answer batch; the question is still awaiting an answer.',
-          'error',
-        )
+        // The batch was refused: the question is still answerable, so the entry
+        // parks (never a re-presentation loop) and Task Center can reopen it.
+        this.park(entry)
+        this.deps.notify('The Agent rejected that answer batch; the question is still awaiting an answer.', 'error')
       } else if (this.isUserDismissal(error)) {
-        // Dismissing a continued panel never cancels the question: the next
-        // session navigation / reconnect reconcile offers it again — and the
-        // projection subscription offers it again the moment authority changes.
-        this.deps.notify('A continued question is still awaiting your answer.', 'info')
+        // Esc PARKS a continued Question (addendum §4.1): the Host question is
+        // untouched, the draft survives, the editor seat returns, and Quick/Full
+        // Task Center own the reopen. It is never reported as a cancellation.
+        this.park(entry)
+        this.deps.notify('A continued question is parked — ↓ Quick Tasks or /tasks to answer it.', 'info')
       } else if (error instanceof QuestionAnswerError) {
+        this.park(entry)
         this.deps.notify(`could not deliver the answer: ${error.message}`, 'error')
+      } else {
+        // An ordinary local cancel parks silently; the question survives.
+        this.park(entry)
       }
-      // Any other rejection is the user's own cancel: stay silent.
     } finally {
-      // Only OUR registration is removed: a withdrawal may have installed a
-      // newer panel for the same call in the meantime.
-      if (this.presentedPanels.get(this.callKey(sessionId, callId)) === controller) {
-        this.presentedPanels.delete(this.callKey(sessionId, callId))
-      }
+      // Only OUR mount is cleared: authority or a reopen may have moved on.
+      if (entry.mounted === controller) entry.mounted = undefined
     }
   }
 

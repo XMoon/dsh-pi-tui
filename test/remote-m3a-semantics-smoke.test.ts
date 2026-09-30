@@ -511,3 +511,38 @@ test('P12: the M3 composition REUSES the existing userQuestions service (never a
   const afterDispose = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote
   assert.equal(afterDispose, before, 'disposal leaves the Host service untouched')
 })
+
+test('P13: the Remote question subscription follows a REAL reconnect', async (t) => {
+  // The contract the adapter claims must hold against the real Client, not only
+  // a fake: a generation change notifies the consumer (which re-reads the
+  // fenced snapshot), and authority is restored on the new generation.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+  const { runtime, semantics } = await compose(host)
+  const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+  await reference.ready
+
+  const first = runtime.client.connection.generation.getSnapshot()
+  assert.notEqual(first, undefined)
+  assert.notEqual(semantics.interaction.questions.snapshot(MAIN), undefined,
+    'authority to present while connected')
+
+  let notifications = 0
+  const off = semantics.interaction.questions.subscribe(MAIN, () => { notifications += 1 })
+  try {
+    assert.ok(off !== undefined, 'the real Client provides the observation seam')
+    runtime.client.connection.reconnect()
+    await waitFor('a different connection generation', () =>
+      runtime.client.connection.generation.getSnapshot()?.id !== first?.id)
+    await waitFor('the generation change to notify the question surface', () => notifications >= 1)
+    // Authority comes back on the new generation (the fenced read answers
+    // again), so the consumer's reconcile can re-derive reachability.
+    await waitFor('authority on the new generation', () =>
+      semantics.interaction.questions.snapshot(MAIN) !== undefined)
+  } finally {
+    off?.()
+    reference.release()
+    await runtime.dispose()
+  }
+})

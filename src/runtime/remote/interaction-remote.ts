@@ -243,25 +243,44 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
   }
 
   subscribe(sessionId: string, listener: () => void): (() => void) | undefined {
-    // The Client projection faces are the session-scoped observables and keep
-    // their identity across a binding/generation replacement, so ONE
-    // registration per unit stays valid across a reconnect; the re-hydrated
-    // value notifies through it and the consumer re-reads the (generation
-    // fenced) snapshot.
-    const binding = this.sessions.binding(sessionId)
-    if (binding === undefined) return undefined
-    const owned: Array<() => void> = []
-    try {
-      for (const key of [USER_QUESTIONS_PROJECTION_KEY, INBOX_PROJECTION_KEY]) {
-        owned.push(binding.session.projections.faceOf(key).subscribe(listener))
+    if (this.sessions.binding(sessionId) === undefined) return undefined
+    let faceOffs: Array<() => void> = []
+    /** (Re)register the two projected units against the CURRENT binding. */
+    const armFaces = (): void => {
+      for (const off of faceOffs.splice(0)) off()
+      const current = this.sessions.binding(sessionId)
+      if (current === undefined) return
+      try {
+        for (const key of [USER_QUESTIONS_PROJECTION_KEY, INBOX_PROJECTION_KEY]) {
+          faceOffs.push(current.session.projections.faceOf(key).subscribe(listener))
+        }
+      } catch (error) {
+        // A face that cannot be observed must not leak the earlier registration.
+        for (const off of faceOffs.splice(0)) off()
+        throw error
       }
-    } catch (error) {
-      // A face that cannot be observed must not leak the first registration.
-      for (const off of owned.splice(0)) off()
-      throw error
     }
+    armFaces()
+    // The CONNECTION generation is part of the observed surface, not just a
+    // fence on the read. Two reasons it must be owned:
+    //  1. Nothing in the Client notifies on DISCONNECT (its projection stores
+    //     are cleared when a NEW generation connects), so without this a
+    //     continued panel would stay editable through a disconnect and only
+    //     discover it on submit (SupersededReadError → silently gone). The
+    //     consumer's reconcile re-reads `snapshot()`, which answers `undefined`
+    //     with no generation and therefore withdraws.
+    //  2. A reconnect keeps the retained binding identity-stable (asserted by
+    //     the official client test), but a full retire + same-id rebuild
+    //     produces a NEW session owner and therefore NEW faces — the previous
+    //     registrations would then be attached to a dead store. Re-arming on
+    //     every generation change covers both cases.
+    const generationOff = this.generation.subscribe(() => {
+      armFaces()
+      listener()
+    })
     return () => {
-      for (const off of owned.splice(0)) off()
+      generationOff()
+      for (const off of faceOffs.splice(0)) off()
     }
   }
 

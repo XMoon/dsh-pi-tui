@@ -2202,3 +2202,49 @@ test('read-only Input operations never clear the skipped state', () => {
   view = render(g, 100).join('\n')
   assert.ok(view.includes('(skipped)'), `Ctrl+C without typing must keep the skipped mark:\n${view}`)
 })
+
+test('M3-3B draftSnapshot/initialDraft preserve progress across a park', () => {
+  // The park/reopen contract keeps the user's work: a controller snapshots the
+  // flow at teardown and seeds the SAME call's new flow from it.
+  const questions = [
+    { id: 'q1', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+    { id: 'q2', question: 'Second?' },
+  ]
+  const done: unknown[] = []
+  const flow = new QuestionFlow(questions, answers => { done.push(answers) }, () => {}, undefined, undefined)
+  // q1: select 'a' → advances to q2; there type free text and commit it.
+  flow.handleInput('1')
+  flow.handleInput('h')
+  flow.handleInput('i')
+  flow.handleInput('\r')
+  const draft = flow.draftSnapshot()
+  assert.equal(draft.tab, 2, 'the review page the user was on is preserved')
+  assert.deepEqual(draft.answers[0]!.selected, ['a'])
+  assert.equal(draft.answers[1]!.custom, 'hi')
+
+  // A fresh flow for the SAME call restores exactly that progress.
+  const restored = new QuestionFlow(questions, () => {}, () => {}, undefined, undefined, draft)
+  assert.deepEqual(restored.draftSnapshot(), draft, 'the parked progress is restored verbatim')
+  assert.deepEqual(done, [], 'no flow settled merely by snapshotting')
+
+  // Without a seed the flow starts empty (a different call never inherits it).
+  const fresh = new QuestionFlow(questions, () => {}, () => {}, undefined, undefined)
+  const freshDraft = fresh.draftSnapshot()
+  assert.deepEqual(freshDraft.answers[0]!.selected, [])
+  assert.equal(freshDraft.answers[1]!.custom, '')
+  assert.equal(freshDraft.tab, 0)
+})
+
+test('M3-3B onDraftChange reports every real mutation', () => {
+  const seen: number[] = []
+  const flow = new QuestionFlow(
+    [{ id: 'q1', question: 'Pick', options: [{ label: 'a' }, { label: 'b' }], multiSelect: true }],
+    () => {},
+    () => {},
+    undefined,
+    (draft) => { seen.push(draft.answers[0]!.selected.length) },
+  )
+  flow.handleInput('1')
+  flow.handleInput('2')
+  assert.deepEqual(seen, [1, 2], 'each real mutation reports the current draft')
+})
