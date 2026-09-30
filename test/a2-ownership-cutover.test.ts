@@ -78,10 +78,16 @@ test('the current owner is published only through the injected SessionOwnerAcces
     'the M3-4 selection seam constructs the selected runtime core')
   assert.ok(indexSource.includes('      kind: \'direct\','),
     'normal package apply() selects Direct')
-  assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()'),
+  assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime().owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
-  assert.ok(indexSource.includes('const handleNow = (): AgentHandle | undefined =>'),
-    'the retirement handle is read through the core slot')
+  // M3-4 PR1 removed the runner's last Direct owner-handle read
+  // (`handleNow`): the fatal catch now runs the ONE memoized retirement
+  // coordinator unconditionally (it covers parked owners and pending forks
+  // too), so no Direct-handle-based owner-presence gate remains.
+  assert.ok(!indexSource.includes('handleNow'),
+    'the runner keeps no Direct-handle-based owner-presence gate (the coordinator owns retirement)')
+  assert.ok(!indexSource.includes('currentOwnerPresentRef'),
+    'no Direct-handle owner-presence ref remains in the composition root')
 })
 
 /**
@@ -171,7 +177,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the agent/status main branch compares against the core-derived completion identity')
   assert.ok(!agentStatus.includes('agentNow('), 'agent/status must not read the Direct attachment')
   assert.ok(indexSource.includes('completionOwnerId: () => {')
-    && indexSource.includes('directRuntime.owners.completionIdentity(owner)'),
+    && indexSource.includes('directRuntime().owners.completionIdentity(owner)'),
     'the runner must inject the completion identity from the core owner')
 
   // No identity/currentness judgement may use the Direct attachment as the

@@ -2972,10 +2972,13 @@ Remote-ready):
   hasParkedOwners...) stay on `directRuntime` untouched. Normal package
   `apply()` selects Direct — no CLI option, config field, env var,
   cordis.patch backend row or public root export selects Remote.
-- Teardown: every runner teardown path (fiber disposer, pre-mount abort,
-  terminal-total fatal catch) runs the selected transport disposal AFTER the
-  session retirement; Direct is a no-op, and the Direct retirement ordering
-  itself is unchanged.
+- Teardown: the fiber disposer and the pre-mount abort path await the
+  selected transport disposal AFTER the session retirement completes. The
+  terminal-total fatal catch disposes it only when the (bounded) retirement
+  settled — a timed-out or unknown retirement state intentionally leaves
+  the transport undisposed rather than racing it (plan §4 ordering, never
+  the reverse). Direct is a no-op on every path, and the Direct retirement
+  ordering itself is unchanged.
 
 Closure evidence for PR1:
 
@@ -3007,9 +3010,11 @@ Closure evidence for PR1:
   constructed-backend-then-failure branch in the aggregate's unwind) has no
   natural injection point today — `createRemoteBackendRuntime` has no
   test-controllable throwing input after its adapters are retained. The
-  branch is implemented and exercised only via the post-wire failure path
-  (D2); its dedicated behavioral proof lands with the first M3-4 PR that
-  adds a real post-backend construction seam.
+  branch is implemented but exercised only at the SOURCE level; D2's
+  injection (a throwing promptSerializer getter) fires while composing the
+  backend factory's arguments, before `backendRuntime` is assigned. Its
+  dedicated behavioral proof lands with the first M3-4 PR that adds a real
+  post-backend construction seam.
 - Regression support: `test/remote-client-runtime.test.ts`,
   `test/remote-backend.test.ts`, `test/remote-session-owners.test.ts`,
   `test/session-runtime-remote-owner-handoff.test.ts`,

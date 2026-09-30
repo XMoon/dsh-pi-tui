@@ -311,7 +311,7 @@ test('C. disposeTransport disposes adapters before the Client and the Client bef
     'the ordinary Host Session store must remain servable')
 })
 
-test('C2. disposeTransport preserves errors from every step (aggregation, non-truncating)', async (t) => {
+test('C2. disposeTransport preserves errors from every step and never truncates the backend-internal cleanup', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
@@ -324,18 +324,30 @@ test('C2. disposeTransport preserves errors from every step (aggregation, non-tr
 
   // Induce a REAL adapter-side disposal failure: the M3-3B semantic bundle's
   // disposer is the first transport step, so an error thrown there must
-  // surface (never be swallowed) while the wire still unwinds.
+  // surface (never be swallowed) while the wire still unwinds. The backend
+  // runtime's OWN config-mirror disposal must still run after the throwing
+  // semantics step (per-step isolation inside RemoteBackendRuntime.dispose).
   const semantics = runtime.backendRuntime.semantics as unknown as { dispose(): void }
+  const configMirror = runtime.selected.backend.config as unknown as { dispose(): void }
   const induced = new Error('induced adapter disposal failure')
-  const originalDispose = semantics.dispose.bind(semantics)
+  let configDisposed = false
+  const originalSemanticsDispose = semantics.dispose.bind(semantics)
+  const originalConfigDispose = configMirror.dispose.bind(configMirror)
   semantics.dispose = () => {
-    originalDispose()
+    originalSemanticsDispose()
     throw induced
+  }
+  configMirror.dispose = () => {
+    configDisposed = true
+    originalConfigDispose()
   }
   await assert.rejects(() => runtime.selected.disposeTransport(), (error: unknown) => {
     assert.equal(error, induced, 'the adapter disposal failure surfaces as the primary error')
     return true
   })
+  // The backend-internal cleanup did NOT truncate: the config mirror's
+  // subscriptions were released despite the semantics failure.
+  assert.ok(configDisposed, 'the config mirror disposal must still run after a throwing semantics dispose')
   // The wire still unwound despite the adapter failure (error-isolated steps).
   assert.equal(host.ctx.reflect.get('connection'), undefined, 'the wire disposal still ran after the adapter failure')
   // Idempotent even on the failure path.
@@ -392,7 +404,15 @@ test('D2. a post-wire application composition failure (Client exists) unwinds th
       return true
     },
   )
-  assert.ok(clientRowsMountedAtInjection, 'the failure was induced while the M3 Host rows (and thus the Client) existed')
+  assert.ok(clientRowsMountedAtInjection, 'the failure was induced while the M3 Host rows (mounted with the Client) existed')
+  // The Client-existence ordering is source-locked: the getter is read only
+  // in the post-wire stage, after `await createExperimentalRemoteRuntime`.
+  const aggregateSource = await import('node:fs').then(fs =>
+    fs.readFileSync(new URL('../src/app/remote/application-runtime.ts', import.meta.url), 'utf8'))
+  const wireAwait = aggregateSource.indexOf('const wire = await createExperimentalRemoteRuntime(')
+  const optionsRead = aggregateSource.indexOf('options.promptSerializer')
+  assert.ok(wireAwait >= 0 && optionsRead > wireAwait,
+    'the promptSerializer read must come after the awaited wire construction (post-wire injection)')
   assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 Host rows unwound with the wire')
   assert.equal(host.ctx.reflect.get('fileUploads'), undefined, 'the M3 fileUploads row unwound with the wire')
   assert.equal(host.ctx.reflect.get('sessionController'), undefined, 'the M3 session controller unwound with the wire')

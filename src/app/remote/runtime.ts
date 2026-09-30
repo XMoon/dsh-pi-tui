@@ -183,8 +183,28 @@ export async function createRemoteBackendRuntime(
     dispose(): void {
       if (disposed) return
       disposed = true
-      semantics.dispose()
-      config.dispose()
+      // Per-step error isolation (the M3-4 PR1 transport disposal contract):
+      // a throwing semantic-bundle dispose must not skip the config mirror's
+      // subscription release. The first collected error surfaces with the
+      // rest attached as its cause.
+      const errors: unknown[] = []
+      try {
+        semantics.dispose()
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        config.dispose()
+      } catch (error) {
+        errors.push(error)
+      }
+      if (errors.length > 0) {
+        const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+        if (errors.length > 1) {
+          mergeCause(failure, new AggregateError(errors.slice(1), 'remote backend runtime: remaining disposal failures'))
+        }
+        throw failure
+      }
     },
   }
 }

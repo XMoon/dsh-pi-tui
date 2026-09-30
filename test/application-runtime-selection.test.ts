@@ -148,16 +148,17 @@ test('the production bootstrap calls the seam with the Direct branch only (no us
   assert.ok(seamCall !== null, 'the bootstrap must construct its selected runtime through the seam')
   assert.ok(seamCall[0].includes("kind: 'direct'"), 'the production bootstrap selects Direct')
   assert.ok(seamCall[0].includes('createRemote: undefined'), 'the production bootstrap passes no Remote constructor')
-  assert.ok(bootstrapSource.includes('const directRuntime = createDirectApplicationRuntime({'),
-    'the Direct runtime construction stays the bootstrap composition step it always was')
-  // The seam's Direct branch is a factory over that one construction: the
-  // bootstrap hands the ALREADY-BUILT directRuntime through createDirect, so
-  // the production path constructs exactly ONE Direct runtime (below the
-  // seam), and a would-be Remote selection through this seam shape would
-  // have to skip that call site — which is exactly what the factory shape
-  // makes testable.
-  assert.ok(seamCall[0].includes('createDirect: () => directRuntime'),
-    'the production seam call supplies the Direct runtime through the factory')
+  assert.ok(seamCall[0].includes('createDirect: createDirectApplication'),
+    'the production seam call supplies the DIRECT FACTORY (the construction runs inside the seam)')
+  // The Direct construction site itself lives inside that factory — a
+  // Remote selection through this seam constructs NO Direct graph (the
+  // factory is never invoked on the Remote branch).
+  const factoryStart = bootstrapSource.indexOf('const createDirectApplication = (): DirectApplicationRuntime => {')
+  const factorySpan = bootstrapSource.slice(factoryStart, bootstrapSource.indexOf('const selectedRuntime = await selectApplicationRuntime({'))
+  assert.ok(factoryStart >= 0 && factorySpan.includes('createDirectApplicationRuntime({'),
+    'the one Direct construction site must live inside the Direct factory passed to the seam')
+  assert.equal(bootstrapSource.indexOf('createDirectApplicationRuntime({'), bootstrapSource.lastIndexOf('createDirectApplicationRuntime({'),
+    'exactly one createDirectApplicationRuntime call site exists in the bootstrap')
   // No public/config/env Remote selector exists: the only Remote
   // construction reachability is the lazy boundary function in backend-loader.
   assert.ok(!/DSH_PI_TUI_BACKEND|PI_TUI_REMOTE|--remote/.test(bootstrapSource),
