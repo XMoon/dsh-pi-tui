@@ -1602,6 +1602,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * only — Task Center never reads the Question projection or the Inbox — and
    * it is composed BEFORE the first frame so a work-only list never flashes.
    */
+  /**
+   * Publish how many PARKED actionable Questions exist, so the footer's ↓
+   * trigger and the Quick Task Center stay reachable for a Questions-only
+   * session (addendum §11). A visible Question is not counted: it already owns
+   * the editor seat. This never touches the active-work counts.
+   */
+  const publishQuestionAttention = (): void => {
+    if (isCleanedUp()) return
+    const rows = questionController?.attentionRows() ?? []
+    mounted().setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
+  }
+
   const taskPanelItemsWithAttention = (
     rows: readonly TaskBrowserRow[],
     mode: 'quick' | 'full',
@@ -2845,6 +2857,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       return taskHasChild(childId)
     },
     resetTasks() {
+      // A session switch drops the old session's Question attention with the
+      // rest of the Task Center state: its parked count must not arm the new
+      // session's footer trigger.
+      mounted().setQuestionAttention(0)
       // Invalidate the coalescing gate BEFORE any close/dispose that can
       // synchronously run a callback: the old session's slow traversal must
       // neither hold the new session's refresh back (`inFlight`) nor clear the
@@ -2926,9 +2942,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // never re-lists the Subagent catalog or touches the Job registry
       // (addendum §9.4).
       questionAttentionDisposal = controller.subscribeAttention(() => {
+        publishQuestionAttention()
         if (isCleanedUp() || activeTaskBrowserMode === undefined) return
         activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
       })
+      publishQuestionAttention()
     },
     attachEventRouting(source) {
       routingSource = source

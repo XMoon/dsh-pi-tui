@@ -1653,6 +1653,8 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   context = new Context()
   // The durable Question authority: one CONTINUED call with no queued reply.
   // A parked Question is discovered from this projection alone.
+  let queuedReply = false
+  let projectionListener: (() => void) | undefined
   const questionsProjection = context.provide('sessionProjections', {
     stateOf: (_session: unknown, key: string): unknown => key === 'userQuestions'
       ? {
@@ -1665,8 +1667,17 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
             settled: [],
           },
         }
-      : { 'next-step': [], 'next-turn': [] },
-    onChanged: () => () => {},
+      : {
+          'next-step': queuedReply ? [{ source: { kind: 'user-question-reply', callId: 'call-parked' } }] : [],
+          'next-turn': [],
+        },
+    onChanged: (listener: (session: unknown, key: string) => void) => {
+      // The adapter filters by owning session + projected unit, so the
+      // notification carries the real arguments (an argument-less call would be
+      // filtered out and prove nothing).
+      projectionListener = () => listener({ id: 'question-park-session' }, 'inbox')
+      return () => { projectionListener = undefined }
+    },
   } as never)
   assert.ok(questionsProjection === undefined || questionsProjection !== undefined)
   fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
@@ -1684,22 +1695,51 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await settle()
   await vt.waitForRender()
 
-  // COLD discovery parks it: nothing stole the editor seat. `/tasks` is the
-  // mandatory reopen surface and shows the parked Question as awaiting an
-  // answer, composed ABOVE the (empty) work rows.
+  // COLD discovery parks it: the Question must NOT have stolen the editor seat,
+  // yet the footer's Task Center trigger is armed by the parked attention alone
+  // (no Job/Subagent is running in this fixture).
+  assert.equal(app.overlayGraphState().handles, 0, 'cold discovery owns no overlay')
+  const idle = vt.getViewport().join('\n')
+  assert.ok(!idle.includes('Type your answer…'), `no Question panel was mounted:\n${idle}`)
+  assert.ok(idle.includes('↓'), `a parked Question alone arms the ↓ trigger:\n${idle}`)
+
+  // The reopen surface is the Task Center. `/tasks` covers the SAME open path
+  // end-to-end: the row, the live removal, the visible-Question focus and the
+  // re-park cycle. The literal `↓` keypress is not drivable in this headless
+  // fixture (the runner mount has no focused editor seat, so the terminal key
+  // is dropped); the frame-level assertion above proves the trigger is armed
+  // and advertised, and the Quick row rules are covered by the panel tests.
   const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
   assert.ok(tasksHandler, 'the real runner must register /tasks')
   await tasksHandler()
   await settle()
   await vt.waitForRender()
-  const opened = vt.getViewport().join('\n')
-  assert.equal(app.overlayGraphState().handles, 1, `the Task Center is open:\n${opened}`)
-  assert.ok(opened.includes('Needs attention'), `the attention group renders:\n${opened}`)
-  assert.ok(opened.includes('Use staging or production?'), `the Question row renders:\n${opened}`)
-  assert.ok(opened.includes('awaiting answer'), `a parked Question is awaiting an answer:\n${opened}`)
+  const quick = vt.getViewport().join('\n')
+  assert.equal(app.overlayGraphState().handles, 1, `the Task Center is open:\n${quick}`)
+  assert.ok(quick.includes('Needs attention'), `it lists the parked Question:\n${quick}`)
+  assert.ok(quick.includes('Use staging or production?'), `with its label:\n${quick}`)
+  assert.ok(quick.includes('awaiting answer'), `as awaiting an answer:\n${quick}`)
 
-  // Enter reopens the SAME entry: the browser closes and the Question takes the
-  // editor seat with its editable form.
+  // Authority changes while the browser is open: the row disappears live, with
+  // no catalog re-list and no stale row left behind.
+  queuedReply = true
+  projectionListener?.()
+  await settle()
+  await vt.waitForRender()
+  const removed = vt.getViewport().join('\n')
+  assert.ok(!removed.includes('Use staging or production?'), `a queued reply removes the row live:\n${removed}`)
+
+  // The reply is discarded: the same call becomes answerable again, parked, and
+  // the row returns.
+  queuedReply = false
+  projectionListener?.()
+  await settle()
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(restored.includes('Use staging or production?'), `the row returns when the call is answerable again:\n${restored}`)
+
+  // Enter reopens the SAME entry: the browser closes and the editable panel
+  // returns (no transcript reconstruction, no second flow).
   input('\r')
   await settle()
   await vt.waitForRender()
@@ -1707,9 +1747,10 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   const reopened = vt.getViewport().join('\n')
   assert.ok(reopened.includes('Use staging or production?'), `the Question panel returns:\n${reopened}`)
   assert.ok(reopened.includes('Type your answer…'), `the editable form owns the seat again:\n${reopened}`)
+  const flowFrames = (reopened.match(/Type your answer…/gu) ?? []).length
+  assert.equal(flowFrames, 1, 'exactly one editable flow exists')
 
-  // Parking it again re-exposes the row: authority is untouched and the row is
-  // rebuilt from the controller's presentation state, not from the transcript.
+  // Park it again and confirm the row is rebuilt from presentation state.
   vt.sendInput('\x1b')
   await settle()
   await vt.waitForRender()
@@ -1719,4 +1760,10 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await vt.waitForRender()
   const reparked = vt.getViewport().join('\n')
   assert.ok(reparked.includes('Use staging or production?'), `the parked Question is reachable again:\n${reparked}`)
+
+  // The visible-Question `answering` row is covered by the pure
+  // attention-projection test: opening Full while the Question owns the seat
+  // leaves the Question's frame painting over the browser and holding input
+  // ownership (the existing response-ownership rule, which the addendum's §16.4
+  // explicitly forbids weakening just to make that row selectable).
 })

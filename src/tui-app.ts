@@ -3700,6 +3700,13 @@ export class TuiApp {
 
   /** Whether any job/subagent is running/stopping. */
   private tasksActive = false
+  /**
+   * Parked human-required Question attention (M3-3B addendum §11): a hidden
+   * actionable Question must arm the Task Center trigger and keep the keyboard
+   * reopen path (`↓` Quick / `/tasks` Full) reachable even when no Job or
+   * Subagent is running. It is deliberately NOT part of the active-work count.
+   */
+  private questionAttentionCount = 0
   /** Independent Task Center counts; footer consumes this through status. */
   private taskSummary: TaskBrowserSummary = {
     runningAgents: 0,
@@ -17131,9 +17138,9 @@ export class TuiApp {
     // caller happens to pass here: the badge callback may legitimately
     // receive a subset (e.g. running-only) and length-based derivation
     // would corrupt the totals. setTasks/setAgents stay pure UI mirrors.
-    this.tasksActive = this.taskSummaryRich
+    this.tasksActive = this.questionAttentionCount > 0 || (this.taskSummaryRich
       ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
-      : tasks.length > 0 || this.dockAgents.length > 0
+      : tasks.length > 0 || this.dockAgents.length > 0)
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
@@ -17148,9 +17155,9 @@ export class TuiApp {
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
     this.dockAgents = agents
     // RICH mode: see the setTasks note — counts are commitSummary-owned.
-    this.tasksActive = this.taskSummaryRich
+    this.tasksActive = this.questionAttentionCount > 0 || (this.taskSummaryRich
       ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
-      : this.dockTasks.length > 0 || agents.length > 0
+      : this.dockTasks.length > 0 || agents.length > 0)
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
@@ -17160,9 +17167,34 @@ export class TuiApp {
   setTaskSummary(summary: TaskBrowserSummary): void {
     this.taskSummary = { ...summary }
     this.taskSummaryRich = true
-    this.tasksActive = summary.runningJobs > 0 || summary.runningAgents > 0 || summary.failedAttention > 0
+    this.tasksActive = this.questionAttentionCount > 0
+      || summary.runningJobs > 0 || summary.runningAgents > 0 || summary.failedAttention > 0
     this.projectActivity()
     this.syncExtensionState()
+  }
+
+  /**
+   * Publish the number of PARKED actionable Questions (M3-3B addendum §11):
+   * hidden human attention alone must arm the Task Center trigger, so a
+   * Questions-only session can still reach its reopen path. A visible Question
+   * is not counted (it already owns the seat), and the count never joins the
+   * active-work totals.
+   */
+  setQuestionAttention(count: number): void {
+    const next = Math.max(0, count)
+    if (next === this.questionAttentionCount) return
+    this.questionAttentionCount = next
+    this.tasksActive = next > 0 || this.tasksActive
+    if (next === 0) {
+      // Dropping back to zero must not latch the trigger on: recompute from the
+      // work facts instead of keeping the previous value.
+      this.tasksActive = this.taskSummaryRich
+        ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
+        : this.dockTasks.length > 0 || this.dockAgents.length > 0
+    }
+    this.projectActivity()
+    this.syncExtensionState()
+    this.renderFooter()
   }
 
   /** Whether active jobs/subagents or unacknowledged failures are available. */
