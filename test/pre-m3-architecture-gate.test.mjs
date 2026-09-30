@@ -607,6 +607,20 @@ test('the M3-4 application-runtime aggregate joins through the SINGLE dynamic en
   assert.equal(secondTarget.length, 1, 'a second dynamic target must fail')
   assert.equal(secondTarget[0].rule, 'remote-dynamic-import-owner')
 
+  // A SECOND import expression for the SAME sanctioned target is also a
+  // violation: "ONE dynamic edge" is one owner + ONE expression + one target
+  // (enforced by the gate function itself, not only by the real-tree test).
+  const duplicateExpression = findRemoteDynamicImportViolations([
+    entry(
+      REMOTE_DYNAMIC_IMPORT_OWNER,
+      `export const a = () => import('../app/remote/runtime.ts')\nexport const b = () => import('../app/remote/runtime.ts')\n`,
+    ),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
+  ])
+  assert.equal(duplicateExpression.length, 1, 'a duplicate expression for the sanctioned target must fail')
+  assert.equal(duplicateExpression[0].rule, 'remote-dynamic-import-owner')
+  assert.match(duplicateExpression[0].detail, /exactly ONE dynamic import expression/)
+
   // bootstrap may statically import the loader (the selection seam's reach),
   // and the loader's dynamic import is not a static edge — the Remote graph
   // stays unreachable from startup.ts.

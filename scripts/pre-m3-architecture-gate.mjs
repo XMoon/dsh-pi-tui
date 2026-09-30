@@ -278,23 +278,29 @@ export function parseValueDynamicImports(source) {
 /**
  * Rule: `app/remote/**` may be reached by a VALUE dynamic import only through
  * the sanctioned lazy boundary edge — the single owner
- * (`runtime/backend-loader.ts`) and its ONE target (`app/remote/runtime.ts`,
+ * (`runtime/backend-loader.ts`), its ONE target (`app/remote/runtime.ts`,
  * the entry module that statically re-exports the application-runtime
- * aggregate). The check is scoped to the Remote composition boundary —
- * dynamic imports of anything else stay out of scope.
+ * aggregate), and exactly ONE import expression for that target (the frozen
+ * "ONE dynamic edge" is one owner + one expression + one target). The check
+ * is scoped to the Remote composition boundary — dynamic imports of anything
+ * else stay out of scope.
  * @param {Array<{ rel: string, source: string }>} entries
  * @returns {Array<{ file: string, line: number, rule: string, detail: string }>}
  */
 export function findRemoteDynamicImportViolations(entries) {
   const known = new Set(entries.map(entry => entry.rel))
   const violations = []
+  const sanctionedEdges = []
   for (const { rel, source } of entries) {
     for (const { specifier, line } of parseValueDynamicImports(source)) {
       const resolved = resolveRelativeImport(rel, specifier)
       if (resolved === undefined) continue
       const target = staticImportCandidates(resolved).find(candidate => known.has(candidate)) ?? resolved
       if (!target.startsWith('app/remote/')) continue
-      if (rel === REMOTE_DYNAMIC_IMPORT_OWNER && target === REMOTE_DYNAMIC_IMPORT_TARGET) continue
+      if (rel === REMOTE_DYNAMIC_IMPORT_OWNER && target === REMOTE_DYNAMIC_IMPORT_TARGET) {
+        sanctionedEdges.push({ rel, target, line })
+        continue
+      }
       violations.push({
         file: rel,
         line,
@@ -303,6 +309,15 @@ export function findRemoteDynamicImportViolations(entries) {
           + `(found ${rel} -> ${specifier})`,
       })
     }
+  }
+  if (sanctionedEdges.length > 1) {
+    violations.push({
+      file: sanctionedEdges[1].rel,
+      line: sanctionedEdges[1].line,
+      rule: 'remote-dynamic-import-owner',
+      detail: `${REMOTE_DYNAMIC_IMPORT_OWNER} must carry exactly ONE dynamic import expression for `
+        + `${REMOTE_DYNAMIC_IMPORT_TARGET} (found ${sanctionedEdges.length})`,
+    })
   }
   return violations
 }

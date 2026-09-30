@@ -62,7 +62,9 @@ import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { RemotePromptSerializer } from '../../src/runtime/remote/session-writer-remote.ts'
 import { testLifecycle, type TestLifecycle } from './temp-lifecycle.ts'
 
-/** The unsupported prompt serializer stand-in: PR1's only substitution. */
+/** The unsupported prompt serializer stand-in: the plan-sanctioned
+ *  prompt-serializer substitution (the only PR1-specific SEMANTIC
+ *  substitution — the readiness stand-ins are listed in the header). */
 export const testPromptSerializer: RemotePromptSerializer = {
   preflight: () => ({ kind: 'unsupported', reason: 'm3-4 pr1 composition test: no production serializer yet' }),
   serialize: async () => ({ kind: 'unsupported', reason: 'm3-4 pr1 composition test: no production serializer yet' }),
