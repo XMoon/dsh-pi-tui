@@ -309,7 +309,7 @@ A migration stage may be marked DONE only when four axes are closed:
 2. IMPLEMENTATION
    the semantic owner, adapter and composition are correct
 3. QUALIFICATION
-   the required L3/L5/L6 evidence is complete
+   the required L1-L6 evidence, as applicable, is complete
    the supported success path is proven
    the required negative/fail-closed paths are proven
 4. SURFACE / REACHABILITY
@@ -322,23 +322,43 @@ substitute for any missing axis.
 
 ### Qualification evidence levels
 
-The layer vocabulary is `## M3 test-layer contract (T0 handoff)`; these are the
-qualification meanings a stage closure cites:
+The test-layer vocabulary is owned by `## M3 test-layer contract (T0 handoff)` and
+is NOT redefined here:
 
-- **L3 — semantic/adapter contract.** Structural fakes are allowed. Proves
-  mapping, state machine, generation fences, error taxonomy and
-  serialization-independent semantics. Does NOT prove official generated Client
-  object shape or production composition.
-- **L5 — official-wire qualification.** Must use a real DSH Host composition and
-  the real generated Client/Remote object graph. Proves prototype/accessor object
-  shape, method receiver binding, real Remote namespace availability, production
-  prerequisite composition, transport path, supported success-path
-  interoperability and reverse disposal/lifetime where relevant. Every
-  wire-sensitive Remote capability needs at least one L5 proof before closure.
-- **L6 — application/surface qualification.** Uses the real Backend and the
-  actual application navigation/presentation path. Proves input/focus ownership,
-  surface navigation, user recovery, presentation parity, forbidden-fallback
-  unreachability and stale-generation behavior at the application boundary.
+```text
+L1 semantic-port contract
+L2 Direct adapter contract
+L3 Remote adapter contract
+L4 Direct ↔ Remote parity
+L5 official in-process wire integration
+L6 application composition
+```
+
+A stage closure cites the level that actually proves the fact, and adds a level
+only when that level is under test:
+
+```text
+adapter-level evidence      = L1-L3 as applicable
+wire evidence               = L5
+application/surface evidence = L6 when application ownership / reachability is
+                              actually under test
+```
+
+Consequences a closure must respect:
+
+- Structural fakes are legitimate at L1–L3 but never prove official generated
+  Client object shape or production composition. Every wire-sensitive Remote
+  capability needs at least one L5 proof before closure.
+- L5 is the real Client Context → Gateway → Host path with no TUI runner. It
+  proves prototype/accessor object shape, method receiver binding, real Remote
+  namespace availability, production prerequisite composition, transport path,
+  supported success-path interoperability and reverse disposal/lifetime where
+  relevant.
+- L6 uses the real runner/application owner wiring and settlement; it is required
+  when application ownership, navigation, user recovery, presentation parity or
+  reachability is the fact under test.
+- An implementation file is never qualification evidence; name the test or smoke
+  lane that proves the fact.
 
 ### Positive and negative evidence are separate
 
@@ -369,8 +389,8 @@ But a negative path never substitutes for a supported success path.
 
 ### Production-equivalent fixture manifest
 
-Every L5 fixture MUST state at its declaration site or immediately above the
-test:
+Every NEW or materially modified L5 fixture from M3-4 onward MUST state at its
+declaration site or immediately above the test:
 
 ```text
 PRODUCTION PREREQUISITES REPRODUCED
@@ -382,6 +402,9 @@ TEST STAND-INS / SUBSTITUTIONS
 DELIBERATELY ABSENT
   ...
 ```
+
+Existing pre-governance L5 fixtures are grandfathered; when one is materially
+touched it must be upgraded to the manifest form.
 
 A fixture may use stubs for unrelated domains, but it must not claim to prove a
 normal product topology while omitting a base prerequisite ordinary production
@@ -456,9 +479,10 @@ Each completed M3-x status section carries one compact block:
 
 - Contract authority:
 - Composition owner:
-- L3:
-- L5:
-- L6:
+- Adapter-level evidence (L1–L3):
+- Direct ↔ Remote parity (L4):
+- Wire evidence (L5):
+- Application/surface evidence (L6):
 - Supported success path:
 - Fail-closed/error paths:
 - Reachability/UI disposition:
@@ -2194,13 +2218,16 @@ ownership, stage boundary, or seam policy changed.
 - Composition owner: `src/app/remote/host-runtime.ts` (`RemoteHostRuntime`) and
   `src/app/remote/client-runtime.ts` (`RemoteClientRuntime`), reachable only
   through `src/runtime/backend-loader.ts`.
-- L3: n/a — M3-1 introduced composition, not a Remote adapter contract.
-- L5: `test/remote-client-runtime.test.ts` (prerequisite barrier, loader
-  exactness/single-flight, real connect + ready list, `sessionStats` +
-  `turnOutline` projections, Job roster, reconnect, archive route, reverse
-  disposal).
-- L6: n/a — no product cutover; the Direct runner regression
-  (`test/runner-startup-lifecycle.test.ts`) stays the application proof.
+- Adapter-level evidence (L1–L3): n/a — M3-1 introduced composition, not a Remote
+  adapter contract.
+- Direct ↔ Remote parity (L4): n/a.
+- Wire evidence (L5): `test/remote-client-runtime.test.ts` (prerequisite
+  barrier, loader exactness/single-flight, real connect + ready list,
+  `sessionStats` + `turnOutline` projections, Job roster, reconnect, archive
+  route, reverse disposal).
+- Application/surface evidence (L6): n/a — no product cutover; the Direct
+  runner regression (`test/runner-startup-lifecycle.test.ts`) stays the
+  application proof.
 - Supported success path: real in-process connect and the dependency-closed
   official Host composition.
 - Fail-closed/error paths: unknown/duplicate bundle registration rejected;
@@ -2358,13 +2385,16 @@ the composition and presentation.
 - Composition owner: `src/app/remote/session-owners.ts`
   (`createRemoteSessionOwnerServices`), consumed by the transport-neutral
   `src/app/session/**` orchestration.
-- L3: covered inside the L6 owner suites; the stage added no Remote transport
-  adapter.
-- L5: same-binding identity and full same-id re-materialize identity are locked
-  by `test/remote-session-lifecycle.test.ts` and the lifecycle parity smoke.
-- L6: `test/remote-session-owners.test.ts` (R1–R12) and
-  `test/session-runtime-remote-owner-handoff.test.ts` (H1–H12) over the real
-  `bindSessionRuntime` and real Remote owner services.
+- Adapter-level evidence (L1–L3): n/a — the stage added the Remote owner provider
+  (`src/app/remote/session-owners.ts`), not a Remote adapter against the
+  official Client/Remote face.
+- Direct ↔ Remote parity (L4): `test/remote-session-lifecycle.test.ts` and
+  `smoke:remote-session-lifecycle-parity` — same-binding identity and same-id
+  rollover semantics.
+- Wire evidence (L5): n/a — the stage added no wire-sensitive adapter.
+- Application/surface evidence (L6): `test/remote-session-owners.test.ts`
+  (R1–R12) and `test/session-runtime-remote-owner-handoff.test.ts` (H1–H12)
+  over the real `bindSessionRuntime` and real Remote owner services.
 - Supported success path: ordinary switch/open/fork `retain → commit → release`
   with exactly-once release and Remote fork publication→open adoption.
 - Fail-closed/error paths: a pre-publication failure releases NEW exactly once
@@ -2561,12 +2591,15 @@ build a `ChildStatusReader`, `ViewerStatusPort` or any parent-fallback.
   `docs/m3-entry-contract.md` §1.1; requalified to `0.2.0-rc.2` in M3-3B.
 - Composition owner: `src/app/remote/m3a-semantics.ts`
   (`createRemoteM3ASemantics`) over ONE M3-1 `RemoteClientRuntime`.
-- L3: the adapter suites listed under Evidence (session reader, skill catalog,
-  host file, presentation read, model port, assembly).
-- L5: `test/remote-m3a-semantics-smoke.test.ts` (P1–P10) same-Host
-  qualification through the real in-process carrier.
-- L6: n/a — zero product cutover; the Projection / Presentation Availability
-  Map is the M3-4/M3-5 input, not a surface.
+- Adapter-level evidence (L1–L3): the adapter suites listed under Evidence
+  (session reader, skill catalog, host file, presentation read, model port,
+  assembly).
+- Direct ↔ Remote parity (L4): `smoke:remote-session-read-parity` /
+  `smoke:remote-d1-closure` (the retired `measureContext` skip now compares).
+- Wire evidence (L5): `test/remote-m3a-semantics-smoke.test.ts` (P1–P10)
+  same-Host qualification through the real in-process carrier.
+- Application/surface evidence (L6): n/a — zero product cutover; the Projection
+  / Presentation Availability Map is the M3-4/M3-5 input, not a surface.
 - Supported success path: real `contextPressure` / `turnOutline` /
   `sessionStatus` projection reads, the official `modelCatalog` directory,
   `skills/list`, `fileReferences/list` and `PresentationReader.loadThrough`.
@@ -2863,13 +2896,20 @@ release commit.
 - Composition owner: `src/app/remote/runtime.ts#createRemoteBackendRuntime`
   (`src/runtime/remote/backend-remote.ts`) over the M3-1 composition spine;
   `RemoteHostRuntime` reuses the base `userQuestions` service.
-- L3: `test/remote-config-port.test.ts` plus the M3-3B interaction/archive
-  adapter suites.
-- L5: `test/remote-m3a-semantics-smoke.test.ts` same-Host qualification (rc.2
-  Question wire, a real settings write with authoritative re-read, the archive
-  ZIP bytes, reverse disposal).
-- L6: `src/app/surface/question-controller.ts` over the unchanged
-  `QuestionFlow`; M3-4 owns the main-application cutover.
+- Adapter-level evidence (L1–L3): `test/remote-config-port.test.ts` plus the
+  M3-3B interaction/archive adapter suites.
+- Direct ↔ Remote parity (L4): the same-Host Remote parity smokes.
+- Wire evidence (L5): `test/remote-m3a-semantics-smoke.test.ts` same-Host
+  qualification (rc.2 Question wire, a real settings write with authoritative
+  re-read, the archive ZIP bytes, reverse disposal).
+- Application/surface evidence (L6) (Question surface):
+  `test/runner-viewer-task-integration.test.ts` over the real runner — a parked
+  continued Question is reachable through the literal `↓` Quick Tasks path and
+  reopens the same `QuestionFlow`, and the Full Task Center (`/tasks`) parked
+  path proves live authority removal/restoration when a queued reply appears and
+  is discarded.
+- Application/surface evidence (L6) (complete Remote main Backend): n/a in
+  M3-3B — M3-4 owns the main-application cutover.
 - Supported success path: a real Config write mutating Host authority, the real
   `/api/session.export` ZIP, and a live Question running request → claim →
   timeout → late answer.
