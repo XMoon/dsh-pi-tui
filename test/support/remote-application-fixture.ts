@@ -5,6 +5,31 @@
  * test/remote-application-runtime.test.ts (the aggregate) and
  * test/application-runtime-selection.test.ts (the real selection chain).
  *
+ * FIXTURE MANIFEST (L5 evidence governance; see each consuming suite's own
+ * header for the per-suite view):
+ *
+ * PRODUCTION PREREQUISITES REPRODUCED
+ * - real rc.2 Host services required by the composition: real persistence
+ *   (Jsonl), storage/domain, credentials, jobs + job controller, gateway,
+ *   loader, presets, userQuestions, workspace, filesystem
+ * - the official in-process Client/Gateway path over the real carrier
+ * - M3 additive Host rows mount/unwind with the composed runtime
+ *
+ * TEST STAND-INS / SUBSTITUTIONS (beyond the serializer)
+ * - prompt serializer (unsupported test double): PR1 does not own production
+ *   submission serialization — the plan's single sanctioned substitution.
+ * - `StubLlmAdapter` (`smoke` route, no streamed turn): the suites prove
+ *   composition/lifetime, never a model turn; the M3-1 L5 fixture uses the
+ *   same shape. Not wire-sensitive: the LLM adapter never participates in
+ *   composition, readiness or disposal.
+ * - hand-provided `agentDefaultModel` + `attachments` + `webServer`:
+ *   the minimal service values the composition's readiness requires
+ *   (identical to the M3-1 L5 fixture); they carry no Remote-wire state and
+ *   are not read through the Client connection.
+ * These non-wire-sensitive stand-ins do not weaken the PR1 proofs
+ * (composition identity, disposal ordering, failure unwind): none of them
+ * sits on the composed Client/Host graph under test.
+ *
  * @module @xmoon76/dsh-pi-tui/support/remote-application-fixture
  */
 

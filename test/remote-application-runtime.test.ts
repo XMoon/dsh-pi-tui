@@ -29,9 +29,16 @@
  *   runtime)
  *
  * TEST STAND-INS / SUBSTITUTIONS
- * - prompt serializer only (a `remote/unsupported` test double): PR1 does not
+ * - prompt serializer (a `remote/unsupported` test double): PR1 does not
  *   own production submission serialization, so no real serializer exists to
- *   inject. This is the ONLY substitution.
+ *   inject — the plan's single sanctioned substitution.
+ * - `StubLlmAdapter` (a `smoke` route, no streamed turn), plus hand-provided
+ *   `agentDefaultModel` / `attachments` / `webServer` values: the minimal
+ *   readiness inputs the composition requires, identical to the proven
+ *   M3-1 L5 fixture shape. None sits on the composed Client/Host graph under
+ *   test (no Remote-wire state, never read through the connection), so they
+ *   do not weaken the composition-identity / disposal-ordering /
+ *   failure-unwind proofs this suite makes.
  *
  * DELIBERATELY ABSENT
  * - mounted TUI main surface
@@ -322,11 +329,13 @@ test('C2. disposeTransport preserves errors from every step and never truncates 
   })
   t.after(() => host.dispose())
 
-  // Induce a REAL adapter-side disposal failure: the M3-3B semantic bundle's
-  // disposer is the first transport step, so an error thrown there must
-  // surface (never be swallowed) while the wire still unwinds. The backend
-  // runtime's OWN config-mirror disposal must still run after the throwing
-  // semantics step (per-step isolation inside RemoteBackendRuntime.dispose).
+  // Induce a REAL adapter-side disposal failure. The backend runtime's
+  // disposal ledger runs its parts in REVERSE construction order (config
+  // mirror first, then the semantics bundle — both adapters, still strictly
+  // before the Client/Host wire). An error thrown from EITHER step must
+  // surface (never be swallowed), never truncate the other step, and the
+  // wire must still unwind. The probe below throws from the semantics step:
+  // the config step (which the ledger runs FIRST) has then already executed.
   const semantics = runtime.backendRuntime.semantics as unknown as { dispose(): void }
   const configMirror = runtime.selected.backend.config as unknown as { dispose(): void }
   const induced = new Error('induced adapter disposal failure')

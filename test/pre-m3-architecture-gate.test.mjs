@@ -28,7 +28,7 @@ import {
   parseValueDynamicImports,
   REMOTE_COMPOSITION_SPECIFIER,
   REMOTE_DYNAMIC_IMPORT_OWNER,
-  REMOTE_DYNAMIC_IMPORT_TARGETS,
+  REMOTE_DYNAMIC_IMPORT_TARGET,
   resolveRelativeImport,
   STARTUP_REMOTE_COMPOSITION_RULE,
   staticImportCandidates,
@@ -539,7 +539,7 @@ test('startup importing the backend loader alone is fine; its value dynamic impo
       REMOTE_DYNAMIC_IMPORT_OWNER,
       `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
     ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGETS[0], 'export const runtime = 1\n'),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
   ])
   assert.deepEqual(jsSpelling, [])
 })
@@ -550,7 +550,7 @@ test('the sanctioned lazy boundary is the only value dynamic-import owner into a
       REMOTE_DYNAMIC_IMPORT_OWNER,
       `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
     ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGETS[0], 'export const runtime = 1\n'),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
   ])
   assert.deepEqual(allowed, [])
 
@@ -583,15 +583,29 @@ test('the sanctioned lazy boundary is the only value dynamic-import owner into a
   ]), [])
 })
 
-test('the M3-4 application-runtime aggregate is the exact second sanctioned target (M3-4 PR1)', () => {
-  // The owner may dynamically import the Remote application runtime aggregate.
+test('the M3-4 application-runtime aggregate joins through the SINGLE dynamic entry, not a second target (M3-4 PR1)', () => {
+  // The one sanctioned edge covers BOTH composition entries: the loader
+  // imports app/remote/runtime.ts, which statically re-exports the aggregate.
   assert.deepEqual(findRemoteDynamicImportViolations([
+    entry(
+      REMOTE_DYNAMIC_IMPORT_OWNER,
+      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/runtime.ts').then(m => ({ createRemoteApplicationRuntime: m.createRemoteApplicationRuntime }))\n}\n`,
+    ),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGET, "export { createRemoteApplicationRuntime } from './application-runtime.ts'\n"),
+    entry('app/remote/application-runtime.ts', 'export async function createRemoteApplicationRuntime() {}\n'),
+  ]), [])
+
+  // A SECOND dynamic target under the owner — even the aggregate itself —
+  // violates the frozen ONE-edge contract.
+  const secondTarget = findRemoteDynamicImportViolations([
     entry(
       REMOTE_DYNAMIC_IMPORT_OWNER,
       `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/application-runtime.ts')\n}\n`,
     ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGETS[1], 'export const applicationRuntime = 1\n'),
-  ]), [])
+    entry('app/remote/application-runtime.ts', 'export async function createRemoteApplicationRuntime() {}\n'),
+  ])
+  assert.equal(secondTarget.length, 1, 'a second dynamic target must fail')
+  assert.equal(secondTarget[0].rule, 'remote-dynamic-import-owner')
 
   // bootstrap may statically import the loader (the selection seam's reach),
   // and the loader's dynamic import is not a static edge — the Remote graph
@@ -602,37 +616,48 @@ test('the M3-4 application-runtime aggregate is the exact second sanctioned targ
     entry('app/bootstrap.ts', "import { loadRemoteApplicationRuntime } from '../runtime/backend-loader.ts'\n"),
     entry(
       'runtime/backend-loader.ts',
-      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/application-runtime.ts')\n}\n`,
+      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/runtime.ts').then(m => ({ createRemoteApplicationRuntime: m.createRemoteApplicationRuntime }))\n}\n`,
     ),
+    entry('app/remote/runtime.ts', "export { createRemoteApplicationRuntime } from './application-runtime.ts'\n"),
     entry('app/remote/application-runtime.ts', 'export const applicationRuntime = 1\n'),
   ]
-  assert.deepEqual(findViolations(entries), [], 'bootstrap -> backend-loader -> dynamic app/remote is the sanctioned M3-4 shape')
+  assert.deepEqual(findViolations(entries), [], 'bootstrap -> backend-loader -> dynamic app/remote/runtime.ts is the sanctioned M3-4 shape')
 
-  // Any other module dynamically importing the aggregate still fails, and the
-  // aggregate statically imported anywhere is still a Remote-composition edge.
+  // Any other module dynamically importing the composition still fails.
   const other = findRemoteDynamicImportViolations([
-    entry('app/surface/runtime.ts', "const m = await import('../../app/remote/application-runtime.js')\n"),
-    entry('app/remote/application-runtime.ts', 'export const applicationRuntime = 1\n'),
+    entry('app/surface/runtime.ts', "const m = await import('../../app/remote/runtime.js')\n"),
+    entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
   ])
   assert.equal(other.length, 1)
   assert.equal(other[0].rule, 'remote-dynamic-import-owner')
 })
 
-test('the REAL production tree carries the bootstrap -> backend-loader edge and stays Remote-clean (M3-4 PR1)', () => {
+test('the REAL production tree carries the bootstrap -> backend-loader edge, ONE dynamic target, and stays Remote-clean (M3-4 PR1)', () => {
   // The M3-4 selection seam is not a synthetic allowance: the real
   // `app/bootstrap.ts` statically imports the loader, the loader owns the
-  // only two dynamic edges, and the whole production tree stays violation-free
-  // (the startup graph included — verified by the full findViolations scan in
-  // the other real-tree tests).
+  // only dynamic edge into app/remote/**, and the whole production tree stays
+  // violation-free (the startup graph included — verified by the full
+  // findViolations scan in the other real-tree tests).
   const bootstrap = collectSourceEntries().find(e => e.rel === 'app/bootstrap.ts')
   assert.ok(bootstrap !== undefined, 'app/bootstrap.ts must exist in the scanned tree')
   const edges = parseImportSpecifiers(bootstrap.source)
     .map(spec => resolveRelativeImport('app/bootstrap.ts', spec.specifier))
     .filter(resolved => resolved === 'runtime/backend-loader.ts')
   assert.equal(edges.length, 1, 'the real bootstrap statically imports runtime/backend-loader.ts exactly once (the M3-4 selection seam reach)')
+  const loader = collectSourceEntries().find(e => e.rel === REMOTE_DYNAMIC_IMPORT_OWNER)
+  assert.ok(loader !== undefined, 'runtime/backend-loader.ts must exist in the scanned tree')
+  const dynamicTargets = parseValueDynamicImports(loader.source)
+    .map(({ specifier }) => resolveRelativeImport(REMOTE_DYNAMIC_IMPORT_OWNER, specifier))
+    .filter(resolved => resolved !== undefined && resolved.startsWith('app/remote/'))
+  assert.deepEqual(dynamicTargets, [REMOTE_DYNAMIC_IMPORT_TARGET],
+    'the real loader has EXACTLY ONE dynamic import into app/remote/** (the single entry module)')
+  // The entry module statically re-exports the aggregate (intra-app/remote).
+  const entryModule = collectSourceEntries().find(e => e.rel === REMOTE_DYNAMIC_IMPORT_TARGET)
+  assert.ok(entryModule !== undefined && /export\s*\{[^}]*createRemoteApplicationRuntime[^}]*\}\s*from\s*'\.\/application-runtime\.ts'/.test(entryModule.source),
+    'app/remote/runtime.ts must statically re-export the aggregate constructor (the single-entry join)')
   const tree = collectSourceEntries()
   assert.deepEqual(findViolations(tree), [], 'the real tree stays clean with the real seam edge')
-  assert.deepEqual(findRemoteDynamicImportViolations(tree), [], 'the real tree keeps the exact dynamic-import owners')
+  assert.deepEqual(findRemoteDynamicImportViolations(tree), [], 'the real tree keeps the exact dynamic-import owner and single target')
 })
 
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
