@@ -17,7 +17,9 @@
  *
  * TEST STAND-INS / SUBSTITUTIONS (beyond the serializer)
  * - prompt serializer (unsupported test double): PR1 does not own production
- *   submission serialization — the plan's single sanctioned substitution.
+ *   submission serialization — the plan-sanctioned SEMANTIC substitution
+ *   (the only PR1-specific one; the readiness stand-ins below are
+ *   fixture-level).
  * - `StubLlmAdapter` (`smoke` route, no streamed turn): the M3-1 L5 fixture
  *   shape. Precision note: the adapter IS registered on the required Host
  *   `llm` service and the composed `RemoteModelCatalog` holds

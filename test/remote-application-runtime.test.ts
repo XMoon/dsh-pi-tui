@@ -31,7 +31,8 @@
  * TEST STAND-INS / SUBSTITUTIONS
  * - prompt serializer (a `remote/unsupported` test double): PR1 does not
  *   own production submission serialization, so no real serializer exists to
- *   inject — the plan's single sanctioned substitution.
+ *   inject — the plan-sanctioned SEMANTIC substitution (the only
+ *   PR1-specific one; the readiness stand-ins below are fixture-level).
  * - `StubLlmAdapter` (a `smoke` route, no streamed turn), plus hand-provided
  *   `agentDefaultModel` / `attachments` / `webServer` values: the minimal
  *   readiness inputs the composition requires, identical to the proven
