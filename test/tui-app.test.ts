@@ -651,6 +651,56 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   assert.ok(view.includes('steering…'), `the parent active steer must read steering…:\n${view}`)
 })
 
+test('a pending Context tail row follows the active subject across a child viewer round trip', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [],
+    tail: [{ kind: 'context', row: { id: 'parent-ctx', text: 'PARENT-CONTEXT-ROW' } }],
+    running: true,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('PARENT-CONTEXT-ROW'),
+    'the parent pending Context row renders before the viewer opens')
+
+  // Entering the child viewer clears the parent tail (no parent leak), then
+  // the child subject's own Context occurrence renders.
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'inactive',
+    access: 'interactive-direct-child',
+  })
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('PARENT-CONTEXT-ROW'),
+    'entering the viewer must clear the parent Context tail')
+  app.setPendingInputPresentation({
+    queued: [],
+    tail: [{ kind: 'context', row: { id: 'child-ctx', text: 'CHILD-CONTEXT-ROW' } }],
+    running: true,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('CHILD-CONTEXT-ROW'), `the child Context row must render in the viewer:\n${view}`)
+  assert.ok(!view.includes('PARENT-CONTEXT-ROW'), `the parent Context row must not leak into the viewer:\n${view}`)
+
+  // Leaving the viewer: the tail is re-projected from the MAIN subject by the
+  // runner's next atomic presentation (the same contract as the user lane),
+  // so the parent's rows replace the child's with no residue.
+  app.setViewerMode(undefined)
+  app.setPendingInputPresentation({
+    queued: [],
+    tail: [{ kind: 'context', row: { id: 'parent-ctx', text: 'PARENT-CONTEXT-ROW' } }],
+    running: true,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('PARENT-CONTEXT-ROW'), `the parent Context row returns:\n${view}`)
+  assert.ok(!view.includes('CHILD-CONTEXT-ROW'), `the child Context row must not leak back:\n${view}`)
+})
+
 test('a narrow queue pane keeps a local sending suffix on the same row', async () => {
   const { vt, app } = startApp()
   vt.resize(24, 24)

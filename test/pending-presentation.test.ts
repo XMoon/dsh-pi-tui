@@ -209,20 +209,36 @@ test('a narrow terminal still renders the Context row without overflow', async (
 
 // ── 9.6 Pending -> durable transition ───────────────────────────────────────
 
-test('the Host claim removes the Context row with no TUI-owned retained duplicate', async () => {
+test('the Host claim removes the Context row and the durable Context replaces it in the same lifecycle', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
+  // Phase 1: the authoritative pending occurrence renders in the tail.
   app.setPendingInputPresentation({
     queued: [],
-    tail: [{ kind: 'context', row: { id: 'ctx-1', text: 'to be claimed' } }],
+    tail: [{ kind: 'context', row: { id: 'ctx-1', text: 'claim me durably' } }],
     running: true,
   })
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('to be claimed'))
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('claim me durably'), `the pending Context preview must be visible:\n${view}`)
+  assert.ok(view.includes('waiting for next step…'), `phase 1 reads the pending status:\n${view}`)
 
-  // The Host claims the occurrence (its inbox projection no longer holds it).
+  // Phase 2: the Host claims the occurrence — the inbox projection no longer
+  // holds it, and the durable `user/message` Context lands in the transcript
+  // as an ordinary standalone Context card (its producer label is the durable
+  // identity; the payload stays behind the row's own disclosure).
+  app.setTranscript([
+    {
+      kind: 'system', turn: 0, text: 'claim me durably', label: 'Background job', context: true,
+      contextPresentation: { form: 'notice', sourceKind: 'tool-jobs', role: 'inject' },
+    },
+  ], new Map())
   app.setPendingInputPresentation({ queued: [], tail: [], running: true })
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('to be claimed'), `the claimed occurrence must leave no retained duplicate:\n${view}`)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Background job'), `the durable Context card must render through the normal transcript path:\n${view}`)
+  // The pending lane's status line is gone — the visible row is the durable
+  // card, not a retained tail duplicate.
+  assert.ok(!view.includes('waiting for next step…'), `no pending tail duplicate may survive the claim:\n${view}`)
+  assert.equal(app.pendingInputForTest().tail.length, 0, 'the tail state holds no shadow row')
 })

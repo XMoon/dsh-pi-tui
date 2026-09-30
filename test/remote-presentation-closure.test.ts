@@ -429,20 +429,80 @@ test('a replaced Remote Connection generation clears a stale pending Context row
     running: true,
     pendingSubmissions: [],
   })
-  let bindable = true
+  // The replacement generation has not re-bound the addressed Session yet
+  // (the real reconnect window): the old binding is gone, so the reader must
+  // report the session unavailable, never replay the previous generation's
+  // rows.
+  let rebindable = true
   const sessions: BothSessionsSource = {
-    binding: id => bindable && id === 'session-a' ? { session: host.sessions.binding(id)!.session } : undefined,
+    binding: id => rebindable && id === 'session-a' ? { session: host.sessions.binding(id)!.session } : undefined,
   }
   presentOnce(app, sessions, generation.source)
   await vt.waitForRender()
   assert.ok(vt.getViewport().join('\n').includes('REMOTE-STALE-CONTEXT'))
 
   generation.set({ id: 2 })
-  bindable = false
+  rebindable = false
   presentOnce(app, sessions, generation.source)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('REMOTE-STALE-CONTEXT'), `stale Context presentation survived:\n${view}`)
+})
+
+test('a same-generation durable re-bind keeps the Context row (reconnect is not data loss)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: contextInbox([{ id: 'ctx-durable', text: 'REMOTE-DURABLE-CONTEXT' }]),
+    running: true,
+    pendingSubmissions: [],
+  })
+  const sessions: BothSessionsSource = {
+    binding: id => id === 'session-a' ? { session: host.sessions.binding(id)!.session } : undefined,
+  }
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('REMOTE-DURABLE-CONTEXT'))
+
+  // The durable inbox projection SURVIVES a reconnect: a replaced generation
+  // whose new binding carries the same durable rows keeps them on screen —
+  // the clear in the generation test comes from the un-rebound window, not
+  // from dropping durable data.
+  generation.set({ id: 2 })
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('REMOTE-DURABLE-CONTEXT'),
+    `a re-bound durable Context must survive the generation replacement:\n${view}`)
+})
+
+test('a SAME-generation unavailable binding retains no stale pending Context (case 6)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: contextInbox([{ id: 'ctx-unbound', text: 'REMOTE-UNBOUND-CONTEXT' }]),
+    running: true,
+    pendingSubmissions: [],
+  })
+  let bindable = true
+  const sessions: BothSessionsSource = {
+    binding: id => bindable && id === 'session-a' ? { session: host.sessions.binding(id)!.session } : undefined,
+  }
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('REMOTE-UNBOUND-CONTEXT'))
+
+  // ONLY the binding becomes unavailable; the generation is UNCHANGED. The
+  // reader must report the session as unavailable (never replay the previous
+  // binding's rows), so the Context row leaves the rendered surface.
+  bindable = false
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('REMOTE-UNBOUND-CONTEXT'),
+    `an unavailable same-generation binding must not retain stale Context:\n${view}`)
 })
 
 test('a Remote session switch clears the previous session pending Context row', async () => {
