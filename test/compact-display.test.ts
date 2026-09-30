@@ -807,7 +807,7 @@ test('regular Compact pending-user rows fold under the shared Ctrl+O disclosure'
   const longText = Array.from({ length: 40 }, (_, index) => `pending line ${index}`).join('\n')
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'pending-1', text: longText, rpcId: 'rpc-1', status: 'steering', foldableText: true }],
+    tail: [{ kind: 'user', row: { id: 'pending-1', text: longText, rpcId: 'rpc-1', status: 'steering', foldableText: true } }],
     running: true,
   })
   await vt.waitForRender()

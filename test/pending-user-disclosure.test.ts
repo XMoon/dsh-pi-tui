@@ -50,7 +50,7 @@ function lines(n: number, prefix = 'line'): string {
 }
 
 function steering(target: TuiApp, rows: readonly PendingUserRow[]): void {
-  target.setPendingInputPresentation({ queued: [], steering: rows, running: true })
+  target.setPendingInputPresentation({ queued: [], tail: rows.map(row => ({ kind: 'user', row })), running: true })
 }
 
 function longRow(id: string, prefix: string, rpcId?: string): PendingUserRow {

@@ -177,6 +177,7 @@ import { CompactWorkComponent, summarizeWorkSpan, type CompactWorkSummary } from
 import { ContextClusterComponent } from './context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './context-row.ts'
+import { PendingContextComponent } from './pending-context.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { FocusTimingStore } from './focus-timing.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
@@ -2856,6 +2857,25 @@ export interface PendingUserRow {
   foldableText?: boolean
 }
 
+/** One pending non-user Context row for the ephemeral conversation-tail
+ * lane: an authoritative `placement === 'context'` occurrence (background /
+ * injected input parked in the Host inbox before materialization). It has a
+ * NON-user visual identity, is never durable transcript content, and never
+ * correlates with a client-local echo. */
+export interface PendingContextRow {
+  /** The Host occurrence id. */
+  id: string
+  /** Display text (the runner's single-line content projection). */
+  text: string
+}
+
+/** One ordered conversation-tail row (mirrors the join's `PendingTailRow`
+ * for the app's own state; kept structural so TuiApp stays independent of
+ * the join module). */
+export type PendingTailRow =
+  | { readonly kind: 'user'; readonly row: PendingUserRow }
+  | { readonly kind: 'context'; readonly row: PendingContextRow }
+
 /** The stable presentation identity of one pending-user row: the rpc
  * correlation when present (a local echo and its authoritative occurrence
  * share it), the occurrence/request id otherwise. Never text, and never the
@@ -2865,14 +2885,22 @@ function pendingUserDisclosureKey(row: PendingUserRow): string {
   return row.rpcId !== undefined ? `rpc:${row.rpcId}` : `id:${row.id}`
 }
 
-/** The single atomic pending-input presentation update. Queue rows, the
- * ephemeral steering/transcript lane, and the subject's activity move
+/** The stable presentation identity of one pending-context row: the Host
+ * occurrence id (it never correlates with a local echo, so no rpc form). */
+function pendingContextKey(row: PendingContextRow): string {
+  return `id:${row.id}`
+}
+
+/** The single atomic pending-input presentation update. Queue rows, the ONE
+ * ordered ephemeral conversation-tail lane (user steering rows interleaved
+ * with non-user context occurrences), and the subject's activity move
  * together so a handoff never paints an intermediate blank/duplicate frame. */
 export interface PendingInputPresentation {
   /** Authoritative `queued` occurrences plus client-local queued echoes. */
   queued: readonly QueueItem[]
-  /** Authoritative `steering` occurrences plus local user echoes. */
-  steering: readonly PendingUserRow[]
+  /** The ordered conversation tail: `steering`/local-user rows plus
+   * non-user `context` occurrences, in the join's projection order. */
+  tail: readonly PendingTailRow[]
   /** Activity of the same pending-input subject (drives the queue steer hint). */
   running: boolean
 }
@@ -3150,6 +3178,9 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
 } | {
   kind: 'pending-user'
   row: PendingUserRow
+} | {
+  kind: 'pending-context'
+  row: PendingContextRow
 }
 
 /** Canonical Work/cluster membership for one `messages` window, memoized on
@@ -3215,6 +3246,9 @@ function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: Transcript
   if (left.kind === 'pending-user' && right.kind === 'pending-user') {
     return pendingUserDisclosureKey(left.row) === pendingUserDisclosureKey(right.row)
   }
+  if (left.kind === 'pending-context' && right.kind === 'pending-context') {
+    return pendingContextKey(left.row) === pendingContextKey(right.row)
+  }
   return false
 }
 
@@ -3244,6 +3278,10 @@ function sameStreamingToolPreviews(left: readonly StreamingToolPreview[], right:
 function samePendingUserRow(left: PendingUserRow, right: PendingUserRow): boolean {
   return left.id === right.id && left.rpcId === right.rpcId && left.text === right.text
     && left.local === right.local && left.status === right.status && left.foldableText === right.foldableText
+}
+
+function samePendingContextRow(left: PendingContextRow, right: PendingContextRow): boolean {
+  return left.id === right.id && left.text === right.text
 }
 
 /** One cached component for a transcript message (stage J render cache). */
@@ -3692,9 +3730,10 @@ export class TuiApp {
   private readonly queuePane: Text
   /** The semantic queued pending-input occurrences for the active subject. */
   private queueItems: readonly QueueItem[] = []
-  /** The ephemeral pending user-input lane (authoritative steering + local
-   * submission echoes) rendered after the live transcript tail. */
-  private pendingUserRows: readonly PendingUserRow[] = []
+  /** The ONE ordered ephemeral pending tail lane (authoritative steering +
+   * non-user context occurrences + local submission echoes) rendered after
+   * the live transcript tail. */
+  private pendingTailRows: readonly PendingTailRow[] = []
   /** Activity of the same pending-input subject shown in queueItems. */
   private queueRunning = true
 
@@ -5200,7 +5239,7 @@ export class TuiApp {
     this.pendingUserExpanded.clear()
     this.disposeMessageComponents()
     this.localMessages.length = 0
-    this.pendingUserRows = []
+    this.pendingTailRows = []
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
@@ -8120,7 +8159,9 @@ export class TuiApp {
       if (!this.isHostUserDisclosure(message)) continue
       if (this.userMessageCompactsAtCurrentWidth(message)) return true
     }
-    for (const row of this.pendingUserRows) {
+    for (const item of this.pendingTailRows) {
+      if (item.kind !== 'user') continue
+      const row = item.row
       if (row.foldableText !== true) continue
       if (this.pendingUserExpanded.get(pendingUserDisclosureKey(row)) !== true) continue
       if (this.pendingUserCompactsAtCurrentWidth(row)) return true
@@ -9239,6 +9280,7 @@ export class TuiApp {
       }
       if (block.kind === 'streaming-tool-previews') continue
       if (block.kind === 'pending-user') continue
+      if (block.kind === 'pending-context') continue
       if (block.kind === 'work') continue
       if (block.kind === 'context-cluster') {
         // A fullscreen mid-turn ambient cluster is a durable persistent fence:
@@ -9284,11 +9326,17 @@ export class TuiApp {
       this.applyWorkPreparing(blocks, projectionExpanded)
     }
     blocks.push(...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock))
-    // The ephemeral pending user-input lane sits at the LIVE conversation
-    // tail, after durable content and local cards. It is never projected into
-    // Focus, the search corpus, or the durable transcript.
-    for (const row of this.pendingUserRows) {
-      blocks.push({ kind: 'pending-user', row })
+    // The ONE ordered ephemeral pending tail sits at the LIVE conversation
+    // tail, after durable content and local cards: user steering rows and
+    // non-user context occurrences in the join's projection order. It is
+    // never projected into Focus, the search corpus, or the durable
+    // transcript.
+    for (const item of this.pendingTailRows) {
+      if (item.kind === 'user') {
+        blocks.push({ kind: 'pending-user', row: item.row })
+      } else {
+        blocks.push({ kind: 'pending-context', row: item.row })
+      }
     }
     return blocks
   }
@@ -9708,6 +9756,7 @@ export class TuiApp {
       return this.streamingToolPreviewComponent(block.previews, width)
     }
     if (block.kind === 'pending-user') return this.pendingUserComponentFor(block.row)
+    if (block.kind === 'pending-context') return this.pendingContextComponentFor(block.row)
     return this.componentForMessage(block.message, boundary, width, userBoundary)
   }
 
@@ -10046,6 +10095,7 @@ export class TuiApp {
     if (block.kind === 'activity') return block.activity.turn
     if (block.kind === 'streaming-tool-previews') return block.turn
     if (block.kind === 'pending-user') return undefined
+    if (block.kind === 'pending-context') return undefined
     if (block.kind === 'work') return block.span.turn
     if (block.kind === 'context-cluster') return block.cluster.turn
     return 'turn' in block.message ? block.message.turn : undefined
@@ -10292,6 +10342,9 @@ export class TuiApp {
         component = previous.component
       } else if (block.kind === 'pending-user' && previous.block.kind === 'pending-user'
         && samePendingUserRow(block.row, previous.block.row)) {
+        component = previous.component
+      } else if (block.kind === 'pending-context' && previous.block.kind === 'pending-context'
+        && samePendingContextRow(block.row, previous.block.row)) {
         component = previous.component
       } else {
         component = this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
@@ -10852,9 +10905,10 @@ export class TuiApp {
     return this.notifyText
   }
 
-  /** Headless-test hook: the current pending-input presentation rows. */
-  pendingInputForTest(): { queued: readonly QueueItem[]; steering: readonly PendingUserRow[] } {
-    return { queued: this.queueItems, steering: this.pendingUserRows }
+  /** Headless-test hook: the current pending-input presentation rows (queue
+   * plus the ordered tail; context rows included). */
+  pendingInputForTest(): { queued: readonly QueueItem[]; tail: readonly PendingTailRow[] } {
+    return { queued: this.queueItems, tail: this.pendingTailRows }
   }
 
   fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined {
@@ -12625,11 +12679,11 @@ export class TuiApp {
       // shell-mode draft round-trips through the viewer with its mode.
       this.mainDraftBeforeViewer = this.expandedSeatWireDraft()
       // The viewer renders ONLY the child transcript: the main session's
-      // local cards (`!` shell runs) and its ephemeral pending user lane must
+      // local cards (`!` shell runs) and its ephemeral pending tail must
       // never leak into it. The runner repaints the child folder right after,
       // so the cleared lists are rebuilt from the child content.
       this.localMessages.length = 0
-      this.pendingUserRows = []
+      this.pendingTailRows = []
       this.rebuildMessages()
     } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
       // Switching child: park the outgoing child's draft first.
@@ -17221,25 +17275,23 @@ export class TuiApp {
   setQueueItems(items: readonly QueueItem[], running?: boolean): void {
     this.setPendingInputPresentation({
       queued: items,
-      steering: this.pendingUserRows,
+      tail: this.pendingTailRows,
       running: running ?? true,
     })
   }
 
   /**
    * Apply one coherent pending-input presentation: the authoritative queued
-   * occurrences plus client-local queued echoes (queue pane), and the
-   * authoritative `steering` occurrences plus local submission echoes (the
-   * ephemeral conversation-tail lane). A single call keeps the queue and the
+   * occurrences plus client-local queued echoes (queue pane), and the ONE
+   * ordered ephemeral conversation-tail lane — authoritative `steering` rows,
+   * local submission echoes and authoritative non-user `context` occurrences
+   * in the join's projection order. A single call keeps the queue and the
    * lane in the same frame — a separate setter per surface would paint the
    * exact transient blank/duplicate frame this handoff exists to remove.
-   *
-   * `context` occurrences are deliberately absent: this presentation owns
-   * pending USER input only.
    */
   setPendingInputPresentation(presentation: PendingInputPresentation): void {
     this.queueItems = presentation.queued
-    this.pendingUserRows = presentation.steering
+    this.pendingTailRows = presentation.tail
     this.queueRunning = presentation.running
     // Prune the presentation-only disclosure state to the LIVE pending keys
     // (plan §16): a steering row that left the lane (its durable message
@@ -17248,7 +17300,11 @@ export class TuiApp {
     // pending key, so a local echo whose authoritative occurrence replaces it
     // keeps its explicit disclosure state.
     if (this.pendingUserExpanded.size > 0) {
-      const liveKeys = new Set(presentation.steering.map(pendingUserDisclosureKey))
+      const liveKeys = new Set(
+        presentation.tail
+          .filter(item => item.kind === 'user')
+          .map(item => pendingUserDisclosureKey(item.row)),
+      )
       for (const key of [...this.pendingUserExpanded.keys()]) {
         if (!liveKeys.has(key)) this.pendingUserExpanded.delete(key)
       }
@@ -17957,6 +18013,13 @@ export class TuiApp {
       expanded: this.pendingUserExpandedState(row),
       compactMarker: (hiddenRows, available) => this.userCompactMarker(hiddenRows, available, hint),
     })
+  }
+
+  /** Build the ephemeral pending-context component: the generic non-user
+   * chrome (`context-generic` icon under the current IconStyle) with a
+   * bounded width-aware body preview and the subject-derived waiting line. */
+  private pendingContextComponentFor(row: PendingContextRow): PendingContextComponent {
+    return new PendingContextComponent(row, this.queueRunning, this.iconStyle)
   }
 
   /**

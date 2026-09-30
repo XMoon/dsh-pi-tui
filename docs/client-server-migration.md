@@ -1352,6 +1352,32 @@ of the TUI product surface. D2.2 keeps the queue-action semantic fully aligned
 for both adapters while exposing only the bulk gestures; see the D2.2
 queue-action surface decision below.
 
+### 2026-09-30 addendum — pending Context presentation closure
+
+D2.1 and its follow-up originally mirrored the official Web pending-user
+visibility: `queued` → QueueDock, `steering` → pending user bubble,
+`context` → no pending row. The 2026-09-30 TUI presentation closure
+intentionally extends the Client-local policy to render existing semantic
+`placement === 'context'` occurrences in a NON-USER ephemeral conversation-tail
+row (generic `context-generic` chrome, bounded preview, waiting status), so a
+background job or subagent settlement parked in the Host's next-step inbox is
+immediately observable before it materializes. This is a TUI UX extension over
+the official Web, not a Host/semantic parity fix:
+
+- No Host/wire/port authority changes: the Direct/Remote
+  `PendingInputReader` semantics are unchanged, the raw `source` still never
+  crosses the semantic port, and no new Remote capability (RPC or event
+  forwarding) exists.
+- The join keeps ONE ordered tail: `steering`/local-user rows and `context`
+  occurrences interleave in the snapshot's projection order. Correlation
+  stays identity-only — a `context` occurrence never correlates with a
+  client-local echo, so same-text rows never merge.
+- Presentation-only lifecycle: the row is ephemeral, non-durable,
+  non-searchable, outside `TranscriptFolder`/Work/Context-cluster projection,
+  and never steals the viewport. The Host claim removes it; the durable
+  `user/message` Context returns through the normal transcript path. See
+  `docs/surface-decisions.md` for the full surface policy.
+
 ### D2.1 follow-up — interrupted parked-steering recovery
 
 The official Agent contract leaves a next-step steering occurrence PARKED in the

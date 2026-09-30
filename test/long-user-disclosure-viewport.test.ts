@@ -121,7 +121,7 @@ test('fullscreen: the pending lane uses the stable pending key as its viewport a
   app.setTranscript([{ kind: 'assistant', turn: 0, text: lines(60, 'a-') }])
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'p1', rpcId: 'r1', text: lines(60, 'p-'), status: 'steering', foldableText: true }],
+    tail: [{ kind: 'user', row: { id: 'p1', rpcId: 'r1', text: lines(60, 'p-'), status: 'steering', foldableText: true } }],
     running: true,
   })
   app.setFullscreen(true)
@@ -150,7 +150,7 @@ test('an unresolved pending-user anchor never copies the pre-mutation absolute o
   app.setTranscript([{ kind: 'assistant', turn: 0, text: lines(60, 'a-') }])
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'p1', rpcId: 'gone', text: lines(20, 'p-'), status: 'steering', foldableText: true }],
+    tail: [{ kind: 'user', row: { id: 'p1', rpcId: 'gone', text: lines(20, 'p-'), status: 'steering', foldableText: true } }],
     running: true,
   })
   app.setFullscreen(true)
@@ -159,7 +159,7 @@ test('an unresolved pending-user anchor never copies the pre-mutation absolute o
 
   // The pending row leaves the lane (its durable message materialized), and
   // the live position moves far away from the captured absolute scrollTop.
-  app.setPendingInputPresentation({ queued: [], steering: [], running: false })
+  app.setPendingInputPresentation({ queued: [], tail: [], running: false })
   app.scrollToBottom()
   await viewRows(vt)
   const before = app.fullscreenScrollForTest()!

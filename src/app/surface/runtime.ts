@@ -970,19 +970,21 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * Own pending input must become VISIBLE even when the reader deliberately
    * browsed away from the live tail (official Web: an appended user node /
    * steering node / submission echo forces `toBottom`). Ownership is
-   * EXPLICIT here — only a client-LOCAL submission echo is own input, so a
-   * background/other-client authoritative steering occurrence never steals
-   * the viewport. Keys are tracked per SUBJECT, so entering/leaving the child
-   * viewer neither re-fires nor forgets the parent's own input.
+   * EXPLICIT here — only a client-LOCAL submission echo is own input, so an
+   * authoritative steering occurrence from another client, or a background
+   * `context` occurrence, never steals the viewport. Keys are tracked per
+   * SUBJECT, so entering/leaving the child viewer neither re-fires nor
+   * forgets the parent's own input.
    */
   const pendingOwnInputBySubject = new Map<string, ReadonlySet<string>>()
   /**
    * Read one coherent pending-input projection and publish it to the app in
    * a SINGLE atomic presentation update: authoritative `queued` rows plus
-   * local queued echoes (queue pane), and authoritative `steering` rows plus
-   * local user echoes (the ephemeral conversation-tail lane). `context` is
-   * deliberately excluded from the pending USER surface. Correlation is by
-   * request/rpc identity — never text.
+   * local queued echoes (queue pane), and the ONE ordered conversation-tail
+   * lane — authoritative `steering` rows, local user echoes and authoritative
+   * non-user `context` occurrences in the join's projection order. Context
+   * occurrences have a non-user visual identity and never correlate with a
+   * local echo; correlation is by request/rpc identity only — never text.
    */
   const refreshPendingInput = (): void => {
     if (isCleanedUp()) return
@@ -996,18 +998,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // experimental Remote path) so the two optimistic identities never run
     // together. The join below is the single authoritative rule.
     const subjectEchoes = source.submissionEchoes(sessionId) ?? []
-    const { queued, steering, running } = buildPendingPresentation({
+    const { queued, tail, running } = buildPendingPresentation({
       pending,
       submissions: subjectEchoes,
       textOf: source.queueTextOf,
     })
     // Ownership: only a local echo bound for the TRANSCRIPT lane
     // (steering/transcript) is own input that may take the viewport. A local
-    // QUEUED echo lives in the queue pane (chrome), not the transcript. The
-    // key set is derived from the LEDGER (not the visible rows), so an
-    // authoritative rpc-correlated replacement — or the Host claim that
-    // re-presents the echo before the durable message — never counts as a
-    // second new own input.
+    // QUEUED echo lives in the queue pane (chrome), and an authoritative
+    // `context` occurrence is background/injected input — neither may move
+    // the viewport. The key set is derived from the LEDGER (not the visible
+    // rows), so an authoritative rpc-correlated replacement — or the Host
+    // claim that re-presents the echo before the durable message — never
+    // counts as a second new own input.
     const subjectKey = sessionId ?? ''
     const ownLaneKeys = new Set(
       subjectEchoes.filter(echo => echo.placement !== 'queued').map(echo => echo.requestId),
@@ -1029,21 +1032,24 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // paged into history): move the subject's window back to latest BEFORE
       // presenting, so the local echo — and later its durable replacement —
       // are actually in the projection the viewport scrolls to.
+      // A background `context` occurrence is NOT own input: it must never
+      // trigger this branch, so a reader browsing history is never yanked
+      // back to the live tail by background completion.
       const controller = activeWindow()
       if (!controller.isLatest()) {
         controller.latest()
         repaintTarget(activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
       }
-      live.setPendingInputPresentation({ queued, steering, running })
+      live.setPendingInputPresentation({ queued, tail, running })
       live.scrollToBottom()
       return
     }
-    live.setPendingInputPresentation({ queued, steering, running })
+    live.setPendingInputPresentation({ queued, tail, running })
   }
   /** Clear the pending-input presentation + own-input memory (generation bump). */
   const resetPendingPresentation = (): void => {
     pendingOwnInputBySubject.clear()
-    mounted().setPendingInputPresentation({ queued: [], steering: [], running: false })
+    mounted().setPendingInputPresentation({ queued: [], tail: [], running: false })
   }
 
   // ── A4-8 search/transcript presentation wiring (plan §17) ───────────────

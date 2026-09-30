@@ -538,7 +538,7 @@ test('a client-local queued echo renders its content marked sending in the queue
   await vt.waitForRender()
   app.setPendingInputPresentation({
     queued: [{ id: 'req-1', rpcId: 'req-1', text: 'queued locally', mode: 'followup', local: true }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -553,7 +553,7 @@ test('the ephemeral pending-steering lane renders user content at the conversati
   const before = (vt.getViewport().join('\n').match(/❯/g) ?? []).length
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'req-2', rpcId: 'req-2', text: 'steer this now', local: true }],
+    tail: [{ kind: 'user', row: { id: 'req-2', rpcId: 'req-2', text: 'steer this now', local: true } }],
     running: true,
   })
   await vt.waitForRender()
@@ -571,7 +571,7 @@ test('an active steering row reads steering…; an interrupted (parked) one read
   const parked = (running: boolean): void => {
     app.setPendingInputPresentation({
       queued: [],
-      steering: [{ id: 'occ-1', rpcId: 'occ-1', text: 'steer this now', status: 'steering' }],
+      tail: [{ kind: 'user', row: { id: 'occ-1', rpcId: 'occ-1', text: 'steer this now', status: 'steering' } }],
       running,
     })
   }
@@ -600,7 +600,7 @@ test('a client-local steering echo never renders waiting: only an authoritative 
   // it into a parked row while its submission is still in flight.
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'echo-1', rpcId: 'echo-1', text: 'local steer echo', local: true, status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'echo-1', rpcId: 'echo-1', text: 'local steer echo', local: true, status: 'steering' } }],
     running: false,
   })
   await vt.waitForRender()
@@ -615,7 +615,7 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   await vt.waitForRender()
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'parent-occ', text: 'parent steer', status: 'steering' } }],
     running: true,
   })
   await vt.waitForRender()
@@ -629,7 +629,7 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   })
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'child-occ', text: 'child steer', status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'child-occ', text: 'child steer', status: 'steering' } }],
     running: false,
   })
   await vt.waitForRender()
@@ -641,7 +641,7 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   app.setViewerMode(undefined)
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'parent-occ', text: 'parent steer', status: 'steering' } }],
     running: true,
   })
   await vt.waitForRender()
@@ -663,7 +663,7 @@ test('a narrow queue pane keeps a local sending suffix on the same row', async (
       mode: 'followup',
       local: true,
     }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -689,7 +689,7 @@ test('an ultra-narrow queue pane never wraps the local status onto a detached ro
       mode: 'followup',
       local: true,
     }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -705,7 +705,7 @@ test('a local-only queue pane does not advertise the bulk steer/recall actions',
   const { vt, app } = startApp()
   app.setPendingInputPresentation({
     queued: [{ id: 'req-l', rpcId: 'req-l', text: 'local only', mode: 'followup', local: true }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -724,7 +724,7 @@ test('a local-only queue pane does not advertise the bulk steer/recall actions',
       { id: 'req-l', rpcId: 'req-l', text: 'local only', mode: 'followup', local: true },
       { id: 'auth-q', rpcId: 'auth-rpc', text: 'authoritative row', mode: 'followup' },
     ],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -756,7 +756,7 @@ test('the pending presentation never steals the fullscreen viewport (force-tail 
   // viewport (it also owns the virtual transcript window).
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true }],
+    tail: [{ kind: 'user', row: { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true } }],
     running: true,
   })
   await vt.waitForRender()
@@ -765,10 +765,7 @@ test('the pending presentation never steals the fullscreen viewport (force-tail 
 
   app.setPendingInputPresentation({
     queued: [],
-    steering: [
-      { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true },
-      { id: 'remote-occ', rpcId: 'remote-rpc', text: 'REMOTE-MARKER', status: 'steering' },
-    ],
+    tail: [{ kind: 'user', row: { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true } }, { kind: 'user', row: { id: 'remote-occ', rpcId: 'remote-rpc', text: 'REMOTE-MARKER', status: 'steering' } }],
     running: true,
   })
   await vt.waitForRender()
@@ -780,11 +777,11 @@ test('clearing the pending-input presentation removes the lane and the queue pan
   const { vt, app } = startApp()
   app.setPendingInputPresentation({
     queued: [{ id: 'q', text: 'queued row', mode: 'followup', local: true }],
-    steering: [{ id: 's', text: 'steering row', local: true }],
+    tail: [{ kind: 'user', row: { id: 's', text: 'steering row', local: true } }],
     running: true,
   })
   await vt.waitForRender()
-  app.setPendingInputPresentation({ queued: [], steering: [], running: false })
+  app.setPendingInputPresentation({ queued: [], tail: [], running: false })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('steering row'), `stale steering row survived:\n${view}`)
@@ -796,7 +793,7 @@ test('the viewer clears the main pending-steering lane on entry', async () => {
   const { vt, app } = startApp()
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 's', text: 'main steering must not leak', local: true }],
+    tail: [{ kind: 'user', row: { id: 's', text: 'main steering must not leak', local: true } }],
     running: true,
   })
   await vt.waitForRender()
