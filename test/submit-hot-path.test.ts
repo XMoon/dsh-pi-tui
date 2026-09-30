@@ -1937,7 +1937,8 @@ test('running + busyEnter=steer: an ordinary Enter presents a steering echo and 
   // The human-prompt local echo placement must match the resolved delivery
   // (steer), not the pre-policy `queue`.
   const pending = mounted.app.pendingInputForTest()
-  assert.ok(pending.steering.some(row => row.local === true && row.text === 'enter steer'),
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(pendingUsers.some(row => row.local === true && row.text === 'enter steer'),
     `the Enter steer must present in the steering lane: ${JSON.stringify(pending)}`)
   assert.ok(!pending.queued.some(row => row.local === true),
     `the Enter steer must not present as a queued row: ${JSON.stringify(pending.queued)}`)
@@ -1951,7 +1952,8 @@ test('running + busyEnter=queue: the accelerated chord presents a steering echo 
   mounted.app.setDraft('accelerated steer')
   ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
   const pending = mounted.app.pendingInputForTest()
-  assert.ok(pending.steering.some(row => row.local === true && row.text === 'accelerated steer'),
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(pendingUsers.some(row => row.local === true && row.text === 'accelerated steer'),
     `the accelerated steer must present in the steering lane: ${JSON.stringify(pending)}`)
   assert.ok(!pending.queued.some(row => row.local === true),
     `the accelerated steer must not present as a queued row: ${JSON.stringify(pending.queued)}`)
@@ -2214,6 +2216,64 @@ test('own steer takes a history-browsed fullscreen viewport to the live tail; a 
     'a background authoritative steering row must not steal the viewport')
 })
 
+test('a background pending Context occurrence never steals a history-browsed viewport', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-history-context-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'history-context-session', events: longSessionEvents(30) })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'history-context-session' })
+  harness.host.status = 'running'
+  mounted.app.setFullscreen(true)
+  await waitForRenderView(vt)
+
+  // Page into history, then browse away from the end.
+  mounted.app.scrollToTop({ disableFollow: true })
+  await waitForRenderView(vt)
+  const scroll = mounted.app.fullscreenScrollForTest()
+  assert.equal(scroll?.isFollowingEnd, false, 'precondition: the reader is browsing history')
+  const scrollTopBefore = scroll?.scrollTop ?? 0
+
+  // A background non-user Context occurrence settles while the Agent works.
+  harness.host.nextStep.push({
+    id: 'background-context-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'BACKGROUND-CONTEXT-PROBE' }],
+    source: { kind: 'tool-jobs', form: 'notice' },
+  })
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 991) as never)
+  await waitForRenderView(vt)
+  const afterContext = mounted.app.fullscreenScrollForTest()
+  assert.equal(afterContext?.isFollowingEnd, false,
+    'a background Context occurrence must not steal the viewport')
+  assert.equal(afterContext?.scrollTop, scrollTopBefore,
+    'the historical scrollTop must be preserved')
+
+  // Control: a new LOCAL human echo still returns to latest as before.
+  mounted.app.setDraft('HISTORY-CONTEXT-OWN')
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await waitForDelivery(harness.host, 'history context own')
+  await waitForRenderView(vt)
+  assert.equal(mounted.app.fullscreenScrollForTest()?.isFollowingEnd !== false, true,
+    'own input must still take the viewport back to the live tail')
+})
+
 test('a steer gesture keeps its gesture-time delivery mode across a FIFO status flip', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-steer-mode-')
@@ -2254,8 +2314,9 @@ test('a steer gesture keeps its gesture-time delivery mode across a FIFO status 
     actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
   }).actionDispatcher.dispatch('app.input.steer')
   const atGesture = mounted.app.pendingInputForTest()
-  assert.ok(atGesture.steering.some(row => row.local === true && row.text === 'steer with captured mode'),
-    `the running steer must present in the steering lane: ${JSON.stringify(atGesture.steering)}`)
+  const atGestureUsers = atGesture.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(atGestureUsers.some(row => row.local === true && row.text === 'steer with captured mode'),
+    `the running steer must present in the steering lane: ${JSON.stringify(atGesture)}`)
 
   // The agent flips idle while B waits on the FIFO turn.
   harness.host.status = 'idle'
@@ -2281,10 +2342,11 @@ test('a skill invocation installs no client-local submission echo', async (t) =>
   // (the skill handler owns the delivery and cannot complete the rpc
   // correlation), so no local echo exists even before the command resolves.
   const pending = mounted.app.pendingInputForTest()
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
   assert.ok(!pending.queued.some(row => row.local === true),
     `a skill invocation must not install a queue echo: ${JSON.stringify(pending.queued)}`)
-  assert.ok(!pending.steering.some(row => row.local === true),
-    `a skill invocation must not install a steering echo: ${JSON.stringify(pending.steering)}`)
+  assert.ok(!pendingUsers.some(row => row.local === true),
+    `a skill invocation must not install a steering echo: ${JSON.stringify(pendingUsers)}`)
   // The skill still delivers through its existing command path.
   await waitForDelivery(harness.host, 'skill invocation')
   assert.ok(harness.host.steered.length + harness.host.followedUp.length >= 1,
@@ -2307,15 +2369,16 @@ test('a submission refused by the transition fence leaves no pending echo', asyn
   assert.equal(await drainUntil(() => /session transition is in progress/.test(mounted.app.notifyTextForTest()), 5000), true,
     'the transition fence must refuse the submission')
   const pending = mounted.app.pendingInputForTest()
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
   assert.ok(!pending.queued.some(row => row.local === true),
     `the refused submission must not leave a queue echo: ${JSON.stringify(pending.queued)}`)
-  assert.ok(!pending.steering.some(row => row.local === true),
-    `the refused submission must not leave a steering echo: ${JSON.stringify(pending.steering)}`)
+  assert.ok(!pendingUsers.some(row => row.local === true),
+    `the refused submission must not leave a steering echo: ${JSON.stringify(pendingUsers)}`)
   harness.releaseCreateGate()
   await transition
 })
 
-test('a context occurrence never becomes a pending user row', async (t) => {
+test('a context occurrence renders as the generic non-user Context tail row', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-context-lane-')
   const previousHome = process.env.DSH_HOME
@@ -2346,7 +2409,12 @@ test('a context occurrence never becomes a pending user row', async (t) => {
   }, 920) as never)
   await waitForRenderView(vt)
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('injected-context-marker'), `context must not render as pending user input:\n${view}`)
+  // The tail row is a generic NON-user Context card: its content preview is
+  // visible with a waiting-for-next-step status, never a user bubble marker,
+  // never a steering row, never a queue row.
+  assert.ok(view.includes('injected-context-marker'), `the pending Context preview must be visible:\n${view}`)
+  assert.ok(view.includes('waiting for next step…'), `the pending Context status must render:\n${view}`)
+  assert.ok(!view.includes('❯ injected-context-marker'), `context must not render as a user bubble:\n${view}`)
   assert.ok(!view.includes('steering…'), `context must not render as a steering row:\n${view}`)
   assert.ok(!view.includes('ctrl+s to steer all'), `context must not enter the queue pane:\n${view}`)
   void mounted

@@ -688,7 +688,9 @@ test('the interactive child viewer projects its own authoritative steering and n
   context.emit('session/event', parent as never, event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [] }, 40))
   await settle()
   await vt.waitForRender()
-  assert.ok(app.pendingInputForTest().steering.some(row => row.text === 'PARENT-STEER'),
+  const userRowsOf = (pending: ReturnType<TuiApp['pendingInputForTest']>) =>
+    pending.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(userRowsOf(app.pendingInputForTest()).some(row => row.text === 'PARENT-STEER'),
     'the main subject shows its authoritative steering before the viewer opens')
 
   // Enter the interactive continuable child viewer.
@@ -706,9 +708,10 @@ test('the interactive child viewer projects its own authoritative steering and n
   await settle()
   await vt.waitForRender()
   const viewed = app.pendingInputForTest()
-  assert.ok(viewed.steering.some(row => row.text === 'CHILD-STEER' && row.rpcId === 'child-rpc'),
-    `the child authoritative steering must be visible: ${JSON.stringify(viewed.steering)}`)
-  assert.ok(!viewed.steering.some(row => row.text === 'PARENT-STEER'),
+  const viewedUsers = userRowsOf(viewed)
+  assert.ok(viewedUsers.some(row => row.text === 'CHILD-STEER' && row.rpcId === 'child-rpc'),
+    `the child authoritative steering must be visible: ${JSON.stringify(viewedUsers)}`)
+  assert.ok(!viewedUsers.some(row => row.text === 'PARENT-STEER'),
     'the parent pending row must not leak into the child viewer')
 
   // Leaving the viewer re-projects the MAIN subject: the child row must not leak.
@@ -718,9 +721,10 @@ test('the interactive child viewer projects its own authoritative steering and n
   await vt.waitForRender()
   assert.ok(app.getViewerGeneration() > mountedGeneration, 'Esc must close the viewer')
   const restored = app.pendingInputForTest()
-  assert.ok(!restored.steering.some(row => row.text === 'CHILD-STEER'),
+  const restoredUsers = userRowsOf(restored)
+  assert.ok(!restoredUsers.some(row => row.text === 'CHILD-STEER'),
     'the closed child pending row must not leak to the parent surface')
-  assert.ok(restored.steering.some(row => row.text === 'PARENT-STEER'),
+  assert.ok(restoredUsers.some(row => row.text === 'PARENT-STEER'),
     'the parent subject is re-projected after the viewer closes')
 })
 

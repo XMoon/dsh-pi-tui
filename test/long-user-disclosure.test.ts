@@ -396,7 +396,7 @@ test('mixed-content user messages are never compacted', async () => {
 test('the ephemeral pending-user echo is never compacted', async () => {
   const { vt, app } = startApp()
   app.setTranscript([])
-  app.setPendingInputPresentation({ queued: [], steering: [{ id: 'p1', text: lines(24), status: 'steering' }], running: true })
+  app.setPendingInputPresentation({ queued: [], tail: [{ kind: 'user', row: { id: 'p1', text: lines(24), status: 'steering' } }], running: true })
   const rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 0, 'the pending echo renders in full')
   assert.ok(rows.some(row => row.includes('line20')), 'the pending text is fully visible')
@@ -1225,7 +1225,7 @@ test('a pending explicit expansion is never promoted onto the durable message', 
   app.setTranscript([])
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'p1', rpcId: 'r1', text: lines(24, 'p-'), status: 'steering', foldableText: true }],
+    tail: [{ kind: 'user', row: { id: 'p1', rpcId: 'r1', text: lines(24, 'p-'), status: 'steering', foldableText: true } }],
     running: true,
   })
   app.setFullscreen(true)
@@ -1237,7 +1237,7 @@ test('a pending explicit expansion is never promoted onto the durable message', 
   // The durable message materializes and the pending lane empties: the
   // ephemeral override must NOT be inherited — that would promote ephemeral
   // UI state into durable message state.
-  app.setPendingInputPresentation({ queued: [], steering: [], running: false })
+  app.setPendingInputPresentation({ queued: [], tail: [], running: false })
   app.setTranscript([user(lines(24, 'p-'), 1)])
   rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 1, 'the durable message re-derives its own state')

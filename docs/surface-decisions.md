@@ -93,8 +93,22 @@ accepted but has no authoritative representation yet:
   occurrence yet and always keeps `steering…`. The parked row stays visible and
   only the label changes — the occurrence keeps its identity, and a later
   ordinary prompt is what wakes the Agent and consumes it.
-- **Context** — `placement === 'context'` has no pending user surface; it
-  presents through its normal conversation/context surface once materialized.
+- **Context** — `placement === 'context'` is not pending USER input, but
+  authoritative occurrences are exposed in a NON-USER ephemeral Context tail
+  for background/injected-input observability (2026-09-30 TUI presentation
+  closure, intentionally extending the official Web policy — see the
+  migration doc's D2.1 addendum). The row renders generic
+  `context-generic` chrome plus a bounded body preview (max 2 width-aware
+  body rows, ellipsized) and a waiting status derived from the subject's
+  activity (`waiting for next step…` while running, `waiting for next turn…`
+  once parked). It is never in the queue pane, has no local optimistic echo,
+  never exposes the raw DSH `source` (or infers a producer from text), is
+  not searchable, not durable, never inside `TranscriptFolder`, Work spans or
+  Context clusters, and does not steal the viewport (a reader browsing
+  history stays put). The Host claim removes it — the pending-input snapshot
+  is the ONLY lifecycle authority, there is no TUI-owned retained row — and
+  the durable Context returns through the normal transcript path after
+  materialization.
 - **Identity, never text** — each human submission mints a request id before its
   first async preparation await and persists it as the Direct user-message
   source `rpcId`. Local echoes and authoritative occurrences correlate by that
@@ -104,9 +118,11 @@ accepted but has no authoritative representation yet:
   pre-step emits the durable message, the echo is re-presented in that window
   rather than deleted — the accepted content stays continuously visible. Two
   same-text submissions stay two distinct pending rows.
-- **One atomic update** — the runner publishes queued rows, steering rows and
-  activity in a single `setPendingInputPresentation` call, so a handoff never
-  paints an intermediate blank/duplicate frame.
+- **One atomic update** — the runner publishes queue rows, the ONE ordered
+  tail (user steering rows interleaved with non-user context occurrences, in
+  the join's projection order) and activity in a single
+  `setPendingInputPresentation` call, so a handoff never paints an
+  intermediate blank/duplicate frame.
 - **Gesture-captured delivery** — a Ctrl+S/steer draft resolves its delivery
   mode at the gesture boundary and uses that SAME mode for both the local echo
   placement and the written prompt, so an agent status flip while the gesture
@@ -151,9 +167,11 @@ D2.2 makes the client-local optimistic-echo source a seam
 `SessionSnapshot.pendingSubmissions`. The single join
 (`src/pending-presentation.ts`) correlates authoritative occurrences with local
 echoes by request/rpc identity only and routes `queued` to the queue pane and
-`steering`/`transcript` to the conversation-tail lane; `context` has no pending
-user surface. The Remote path therefore never runs a second optimistic ledger
-beside the official one, and a steer echo can never render as a queued row.
+`steering`/`transcript` to the conversation-tail lane; a non-user `context`
+occurrence renders in the same ordered tail with its generic non-user Context
+identity and never correlates with a local echo. The Remote path therefore
+never runs a second optimistic ledger beside the official one, and a steer
+echo can never render as a queued row.
 
 ## D2.3 model / preset / new presentation decisions
 
