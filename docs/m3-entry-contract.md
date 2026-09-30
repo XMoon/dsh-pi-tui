@@ -30,6 +30,12 @@ progress):
 |---|---|---|---|---|---|
 | 2026-09-30 | `next @ 25295d7f3ac688cd95c94c6ac7c256f4060be218` | §2.1 `interaction` | Approval and Question both described as waterfall-only | Approval remains waterfall/fail-closed for unsupported policy operations; Question gains official `attachWait` + projection + `answer` authority | DSH `0.2.0-rc.2` publishes the full Question contract |
 
+This register is normative from 2026-09-30 onward. Earlier contract corrections
+(the `transport.rpc` → `installConnection({ transport })` carrier correction, the
+0.2.0-rc.1 `llm.listModels` correction, and the M3-3A public-contract
+requalification) remain documented in their existing sections and are not
+retroactively reconstructed here.
+
 ## 1. Baseline
 
 | Fact | Value | Evidence |
@@ -88,7 +94,7 @@ body read (`skills/list` is Session-addressed and list-only; no `skills/read`),
 Remote-event selection), and `refreshTitle` (no official Client verb;
 `session/rename` is a distinct explicit rename, not regeneration).
 
-### 1.2 Entry state vs live implementation status
+### 1.2 Contract disposition vs live implementation status
 
 This document is the frozen architecture/semantic contract. It answers:
 
@@ -105,15 +111,17 @@ It does NOT answer which PR is currently coding a capability, whether an adapter
 has landed, whether CI is green, or how far the current stage has progressed.
 Those facts belong in `docs/client-server-migration.md` only.
 
-The `Status` column of the §2.1 capability matrix is therefore **M3-0 entry
-state** — what was true when the contract/baseline was frozen — not live
-implementation status, and it must not be mutated merely because implementation
-progressed. A cell that names a later stage (for example `IMPLEMENTED (M3-3B)`)
-is a requalification annotation retained for traceability; the status it implies
-is owned by `docs/client-server-migration.md`. The §2.2/§2.3 sub-domain `Status`
-columns are the frozen classification of record for the catalog/config
-decomposition (last requalified at M3-3B); from this amendment onward they are no
-longer updated for progress either.
+The classification columns of the §2 matrices are a **frozen contract
+disposition / last-requalification snapshot**, not live implementation status,
+and they are not updated for ordinary implementation progress. A cell that names
+a stage (for example `READY (M3-3A closed it)` or `IMPLEMENTED (M3-3B)`) records
+when the disposition was last requalified — it is not a claim that the row was
+already true at M3-0. The `Existing Remote impl` and per-sub-domain evidence
+columns are a historical snapshot captured at the same requalification points.
+
+None of those columns is the live progress authority.
+`docs/client-server-migration.md` remains the only place that reports current
+stage/adapter status and qualification evidence.
 
 Amend this frozen contract only when one of these changes:
 
@@ -161,7 +169,7 @@ actually wrong.
 without its own capability-name entry, so the two inventories are deliberately not
 1:1.
 
-| Backend property | Port (consumer) | Direct impl | Existing Remote impl | Exact rc.2 public source | M3-0 entry state | M3 owner/stage | Acceptance proof |
+| Backend property | Port (consumer) | Direct impl | Existing Remote impl | Exact rc.2 public source | Contract disposition / last requalification | M3 owner/stage | Acceptance proof |
 |---|---|---|---|---|---|---|---|
 | `subagent` | `SubagentPort` (viewer prompt, Task Center interrupt) | `runtime/direct/subagent-direct.ts` | `runtime/remote/subagent-remote.ts` | `ClientRemote['subagents'].prompt` / `.interruptByParent`; `dsh-subagent/remote` (`lib/typert.remote-client.d.ts:15-16`); child catalog is the `subagentCatalog` Session projection (`dsh-subagent/lib/types/projection-types.d.ts:64-67`) | READY | M3-3A | L3 `test/remote-subagent-port.test.ts` + published-contract gate `test/remote-official-contract.test.ts:105` |
 | `sessionReader` | `SessionReader` (picker list/projection/search, `/status` context row) | `runtime/direct/session-direct.ts` (+`session-search-direct.ts`, `session-projection-direct.ts`) | `runtime/remote/session-reader-remote.ts` (list/blank/projectionBatch/search) | `ISessions.list/refresh/search/binding` (`dsh-api-session-controller/lib/types/client/contract/sessions.d.ts:43-153`); `session/search`, `session/projections` Remotes | READY (M3-3A closed it) — `measureContext` reads the official `contextPressure` projection (`projectedTokens ?? pressureTokens`); the same projection face feeds `turnOutline` and the subject-neutral `sessionStatus` snapshot (`dsh-token-meter/lib/types/projection.d.ts:65-72`), **not** a new RPC | M3-3A | parity test Direct vs Remote `measureContext` on a live Session; the D1 "no Client equivalent" skip is retired here |
@@ -184,7 +192,7 @@ assembly that advertises exactly the capabilities it serves
 
 ### 2.2 `catalog` decomposition
 
-| Sub-domain | Port methods | Exact rc.2 public source | Status | Gap / owner |
+| Sub-domain | Port methods | Exact rc.2 public source | Disposition / last requalification | Gap / owner |
 |---|---|---|---|---|
 | `ModelCatalog` | `loadDirectory`, `defaultSelection`, `sessionSelection`, `selectSessionModel` | `session/modelCatalog`, `session/selectModel` Remotes; `modelSelection` projection (`dsh-api-session-controller/lib/types/types.d.ts:20-27`) | READY (adapter exists) | — |
 | `ModelCatalog` | `discoverModels` | `llm/discoverModels(settingsNs, request, signal)` (`dsh-llm/lib/typert.remote-client.d.ts`) | READY (M3-3A adapter) | the add-provider wizard probe maps to the official Remote; a Host failure must surface, never an empty list |
@@ -199,7 +207,7 @@ assembly that advertises exactly the capabilities it serves
 
 ### 2.3 `ConfigPort` decomposition
 
-| Sub-domain | Port methods | Exact rc.2 public source | Status |
+| Sub-domain | Port methods | Exact rc.2 public source | Disposition / last requalification |
 |---|---|---|---|
 | `tuiSettings` | `get()`, `replace(doc)` | read `settings/describe()` → `SettingsDescribeValue{namespaces[].value/base/user/revision}` (`dsh-settings/lib/types/types.d.ts:18-63`); write `settings/replace(ns,section,expectedRevision)` / `update` / `mutate` (`dsh-api-settings-controller/lib/typert.remote-client.d.ts:28-32`); invalidation = `settings/document-updated` plus official `connection/reset` | IMPLEMENTED. **Frozen sync/async bridge:** the adapter owns one serialized Client-local mirror. It installs BOTH invalidation listeners **before** the first `settings/describe()`, commits the first snapshot before Remote-backend readiness, reruns on `settings/document-updated` and after every `connection/reset`, and uses an invalidation/generation counter so a describe result that raced an invalidation is discarded and re-read before becoming current. `get()` returns the last committed snapshot synchronously; it may remain the last-known display value while a reconnect refresh is in flight, but it can never become the post-reconnect authoritative revision until the rerun commits. `replace()` waits for a current mirror/revision, performs the Host write, then forces/awaits a serialized describe refresh instead of optimistically mutating the mirror. No event is assumed to replay across disconnect. **IMPLEMENTED** in `runtime/remote/config-remote.ts`. |
 | `footerCommandTrust` | USER-layer mode + trusted command + activation id sets | `settings/describe()` `user` layer per namespace; the TUI's own trust validator stays client-side | IMPLEMENTED |

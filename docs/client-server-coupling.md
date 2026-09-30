@@ -46,11 +46,14 @@
 
 `scripts/client-boundary-gate.mjs` remains the mechanical
 no-new-business-coupling gate; it does not infer Cordis composition semantics it
-cannot see. Every material coupling/inventory row in this file additionally
-answers locality, composition owner, allowed consumer, wire source,
-reuse-vs-additive mount and duplicate-owner rule:
+cannot see. The legacy `File | Coupling | Notes` allowlist below is grandfathered
+and remains the mechanical coupling inventory; this section is the
+composition-semantics inventory.
 
-| Domain/service | Locality | Composition owner | Consumer | Wire/source | Mount rule | Evidence owner |
+Every NEW or materially changed composition-sensitive domain from M3-4 onward
+must have an ownership row here that records locality, composition owner,
+allowed consumer, wire source, reuse-vs-additive mount and evidence owner; the
+canonical M3-3B rows below already use that shape.
 
 `Evidence owner` is the test/smoke lane or the document that carries the proof.
 The frozen architecture statements live in `docs/m3-entry-contract.md` §2.4.4;
@@ -76,15 +79,15 @@ CLIENT_LOCAL             terminal/editor/clipboard/draft/overlay/keybinding/
 
 ### Canonical M3-3B ownership rows
 
-| Domain/service | Class | Owner rule |
-|---|---|---|
-| `userQuestions` Host service | `BASE_HOST_PREREQUISITE` | reuse the existing base service; never mount a second `UserQuestionService` in `RemoteHostRuntime` |
-| `userQuestions` Client Remote | `GENERATED_CLIENT_REMOTE` | mounted by the official client contribution; preserve the generated object semantics |
-| `configEditor` | `BASE_HOST_PREREQUISITE` | profile/base owns it when `profileContext` enables the config plane |
-| `settings` | `BASE_HOST_PREREQUISITE` | profile/base owns it; the Remote Config adapter consumes the generated `settings` Remote |
-| `jobController` | `BASE_HOST_PREREQUISITE` (existing Host service) | reuse; do not introduce a second job observation authority |
-| M3 Host API/session helper rows | `M3_ADDITIVE_HOST` | mount only the frozen additive closure from the M3 contract |
-| TUI Task Center / Question presentation | `CLIENT_LOCAL` presentation over semantic authority | never becomes Host authority |
+| Domain/service | Locality | Class | Composition owner | Consumer | Wire/source | Mount rule | Evidence owner |
+|---|---|---|---|---|---|---|---|
+| `userQuestions` Host service | Host-owned | `BASE_HOST_PREREQUISITE` | `@deepseek-ai/dsh-base` (row `user-questions`) | `InteractionPort` (Direct + Remote) | forwarded `user-questions/request` waterfall + Host service | reuse; never mount a second `UserQuestionService` in `RemoteHostRuntime` | `test/remote-m3a-semantics-smoke.test.ts` |
+| `userQuestions` Client Remote | Client-local consumption of a Host authority | `GENERATED_CLIENT_REMOTE` | official client contribution (`@deepseek-ai/dsh-user-questions/remote`) | `QuestionInteractionPort` + the `userQuestions` Session projection | generated `/remote` namespace | additive Client contribution; preserve the generated object identity | `test/remote-m3a-semantics-smoke.test.ts` |
+| `configEditor` | Host-owned | `BASE_HOST_PREREQUISITE` | profile/base composition (`profileContext` config plane) | `ConfigPort` settings mirror | Host settings/config plane | reuse; `RemoteHostRuntime` must not mount it | M3-3B same-Host smoke (fixture-mounted only per `docs/client-server-migration.md`) |
+| `settings` | Host-owned | `BASE_HOST_PREREQUISITE` | profile/base composition | Remote Config adapter | generated `settings` Remote | reuse; no second settings authority or namespace | `test/remote-config-port.test.ts` + same-Host smoke |
+| `jobController` | Host-owned | `BASE_HOST_PREREQUISITE` | the existing TUI row | `JobObservationPort` | `IJobs` + generated `job` Remote | reuse; no second job observation authority | `test/remote-job-observation.test.ts` + the Job roster in `test/remote-client-runtime.test.ts` |
+| M3 Host API/session helper rows | Host-owned | `M3_ADDITIVE_HOST` | `RemoteHostRuntime` (§2.4.1) | the M3 adapters | official Host plugins + generated Remotes | additive; mount only the frozen §2.4.1 closure | `test/remote-client-runtime.test.ts` |
+| TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority | `test/runner-viewer-task-integration.test.ts` |
 
 The exact package/row names may evolve; the ownership rule must remain explicit.
 
@@ -151,7 +154,8 @@ Client method whose contract is receiver-sensitive, not only `$on`.
 
 ### L5 fixture topology
 
-Any test described as real-wire / real-Host must list, next to the fixture:
+Every NEW or materially modified test described as real-wire / real-Host from
+M3-4 onward must list, next to the fixture:
 
 ```text
 reproduced production prerequisites
@@ -159,7 +163,10 @@ stand-ins
 deliberately absent services
 ```
 
-This document records the stable ownership rule;
+Existing pre-governance fixtures are grandfathered and are upgraded only when
+materially touched; the canonical manifest contract is in
+`docs/client-server-migration.md` §Production-equivalent fixture manifest. This
+document records the stable ownership rule;
 `docs/client-server-migration.md` records the qualification evidence. A fixture
 may stand in for an unrelated domain, but it must not omit a base prerequisite
 that ordinary production composition owns and still claim to prove the product
