@@ -594,21 +594,21 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
 })
 
 test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
-  // Proven on the real graph: the exact capability set; the production-equivalent
-  // config plane reaching `ready` (the mirror commits the official settings
-  // describe — the namespace-loss P1 fixed in the port); the archive returning a
-  // REAL `ready` with `dsh-session-m3a-main.zip` and readable bytes; the
-  // backend/assembly interaction identity; reverse disposal. The absent
-  // deployment contract is its own passing regression (P15).
+  // Proven on the real graph: exact capability set; the production-equivalent
+  // config plane reaching `ready`; the archive returning a REAL `ready` with
+  // `dsh-session-m3a-main.zip` and readable bytes; backend/assembly interaction
+  // identity; reverse disposal. The absent deployment contract is its own
+  // passing regression (P15).
   //
-  // Remaining leg: the SUCCESS write -> authoritative re-read. The plane serves
-  // a describe, but this fixture's profile has no WRITABLE namespace yet:
-  // `agent-preset-registry` is not exposed as a settings section, and the
-  // permission-preset catalog is empty, so the semantic write legs have no
-  // target. Next step: give the profile a real entry with a Config schema (the
-  // official owner of `tui-app`) or seed the permission-preset catalog, then
+  // Remaining leg: the SUCCESS write -> authoritative re-read. Root cause
+  // measured, not guessed: `describe()` succeeds but the mirror holds ZERO
+  // namespaces, because settings sections come from LOADER entries (the
+  // profile) and this fixture mounts its plugins directly. The profile here has
+  // no entries, so there is nothing writable. Next step: put ONE lightweight
+  // official plugin entry (with a Config schema) into the fixture profile so the
+  // Loader mounts it and its section becomes writable through the mirror, then
   // assert write -> Host mutation -> authoritative re-read -> still current.
-  skip: 'P1-B: the config SUCCESS leg needs a writable settings namespace in the fixture profile',
+  skip: 'P1-B: the fixture profile has no Loader entry, so describe() exposes no writable section',
 }, async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
