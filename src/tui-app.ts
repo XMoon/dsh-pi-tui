@@ -2869,9 +2869,11 @@ export interface PendingContextRow {
   text: string
 }
 
-/** One ordered conversation-tail row (mirrors the join's `PendingTailRow`
- * for the app's own state; kept structural so TuiApp stays independent of
- * the join module). */
+/** One ordered conversation-tail row: the join's projection unit for the
+ * ephemeral lane — an authoritative `steering` occurrence or a client-local
+ * user echo (`user`), or an authoritative non-user `context` occurrence
+ * (`context`). The join (`pending-presentation.ts`) imports this union;
+ * it lives here beside its row shapes so there is exactly one definition. */
 export type PendingTailRow =
   | { readonly kind: 'user'; readonly row: PendingUserRow }
   | { readonly kind: 'context'; readonly row: PendingContextRow }
@@ -2885,10 +2887,18 @@ function pendingUserDisclosureKey(row: PendingUserRow): string {
   return row.rpcId !== undefined ? `rpc:${row.rpcId}` : `id:${row.id}`
 }
 
-/** The stable presentation identity of one pending-context row: the Host
- * occurrence id (it never correlates with a local echo, so no rpc form). */
-function pendingContextKey(row: PendingContextRow): string {
-  return `id:${row.id}`
+/** The stable presentation identity of one pending tail row, in either lane
+ * kind: the user form is the rpc correlation when present (a local echo and
+ * its authoritative occurrence share it); the context form is the Host
+ * occurrence id under its own namespace (it never correlates with a local
+ * echo, and the namespace keeps a user `id:` key from ever colliding with a
+ * context one). Never text, and never the entry index — a projection update
+ * must not transfer disclosure state (or a stale click) to a different
+ * pending row. */
+function pendingTailRowKey(item: PendingTailRow): string {
+  return item.kind === 'user'
+    ? (item.row.rpcId !== undefined ? `rpc:${item.row.rpcId}` : `id:${item.row.id}`)
+    : `ctx:${item.row.id}`
 }
 
 /** The single atomic pending-input presentation update. Queue rows, the ONE
@@ -3176,11 +3186,8 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
    * Work/Thought tail (never the globally appended pending-run block). */
   containerPath?: TranscriptContainerPath
 } | {
-  kind: 'pending-user'
-  row: PendingUserRow
-} | {
-  kind: 'pending-context'
-  row: PendingContextRow
+  kind: 'pending-tail'
+  item: PendingTailRow
 }
 
 /** Canonical Work/cluster membership for one `messages` window, memoized on
@@ -3243,11 +3250,8 @@ function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: Transcript
     return left.turn === right.turn
       && sameStreamingToolPreviewShape(left.previews, right.previews)
   }
-  if (left.kind === 'pending-user' && right.kind === 'pending-user') {
-    return pendingUserDisclosureKey(left.row) === pendingUserDisclosureKey(right.row)
-  }
-  if (left.kind === 'pending-context' && right.kind === 'pending-context') {
-    return pendingContextKey(left.row) === pendingContextKey(right.row)
+  if (left.kind === 'pending-tail' && right.kind === 'pending-tail') {
+    return pendingTailRowKey(left.item) === pendingTailRowKey(right.item)
   }
   return false
 }
@@ -3282,6 +3286,17 @@ function samePendingUserRow(left: PendingUserRow, right: PendingUserRow): boolea
 
 function samePendingContextRow(left: PendingContextRow, right: PendingContextRow): boolean {
   return left.id === right.id && left.text === right.text
+}
+
+/** Whether one pending tail row's PRESENTATION is unchanged, so the content
+ * refresh keeps the already-mounted component (per lane kind). */
+function samePendingTailRow(left: PendingTailRow, right: PendingTailRow): boolean {
+  return left.kind === right.kind
+    && (left.kind === 'user' && right.kind === 'user'
+      ? samePendingUserRow(left.row, right.row)
+      : left.kind === 'context' && right.kind === 'context'
+        ? samePendingContextRow(left.row, right.row)
+        : false)
 }
 
 /** One cached component for a transcript message (stage J render cache). */
@@ -9258,8 +9273,7 @@ export class TuiApp {
         continue
       }
       if (block.kind === 'streaming-tool-previews') continue
-      if (block.kind === 'pending-user') continue
-      if (block.kind === 'pending-context') continue
+      if (block.kind === 'pending-tail') continue
       if (block.kind === 'work') continue
       if (block.kind === 'context-cluster') {
         // A fullscreen mid-turn ambient cluster is a durable persistent fence:
@@ -9311,11 +9325,7 @@ export class TuiApp {
     // never projected into Focus, the search corpus, or the durable
     // transcript.
     for (const item of this.pendingTailRows) {
-      if (item.kind === 'user') {
-        blocks.push({ kind: 'pending-user', row: item.row })
-      } else {
-        blocks.push({ kind: 'pending-context', row: item.row })
-      }
+      blocks.push({ kind: 'pending-tail', item })
     }
     return blocks
   }
@@ -9734,8 +9744,11 @@ export class TuiApp {
       // the ONE streaming preview renderer.
       return this.streamingToolPreviewComponent(block.previews, width)
     }
-    if (block.kind === 'pending-user') return this.pendingUserComponentFor(block.row)
-    if (block.kind === 'pending-context') return this.pendingContextComponentFor(block.row)
+    if (block.kind === 'pending-tail') {
+      return block.item.kind === 'user'
+        ? this.pendingUserComponentFor(block.item.row)
+        : this.pendingContextComponentFor(block.item.row)
+    }
     return this.componentForMessage(block.message, boundary, width, userBoundary)
   }
 
@@ -9759,10 +9772,10 @@ export class TuiApp {
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
       let userDisclosureHits: readonly UserDisclosureHit[] | undefined
       const containerPath = this.rowContainerPath(block)
-      if (block.kind === 'pending-user') {
+      if (block.kind === 'pending-tail' && block.item.kind === 'user') {
         userDisclosureHits = this.userDisclosureHitsFor(component, rendered, truncatedMarker, {
           kind: 'pending',
-          key: pendingUserDisclosureKey(block.row),
+          key: pendingUserDisclosureKey(block.item.row),
         })
       } else if (block.kind === 'message') {
         truncatedMarker = block.truncated === true
@@ -10014,10 +10027,10 @@ export class TuiApp {
   ): RenderedTranscriptBlock[] {
     return mounted.map(entry => {
       const rendered = entry.component.render(width)
-      if (entry.block.kind === 'pending-user') {
+      if (entry.block.kind === 'pending-tail' && entry.block.item.kind === 'user') {
         const userDisclosureHits = this.userDisclosureHitsFor(entry.component, rendered, entry.truncatedMarker, {
           kind: 'pending',
-          key: pendingUserDisclosureKey(entry.block.row),
+          key: pendingUserDisclosureKey(entry.block.item.row),
         })
         return {
           ...entry,
@@ -10073,8 +10086,7 @@ export class TuiApp {
   private focusLiveTurnOf(block: TranscriptRenderBlock): number | undefined {
     if (block.kind === 'activity') return block.activity.turn
     if (block.kind === 'streaming-tool-previews') return block.turn
-    if (block.kind === 'pending-user') return undefined
-    if (block.kind === 'pending-context') return undefined
+    if (block.kind === 'pending-tail') return undefined
     if (block.kind === 'work') return block.span.turn
     if (block.kind === 'context-cluster') return block.cluster.turn
     return 'turn' in block.message ? block.message.turn : undefined
@@ -10193,7 +10205,7 @@ export class TuiApp {
     const block = entry.block
     return {
       ...(block.kind === 'message' ? { message: block.message } : block.kind === 'activity' ? { activity: block.activity } : {}),
-      ...(block.kind === 'pending-user' ? { pendingKey: pendingUserDisclosureKey(block.row) } : {}),
+      ...(block.kind === 'pending-tail' ? { pendingKey: pendingTailRowKey(block.item) } : {}),
       ...(block.kind === 'work' ? { workOwner: block.span.owner } : {}),
       ...(block.kind === 'context-cluster' ? { clusterOwner: block.cluster.owner } : {}),
       ...(entry.containerPath === undefined ? {} : { containerPath: entry.containerPath }),
@@ -10319,11 +10331,8 @@ export class TuiApp {
       } else if (block.kind === 'streaming-tool-previews' && previous.block.kind === 'streaming-tool-previews'
         && sameStreamingToolPreviews(block.previews, previous.block.previews)) {
         component = previous.component
-      } else if (block.kind === 'pending-user' && previous.block.kind === 'pending-user'
-        && samePendingUserRow(block.row, previous.block.row)) {
-        component = previous.component
-      } else if (block.kind === 'pending-context' && previous.block.kind === 'pending-context'
-        && samePendingContextRow(block.row, previous.block.row)) {
+      } else if (block.kind === 'pending-tail' && previous.block.kind === 'pending-tail'
+        && samePendingTailRow(block.item, previous.block.item)) {
         component = previous.component
       } else {
         component = this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
@@ -17998,7 +18007,7 @@ export class TuiApp {
    * chrome (`context-generic` icon under the current IconStyle) with a
    * bounded width-aware body preview and the subject-derived waiting line. */
   private pendingContextComponentFor(row: PendingContextRow): PendingContextComponent {
-    return new PendingContextComponent(row, this.queueRunning, this.iconStyle)
+    return new PendingContextComponent(row.text, this.queueRunning, this.iconStyle)
   }
 
   /**
