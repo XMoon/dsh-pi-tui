@@ -361,7 +361,7 @@ test('a visible collapsed-Focus compaction override is collapsed by the first Ct
   assert.notEqual(overrides.get(compaction), true, 'the materialized override is cleared')
 })
 
-test('a hidden mid-turn notice override does not consume the first Ctrl+O', async () => {
+test('a materialized mid-turn notice payload override is collapsed by the first Ctrl+O', async () => {
   const { vt, app } = startApp('focus')
   const notice: TranscriptMessage = {
     kind: 'system', turn: 1, text: 'NOTICE_BODY_MARKER', label: 'Background job', context: true,
@@ -377,15 +377,21 @@ test('a hidden mid-turn notice override does not consume the first Ctrl+O', asyn
   const activities = new Map([[1, activity(1)]])
   app.setTranscript(messages, activities)
   await viewport(vt)
+  const view0 = await viewport(vt)
+  assert.ok(view0.includes('Background job'), 'the mid-turn notice row is visible (post-Thought)')
+  assert.ok(!view0.includes('NOTICE_BODY_MARKER'), 'precondition: its payload stays folded')
   const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
   overrides.set(notice, true)
   app.setTranscript(messages, activities)
-  assert.ok(!(await viewport(vt)).includes('NOTICE_BODY_MARKER'),
-    'precondition: collapsed Focus hides the mid-turn notice')
+  assert.ok((await viewport(vt)).includes('NOTICE_BODY_MARKER'),
+    'the materialized notice override opens its payload')
   vt.sendInput('\x0f')
   await viewport(vt)
-  assert.equal(app.isTranscriptDetailExpanded(), true, 'the hidden notice override must not consume the first press')
-  assert.equal(overrides.get(notice), true, 'the parked notice override is preserved')
+  // The notice renders outside the collapsed Thought, so its payload override
+  // is a MATERIALIZED regular-master disclosure: the first press collapses it
+  // (never a two-step no-op), exactly like any other visible card override.
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the visible notice override consumes the first press')
+  assert.notEqual(overrides.get(notice), true, 'the override is cleared by the collapse')
 })
 
 test('regular Focus Ctrl+O ignores a redundant Work owner covered by a manual root', async () => {

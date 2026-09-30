@@ -35,7 +35,7 @@ const echo = (
   requestId: string,
   placement: SubmissionPresentationItem['placement'],
   echoText: string,
-): SubmissionPresentationItem => ({ requestId, placement, time: 1, text: echoText, attachments: [] })
+): SubmissionPresentationItem => ({ requestId, placement, createdAt: 1, text: echoText, attachments: [] })
 
 // ── 9.1 Pending presentation ordering ───────────────────────────────────────
 
@@ -109,9 +109,13 @@ test('only a real user rpcId identity suppresses the matching human local echo',
 
 // ── 9.3 Real TUI pending Context render ─────────────────────────────────────
 
-function startApp(width = 80): { vt: VirtualTerminal; app: TuiApp } {
+function startApp(width = 80, preset?: 'focus' | 'compact' | 'full'): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(
+    vt,
+    { onSubmit: () => {}, onExit: () => {} },
+    preset === undefined ? {} : { displayState: { preset } },
+  )
   app.start()
   startedApps.add(app)
   return { vt, app }
@@ -146,6 +150,24 @@ test('a parked context occurrence (subject no longer running) reads waiting for 
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('waiting for next turn…'), `an idle subject reads waiting for next turn:\n${view}`)
   assert.ok(!view.includes('waiting for next step…'), `the running label must not render:\n${view}`)
+})
+
+test('the pending Context tail renders in every display preset (UI acceptance matrix)', async () => {
+  for (const preset of ['focus', 'compact', 'full'] as const) {
+    const { vt, app } = startApp(80, preset)
+    await vt.waitForRender()
+    app.setPendingInputPresentation({
+      queued: [],
+      tail: [{ kind: 'context', row: { id: 'ctx-1', text: `CONTEXT-IN-${preset}` } }],
+      running: true,
+    })
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.ok(view.includes(`CONTEXT-IN-${preset}`), `${preset}: the pending Context tail must render:\n${view}`)
+    assert.ok(!view.includes('to steer all') && !view.includes('to recall all'),
+      `${preset}: the Context row must never enter the queue pane:\n${view}`)
+    app.dispose()
+  }
 })
 
 test('a long context preview is bounded to two body rows with an ellipsis', async () => {

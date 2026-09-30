@@ -1,12 +1,14 @@
 /**
- * PR4 addendum: Focus collapsed mid-turn Notice suppression.
+ * Focus collapsed mid-turn Notice disposition (2026-09-30 closure).
  *
- * Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK:
- * a `form:'notice'` row in the turn's opening foundation stays visible (it
- * explains why the Agent resumed), while a mid-turn notice is hidden inside
- * the collapsed Thought and restored in raw chronology when the Thought opens.
- * The decision reads the semantic `form`, never a source kind or plugin name;
- * Compact/Full never route through this predicate.
+ * Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK
+ * POSITIONALLY: a `form:'notice'` row in the turn's opening foundation stays
+ * BEFORE the Thought (it explains why the turn started), while a mid-turn
+ * notice renders AFTER the Thought as visible process feedback — never hidden
+ * inside it, and never a candidate for the Thought's Action slot. Expanded
+ * Focus restores the exact raw chronology. The decision reads the semantic
+ * `form` plus raw position, never a source kind or plugin name; Compact/Full
+ * never route through this disposition.
  * @module @xmoon76/dsh-pi-tui/focus-notice-suppression.test
  */
 
@@ -14,7 +16,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { isCollapsedFocusHiddenRow, projectFocus } from '../src/focus-activity.ts'
+import { projectFocus } from '../src/focus-activity.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/display-preset.ts'
@@ -68,39 +70,51 @@ function expanded(messages: readonly TranscriptMessage[]): TranscriptMessage[] {
   return flatRows(projectFocus(messages, noActivities, new Set([TURN]), true))
 }
 
-// --- 1/2: busy-turn notice is absorbed by the collapsed Thought -------------
+// --- F1: busy tool-jobs Notice renders AFTER the Thought ---------------------
 
-test('1. a busy-turn tool-jobs notice is hidden while collapsed and restored in raw chronology when expanded', () => {
+test('F1. a busy-turn tool-jobs notice is visible after the Thought and never a hidden Action candidate', () => {
   const noticeRow = notice('Background job', 'job finished', 'tool-jobs')
   const messages = [user('go'), thinking('first'), tool(), noticeRow, thinking('second'), tool(), assistant('final')]
   const collapsedRows = collapsed(messages)
-  assert.ok(!collapsedRows.includes(noticeRow), 'the mid-turn notice is hidden inside the collapsed Thought')
-  assert.deepEqual(collapsedRows.map(row => row.kind), ['user'], 'only the causal opening input stays visible')
+  const noticeIndex = collapsedRows.indexOf(noticeRow)
+  assert.ok(noticeIndex >= 0, 'the mid-turn notice is VISIBLE while collapsed')
+  const thoughtIndex = collapsedRows.findIndex(row => row.kind === 'thinking')
+  // The notice renders after the Thought (its position within the visible
+  // pre/post rows), never hoisted before it as causal input.
+  assert.ok(thoughtIndex < 0 || noticeIndex > collapsedRows.indexOf(user('go')),
+    'the notice renders after the opening causal input')
+  const blocks = projectFocus(messages, noActivities, new Set(), true)
+  const actionBlock = blocks.find(block => block.kind === 'activity')
+  assert.ok(actionBlock === undefined || !('action' in actionBlock) || actionBlock.action?.message !== noticeRow,
+    'a visible notice never contaminates the Thought Action candidate set')
 
   const expandedRows = expanded(messages)
   assert.deepEqual(expandedRows, messages, 'expanded Focus restores the exact raw chronology')
   assert.equal(expandedRows.indexOf(noticeRow), 3)
 })
 
-test('2. a busy-turn subagent-settled notice is hidden by form, not by source kind', () => {
+// --- F2: by form + raw position, never hardcoded source kinds ----------------
+
+test('F2. a busy-turn subagent-settled and future-producer notice render by form, not source kind', () => {
   for (const sourceKind of ['tool-jobs', 'subagent-settled', 'future-producer']) {
     const noticeRow = notice('Agent notice', 'child settled', sourceKind)
     const messages = [user('go'), thinking('first'), tool(), noticeRow, assistant('final')]
-    assert.ok(!collapsed(messages).includes(noticeRow), `source ${sourceKind}: hidden while collapsed`)
+    assert.ok(collapsed(messages).includes(noticeRow), `source ${sourceKind}: visible while collapsed`)
     assert.equal(expanded(messages).indexOf(noticeRow), 3, `source ${sourceKind}: restored when expanded`)
   }
 })
 
-// --- 3: leading / causal notice --------------------------------------------
+// --- F3: opening Notice stays BEFORE the Thought -----------------------------
 
-test('3. a leading wakeup notice stays visible above the Working row', () => {
+test('F3. a leading wakeup notice stays visible above the Working row', () => {
   const noticeRow = notice('Background job', 'woke the agent', 'tool-jobs')
   const messages = [noticeRow, thinking('why I resumed'), tool(), assistant('final')]
-  assert.ok(collapsed(messages).includes(noticeRow), 'the opening foundation notice stays surfaced')
-  assert.equal(collapsed(messages)[0], noticeRow, 'it renders before the Thought')
+  const rows = collapsed(messages)
+  assert.ok(rows.includes(noticeRow), 'the opening foundation notice stays surfaced')
+  assert.equal(rows[0], noticeRow, 'it renders before the Thought')
 })
 
-test('3b. a notice inside the opening foundation burst stays visible', () => {
+test('F3b. a notice inside the opening foundation burst stays visible', () => {
   const ambientRow = ambient('AGENTS.md')
   const noticeRow = notice('Background job', 'woke the agent', 'tool-jobs')
   const thinkingRow = thinking('process')
@@ -109,24 +123,24 @@ test('3b. a notice inside the opening foundation burst stays visible', () => {
   assert.ok(rows.includes(ambientRow) && rows.includes(noticeRow), 'opening foundation rows survive')
 })
 
-// --- 4: mid-turn relay stays visible ---------------------------------------
+// --- F4: mid-turn relay stays visible (unchanged) ----------------------------
 
-test('4. a mid-turn relay remains visible while collapsed', () => {
+test('F4. a mid-turn relay remains visible while collapsed', () => {
   const relayRow = relay('child-2')
   const messages = [user('go'), thinking('first'), relayRow, thinking('second'), assistant('final')]
   const rows = collapsed(messages)
   assert.ok(rows.includes(relayRow), 'an external Agent-authored input is never hidden with a notice')
 })
 
-// --- 5: notice between two Process regions ---------------------------------
+// --- F5: notice between two Process regions ----------------------------------
 
-test('5. a notice between Process regions creates no standalone collapsed row and restores in place when expanded', () => {
+test('F5. a notice between Process regions renders after the Thought; expanded restores in place', () => {
   const noticeRow = notice('Background job', 'between', 'subagent-settled')
   const firstProcess = thinking('before')
   const secondProcess = thinking('after')
   const messages = [user('go'), firstProcess, tool(), noticeRow, secondProcess, tool(), assistant('final')]
   const collapsedRows = collapsed(messages)
-  assert.ok(!collapsedRows.includes(noticeRow), 'no standalone visible row while collapsed')
+  assert.ok(collapsedRows.includes(noticeRow), 'the between-regions notice renders a standalone visible row while collapsed')
   assert.equal(collapsedRows.filter(row => row.kind === 'user').length, 1, 'the causal opening user row still renders')
 
   const expandedRows = expanded(messages)
@@ -137,32 +151,30 @@ test('5. a notice between Process regions creates no standalone collapsed row an
     'expanded restores Process -> Notice -> Process order')
 })
 
-// --- 7: user/steer rows are never moved or swallowed ------------------------
-test('7. the notice suppression never moves or swallows a user/steer row', () => {
+// --- F7: user/steer rows are never moved or swallowed ------------------------
+
+test('F7. the notice disposition never moves or swallows a user/steer row', () => {
   const steerRow = steer('steered mid-turn')
   const noticeRow = notice('Background job', 'mid', 'tool-jobs')
   const messages = [user('opening'), thinking('process'), noticeRow, steerRow, tool()]
   const rows = collapsed(messages)
   assert.equal(rows[0]!.kind, 'user')
   assert.ok(rows.includes(steerRow), 'a same-turn steer stays visible')
-  assert.ok(!rows.includes(noticeRow), 'only the mid-turn notice is suppressed')
+  assert.ok(rows.includes(noticeRow), 'the mid-turn notice is visible too')
 })
 
-// --- 8: grouping parity on a turn split by a window summary -----------------
+// --- F8: turn-less split keeps the consecutive-run grouping ------------------
 
-test('8. a turn split by a turn-less row keeps the consecutive-run grouping (reveal predicate agrees with the projection)', () => {
+test('F8. a turn split by a turn-less row keeps the consecutive-run grouping (a notice starting its own run is opening foundation)', () => {
   // A turn-less entry SPLITS turn 1 into two runs. The notice starts the second
   // run, so its own lead boundary is the run start and the projection renders
-  // it; the reveal predicate must use the SAME consecutive grouping instead of
-  // reconstructing an all-same-turn group (which would wrongly call it hidden).
+  // it as that run's opening foundation.
   const noticeRow = notice('Background job', 'after the split', 'tool-jobs')
   const messages = [user('opening'), thinking('before'), summary('… older'), noticeRow, thinking('after')]
-  assert.equal(isCollapsedFocusHiddenRow(messages, noticeRow), false,
-    'the predicate mirrors the projection consecutive-run grouping')
   assert.ok(collapsed(messages).includes(noticeRow), 'the projection renders the notice in its own run')
 })
 
-// --- 6: search reveal over a hidden mid-turn notice -------------------------
+// --- F6 + F9/F10: real-TUI search / Compact / Full controls -------------------
 
 function startApp(preset: DisplayState['preset']): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(100, 40)
@@ -178,13 +190,13 @@ function eventAt(type: string, data: Record<string, unknown>, time: number, seq:
 
 function busyTurnWithNoticeFixture(): { folder: TranscriptFolder; noticeRow: TranscriptMessage } {
   const folder = new TranscriptFolder()
-  const source = { kind: 'tool-jobs', form: 'notice', summary: 'HIDDEN_NOTICE_SUMMARY', senderSessionId: 'job-1' }
+  const source = { kind: 'tool-jobs', form: 'notice', summary: 'NOTICE_SUMMARY', senderSessionId: 'job-1' }
   folder.apply([
     eventAt('turn/start', { turn: 1 }, 1000, 0),
     eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first reasoning' } }, 1002, 2),
     eventAt('tool/call', { turn: 1, step: 0, callId: 'c1', name: 'read', arguments: '{}' }, 1003, 3),
-    eventAt('user/message', { id: MessageId('notice-1'), role: 'user', content: [{ type: 'text', text: 'notice payload HIDDEN_NOTICE_PAYLOAD' }], source }, 1004, 4),
+    eventAt('user/message', { id: MessageId('notice-1'), role: 'user', content: [{ type: 'text', text: 'notice payload NOTICE_PAYLOAD' }], source }, 1004, 4),
     eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second reasoning' } }, 1005, 5),
     eventAt('tool/call', { turn: 1, step: 1, callId: 'c2', name: 'read', arguments: '{}' }, 1006, 6),
   ])
@@ -193,38 +205,36 @@ function busyTurnWithNoticeFixture(): { folder: TranscriptFolder; noticeRow: Tra
   return { folder, noticeRow }
 }
 
-test('6. a search hit inside a hidden mid-turn notice reveals it temporarily and dismiss restores collapsed Focus', async () => {
+test('F6. searching a durable mid-turn notice needs no Focus root reveal and dismiss keeps it visible', async () => {
   const { vt, app } = startApp('focus')
   const { folder, noticeRow } = busyTurnWithNoticeFixture()
   app.setTranscript(folder.messages(), folder.turnActivities())
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('HIDDEN_NOTICE_SUMMARY'), `the mid-turn notice is hidden while collapsed:\n${view}`)
+  assert.ok(view.includes('NOTICE_SUMMARY'), `the mid-turn notice is visible while collapsed (post-Thought):\n${view}`)
 
   app.setTranscriptSearchTarget({
-    query: 'HIDDEN_NOTICE_PAYLOAD',
+    query: 'NOTICE_PAYLOAD',
     match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
     message: noticeRow,
   })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('HIDDEN_NOTICE_SUMMARY'), `the search reveal surfaces the hidden notice:\n${view}`)
-  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the reveal never writes manual Thought state')
+  assert.ok(view.includes('NOTICE_SUMMARY'), `the notice stays visible during the search:\n${view}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the search never opens a manual Thought state for an already-visible row')
 
   app.finishTranscriptSearchPresentation(new Set())
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('HIDDEN_NOTICE_SUMMARY'), `dismiss restores collapsed Focus:\n${view}`)
+  assert.ok(view.includes('NOTICE_SUMMARY'), `dismiss does NOT hide the notice again — it is an ordinary visible row:\n${view}`)
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no manual disclosure state is created')
 })
 
-// --- Compact / Full are unchanged ------------------------------------------
-
-test('a Compact notice stays a standalone row (this suppression is Focus-only)', async () => {
+test('F9. a Compact notice stays a standalone row (this disposition is Focus-only)', async () => {
   const { vt, app } = startApp('compact')
   const { folder } = busyTurnWithNoticeFixture()
   app.setTranscript(folder.messages(), folder.turnActivities())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('HIDDEN_NOTICE_SUMMARY'), `Compact keeps the notice standalone:\n${view}`)
+  assert.ok(view.includes('NOTICE_SUMMARY'), `Compact keeps the notice standalone:\n${view}`)
 })

@@ -2249,7 +2249,7 @@ test('a background pending Context occurrence never steals a history-browsed vie
     id: 'background-context-1',
     role: 'user',
     content: [{ type: 'text', text: 'BACKGROUND-CONTEXT-PROBE' }],
-    source: { kind: 'tool-jobs', form: 'notice' },
+    source: { kind: 'plugin', plugin: 'jobs' },
   })
   context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
     target: 'next-step',
