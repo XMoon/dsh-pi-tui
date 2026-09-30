@@ -1651,6 +1651,20 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   const harness = makeHarness(home, [session], { provider: 'p', model: 'm' })
 
   context = new Context()
+  // The production base contract this fixture must model: the Host provides the
+  // `userQuestions` capability (`dsh-base` mounts it), and the Direct Question
+  // adapter's `onRequest()` returns false without it — which would leave
+  // `attach()` with nothing to cold-reconcile and silently hide the whole
+  // parked-Question path. The fake is the minimal SEMANTIC shape the adapter
+  // declares (`attachWait` + `answer`); this test never answers a late reply.
+  context.provide('userQuestions', {
+    attachWait: () => (async function* () {
+      // No live timed wait for any call: the durable projection is the only
+      // authority this fixture exercises.
+      await new Promise(() => {})
+    })(),
+    answer: () => false,
+  } as never)
   // The durable Question authority: one CONTINUED call with no queued reply.
   // A parked Question is discovered from this projection alone.
   let queuedReply = false
@@ -1689,11 +1703,6 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   }
   await settle()
   await vt.waitForRender()
-  // The live session must be attached before authority can resolve its exact
-  // agent; one ordinary session event is the production reconcile trigger.
-  emitLiveStream(context, liveAgentOf(harness, session.id), { type: 'start', attemptId: 'park-1', revision: 1, turn: 1, step: 0 })
-  await settle()
-  await vt.waitForRender()
 
   // COLD discovery parks it: the Question must NOT have stolen the editor seat,
   // yet the footer's Task Center trigger is armed by the parked attention alone
@@ -1701,10 +1710,43 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.equal(app.overlayGraphState().handles, 0, 'cold discovery owns no overlay')
   const idle = vt.getViewport().join('\n')
   assert.ok(!idle.includes('Type your answer…'), `no Question panel was mounted:\n${idle}`)
-  // The badge/hint rendering for parked attention alone is unit-proven in
-  // `test/task-center-summary.test.ts`; this runner fixture does not put an
-  // editor seat in the focused input path, so the footer's `taskBrowserAvailable`
-  // gate and the literal ↓ key are asserted there instead.
+  // COLD DISCOVERY closes the whole chain, with zero work of any kind: the
+  // controller found the continued call at attach (the fixture now models the
+  // production `userQuestions` capability), parked it, published the count, and
+  // the footer therefore advertises the Task Center.
+  assert.equal(app.isTasksActive(), true, 'a parked Question alone arms the affordance')
+  assert.ok(idle.includes('? 1 awaiting'), `the footer counts it as human attention:\n${idle}`)
+  assert.ok(idle.includes('↓ view'), `and advertises the reopen trigger:\n${idle}`)
+
+  // The MANDATORY keyboard path: the literal ↓ opens Quick for a Questions-only
+  // session.
+  vt.sendInput('\x1b[B')
+  await settle()
+  await vt.waitForRender()
+  const quickByKey = vt.getViewport().join('\n')
+  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick Tasks:\n${quickByKey}`)
+  assert.ok(quickByKey.includes('Needs attention'), `with the attention group:\n${quickByKey}`)
+  assert.ok(quickByKey.includes('Use staging or production?'), `and the parked Question row:\n${quickByKey}`)
+  assert.ok(quickByKey.includes('awaiting answer'), `marked as awaiting an answer:\n${quickByKey}`)
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'Enter reopens the Question from Quick')
+  const fromQuick = vt.getViewport().join('\n')
+  assert.ok(fromQuick.includes('Type your answer…'), `the QuestionFlow is reopened:\n${fromQuick}`)
+  // Esc parks it again: the Question survives and the affordance comes back.
+  // Esc is LAYERED inside the flow (the reopened form restores the review
+  // page, where the first Esc steps back and the next one cancels the flow);
+  // only the flow's own cancel parks the continued Question.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    vt.sendInput('\x1b')
+    await settle()
+    await vt.waitForRender()
+    if (!vt.getViewport().join('\n').includes('Type your answer…')) break
+  }
+  const parkedAgain = vt.getViewport().join('\n')
+  assert.ok(parkedAgain.includes('? 1 awaiting'), `parking restores the attention figure:\n${parkedAgain}`)
+  assert.ok(parkedAgain.includes('↓ view'), `and the trigger:\n${parkedAgain}`)
 
   // `/tasks` covers the same open path through the Full surface:
   // end-to-end: the row, the live removal, the visible-Question focus and the
@@ -1763,6 +1805,21 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await vt.waitForRender()
   const reparked = vt.getViewport().join('\n')
   assert.ok(reparked.includes('Use staging or production?'), `the parked Question is reachable again:\n${reparked}`)
+
+  // Authority ends the interaction: with no other work or failure attention,
+  // BOTH the attention figure and the trigger disappear — the affordance never
+  // outlives the truth that produced it.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  queuedReply = true
+  projectionListener?.()
+  await settle()
+  await vt.waitForRender()
+  const ended = vt.getViewport().join('\n')
+  assert.ok(!ended.includes('? 1 awaiting'), `a queued reply removes the attention figure:\n${ended}`)
+  assert.ok(!ended.includes('↓ view'), `and the trigger with it:\n${ended}`)
+  assert.equal(app.isTasksActive(), false, 'nothing is reachable any more')
 
 
   // The literal `↓` keypress is NOT drivable here: the runner mount never puts

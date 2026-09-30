@@ -120,7 +120,7 @@ export interface ActivityStatus {
    * work counts: a Question is not a task, so it renders as its own `?N`
    * attention figure and never inflates the active/tracked totals.
    */
-  readonly humanAttentionCount?: number
+  readonly questionAttentionCount?: number
   readonly todoCount: number
 }
 

@@ -79,10 +79,10 @@ test('a Questions-only session still shows the Task Center badge and its ↓ hin
   snap.activity.taskTotalCount = 0
   snap.activity.childAgentTotalCount = 0
   snap.activity.failedTaskCount = 0
-  snap.activity.humanAttentionCount = 1
+  snap.activity.questionAttentionCount = 1
   const segment = item.render(snap as StatusSnapshot, ref, 'preferred', context)
   assert.ok(segment, 'the badge must render for parked attention alone')
-  assert.equal(plain(renderSpans(segment.spans)), '[? 1 awaiting answer · ↓ view]')
+  assert.equal(plain(renderSpans(segment.spans)), '[? 1 awaiting · ↓ view]')
 
   const compact = item.render(snap as StatusSnapshot, ref, 'compact', context)
   assert.ok(compact)
@@ -90,14 +90,14 @@ test('a Questions-only session still shows the Task Center badge and its ↓ hin
 
   // A visible Question is not counted (it already owns the seat), so the badge
   // disappears with nothing else to show.
-  snap.activity.humanAttentionCount = 0
+  snap.activity.questionAttentionCount = 0
   assert.equal(item.render(snap as StatusSnapshot, ref, 'preferred', context), null)
 
   // And with work present the attention figure stays SEPARATE from the counts.
   snap.activity.taskCount = 1
   snap.activity.taskTotalCount = 3
-  snap.activity.humanAttentionCount = 2
+  snap.activity.questionAttentionCount = 2
   const mixed = item.render(snap as StatusSnapshot, ref, 'preferred', context)
   assert.ok(mixed)
-  assert.equal(plain(renderSpans(mixed.spans)), '[● 1/3 tracked jobs · ? 2 awaiting answer · ↓ view]')
+  assert.equal(plain(renderSpans(mixed.spans)), '[● 1/3 tracked jobs · ? 2 awaiting · ↓ view]')
 })

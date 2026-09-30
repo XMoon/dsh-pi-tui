@@ -139,10 +139,14 @@ const tasksItem: FooterItemDefinition = {
     const tasks = snapshot.activity.taskCount
     const agents = snapshot.activity.childAgentCount
     const failed = snapshot.activity.failedTaskCount ?? 0
+    // Parked Questions are the ONE attention fact that can exist without any
+    // runtime task summary (a Questions-only session): their presence makes the
+    // badge rich even though the work totals are absent.
+    const human = snapshot.activity.questionAttentionCount ?? 0
     const rich = snapshot.activity.taskTotalCount !== undefined
       || snapshot.activity.childAgentTotalCount !== undefined
       || snapshot.activity.failedTaskCount !== undefined
-      || snapshot.activity.humanAttentionCount !== undefined
+      || human > 0
     if (!rich) {
       if (tasks <= 0 && agents <= 0) return null
       // The old direct-setter contract remains available to non-runtime
@@ -166,7 +170,6 @@ const tasksItem: FooterItemDefinition = {
     // Parked Questions are human attention, not work: they render as their own
     // `?N` figure and must be able to show the badge (and therefore the ↓ view
     // hint) on their own — a Questions-only session still needs its reopen path.
-    const human = snapshot.activity.humanAttentionCount ?? 0
     if (tasks <= 0 && agents <= 0 && failed <= 0 && human <= 0) return null
     const hint = context.taskBrowserAvailable ? ' · ↓ view' : ''
     const tone = failed > 0 ? 'warning' : 'primary'
@@ -202,7 +205,7 @@ const tasksItem: FooterItemDefinition = {
     } else if (tasks > 0) {
       parts.push(`● ${tasks}/${totalJobs} tracked jobs`)
     }
-    if (human > 0) parts.push(`? ${human} awaiting answer`)
+    if (human > 0) parts.push(`? ${human} awaiting`)
     return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone }] }
   },
 }

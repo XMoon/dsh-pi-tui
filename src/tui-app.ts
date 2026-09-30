@@ -16869,8 +16869,11 @@ export class TuiApp {
           taskTotalCount: this.taskSummary.totalJobs,
           childAgentTotalCount: this.taskSummary.totalAgents,
           failedTaskCount: this.taskSummary.failedAttention,
-          humanAttentionCount: this.questionAttentionCount,
         } : {}),
+        // Human attention is NOT a runtime summary fact: it can be the only
+        // thing on screen (a Questions-only session has no TaskBrowserRuntime
+        // commit at all), so it is published unconditionally.
+        questionAttentionCount: this.questionAttentionCount,
         todoCount: this.todoItems.length,
       },
     )
