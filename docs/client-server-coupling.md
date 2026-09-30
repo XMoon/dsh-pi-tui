@@ -42,6 +42,145 @@
   in `docs/client-server-migration.md`). This file stays the Host-coupling
   authority only; the two gates answer different questions.
 
+## Composition ownership and wire-shape inventory
+
+`scripts/client-boundary-gate.mjs` remains the mechanical
+no-new-business-coupling gate; it does not infer Cordis composition semantics it
+cannot see. Every material coupling/inventory row in this file additionally
+answers locality, composition owner, allowed consumer, wire source,
+reuse-vs-additive mount and duplicate-owner rule:
+
+| Domain/service | Locality | Composition owner | Consumer | Wire/source | Mount rule | Evidence owner |
+
+`Evidence owner` is the test/smoke lane or the document that carries the proof.
+The frozen architecture statements live in `docs/m3-entry-contract.md` §2.4.4;
+qualification evidence lives in `docs/client-server-migration.md`.
+
+### Composition-owner classes
+
+```text
+BASE_HOST_PREREQUISITE   ordinary DSH/base/profile composition owns it;
+                         migration code may require/read/adapt/verify identity
+                         but MUST NOT mount a second copy merely to satisfy
+                         Remote composition
+M3_ADDITIVE_HOST         a Host contribution genuinely added by the M3
+                         composition contract; it may mount only the rows frozen
+                         in m3-entry-contract.md
+GENERATED_CLIENT_REMOTE  official Client-side generated Remote/service
+                         contribution; the TUI consumes it and does not
+                         reconstruct its namespace object
+CLIENT_LOCAL             terminal/editor/clipboard/draft/overlay/keybinding/
+                         local-shell/UI extension state; no Host semantic
+                         coupling is invented for it
+```
+
+### Canonical M3-3B ownership rows
+
+| Domain/service | Class | Owner rule |
+|---|---|---|
+| `userQuestions` Host service | `BASE_HOST_PREREQUISITE` | reuse the existing base service; never mount a second `UserQuestionService` in `RemoteHostRuntime` |
+| `userQuestions` Client Remote | `GENERATED_CLIENT_REMOTE` | mounted by the official client contribution; preserve the generated object semantics |
+| `configEditor` | `BASE_HOST_PREREQUISITE` | profile/base owns it when `profileContext` enables the config plane |
+| `settings` | `BASE_HOST_PREREQUISITE` | profile/base owns it; the Remote Config adapter consumes the generated `settings` Remote |
+| `jobController` | `BASE_HOST_PREREQUISITE` (existing Host service) | reuse; do not introduce a second job observation authority |
+| M3 Host API/session helper rows | `M3_ADDITIVE_HOST` | mount only the frozen additive closure from the M3 contract |
+| TUI Task Center / Question presentation | `CLIENT_LOCAL` presentation over semantic authority | never becomes Host authority |
+
+The exact package/row names may evolve; the ownership rule must remain explicit.
+
+### Duplicate-mount prohibition
+
+Before mounting any Host service/plugin row in M3+:
+
+```text
+1. determine whether base/profile already owns it
+2. determine whether mounting replaces a Cordis namespace owner
+3. determine whether projection units/event handlers would be registered twice
+4. freeze the owner in m3-entry-contract.md
+5. record the coupling/owner row here
+```
+
+A missing service in a fixture is not evidence that production
+`RemoteHostRuntime` should own it — fix the fixture to reproduce the production
+prerequisite instead.
+
+### One runtime graph / one semantic assembly
+
+A product runtime or L5 qualification should have ONE Host graph → ONE
+Connection/Client graph → ONE semantic assembly → ONE Backend assembly. Do not
+create semantics manually AND call `createRemoteBackendRuntime()` (which creates
+another semantics bundle) and then treat that as evidence of one production
+wiring. Extra semantic bundles are allowed only in a test explicitly about
+multiple independent consumers, never implicitly in the main qualification
+fixture.
+
+### Generated Client / Remote identity invariant
+
+Official generated Client namespace properties may be prototype accessors.
+Therefore:
+
+```ts
+const bad = { ...source.remote }
+```
+
+is forbidden for semantic adapter wiring: an own-property spread copies
+bookkeeping fields only, so the generated prototype namespaces disappear and
+`settings` / `credentials` / `llm` / `presets` / `commands` become `undefined`.
+Preserve the source object's identity and pass the original generated object
+through. A structural fake used by L3 tests should model important accessor
+behavior when the adapter depends on the generated object shape, but L5 real-wire
+qualification remains mandatory.
+
+### Receiver/method-binding invariant
+
+Forwarded event methods may read receiver-owned state. Forbidden:
+
+```ts
+const on = source.remote.$on
+on(...)
+```
+
+Required:
+
+```ts
+const on = source.remote.$on.bind(source.remote)
+```
+
+or an equivalent call that preserves the receiver. This applies to any generated
+Client method whose contract is receiver-sensitive, not only `$on`.
+
+### L5 fixture topology
+
+Any test described as real-wire / real-Host must list, next to the fixture:
+
+```text
+reproduced production prerequisites
+stand-ins
+deliberately absent services
+```
+
+This document records the stable ownership rule;
+`docs/client-server-migration.md` records the qualification evidence. A fixture
+may stand in for an unrelated domain, but it must not omit a base prerequisite
+that ordinary production composition owns and still claim to prove the product
+topology.
+
+### Coupling review checklist
+
+Before accepting a new Host/Client coupling:
+
+```text
+[ ] locality is explicit
+[ ] semantic port owner is explicit
+[ ] composition owner is explicit
+[ ] official wire/source is explicit
+[ ] generated object identity is preserved
+[ ] receiver-sensitive methods preserve binding
+[ ] no duplicate service/projection owner
+[ ] no second Connection/Client/semantic graph
+[ ] L5 evidence exists when wire shape matters
+```
+
 ## Application-layer ownership target (Pre-M3 TS Architecture Convergence)
 
 The stage moves M3-critical runner ownership out of `src/index.ts` into
@@ -291,3 +430,11 @@ implementation:
 3. Keep the `HOST_SERVICES` list in `scripts/client-boundary-gate.mjs` in
    sync with this inventory when upstream adds a service the migration must
    isolate.
+4. Composition ownership changes follow the row classes above:
+   - a semantic coupling move updates the allowlist row and the boundary
+     baseline intentionally;
+   - a composition-owner change updates this ownership inventory and amends
+     `docs/m3-entry-contract.md` when the frozen architecture changed;
+   - implementation progress alone never changes frozen ownership;
+   - a fixture that adds a production prerequisite documents its topology and
+     does not automatically grant product composition ownership.
