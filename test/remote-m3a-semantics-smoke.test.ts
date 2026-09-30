@@ -24,9 +24,11 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { SESSION_LOG_FILENAME, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import ConfigEditor from '@deepseek-ai/dsh-config-editor'
 import SettingsForms from '@deepseek-ai/dsh-settings'
 import { loadProfileDirectory, mountRootInclude } from '@deepseek-ai/dsh-app-boot'
+import { unzipEntries } from './support/zip-entries.ts'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -356,11 +358,16 @@ interface Composed {
   semantics: RemoteM3ASemantics
 }
 
-async function compose(host: HostFixture): Promise<Composed> {
-  const runtime = await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+/** The real Host + generated Client runtime, with no M3 semantic bundle yet. */
+async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
+  return await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })
+}
+
+async function compose(host: HostFixture): Promise<Composed> {
+  const runtime = await composeRuntime(host)
   return { runtime, semantics: createRemoteM3ASemantics(runtime.client, { promptSerializer: stubSerializer() }) }
 }
 
@@ -694,7 +701,10 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
     response: 'archived answer',
     usage: { inputTokens: 7, outputTokens: 3 },
   })
-  const { runtime, semantics } = await compose(host)
+  // Deliberately NOT `compose(...)`: that would also build an M3A semantic
+  // bundle over this same Client graph, and the closure evidence must carry
+  // exactly ONE M3 wiring — the one `createRemoteBackendRuntime` assembles.
+  const runtime = await composeRuntime(host)
   const assembled = await createRemoteBackendRuntime({
     runtime: runtime.client,
     promptSerializer: stubSerializer(),
@@ -703,13 +713,11 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
   const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
   await reference.ready
   try {
-    // 1. The exact Remote advertisement, never the Direct set.
+    // 1. This assembly is the Remote backend. The exact advertised set (and its
+    // equality with the whole port vocabulary) is locked in
+    // `test/remote-backend.test.ts`; repeating it here against the same
+    // constant the backend is built from would assert nothing.
     assert.equal(assembled.backend.kind, 'remote')
-    assert.deepEqual(
-      [...assembled.backend.capabilities].sort(),
-      [...REMOTE_IMPLEMENTED_CAPABILITIES].sort(),
-      'the assembled backend advertises exactly the Remote capability set',
-    )
 
     // 2. Config over the REAL generated settings Remote with the
     // production-equivalent config plane mounted: the mirror reached the
@@ -727,57 +735,58 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
     await tuiSettings.replace(before)
     assert.equal(tuiSettings.get().theme, before.theme, 'and the revert is authoritative too')
 
-    // 3. Archive over the REAL Host route: the composition carrier fetch
-    // reaches `/api/session.export` for real (not a fake fetch), so the outcome
-    // is the Host's own answer. This fixture's JSONL log is not flushed to the
-    // persistence root the export route reads, so the Host can legitimately
-    // report a REAL read failure — and the contract this leg must prove is that
-    // such a failure is a THROWN error, never silently collapsed into `none`
-    // (absent Session) or `unavailable` (missing services).
-    let archiveOutcome: string
-    try {
-      const opened = await assembled.backend.sessionArchive.open(MAIN)
-      archiveOutcome = opened.kind
-      if (opened.kind === 'ready') {
-        assert.ok(opened.artifact.filename.length > 0, 'the archive carries an upstream filename')
-        const chunks: Uint8Array[] = []
-        const reader = opened.artifact.stream.getReader()
-        for (;;) {
-          const next = await reader.read()
-          if (next.done === true) break
-          chunks.push(next.value)
-        }
-        assert.ok(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0) > 0, 'the stream yields real bytes')
-      }
-    } catch (error) {
-      archiveOutcome = 'threw'
-      // A real Host read failure travels as an error with the Host's diagnostic.
-      assert.match(String((error as Error).message), /session export failed/u,
-        'a real archive failure is thrown, never classified as none/unavailable')
+    // 3. Archive over the REAL Host route: the composition carrier fetch reaches
+    // `/api/session.export` for real (never a fake fetch), and the returned ZIP
+    // is unpacked here to prove the whole chain carried the ACTUAL durable log
+    // of this AgentLoop-backed Session: seeded prompt and answer, in the root
+    // entry the upstream exporter names. The fail-closed classification (absent
+    // Session → `none`, missing services → `unavailable`, any other failure →
+    // thrown) is locked separately in `test/remote-session-archive.test.ts`.
+    const opened = await assembled.backend.sessionArchive.open(MAIN)
+    assert.ok(opened.kind === 'ready', `the Host serves a real archive (got ${opened.kind})`)
+    assert.equal(opened.artifact.filename, sessionLogZipFilename(MAIN), 'the upstream archive filename')
+    const chunks: Uint8Array[] = []
+    const reader = opened.artifact.stream.getReader()
+    for (;;) {
+      const next = await reader.read()
+      if (next.done === true) break
+      chunks.push(next.value)
     }
-    assert.notEqual(archiveOutcome, 'none', 'a real read failure is never collapsed to an absent Session')
-    assert.notEqual(archiveOutcome, 'unavailable', 'nor to missing archive services')
+    const archiveBytes = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0))
+    let archiveOffset = 0
+    for (const chunk of chunks) {
+      archiveBytes.set(chunk, archiveOffset)
+      archiveOffset += chunk.byteLength
+    }
+    const archiveEntries = unzipEntries(archiveBytes)
+    const rootLog = archiveEntries.get(SESSION_LOG_FILENAME)
+    assert.ok(rootLog !== undefined,
+      `the archive carries the root session log (entries: ${[...archiveEntries.keys()].join(', ') || 'none'})`)
+    const logText = new TextDecoder().decode(rootLog)
+    assert.match(logText, /archive me/u, 'the ZIP carries the seeded prompt')
+    assert.match(logText, /archived answer/u, 'the ZIP carries the seeded answer')
 
-    // 4. Interaction identity: the assembled backend serves the SAME instance
-    // on this official Client graph (no second wiring).
-    // The backend serves the instance its OWN assembly built: the identity
-    // invariant is backend === assembly semantics (a second semantics instance
-    // would mean two wirings over one Client graph).
+    // 4. The ONE M3 wiring here is the assembly's own: it serves the adapter
+    // INSTANCE it built, never a second one constructed inside
+    // `createRemoteBackend` (the pass-through could be replaced by a rebuilt
+    // adapter).
     assert.equal(
       assembled.backend.interaction,
       assembled.semantics.interaction,
       'the backend serves the assembly\'s own interaction adapter',
     )
 
-
-    // 5. Dispose the adapters BEFORE the Client/Context, then the runtime.
+    // 5. Reverse disposal: the adapters go first, then the Client/Context, and
+    // the borrowed Client stays usable in between — the adapters own only their
+    // own state.
     assembled.dispose()
     assembled.dispose()
-    semantics.dispose()
+    const survivor = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+    await survivor.ready
+    survivor.release()
   } finally {
     reference.release()
     assembled.dispose()
-    semantics.dispose()
     await runtime.dispose()
   }
 })
@@ -790,7 +799,7 @@ test('P15: without a settings service the Remote config fails closed', async (t)
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
-  const { runtime } = await compose(host)
+  const runtime = await composeRuntime(host)
   const assembled = await createRemoteBackendRuntime({
     runtime: runtime.client,
     promptSerializer: stubSerializer(),
