@@ -164,11 +164,22 @@ async function createHostFixture(
         private: true,
         dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
       }, null, 2))
-      writeFileSync(join(workRoot, 'cordis.patch.yml'), '[]\n')
+      writeFileSync(join(workRoot, 'cordis.patch.yml'), [
+        '# The ONE Loader entry this fixture profile declares: the official preset',
+        '# registry, whose Config schema is the settings section the Remote config',
+        '# success leg writes through.',
+        '- id: agent-preset-registry',
+        "  name: '@deepseek-ai/dsh-agent-preset-registry'",
+        '  config:',
+        `    default: ${PRESET}`,
+        '',
+      ].join('\n'))
       ctx.provide('profileContext', {
         dir: workRoot,
         patchPath: join(workRoot, 'cordis.patch.yml'),
-        installAnchor: workRoot,
+        // The REPOSITORY root: the Loader resolves the entry by package name
+        // from its node_modules, exactly like a real profile install anchor.
+        installAnchor: process.cwd(),
       } as never)
       await ctx.plugin(ConfigEditor)
       await ctx.plugin(SettingsForms)
@@ -594,21 +605,23 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
 })
 
 test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
-  // Proven on the real graph: exact capability set; the production-equivalent
-  // config plane reaching `ready`; the archive returning a REAL `ready` with
+  // Proven on the real graph: exact capability set; the config plane reaching
+  // `ready`; the archive returning a REAL `ready` with
   // `dsh-session-m3a-main.zip` and readable bytes; backend/assembly interaction
   // identity; reverse disposal. The absent deployment contract is its own
   // passing regression (P15).
   //
-  // Remaining leg: the SUCCESS write -> authoritative re-read. Root cause
-  // measured, not guessed: `describe()` succeeds but the mirror holds ZERO
-  // namespaces, because settings sections come from LOADER entries (the
-  // profile) and this fixture mounts its plugins directly. The profile here has
-  // no entries, so there is nothing writable. Next step: put ONE lightweight
-  // official plugin entry (with a Config schema) into the fixture profile so the
-  // Loader mounts it and its section becomes writable through the mirror, then
-  // assert write -> Host mutation -> authoritative re-read -> still current.
-  skip: 'P1-B: the fixture profile has no Loader entry, so describe() exposes no writable section',
+  // Measured blocker for the last leg (write -> authoritative re-read): the
+  // official settings `describe()` returns an EMPTY section list here. Sections
+  // come from Loader entries whose plugins declare a Config schema; mounting a
+  // plugin directly (as this fixture does) contributes nothing, and a
+  // hand-written single patch entry did not register one either. The success
+  // leg therefore needs a PRODUCTION-SHAPED profile (a manifest whose bundles
+  // resolve the same official plugins a real dsh profile mounts, so their
+  // Config schemas become sections) — the smallest faithful way to reach a
+  // writable section, and the same shape the owner asked for with the `tui-app`
+  // entry.
+  skip: 'P1-B: needs a production-shaped fixture profile (Loader entries with Config schemas) before the write leg can target a section',
 }, async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
