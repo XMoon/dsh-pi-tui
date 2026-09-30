@@ -21,7 +21,8 @@ M3-1 DONE          (experimental in-process wire composition spine: reusable `Re
 M3-2 DONE          (Remote Session owner spine: exact-`SessionBinding` `SessionOwnerAccess`/`SessionOwnerRetirement` provider, transport-neutral app/session runtime, Remote fork publication→open adoption — zero product cutover, see the M3-2 status section)
 M3-3A DONE         (Remote session/runtime/catalog/host-file semantic closure: official contextPressure + turnOutline + sessionStatus projection reads, subagent allowlist on the official model directory, Remote skills/list + fileReferences/list adapters, truthful Host-file unavailable states, PresentationReader.loadThrough, one-source M3-3A semantic bundle — zero product cutover, see the M3-3A status section)
 M3-3B DONE         (rc.2 retarget + frozen-contract reconvergence; rc.2 Question semantics in the semantic port on BOTH backends with a timed/continued UI lifecycle; Remote ConfigPort settings mirror; Remote `/api/session.export` archive; complete experimental Remote `Backend` + `BackendKind 'remote'` — zero product cutover, see the M3-3B status section)
-M3 product composition NOT STARTED (Direct production/default behavior unchanged; Remote composition NOT active)
+M3-4 PR1 DONE      (application runtime-selection spine: `SelectedApplicationRuntime` core + the Remote application runtime aggregate + the internal selection seam in bootstrap; normal/default remains Direct, no public/config/env selector — see the M3-4 status section)
+M3-4 IN PROGRESS   (main TUI Remote composition; PR1 of the PR train landed — full Remote main surface NOT YET COMPLETE)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -36,7 +37,8 @@ Experimental backend:      ONE complete Backend(kind='remote') assembly exists (
 Experimental Remote:        reads + selected ordinary writes + interaction (approval +
                            rc.2 Question lifecycle) + ConfigPort settings mirror +
                            session archive (adapters proven in tests/smoke; the
-                           assembly has NO production bootstrap call site)
+                           M3-4 PR1 application aggregate can compose the whole graph
+                           internally — still no production bootstrap call site)
 Remote writes:              experimental/test only (no production wiring)
 Remote attach:              unsupported
 Direct rollback:           available
@@ -2925,3 +2927,81 @@ release commit.
 - Deferred items promoted to Debt: none in this change; the matrix carries
   `Post-M3 Q1` (generic Queue per-row actions) and `Post-M3 T1`
   (`clientTimeZone`) as `DEFERRED_WITH_OWNER`.
+
+## M3-4 status (IN PROGRESS — PR1 landed)
+
+M3-4 composes the main TUI application over the Remote Backend. The stage is
+a PR train; each PR closes its own slice with closure evidence.
+
+### PR1 — Application Runtime Selection Spine (COMPLETE)
+
+What landed (composition foundation ONLY — the full main TUI is NOT
+Remote-ready):
+
+- `src/app/application-runtime.ts`: the transport-neutral
+  `SelectedApplicationRuntime` core — `kind` / `backend` / `owners` /
+  `retirement` / `disposeTransport()`. It groups the already-required
+  application composition ownership; it is NOT a new Backend SDK, imports no
+  Host package and no `app/remote/**` / `runtime/remote/**`.
+- `src/app/remote/application-runtime.ts`: the ONE Remote application
+  runtime aggregate — `createExperimentalRemoteRuntime` (ONE Host + ONE
+  Client wire) -> `createRemoteBackendRuntime` (ONE semantic assembly /
+  Backend) -> `createRemoteSessionOwnerServices` (ONE owner registry shared
+  by `owners` + `retirement`). The aggregate calls no constructor twice,
+  constructs no Remote adapter itself, and `selected.backend` IS
+  `backendRuntime.backend` (identity, never a copy). The `promptSerializer`
+  is an injected dependency — PR1 injects it only in composition tests; no
+  partial/production serializer is invented (that is the M3-4 submission
+  PR's ownership).
+- `disposeTransport()` owns exactly `backendRuntime.dispose()` then
+  `wire.dispose()` (adapters before Client, Client before Host additive
+  fibers), is idempotent and error-preserving, and never retires the
+  currently selected Session (`app/session` keeps that ownership). A backend
+  construction failure after the wire exists disposes the wire (original
+  error surfaces, disposal failures ride its cause chain).
+- `src/runtime/backend-loader.ts` stays the only dynamic-import owner and
+  gained the exact second sanctioned target
+  (`app/remote/application-runtime.ts`); the architecture gate enforces the
+  single owner with its exact two targets. No static Remote edge exists
+  anywhere (startup graph unchanged).
+- `src/app/bootstrap.ts`: the internal application runtime-selection seam
+  (`selectApplicationRuntime`). The common session-runtime inputs
+  (`owners`/`retirement`/`lifecycle` via `backend.sessionLifecycle`) and the
+  `backend` constant now read from the selected core; Direct-only helpers
+  (compose/agentFor/queueAgentFor/modelSelections/installAssistantStream/
+  hasParkedOwners...) stay on `directRuntime` untouched. Normal package
+  `apply()` selects Direct — no CLI option, config field, env var,
+  cordis.patch backend row or public root export selects Remote.
+- Teardown: every runner teardown path (fiber disposer, pre-mount abort,
+  terminal-total fatal catch) runs the selected transport disposal AFTER the
+  session retirement; Direct is a no-op, and the Direct retirement ordering
+  itself is unchanged.
+
+Closure evidence for PR1:
+
+- Composition/wire proof (below the real runner, NOT L6):
+  `test/remote-application-runtime.test.ts` — ONE Host/Client/Backend/owner
+  registry (identity assertions), a retained handle -> exact owner ->
+  retirement releases the exact reference, `disposeTransport` ordering +
+  idempotence + ordinary-Host survival, and a backend construction failure
+  unwinding the wire with zero leaked fibers/registry rows.
+- Selection proof: `test/application-runtime-selection.test.ts` — Direct
+  selection never loads the Remote module and carries the exact Direct
+  instances; Remote selection invokes the loader exactly once and returns the
+  ONE aggregate; missing lazy boundary fails closed; the production bootstrap
+  calls the seam with the Direct branch only.
+- Boundary proof: `test/pre-m3-architecture-gate.test.mjs` — the M3-4
+  `bootstrap -> backend-loader -> dynamic app/remote/application-runtime`
+  shape is the sanctioned one; any other dynamic importer and any static
+  Remote edge (including from startup) still fail.
+- Regression support: `test/remote-client-runtime.test.ts`,
+  `test/remote-backend.test.ts`, `test/remote-session-owners.test.ts`,
+  `test/session-runtime-remote-owner-handoff.test.ts`,
+  `test/a2-ownership-cutover.test.ts`, `test/a5b-root-matrix.test.ts` all
+  green on the adapted seam.
+
+What PR1 does NOT claim: the TUI does not run remotely yet. Remote transcript
+hydration, eventSource presentation, status projection, the production
+submission serializer, command runtime, tool cards, rewind, images, local
+shell, permission cycle and secondary surfaces are later M3-4 PRs (PR2+
+consume the seam without re-deciding runtime/Connection/owner composition).

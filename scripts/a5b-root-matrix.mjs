@@ -126,11 +126,17 @@ const CLASSIFICATION = {
   // A5b-5: the application-event owner + the client-local platform owner are
   // constructed in the composition root (owner-construction-or-bind).
   applicationEvents: BIND, clientActions: BIND,
+  // M3-4 PR1: the selected application runtime core (backend/owners/retirement
+  // + the transport-dispose slot) is the owner-construction seam product.
+  selectedRuntime: BIND,
   // Narrow owner-to-owner connectors (incl. the late-bound viewed-queue slot).
   agentNow: CONN, handleNow: CONN, captureMatches: CONN, isCurrentOwnerAgent: CONN,
   directAgentOfOwner: CONN, requireLiveScope: CONN, viewedQueueAgent: CONN,
   // Mount / dispose / fatal coordination.
   disposeSurface: DISC, registerRunnerDisposal: DISC,
+  // M3-4 PR1: the selected-transport dispose connector (session retirement ->
+  // transport disposal; no-op on Direct).
+  disposeSelectedTransport: DISC,
   // Residual work (A5b-5 / A5b-6): the shrink-only ledger this matrix pins.
   surfaceEvents: SURF, runClipboardCommand: SURF, clipboardEnv: SURF, runCopyCommand: SURF,
   copyEnv: SURF, openRewindPicker: SURF,
@@ -249,6 +255,8 @@ const SWEEP_NOTES = {
   submission: 'createSubmissionController<Agent>(...) — the A5b-4a submission/input owner; the A5b-6 move made it own withWriterSection.',
   artifacts: 'createArtifactSaveOwner<Agent>(...) — the A5b-3c artifact-save owner.',
   pluginManager: 'surface.attachPluginManager(...) result — the ONE plugin-manager owner handle.',
+  // M3-4 PR1: the application runtime-selection seam product.
+  selectedRuntime: 'selectApplicationRuntime(...) — the M3-4 PR1 selected application runtime core (kind/backend/owners/retirement/disposeTransport); owner-construction seam product over directRuntime.',
   // owner-connector: a narrow, late-bound composition-to-owner seam (plan
   // §7.6.1).
   requireLiveScope: 'sessionScope.captureLive plus throw; synchronous admission connector into owners.',
@@ -269,6 +277,8 @@ const SWEEP_NOTES = {
   disposeSurface: 'sequences owner disposal in the fixed order (plan §7.6.4); no policy of its own.',
   registerRunnerDisposal: 'ctx.effect cleanup registration; runner lifetime/disposal coordination.',
   requestExit: 'createExitController(...) — the ONE exit orchestration (dispose/fatal coordination; reclassified in the A5b-6 sweep).',
+  // M3-4 PR1: selected-runtime teardown hook.
+  disposeSelectedTransport: 'selected.disposeTransport connector — runs AFTER the session retirement on every teardown path (no-op on Direct); mount/dispose coordination (M3-4 PR1).',
 }
 for (const row of rows) {
   row.classification = CLASSIFICATION[row.name] ?? ''

@@ -93,6 +93,7 @@ import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerAgentLike } from '../steer.ts'
 import { createDirectApplicationRuntime } from '../app/direct/runtime.ts'
+import type { ApplicationRuntimeSelection, SelectedApplicationRuntime } from '../app/application-runtime.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
@@ -128,6 +129,36 @@ function presetErrorCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined
   const code = (error as { readonly code?: unknown }).code
   return typeof code === 'string' && code !== '' ? code : undefined
+}
+
+/**
+ * Select ONE application runtime core. The Direct branch adapts the existing
+ * Direct objects WITHOUT semantic change (`disposeTransport` is a no-op); the
+ * Remote branch awaits the aggregate constructed through the lazy boundary —
+ * this seam never builds a second Remote graph itself. The selected core
+ * exposes exactly kind/backend/owners/retirement/disposeTransport;
+ * branch-specific capabilities stay branch-specific. There is no user-visible
+ * selector: normal package `apply()` selects Direct.
+ *
+ * Exported for the selection unit suite only (tests import the seam
+ * directly); no public root export re-exports it.
+ */
+export async function selectApplicationRuntime(
+  selection: ApplicationRuntimeSelection,
+): Promise<SelectedApplicationRuntime> {
+  if (selection.kind === 'remote') {
+    if (selection.loadRemote === undefined) {
+      throw new Error('tui-runner: the Remote application runtime requires the lazy backend-loader boundary')
+    }
+    return selection.loadRemote()
+  }
+  return {
+    kind: 'direct',
+    backend: selection.direct.backend,
+    owners: selection.direct.owners,
+    retirement: selection.direct.retirement,
+    disposeTransport: async (): Promise<void> => {},
+  }
 }
 
 export function applyRunner(ctx: Context, config: Config): void {
@@ -213,6 +244,13 @@ export function applyRunner(ctx: Context, config: Config): void {
   // coordinator is defined. The fatal catch treats an unassigned slot as
   // "no owner".
   let retireOwnedSessionRef: (() => Promise<SessionRetirementReport>) | undefined
+  /**
+   * The selected runtime's transport disposer for the terminal-total fatal
+   * catch (outside the startup IIFE); assigned once the selection seam ran.
+   * Direct is a no-op, so on today's production path this is only ever the
+   * inert slot.
+   */
+  let disposeSelectedTransportRef: (() => Promise<void>) | undefined
   /**
    * Whether a current Direct owner (agent + handle) exists, for the fatal catch
    * below. The ownership core lives INSIDE the async root, so the catch reads it
@@ -408,6 +446,28 @@ export function applyRunner(ctx: Context, config: Config): void {
         composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState),
       getViewedQueueAgent: () => viewerRef?.viewedQueueAuthority(),
     })
+    // M3-4 PR1: the internal application runtime-selection seam. The selected
+    // core is the ONE common input the transport-neutral session runtime
+    // consumes (`owners`/`retirement`/`backend`); Direct-only helpers stay on
+    // `directRuntime`. Normal package `apply()` stays Direct: there is no
+    // CLI option, config field, env var, cordis.patch row or public root
+    // export that selects Remote — only this seam may construct the Remote
+    // application runtime (through `runtime/backend-loader.ts`), and only
+    // internal/test M3-4 paths do.
+    const selectedRuntime = await selectApplicationRuntime({
+      kind: 'direct',
+      direct: directRuntime,
+      loadRemote: undefined,
+    })
+    /**
+     * The selected runtime's transport disposer, hoisted so every teardown
+     * path (the fiber disposer, the pre-mount abort, the fatal catch) can
+     * reach it AFTER the session retirement completes. Direct is a no-op; a
+     * future selected Remote transport disposes adapters -> Client -> Host
+     * fibers, never the current Session (that stays `app/session` ownership).
+     */
+    const disposeSelectedTransport = (): Promise<void> => selectedRuntime.disposeTransport()
+    disposeSelectedTransportRef = disposeSelectedTransport
     /**
      * The Direct attachment of the CURRENT owner (A2 transitional projection):
      * a DERIVED read of the ownership core through the Direct registry, never a
@@ -460,9 +520,12 @@ export function applyRunner(ctx: Context, config: Config): void {
       setCurrentOf: (agent, next) => directRuntime.modelSelections.setCurrent(agent as Agent, next),
     })
     const sessionRuntime = bindSessionRuntime(ownership, {
-      owners: directRuntime.owners,
-      retirement: directRuntime.retirement,
-      lifecycle: directRuntime.backend.sessionLifecycle,
+      // M3-4 PR1: the common session-runtime inputs come from the selected
+      // application runtime core (today always the Direct objects — the
+      // selection seam above keeps the exact same instances).
+      owners: selectedRuntime.owners,
+      retirement: selectedRuntime.retirement,
+      lifecycle: selectedRuntime.backend.sessionLifecycle,
       lifecycleSignal: lifecycleController.signal,
       surface: {
         warnRetirement: (report) => {
@@ -545,11 +608,11 @@ export function applyRunner(ctx: Context, config: Config): void {
     // owner to retire).
     retireOwnedSessionRef = sessionRuntime.retireOwnedSession
     // The semantic backend (server/client migration): the TUI consumes
-    // Host domains through narrow ports, never ctx.* directly. Direct is the
-    // only backend today; remote/wire adapters join in later milestones
-    // behind the SAME port interfaces. The adapter assembly is owned by
-    // `runtime/direct/backend-direct.ts`; this runner only consumes it.
-    const backend = directRuntime.backend
+    // Host domains through narrow ports, never ctx.* directly. The selected
+    // application runtime core supplies the backend (today always the Direct
+    // assembly owned by `runtime/direct/backend-direct.ts`); this runner only
+    // consumes it.
+    const backend = selectedRuntime.backend
     // A5b-2: the settings owner (footer settings + USER-layer trust, the
     // display-preset mutation/persistence, user keybindings and the boot
     // display/theme application).
@@ -1319,6 +1382,9 @@ export function applyRunner(ctx: Context, config: Config): void {
       } else {
         diag.dispose()
       }
+      // M3-4 PR1: the selected transport disposes after the session
+      // retirement on this pre-mount path too (Direct: no-op).
+      await disposeSelectedTransport()
       return
     }
     // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
@@ -1342,7 +1408,14 @@ export function applyRunner(ctx: Context, config: Config): void {
               // No lower sink.
             }
           }
-          return sessionRuntime.retireOwnedSession()
+          // M3-4 PR1 teardown order: the session retirement completes FIRST,
+          // then the selected runtime's transport disposer runs (a no-op on
+          // Direct today). The retirement promise is returned either way; the
+          // transport disposal is a detached step with rejection capture (a
+          // failure is logged, never an unhandled rejection).
+          return sessionRuntime.retireOwnedSession().finally(() => {
+            runDetached('selected transport disposal', () => disposeSelectedTransport(), { diag })
+          })
         }
       })
     }
@@ -2131,6 +2204,15 @@ export function applyRunner(ctx: Context, config: Config): void {
       } catch {
         // The dispose must not block the process exit.
       }
+    }
+    // M3-4 PR1: dispose the selected runtime's transport after the (bounded)
+    // retirement window on the fatal path too (Direct: no-op). Contained like
+    // every step of this terminal root — a transport failure must never block
+    // the fatal exit.
+    try {
+      await disposeSelectedTransportRef?.()
+    } catch {
+      // The last disposal attempt; never block the exit.
     }
     try {
       exit(1)
