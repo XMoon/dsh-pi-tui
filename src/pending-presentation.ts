@@ -24,17 +24,9 @@
 import { pendingSubmissionsNotReplaced } from './pending-submission.ts'
 import type { SubmissionPresentationItem } from './submission-presentation.ts'
 import type { PendingInputItem, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
-import type { PendingContextRow, PendingUserRow, QueueItem } from './tui-app.ts'
+import type { PendingContextRow, PendingTailRow, PendingUserRow, QueueItem } from './tui-app.ts'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { fileAttachmentSummary } from './content-block-presentation.ts'
-
-/** One ordered conversation-tail row: an authoritative `steering` occurrence
- * or a client-local user echo (`user`), or an authoritative non-user
- * `context` occurrence (`context`). The two kinds interleave in ONE ordered
- * list — the join's projection order is the render order. */
-export type PendingTailRow =
-  | { readonly kind: 'user'; readonly row: PendingUserRow }
-  | { readonly kind: 'context'; readonly row: PendingContextRow }
 
 /** The joined pending-input rows for one subject. */
 export interface PendingPresentationRows {
@@ -70,6 +62,9 @@ export interface PendingPresentationInput {
 export function buildPendingPresentation(input: PendingPresentationInput): PendingPresentationRows {
   const queued: QueueItem[] = []
   const tail: PendingTailRow[] = []
+  // The rpc identities of authoritative USER occurrences (queued + steering).
+  // A `context` occurrence contributes none: it never correlates with a
+  // local echo.
   const userRpcIds = new Set<string>()
   const running = input.pending?.running ?? false
   if (input.pending !== undefined) {
@@ -105,18 +100,13 @@ export function buildPendingPresentation(input: PendingPresentationInput): Pendi
           })
           break
       }
+      if (item.placement !== 'context' && item.rpcId !== undefined) userRpcIds.add(item.rpcId)
     }
   }
   // Suppress a local echo only while an authoritative USER occurrence with
   // the same rpc id is visible. The echo is never deleted here: the Host may
   // claim its pending occurrence before the durable user/message lands, so
   // the echo is re-presented in that window by the caller's next join.
-  for (const row of tail) {
-    if (row.kind === 'user' && row.row.rpcId !== undefined) userRpcIds.add(row.row.rpcId)
-  }
-  for (const queuedRow of queued) {
-    if (queuedRow.rpcId !== undefined) userRpcIds.add(queuedRow.rpcId)
-  }
   for (const echo of pendingSubmissionsNotReplaced(input.submissions, userRpcIds)) {
     const text = echoText(echo)
     if (echo.placement === 'queued') {

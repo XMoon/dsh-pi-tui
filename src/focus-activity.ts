@@ -413,10 +413,9 @@ export type FocusProjectedBlock =
     /**
      * The turn-level Action aggregate the Focus header renders (addendum v2
      * §17/§18): derived ONCE from the turn group's canonical Process
-     * evidence — independent of collapsed/expanded state, search reveals
-     * and forced-visible rows (a temporary reveal must not change `7
-     * actions`). Presentation-only: never stored on `TurnActivity`, never
-     * persisted.
+     * evidence — independent of collapsed/expanded state and search reveals
+     * (a temporary reveal must not change `7 actions`). Presentation-only:
+     * never stored on `TurnActivity`, never persisted.
      */
     actionStats: CompactActionStats
     /**
@@ -468,9 +467,9 @@ function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
  * stats (addendum v2 §18) plus — collapsed only (`hidden !== undefined`) —
  * the presentation-only Action source. `latestCompactAction` picks the
  * latest eligible candidate among EXACTLY the rows the collapsed projection
- * hides under the root, so nothing already visible outside (a
- * forced-visible search row, a committed answer, the held-back final) can
- * duplicate itself in the Action slot.
+ * hides under the root, so nothing already visible outside (a committed
+ * answer, the held-back final, a post-Thought notice) can duplicate itself
+ * in the Action slot.
  */
 function focusActivityBlock(
   activity: TurnActivity | undefined,
@@ -495,9 +494,9 @@ const EMPTY_ACTION_STATS: CompactActionStats = { total: 0, types: new Map() }
  * turn-less entry can split one turn into separate consecutive runs
  * ({@link consecutiveTurnGroup}), and every Thought block of that turn must
  * still report the same turn-level number — never merely its own run's.
- * A search reveal / forced-visible row / disclosure state cannot change it
- * because none of them participate here. O(n) once per projection, never a
- * per-frame rescan of an unchanged window.
+ * A search reveal / disclosure state cannot change it because none of them
+ * participate here. O(n) once per projection, never a per-frame rescan of an
+ * unchanged window.
  */
 function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<number, CompactActionStats> {
   const accumulators = new Map<number, CompactActionStatsAccumulator>()
@@ -776,7 +775,7 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * `form` and raw position, never a source kind or plugin name; `Compact` and
  * `Full` do not route through here.
  */
-export type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
+type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
 function collapsedFocusRowDisposition(
   message: TranscriptMessage,
