@@ -192,13 +192,19 @@ function seedTurn(
   const session = host.ctx.sessions.get(SessionId(sessionId))
   if (session === undefined) throw new Error(`seedTurn: no Host session ${sessionId}`)
   session.append('turn/start', { turn: input.turn })
+  // The official step lifecycle: an `assistant/message` is only legal inside an
+  // OPEN turn+step, and the durable reader enforces it (`SessionFormatError`
+  // otherwise). Without these two events every seeded log was corrupt on the
+  // persistence READ path — the path `/api/session.export` uses — so the archive
+  // route could never serve a seeded Session.
+  session.append('step/start', { turn: input.turn, step: 1 })
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: input.prompt }],
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   session.append('assistant/message', {
     turn: input.turn,
-    step: 0,
+    step: 1,
     message: {
       id: MessageId(`${sessionId}-assistant-${input.turn}`),
       role: 'assistant',
@@ -211,6 +217,7 @@ function seedTurn(
   if (input.todos !== undefined) {
     session.append('todo/write', { todos: [...input.todos] })
   }
+  session.append('step/end', { turn: input.turn, step: 1 })
   session.append('turn/end', { turn: input.turn, reason: { kind: 'completed' } })
 }
 
@@ -550,14 +557,17 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
 })
 
 test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
-  // IN PROGRESS (M3-3B closure). The legs that pass already proved a real
-  // product bug (see the port fix) and the truthful contract; the remaining
-  // work is (a) a fixture decision for the config write leg (`dsh-settings` is
-  // unmounted and `dsh-config-editor` is not a package of this repository, so a
-  // real settings write cannot be exercised here) and (b) a Cordis
-  // `cannot get property "href" without inject` failure later in the test
-  // (interaction/dispose leg) that needs another pass.
-  skip: 'P1-B in progress: fixture services + the Cordis inject failure on the tail legs',
+  // IN PROGRESS (M3-3B closure). Already proven on this real graph: the exact
+  // capability advertisement, that the config adapter REACHES the real settings
+  // Remote and reports its truthful `unavailable` state (no fabricated values,
+  // writes refused) — this leg is what caught the namespace-loss P1 — and the
+  // archive leg now returns a REAL `ready` with the upstream
+  // `dsh-session-m3a-main.zip` after the seed gained the official step
+  // lifecycle. Remaining: (a) reading `assembled.backend.interaction` throws a
+  // Cordis `cannot get property "href" without inject`, which also blocks the
+  // dispose leg; (b) the config SUCCESS path needs a production-equivalent
+  // config plane in the fixture (official `dsh-settings` + `dsh-config-editor`).
+  skip: 'P1-B in progress: backend.interaction access + the config success plane',
 }, async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
