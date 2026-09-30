@@ -4161,9 +4161,8 @@ test('installFocusPrompt tolerates a throwing registration', () => {
  * projection path (`projectFocus` over the folded window). */
 function collapsedFocusActionOf(
   folder: TranscriptFolder,
-  forcedVisible?: ReadonlySet<TranscriptMessage>,
 ): FocusProjectedBlock & { kind: 'activity' } | undefined {
-  const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true, forcedVisible)
+  const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
     .find(candidate => candidate.kind === 'activity')
   return block?.kind === 'activity' ? block : undefined
 }
@@ -4256,20 +4255,19 @@ test('collapsed Focus: a running question never duplicates itself as the Action'
   assert.equal(block?.action?.message.kind === 'tool' ? block.action.message.name : '', 'read')
 })
 
-test('collapsed Focus: a forced-visible row is never duplicated as the Action', () => {
+test('collapsed Focus: a visible persistent row never duplicates itself as the Action', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
     eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1002, 2),
   ])
-  const retryRow = folder.messages().find(message => message.kind === 'system' && message.origin === 'llm-retry')
-  assert.ok(retryRow !== undefined, 'fixture: the retry row exists')
-  // Without the reveal the retry owns the slot…
-  assert.equal(collapsedFocusActionOf(folder)?.action?.kind, 'retry')
-  // …and once the exact row is forced visible outside the Thought it stops
-  // being Action candidate scope (§16: no standalone row + Action duplicate).
-  assert.equal(collapsedFocusActionOf(folder, new Set([retryRow]))?.action?.kind, 'tool')
+  // The retry row is hidden process evidence, so it owns the collapsed Action
+  // slot; the Action winner is selected from the hidden rows only (§16: no
+  // standalone row + Action duplicate).
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.action?.kind, 'retry')
+  assert.equal(block?.action?.message.kind, 'system')
 })
 
 test('collapsed Focus: the committed-answer boundary keeps the Action on hidden root rows only', () => {
@@ -4324,23 +4322,17 @@ test('expanded Focus carries no Action preview and keeps canonical rows', () => 
 
 // ── Turn-level stats invariants (addendum v2 §18/§42) ────────────────────
 
-test('collapsed Focus: a forced-visible reveal never changes the turn-level action total', () => {
+test('collapsed Focus: the visible mid-turn notice never changes the turn-level action total', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
     eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1002, 2),
   ])
-  const retryRow = folder.messages().find(message => message.kind === 'system' && message.origin === 'llm-retry')
-  assert.ok(retryRow !== undefined, 'fixture: the retry row exists')
-  const base = collapsedFocusActionOf(folder)
-  const revealed = collapsedFocusActionOf(folder, new Set([retryRow]))
-  assert.equal(base?.actionStats.total, 2, 'read + retry')
-  assert.deepEqual(revealed?.actionStats, base?.actionStats,
-    'the temporary reveal is presentation-only and cannot change the header number')
-  // …while the collapsed WINNER does fall back to the still-hidden evidence.
-  assert.equal(base?.action?.kind, 'retry')
-  assert.equal(revealed?.action?.kind, 'tool')
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.actionStats.total, 2, 'read + retry')
+  // The collapsed WINNER comes from the hidden rows only: the retry owns it.
+  assert.equal(block?.action?.kind, 'retry')
 })
 
 test('Focus action stats stay turn-level when a turn-less entry splits the turn (v2 §18)', () => {

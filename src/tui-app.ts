@@ -168,7 +168,7 @@ import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallb
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { createScrollRenderProfiler } from './scroll-render-profile.ts'
-import { FocusActivityComponent, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { FocusActivityComponent, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation, type CompactActionSource, type CompactActionStats } from './compact-process-preview.ts'
 import { projectCompact } from './compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
@@ -7890,8 +7890,9 @@ export class TuiApp {
    * This is the reveal-NECESSITY authority: it resolves the collapsed Focus
    * projection itself (the same visibility rules the renderer uses), so a user
    * prompt, the final assistant, a committed answer, a compaction card, a
-   * surfaced interaction, a forced-visible notice or a fail-open delivered tail
-   * that is already on screen never opens — or promotes — a Thought root. */
+   * surfaced interaction, a mid-turn notice (a post-Thought visible row) or a
+   * fail-open delivered tail that is already on screen never opens — or
+   * promotes — a Thought root. */
   private searchTargetTurn(): number | undefined {
     if (!this.searchRevealGranted) return undefined
     if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
@@ -7904,8 +7905,8 @@ export class TuiApp {
   /** Whether the COLLAPSED Focus projection hides one row (so the search target
    * needs the Focus-root reveal). Computed from the real `projectFocus`
    * collapsed output — never from "the row has a turn" — and memoized per
-   * window/activity/target. `collapsedFocusForcedVisible()` is included, so a
-   * hidden mid-turn notice is already surfaced and needs no root reveal. */
+   * window/activity/target. A mid-turn notice is already visible as a
+   * post-Thought row, so it never needs the root reveal. */
   private focusRootHidesSearchTarget(message: TranscriptMessage): boolean {
     const memo = this.collapsedFocusHiddenMemo
     if (memo !== undefined && memo.messages === this.messages && memo.activities === this.turnActivities
@@ -7915,7 +7916,6 @@ export class TuiApp {
       this.turnActivities,
       new Set(),
       true,
-      this.collapsedFocusForcedVisible(),
     )
     const visible = blocks.some(block => block.kind === 'message' && block.message === message)
     this.collapsedFocusHiddenMemo = {
@@ -8208,8 +8208,8 @@ export class TuiApp {
   /** Whether one per-card override row is MATERIALIZED on the current
    * projection: a current-window top-level row, an OPEN Work member, or a row
    * the Focus projection actually emits (compaction always; a Focus secondary
-   * only inside an expanded root; surfaced context unless collapsed Focus hides
-   * the mid-turn notice). */
+   * only inside an expanded root; surfaced context always — a mid-turn notice
+   * renders as a post-Thought row, never hidden). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
     // A local (non-session) card — e.g. a `!`/`!!` shell card — is always
     // appended to the rendered transcript and participates in NO canonical
@@ -8235,13 +8235,6 @@ export class TuiApp {
       // expanded), so they are always materialized in the current window.
       if (message.kind === 'compaction') return true
       if (isFocusSecondaryDisclosure(message)) return projectionExpanded.has(message.turn)
-      // Surfaced context is emitted unless collapsed Focus hides it (the
-      // mid-turn notice); a granted forced-visible reveal materializes it too.
-      if (isSurfacedContext(message)) {
-        if (projectionExpanded.has(message.turn)) return true
-        return !isCollapsedFocusHiddenRow(this.messages, message)
-          || this.collapsedFocusForcedVisible().has(message)
-      }
     }
     return true
   }
@@ -8975,7 +8968,7 @@ export class TuiApp {
     // order through the projection-aware substitution helper.
     const structure = projectTranscriptStructure(this.messages)
     if (policy.focusBehavior) {
-      const blocks = projectFocus(this.messages, this.turnActivities, projectionExpanded, true, this.collapsedFocusForcedVisible())
+      const blocks = projectFocus(this.messages, this.turnActivities, projectionExpanded, true)
       const substituted = this.applyContextClusters(blocks, clusterByMemberOf(structure))
       return this.materializeFocusWork(substituted)
     }
@@ -9046,20 +9039,6 @@ export class TuiApp {
    * raw `searchTarget`, so a revoked reveal cannot keep a span open. */
   private searchRevealedMessage(): TranscriptMessage | undefined {
     return this.searchRevealGranted ? this.searchTarget?.message : undefined
-  }
-
-  /**
-   * The temporary search reveal for collapsed Focus: the ONE hidden mid-turn
-   * `form:'notice'` the current grant must surface. Presentation-only — it
-   * never opens the Thought and never writes a manual disclosure owner, so an
-   * ordinary dismiss restores the collapsed view with no residue. Rows that
-   * collapsed Focus already shows, and hidden Process rows (which the turn
-   * expansion owns), are not forced here.
-   */
-  private collapsedFocusForcedVisible(): ReadonlySet<TranscriptMessage> {
-    const target = this.searchRevealedMessage()
-    if (target === undefined || !isCollapsedFocusHiddenRow(this.messages, target)) return new Set()
-    return new Set([target])
   }
 
   /**

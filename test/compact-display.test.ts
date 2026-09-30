@@ -1242,9 +1242,12 @@ test('Context rows never occupy the Focus slots or counts', async () => {
   const view = vt.getViewport().join('\n')
   assert.match(view, /1 action · read ×1/, 'the header count describes the real action only')
   assert.match(view, /Think:\s+the real reasoning/)
-  // The mid-turn notice is process feedback: collapsed Focus absorbs it into
-  // the Thought, while the mid-turn relay stays surfaced (external input).
-  assert.ok(!view.includes('child settled summary'), 'a mid-turn notice is hidden inside the collapsed Thought')
+  // The mid-turn notice is visible process feedback rendered AFTER the
+  // Thought (never inside its slots/counts), while the mid-turn relay stays
+  // surfaced (external input).
+  assert.ok(view.includes('child settled summary'), 'a mid-turn notice renders as a post-Thought row')
+  assert.ok(view.indexOf('child settled summary') > view.indexOf('Think:'),
+    'the notice renders after the Thought')
   assert.ok(view.includes('Agent message · child-2'), 'a mid-turn relay remains surfaced')
   app.toggleFocusTurn(1)
   await vt.waitForRender()

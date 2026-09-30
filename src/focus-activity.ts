@@ -519,17 +519,17 @@ function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<num
 
 /**
  * Project one transcript window into Focus presentation blocks. Collapsed
- * Focus summarizes causal input and opening foundation around the Thought;
- * `forcedVisible` carries the temporary search reveal for a row the collapsed
- * view would otherwise hide (a mid-turn notice) — it surfaces that exact row
- * without opening the Thought and without becoming a disclosure owner.
+ * Focus summarizes causal input and opening foundation BEFORE the Thought,
+ * renders a durable mid-turn `form:'notice'` AFTER the Thought (visible
+ * process feedback, never inside the hidden Action candidate set), and
+ * hides ordinary Process inside the collapsed root. Expanded Focus restores
+ * the exact raw chronology.
  */
 export function projectFocus(
   messages: readonly TranscriptMessage[],
   activities: ReadonlyMap<number, TurnActivity>,
   expandedTurns: ReadonlySet<number>,
   focusMode: boolean,
-  forcedVisible?: ReadonlySet<TranscriptMessage>,
 ): FocusProjectedBlock[] {
   if (!focusMode) return messages.map(message => ({ kind: 'message', message }))
   const actionStatsByTurn = focusActionStatsByTurn(messages)
@@ -621,32 +621,40 @@ export function projectFocus(
     // Collapsed Focus summarizes persistent input/context rows before the
     // Thought in their raw relative order. Both human user/steer rows and
     // injected context marked `context:true` are persistent; all ordinary
-    // process rows stay hidden inside the Thought. A committed pre-steer answer
-    // is the one exception: from that exact raw boundary onward, preserve the
-    // persistent rows and answer in chronology so the answer cannot be swallowed
-    // by the Thought or move when the disclosure changes. A MID-TURN
-    // `form:'notice'` is the other exception (see
-    // {@link isCollapsedFocusVisibleRow}): it is process feedback and hides
-    // inside the Thought, while an opening-foundation notice stays visible.
+    // process rows stay hidden inside the Thought. A MID-TURN
+    // `form:'notice'` is the visible exception (see
+    // {@link collapsedFocusRowDisposition}): it renders AFTER the Thought as
+    // a post-thought row, never inside the hidden Action candidate set. A
+    // committed pre-steer answer is the other exception: from that exact raw
+    // boundary onward, preserve the persistent rows and answer in chronology
+    // so the answer cannot be swallowed by the Thought or move when the
+    // disclosure changes.
     //
     // The collapsed Action source (addendum v2 §19/§42) is selected
     // from EXACTLY the rows this projection hides under the Thought root —
-    // the emit loops below record them — so a forced-visible search row, a
-    // committed answer, the held-back final and every persistent boundary
-    // can never duplicate themselves in the Action slot.
+    // the emit loops below record them — so a committed answer, the
+    // held-back final and every visible persistent boundary can never
+    // duplicate themselves in the Action slot.
     const leadBoundary = focusThoughtLeadBoundary(group)
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     const hidden: TranscriptMessage[] = []
+    // Collect first, emit once: the pre-thought rows, the post-thought rows
+    // and the hidden Action candidates of one group.
+    const preThought: TranscriptMessage[] = []
+    const postThought: TranscriptMessage[] = []
     if (firstCommittedIndex < 0) {
       for (let index = 0; index < group.length; index += 1) {
         const member = group[index]!
-        if (isCollapsedFocusVisibleRow(member, index, leadBoundary) || forcedVisible?.has(member) === true) {
-          out.push({ kind: 'message', message: member })
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        if (disposition === 'pre-thought' || disposition === 'post-thought') {
+          (disposition === 'pre-thought' ? preThought : postThought).push(member)
         } else if (member.kind !== 'compaction' && member !== final?.message) {
           hidden.push(member)
         }
       }
+      out.push(...preThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
       out.push(...focusActivityBlock(activity, group[0]!, actionStats, hidden))
+      out.push(...postThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
       // Compaction cards keep their existing lifecycle in the collapsed
       // view (plan §12.3 v1 — never hidden into the Thought).
       for (const member of group) {
@@ -656,27 +664,33 @@ export function projectFocus(
       const beforeCommitted = group.slice(0, firstCommittedIndex)
       for (let index = 0; index < beforeCommitted.length; index += 1) {
         const member = beforeCommitted[index]!
-        if (isCollapsedFocusVisibleRow(member, index, leadBoundary) || forcedVisible?.has(member) === true) {
-          out.push({ kind: 'message', message: member })
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        if (disposition === 'pre-thought' || disposition === 'post-thought') {
+          (disposition === 'pre-thought' ? preThought : postThought).push(member)
         } else if (member.kind !== 'compaction') {
           hidden.push(member)
         }
       }
       // The post-boundary emission is decided FIRST (pure) so the Action
       // selection sees the whole hidden scope before the Thought renders.
+      // The committed-answer fence is preserved: from the first committed
+      // answer onward every persistent row and the answer keep their raw
+      // chronology (they are neither hoisted above the Thought nor moved
+      // across their semantic boundary).
       const postCommitted: TranscriptMessage[] = []
       for (let index = firstCommittedIndex; index < group.length; index += 1) {
         const member = group[index]!
         if (final !== undefined && member === final.message) continue
-        if (isCollapsedFocusVisibleRow(member, index, leadBoundary)
-          || forcedVisible?.has(member) === true
-          || member.kind === 'compaction' || isCommittedAnswer(member)) {
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        if (disposition !== 'hidden' || member.kind === 'compaction' || isCommittedAnswer(member)) {
           postCommitted.push(member)
         } else {
           hidden.push(member)
         }
       }
+      out.push(...preThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
       out.push(...focusActivityBlock(activity, group[0]!, actionStats, hidden))
+      out.push(...postThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
       for (const member of beforeCommitted) {
         if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
       }
@@ -748,22 +762,30 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
 }
 
 /**
- * Whether one row stays visible OUTSIDE the collapsed Thought. Position-aware:
- * a MID-TURN `form:'notice'` is process feedback (a background job settling
- * while the Agent already works), not causal input, so it is hidden inside the
- * collapsed Thought and restored in raw chronology when the Thought opens. A
- * notice inside the turn's OPENING foundation (`index < leadBoundary`) explains
- * why the turn started and stays visible, exactly like users/steers, opening
- * ambient Context and mid-turn relays. The decision is positional (raw
- * chronology) plus semantic (`form`), never a source-name heuristic; `Compact`
- * and `Full` do not route through here.
- * @param message - the raw transcript row.
- * @param index - its index in the raw turn group.
- * @param leadBoundary - the turn's Thought-lead boundary (see {@link focusThoughtLeadBoundary}).
+ * The collapsed-Focus disposition of one row: where it renders relative to
+ * the Thought (or that it does not render at all while collapsed).
+ *
+ * Position-aware plus semantic: a MID-TURN `form:'notice'` (a background job
+ * or subagent settling while the Agent already works) is process feedback
+ * that belongs AFTER the Thought, not causal input hoisted before it; a
+ * notice inside the turn's OPENING foundation (`index < leadBoundary`)
+ * explains why the turn started and stays BEFORE the Thought. Every other
+ * persistent input/context row keeps its existing pre-Thought behavior, and
+ * ordinary Process stays hidden inside the collapsed Thought (restored in
+ * raw chronology when the Thought opens). The decision reads the semantic
+ * `form` and raw position, never a source kind or plugin name; `Compact` and
+ * `Full` do not route through here.
  */
-function isCollapsedFocusVisibleRow(message: TranscriptMessage, index: number, leadBoundary: number): boolean {
-  if (!isFocusPersistentInputRow(message)) return false
-  return !(index >= leadBoundary && isNoticeContext(message))
+export type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
+
+function collapsedFocusRowDisposition(
+  message: TranscriptMessage,
+  index: number,
+  leadBoundary: number,
+): CollapsedFocusRowDisposition {
+  if (!isFocusPersistentInputRow(message)) return 'hidden'
+  if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
+  return 'pre-thought'
 }
 
 /**
@@ -788,34 +810,6 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
     index += 1
   }
   return group
-}
-
-/**
- * Whether collapsed Focus hides one row inside the Thought (a mid-turn
- * `form:'notice'`). The temporary search reveal reads this to force EXACTLY
- * that row visible without opening the Thought and without minting a manual
- * disclosure owner; the positional decision uses the SAME consecutive-run
- * grouping as the projection ({@link consecutiveTurnGroup} +
- * {@link focusThoughtLeadBoundary}), never a source-name check.
- * @param messages - the current transcript window.
- * @param message - the row to test.
- */
-export function isCollapsedFocusHiddenRow(messages: readonly TranscriptMessage[], message: TranscriptMessage): boolean {
-  if (!isSurfacedContext(message) || !isNoticeContext(message) || !('turn' in message)) return false
-  const position = messages.indexOf(message)
-  if (position < 0) return false
-  // Walk back to the start of the CONSECUTIVE run the projection would group,
-  // with the SAME projection-turn authority (a command row is a boundary —
-  // it is a real turn-less `kind: 'command'` node).
-  let start = position
-  while (start > 0) {
-    const previous = messages[start - 1]!
-    if (focusProjectionTurnOf(previous) !== focusProjectionTurnOf(message)) break
-    start -= 1
-  }
-  const group = consecutiveTurnGroup(messages, start, message.turn)
-  const index = position - start
-  return !isCollapsedFocusVisibleRow(message, index, focusThoughtLeadBoundary(group))
 }
 
 /** The end of the turn's LEADING injected-context prefix used only for

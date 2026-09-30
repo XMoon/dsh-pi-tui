@@ -381,16 +381,19 @@ class:
 - Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK by
   the producer-declared `form` and raw position, never by source kind: a
   mid-turn `form:'notice'` (a background job or subagent settling while the
-  Agent already works) is hidden inside the collapsed Thought and restored at
-  its exact raw position when the Thought opens; a notice inside the turn's
-  opening foundation (the `thoughtLeadBoundary()` area) stays visible because it
-  explains why the turn started; a mid-turn relay stays visible because it is
-  external Agent-authored input. Compact keeps every notice standalone and Full
-  keeps full chronology.
-- A hidden mid-turn notice is reachable by search through a presentation-only
-  temporary reveal (`projectFocus` `forcedVisible`): it surfaces that row without
-  opening the Thought and without writing a manual owner, so an ordinary dismiss
-  restores the collapsed view with no residue.
+  Agent already works) renders AFTER the Thought as a visible post-Thought row
+  (2026-09-30 closure — it is visible process feedback, never hidden inside
+  the collapsed Thought and never a candidate for its Action slot); a notice
+  inside the turn's opening foundation (the `thoughtLeadBoundary()` area) stays
+  BEFORE the Thought because it explains why the turn started; a mid-turn relay
+  stays visible because it is external Agent-authored input. Expanded Focus
+  restores every notice at its exact raw position. Compact keeps every notice
+  standalone and Full keeps full chronology.
+- A search hit inside a mid-turn notice needs no Focus-root reveal and no
+  special forced-visible path: the row is already visible outside the Thought,
+  so ordinary search addresses it like any other surfaced Context card. A match
+  inside the folded Notice payload still opens through the row's own ordinary
+  message disclosure.
 - Full keeps the original transcript chronology, with ambient clusters
   substituted in place.
 - Context never enters the Focus Think/Tool/Message slots or the tool counts.
@@ -563,7 +566,8 @@ under bad input, long sessions and rapid live updates:
 - **Search / disclosure.** A flat/fail-open container never mints an inoperable
   owner; a surface switch during search re-checks the capability; a topology
   mutation re-resolves the current container path instead of a stale identity;
-  and a hidden mid-turn notice is reachable through the temporary reveal above.
+  and a mid-turn notice is already visible outside the collapsed Thought, so
+  search reaches it through the ordinary row/message disclosure paths.
 - **Width / grapheme.** Every F4 row family (Work, pending Preparing rows,
   Context cluster, notice, relay, recall) obeys the framebuffer width contract
   at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and

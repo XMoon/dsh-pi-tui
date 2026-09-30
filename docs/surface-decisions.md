@@ -595,16 +595,20 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   Human user/steer rows and CAUSAL surfaced context are persistent
   boundaries in collapsed Focus, where they remain visible in raw relative
   order. A MID-TURN `form:'notice'` (a background job or subagent settling
-  while the Agent already works) is process feedback, not causal input: it is
-  hidden inside the collapsed Thought and restored at its exact raw position
-  when the Thought opens (2026-09-21 addendum; the decision reads the
-  semantic `form` and raw position, never a source kind). A notice inside the
-  opening foundation and a mid-turn relay stay visible.
+  while the Agent works) is visible process feedback: it renders AFTER the
+  Thought as a post-Thought row while collapsed (2026-09-30 closure; the
+  decision reads the semantic `form` and raw position, never a source kind),
+  never enters the Thought's hidden Action candidate set, and returns to its
+  exact raw position when the Thought opens. A notice inside the
+  opening foundation stays before the Thought, and a mid-turn relay stays
+  visible.
   Expanded Focus preserves process chronology after the foundation: later
   steers and surfaced context return to their real positions and remain
-  unmarked as owner-only process content. Searching a hidden mid-turn notice
-  surfaces it through a presentation-only temporary reveal (`projectFocus`
-  `forcedVisible`) without opening the Thought or writing a manual owner.
+  unmarked as owner-only process content. Searching a mid-turn notice needs
+  no Focus-root reveal and no special forced-visible path (retired 2026-09-30)
+  — the row is already visible, so ordinary search addresses it like any
+  other surfaced Context card; a match inside the folded Notice payload opens
+  through the row's own message disclosure.
   The durable `steer`/source facts are never rewritten, and injected
   context still does not occupy Think/Action/Message slots and never counts
   as a tool.
