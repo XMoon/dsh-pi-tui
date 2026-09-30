@@ -1972,6 +1972,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
       }
     }
+    // Read Question authority BEFORE composing the first frame: the attention
+    // rows Task Center shows must reflect the current projection, never only
+    // whatever the last routed event happened to reconcile (addendum §9.3).
+    questionController?.reconcile()
     const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
     const initialQuery = restoreState?.searchQuery ?? ''
     const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined

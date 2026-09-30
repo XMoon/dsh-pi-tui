@@ -1620,3 +1620,103 @@ test('a failed coalesced catalog read still runs exactly one trailing refresh', 
   await vt.waitForRender()
   assert.equal(listings.length, 2, 'the trailing read must settle without starting another read')
 })
+
+test('a parked continued Question is reachable and reopenable from the Task Center', async (t) => {
+  // Addendum §16.4 (surface integration, not a source-string assertion): the
+  // literal user path is park -> Task Center -> Enter -> the SAME Question
+  // returns to the editor seat. The Question controller owns the authority
+  // interpretation; the surface composes its attention rows into the browser.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-question-park-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const session: FakeSession = fakeSession({
+    id: 'question-park-session',
+    header: { id: 'question-park-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer me later'),
+  })
+  const harness = makeHarness(home, [session], { provider: 'p', model: 'm' })
+
+  context = new Context()
+  // The durable Question authority: one CONTINUED call with no queued reply.
+  // A parked Question is discovered from this projection alone.
+  const questionsProjection = context.provide('sessionProjections', {
+    stateOf: (_session: unknown, key: string): unknown => key === 'userQuestions'
+      ? {
+          questions: {
+            active: [{
+              callId: 'call-parked',
+              questions: [{ id: 'q1', question: 'Use staging or production?' }],
+              state: 'continued',
+            }],
+            settled: [],
+          },
+        }
+      : { 'next-step': [], 'next-turn': [] },
+    onChanged: () => () => {},
+  } as never)
+  assert.ok(questionsProjection === undefined || questionsProjection !== undefined)
+  fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  await settle()
+  await vt.waitForRender()
+  // The live session must be attached before authority can resolve its exact
+  // agent; one ordinary session event is the production reconcile trigger.
+  emitLiveStream(context, liveAgentOf(harness, session.id), { type: 'start', attemptId: 'park-1', revision: 1, turn: 1, step: 0 })
+  await settle()
+  await vt.waitForRender()
+
+  // COLD discovery parks it: nothing stole the editor seat. `/tasks` is the
+  // mandatory reopen surface and shows the parked Question as awaiting an
+  // answer, composed ABOVE the (empty) work rows.
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  const opened = vt.getViewport().join('\n')
+  assert.equal(app.overlayGraphState().handles, 1, `the Task Center is open:\n${opened}`)
+  assert.ok(opened.includes('Needs attention'), `the attention group renders:\n${opened}`)
+  assert.ok(opened.includes('Use staging or production?'), `the Question row renders:\n${opened}`)
+  assert.ok(opened.includes('awaiting answer'), `a parked Question is awaiting an answer:\n${opened}`)
+
+  // Enter reopens the SAME entry: the browser closes and the Question takes the
+  // editor seat with its editable form.
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'a reopened Question replaces the browser')
+  const reopened = vt.getViewport().join('\n')
+  assert.ok(reopened.includes('Use staging or production?'), `the Question panel returns:\n${reopened}`)
+  assert.ok(reopened.includes('Type your answer…'), `the editable form owns the seat again:\n${reopened}`)
+
+  // Parking it again re-exposes the row: authority is untouched and the row is
+  // rebuilt from the controller's presentation state, not from the transcript.
+  vt.sendInput('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'Esc returns the editor seat')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  const reparked = vt.getViewport().join('\n')
+  assert.ok(reparked.includes('Use staging or production?'), `the parked Question is reachable again:\n${reparked}`)
+})
