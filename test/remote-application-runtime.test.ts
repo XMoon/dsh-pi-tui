@@ -35,10 +35,11 @@
  * - `StubLlmAdapter` (a `smoke` route, no streamed turn), plus hand-provided
  *   `agentDefaultModel` / `attachments` / `webServer` values: the minimal
  *   readiness inputs the composition requires, identical to the proven
- *   M3-1 L5 fixture shape. None sits on the composed Client/Host graph under
- *   test (no Remote-wire state, never read through the connection), so they
- *   do not weaken the composition-identity / disposal-ordering /
- *   failure-unwind proofs this suite makes.
+ *   M3-1 L5 fixture shape. Precision: the LLM adapter is registered on the
+ *   required Host `llm` service (part of the composed graph), but no proof
+ *   in this suite (composition identity, disposal ordering, failure unwind)
+ *   ever invokes it — no model turn runs; the other values carry no
+ *   Remote-wire state and are never read through the Client connection.
  *
  * DELIBERATELY ABSENT
  * - mounted TUI main surface
