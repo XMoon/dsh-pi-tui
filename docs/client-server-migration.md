@@ -2508,6 +2508,29 @@ still reaches the Remote graph only through the dynamic
 - The forwarded-event seat is passed METHOD-BOUND: the Client `$on` reads its
   own service state, so a detached reference loses `this` (caught by the P11
   same-Host smoke).
+- Generated Client namespaces are PROTOTYPE ACCESSORS. `sessions`, `settings`,
+  `permissionPresets`, `agentPresets`, … exist only through accessors on the
+  generated object, so spreading or rebuilding it (`{ ...source.remote }`, or
+  copying its members into a wrapper) silently turns every namespace
+  `undefined`. The adapters therefore keep the SOURCE object's identity and only
+  pass event seats method-bound. `test/remote-config-port.test.ts` builds its
+  wire the same way (non-enumerable accessors) and asserts that an own-property
+  copy carries no namespace at all, so the shape cannot regress unnoticed; the
+  same-Host smoke below reached a REAL Client and caught the defect that
+  structural fakes had missed.
+- The same-Host qualification (`test/remote-m3a-semantics-smoke.test.ts`) runs
+  the assembled Remote backend over ONE real Host wire: the exact capability
+  set, the rc.2 Question wire (live request → claim → timeout → late answer)
+  plus reuse of the base `userQuestions` service and a subscription that
+  follows a reconnect, the config plane reaching `ready` with a REAL settings
+  write followed by the authoritative re-read, the complementary no-settings
+  deployment still failing closed (unavailable diagnostic, no fabricated view,
+  refused write), the session archive returning the upstream ZIP bytes, the
+  backend/assembly interaction identity, and reverse disposal. The config plane
+  is mounted by the fixture only — a profile directory separate from `home`, a
+  bundle whose layer supplies the row's non-volatile fields, and app boot's own
+  root `Include` fed the raw `insert`-dialect patch options — because the
+  product composition must never mount `configEditor`/`settings` itself.
 - `docs/m3-entry-contract.md` §1.3/§2.1 `interaction` row is reconverged:
   rc.2 publishes the full Question contract, no capability detection and no
   rc.1 fallback lane exists.

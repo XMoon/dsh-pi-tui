@@ -166,6 +166,9 @@ function createBackend(seed?: (state: FakeState) => void) {
     schema: {},
   })
 
+  // Assigned below; the `$on` seat guard compares against the object the port
+  // actually holds, which is the accessor-backed wire.
+  let wire: Record<string, unknown>
   const remote = {
     settings: {
       describe: async () => {
@@ -263,7 +266,7 @@ function createBackend(seed?: (state: FakeState) => void) {
     // its own service state, so a detached reference must throw. This is the
     // regression lock for the P11-class bug (an unbound event seat).
     $on(this: unknown, event: string, listener: EventListener) {
-      if (this !== remote) {
+      if (this !== wire) {
         throw new TypeError("Cannot read properties of undefined (reading 'subscribe')")
       }
       state.order.push(`$on:${event}`)
@@ -280,12 +283,42 @@ function createBackend(seed?: (state: FakeState) => void) {
     },
   }
 
+  // The generated Client exposes each namespace through a prototype ACCESSOR.
+  // The fixture mirrors that shape — non-enumerable accessors over the members
+  // above — so an own-property copy (`{ ...remote }`) inside the adapter loses
+  // every namespace instead of silently keeping them (the namespace-loss P1).
+  wire = {}
+  for (const [key, value] of Object.entries(remote)) {
+    Object.defineProperty(wire, key, { get: () => value, enumerable: false, configurable: false })
+  }
   const port = new RemoteConfigPort({
-    remote: remote as never,
+    remote: wire as never,
     connection: { generation: generation.source },
   })
-  return { port, state, generation, emit, listeners }
+  return { port, state, generation, emit, listeners, wire }
 }
+
+/* ------------------------------------------------------------------------- *
+ * Wire shape.
+ * ------------------------------------------------------------------------- */
+
+test('an accessor-backed wire survives the adapter, an own-property copy never would (namespace-loss P1)', async () => {
+  const { port, state, wire } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
+  })
+  // The generated Client object exposes namespaces as prototype accessors, so it
+  // has nothing own-enumerable to copy: rebuilding the object (`{ ...remote }`,
+  // or spreading it into a wrapper) drops EVERY namespace. That is precisely how
+  // the P1 defect reached a real Client and made each namespace `undefined`
+  // while every structural fake still passed.
+  assert.deepEqual({ ...wire }, {}, 'an own-property copy of the wire carries no namespace')
+  await port.describe()
+  assert.equal(port.configReadiness(), 'ready')
+  const tuiSettings = port.tuiSettings
+  assert.ok(tuiSettings !== undefined, 'the accessor-backed namespace is served')
+  assert.equal(tuiSettings.get().theme, TUI_DEFAULTS.theme)
+  assert.equal(state.describeCalls, 1)
+})
 
 /* ------------------------------------------------------------------------- *
  * Mirror lifecycle.
