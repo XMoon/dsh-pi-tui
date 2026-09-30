@@ -18,17 +18,21 @@
  * TEST STAND-INS / SUBSTITUTIONS (beyond the serializer)
  * - prompt serializer (unsupported test double): PR1 does not own production
  *   submission serialization — the plan's single sanctioned substitution.
- * - `StubLlmAdapter` (`smoke` route, no streamed turn): the suites prove
- *   composition/lifetime, never a model turn; the M3-1 L5 fixture uses the
- *   same shape. Not wire-sensitive: the LLM adapter never participates in
- *   composition, readiness or disposal.
+ * - `StubLlmAdapter` (`smoke` route, no streamed turn): the M3-1 L5 fixture
+ *   shape. Precision note: the adapter IS registered on the required Host
+ *   `llm` service and the composed `RemoteModelCatalog` holds
+ *   `runtime.remote.llm` — it is part of the composed graph; what keeps the
+ *   proofs valid is that nothing these suites exercise (composition,
+ *   readiness, disposal, failure unwind) ever INVOKES it (no model turn
+ *   runs).
  * - hand-provided `agentDefaultModel` + `attachments` + `webServer`:
  *   the minimal service values the composition's readiness requires
  *   (identical to the M3-1 L5 fixture); they carry no Remote-wire state and
  *   are not read through the Client connection.
- * These non-wire-sensitive stand-ins do not weaken the PR1 proofs
- * (composition identity, disposal ordering, failure unwind): none of them
- * sits on the composed Client/Host graph under test.
+ * These stand-ins do not weaken the PR1 proofs (composition identity,
+ * disposal ordering, failure unwind) because the proofs never traverse the
+ * substituted paths — not because the substitutes are absent from the
+ * composed graph.
  *
  * @module @xmoon76/dsh-pi-tui/support/remote-application-fixture
  */

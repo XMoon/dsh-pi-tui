@@ -3041,9 +3041,12 @@ Frozen-plan reconciliation (explicit deviations, review-driven):
   the composition fixtures carry the proven M3-1 L5 minimal readiness inputs
   (`StubLlmAdapter` smoke route; hand-provided `agentDefaultModel` /
   `attachments` / `webServer`). These are declared in the fixture manifests
-  (not presented as "serializer-only"): none sits on the composed
-  Client/Host graph under test, so the composition-identity /
-  disposal-ordering / failure-unwind proofs are unaffected.
+  (not presented as "serializer-only"). They do not weaken the
+  composition-identity / disposal-ordering / failure-unwind proofs because
+  those proofs never traverse the substituted paths — with the precision
+  that the LLM adapter IS registered on the required Host `llm` service
+  (part of the composed graph); no proof in these suites invokes it (no
+  model turn runs), and the other values carry no Remote-wire state.
 
 What PR1 does NOT claim: the TUI does not run remotely yet. Remote transcript
 hydration, eventSource presentation, status projection, the production

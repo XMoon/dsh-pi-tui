@@ -31,10 +31,11 @@
  *   doubles; no Host Context is composed.
  * - real-chain lane: the prompt serializer (PR1 does not own production
  *   submission serialization), plus the shared fixture's minimal readiness
- *   inputs (`StubLlmAdapter` smoke route, hand-provided agentDefaultModel /
- *   attachments / webServer — the proven M3-1 L5 shape, none on the composed
- *   Client/Host graph under test); the official Client/Gateway path and the
- *   M3 additive Host composition are real.
+ *   inputs (`StubLlmAdapter` smoke route — registered on the Host `llm`
+ *   service but never invoked by these proofs; hand-provided
+ *   agentDefaultModel / attachments / webServer — no Remote-wire state, not
+ *   read through the Client connection); the official Client/Gateway path
+ *   and the M3 additive Host composition are real.
  *
  * DELIBERATELY ABSENT
  * - any mounted TUI main surface / secondary surfaces.
