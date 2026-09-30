@@ -19,10 +19,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
+import ConfigEditor from '@deepseek-ai/dsh-config-editor'
+import SettingsForms from '@deepseek-ai/dsh-settings'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -139,6 +141,26 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     // REUSE it, never mount a second one.
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
+    // The production config plane the base bundle mounts while a
+    // `profileContext` exists: `ConfigEditor` (service `configEditor`, injecting
+    // loader + profileContext) and the official `SettingsForms` (service
+    // `settings`, injecting configEditor + profileContext). The M3 Remote
+    // composition must NOT mount these; they belong to the profile lifecycle.
+    // A minimal but REAL dsh profile directory: the official settings service
+    // reads the profile manifest + its patch file, so the plane needs both.
+    writeFileSync(join(workRoot, 'package.json'), JSON.stringify({
+      name: 'dsh-m3a-profile',
+      private: true,
+      dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
+    }, null, 2))
+    writeFileSync(join(workRoot, 'cordis.patch.yml'), '[]\n')
+    ctx.provide('profileContext', {
+      dir: workRoot,
+      patchPath: join(workRoot, 'cordis.patch.yml'),
+      installAnchor: workRoot,
+    } as never)
+    await ctx.plugin(ConfigEditor)
+    await ctx.plugin(SettingsForms)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
     await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3-3A smoke preset', plugins: [] })
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
@@ -557,17 +579,19 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
 })
 
 test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
-  // The ONLY leg still missing is the config SUCCESS plane (the owner's item 3):
-  // a production-equivalent config plane in this fixture (official
-  // `dsh-settings` + `dsh-config-editor` + a temp profileContext) so a real
-  // settings write can be followed by the authoritative re-read. Everything
-  // else already passes on the real wire and is asserted below: the exact
-  // capability set, the config adapter REACHING the real settings Remote with
-  // its truthful `unavailable` state (no fabricated values, writes refused —
-  // the leg that caught the namespace-loss P1), the archive returning a real
-  // `ready` with the upstream `dsh-session-m3a-main.zip` and readable bytes,
-  // the backend/assembly interaction identity, and reverse disposal.
-  skip: 'P1-B: only the config success plane (real settings write -> authoritative re-read) remains',
+  // Already proven on the real graph: the exact capability set; the archive
+  // returning a REAL `ready` with the upstream `dsh-session-m3a-main.zip` and
+  // readable bytes; the backend/assembly interaction identity; reverse
+  // disposal; and — with the production-equivalent config plane now mounted in
+  // this fixture (temp profile directory + official `ConfigEditor` +
+  // official `SettingsForms`, gated on `profileContext`, exactly as the base
+  // bundle mounts them) — the Remote config mirror reaching the REAL settings
+  // Remote and committing a first describe, i.e. `configReadiness() === 'ready'`
+  // with no recorded failure. Remaining: assert the SUCCESS write path through
+  // one existing namespace (`tui-app` via this repository's own TuiConfigSchema,
+  // or an official plugin's namespace already mounted) plus the authoritative
+  // re-read.
+  skip: 'P1-B: only the config SUCCESS write/re-read assertion remains',
 }, async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
