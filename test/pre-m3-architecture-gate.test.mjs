@@ -28,7 +28,7 @@ import {
   parseValueDynamicImports,
   REMOTE_COMPOSITION_SPECIFIER,
   REMOTE_DYNAMIC_IMPORT_OWNER,
-  REMOTE_DYNAMIC_IMPORT_TARGET,
+  REMOTE_DYNAMIC_IMPORT_TARGETS,
   resolveRelativeImport,
   STARTUP_REMOTE_COMPOSITION_RULE,
   staticImportCandidates,
@@ -539,7 +539,7 @@ test('startup importing the backend loader alone is fine; its value dynamic impo
       REMOTE_DYNAMIC_IMPORT_OWNER,
       `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
     ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGETS[0], 'export const runtime = 1\n'),
   ])
   assert.deepEqual(jsSpelling, [])
 })
@@ -550,7 +550,7 @@ test('the sanctioned lazy boundary is the only value dynamic-import owner into a
       REMOTE_DYNAMIC_IMPORT_OWNER,
       `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
     ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGETS[0], 'export const runtime = 1\n'),
   ])
   assert.deepEqual(allowed, [])
 
@@ -581,6 +581,41 @@ test('the sanctioned lazy boundary is the only value dynamic-import owner into a
     entry('runtime/direct/backend-direct.ts', 'export const backend = 1\n'),
     entry('app/remote/client-runtime.ts', "const bundle = await import('@deepseek-ai/dsh-typert-registry/client')\n"),
   ]), [])
+})
+
+test('the M3-4 application-runtime aggregate is the exact second sanctioned target (M3-4 PR1)', () => {
+  // The owner may dynamically import the Remote application runtime aggregate.
+  assert.deepEqual(findRemoteDynamicImportViolations([
+    entry(
+      REMOTE_DYNAMIC_IMPORT_OWNER,
+      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/application-runtime.ts')\n}\n`,
+    ),
+    entry(REMOTE_DYNAMIC_IMPORT_TARGETS[1], 'export const applicationRuntime = 1\n'),
+  ]), [])
+
+  // bootstrap may statically import the loader (the selection seam's reach),
+  // and the loader's dynamic import is not a static edge — the Remote graph
+  // stays unreachable from startup.ts.
+  const entries = [
+    entry('startup.ts', "import { applyRunner } from './index.ts'\n"),
+    entry('index.ts', "import { applyRunner } from './app/bootstrap.ts'\n"),
+    entry('app/bootstrap.ts', "import { loadRemoteApplicationRuntime } from '../runtime/backend-loader.ts'\n"),
+    entry(
+      'runtime/backend-loader.ts',
+      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/application-runtime.ts')\n}\n`,
+    ),
+    entry('app/remote/application-runtime.ts', 'export const applicationRuntime = 1\n'),
+  ]
+  assert.deepEqual(findViolations(entries), [], 'bootstrap -> backend-loader -> dynamic app/remote is the sanctioned M3-4 shape')
+
+  // Any other module dynamically importing the aggregate still fails, and the
+  // aggregate statically imported anywhere is still a Remote-composition edge.
+  const other = findRemoteDynamicImportViolations([
+    entry('app/surface/runtime.ts', "const m = await import('../../app/remote/application-runtime.js')\n"),
+    entry('app/remote/application-runtime.ts', 'export const applicationRuntime = 1\n'),
+  ])
+  assert.equal(other.length, 1)
+  assert.equal(other[0].rule, 'remote-dynamic-import-owner')
 })
 
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {

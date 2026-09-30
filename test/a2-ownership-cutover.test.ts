@@ -66,11 +66,18 @@ test('the current owner is published only through the injected SessionOwnerAcces
     'first-session publication goes through the injected owner provider (runtime)')
   const publishes = sessionRuntimeSource.match(/core\.setCurrentOwner\(/g) ?? []
   assert.equal(publishes.length, 4, `expected the 4 runtime publish sites, saw ${publishes.length}`)
-  // The production bootstrap is still the Direct composition: it injects the
-  // Direct owner provider into the runtime (the Remote provider is composed by
-  // the future Remote runtime selection seam, never by this bootstrap).
-  assert.ok(indexSource.includes('owners: directRuntime.owners,'),
-    'the production bootstrap injects the Direct owner provider')
+  // The production bootstrap is still the Direct composition: it selects the
+  // Direct application runtime through the M3-4 selection seam and injects
+  // its owner provider into the runtime (the Remote provider is composed by
+  // the Remote branch of the same seam, never a second bootstrap truth).
+  assert.ok(indexSource.includes('owners: selectedRuntime.owners,'),
+    'the production bootstrap injects the selected (Direct) owner provider')
+  assert.ok(indexSource.includes('retirement: selectedRuntime.retirement,'),
+    'the production bootstrap injects the selected (Direct) retirement provider')
+  assert.ok(indexSource.includes('const selectedRuntime = await selectApplicationRuntime({'),
+    'the M3-4 selection seam constructs the selected runtime core')
+  assert.ok(indexSource.includes('      kind: \'direct\','),
+    'normal package apply() selects Direct')
   assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
   assert.ok(indexSource.includes('const handleNow = (): AgentHandle | undefined =>'),
