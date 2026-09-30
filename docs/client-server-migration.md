@@ -2497,10 +2497,14 @@ still reaches the Remote graph only through the dynamic
   `REMOTE_IMPLEMENTED_CAPABILITIES` advertisement. There is no Direct
   fallback, no second Connection and no production selection: M3-4 owns the
   main-application cutover.
-- `src/app/remote/host-runtime.ts` mounts the rc.2 `UserQuestionService`
-  (publishing the `userQuestions` Typert namespace + Session projection) and
-  `src/app/remote/client-runtime.ts` mounts the
-  `@deepseek-ai/dsh-user-questions/remote` contribution.
+- The BASE Host owns `UserQuestionService` (`@deepseek-ai/dsh-base` mounts
+  `id: user-questions`). `src/app/remote/host-runtime.ts` REQUIRES that existing
+  service (a Host prerequisite) and verifies its stable Typert binding identity
+  is unchanged across the M3 composition; it never mounts a second copy — a
+  duplicate mount would replace the namespace owner and register the
+  `userQuestions` Session projection unit twice. The Client side mounts the
+  `@deepseek-ai/dsh-user-questions/remote` contribution
+  (`src/app/remote/client-runtime.ts`).
 - The forwarded-event seat is passed METHOD-BOUND: the Client `$on` reads its
   own service state, so a detached reference loses `this` (caught by the P11
   same-Host smoke).

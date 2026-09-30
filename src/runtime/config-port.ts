@@ -3,8 +3,8 @@
  * and the Host-owned CONFIGURATION it reads and mutates: the TUI settings
  * document, provider profiles, credentials, authorization flows, permission
  * presets and the saved preset default. Implemented by
- * `src/runtime/direct/` (Direct) today and by a Remote adapter in a later
- * milestone.
+ * `src/runtime/direct/` (Direct, the production default) and by
+ * `src/runtime/remote/config-remote.ts` (the experimental Remote backend).
  *
  * The port deliberately exposes semantic operations, never generic
  * settings/credentials/authorization service objects (no
@@ -17,9 +17,11 @@
  * never a namespace or a path (the adapter maps its schema knowledge to
  * the flag; a Remote adapter computes the same flag from the wire).
  *
- * Future wire mapping (M2): `settings.*` / `credentials.*` remotes and the
- * authorization capabilities; operations with no 1:1 Remote today are
- * recorded as gaps in the contract comments.
+ * Wire mapping: `settings.*` / `credentials.*` remotes plus the Session
+ * `userQuestions` / Inbox projections. Operations with no 1:1 Remote are
+ * marked `INTENTIONAL_UNSUPPORTED_IN_M3` in the contract comments and in
+ * `docs/m3-entry-contract.md` §10 (credential record read/delete, session
+ * approval-policy override, authorization flows).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/config-port
