@@ -1822,23 +1822,26 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   const flowFrames = (reopened.match(/Type your answer…/gu) ?? []).length
   assert.equal(flowFrames, 1, 'exactly one editable flow exists')
 
-  // Park it again and confirm the row is rebuilt from presentation state.
-  vt.sendInput('\x1b')
-  await settle()
-  await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 0, 'Esc returns the editor seat')
+  // Park it again and confirm the row is rebuilt from presentation state. The
+  // flow's Esc is LAYERED, so a single press would only leave the edit layer:
+  // the parked state must be proven (no editable frame, the attention figure
+  // back) BEFORE the Task Center is opened, otherwise this leg would walk the
+  // unreachable handler path it is meant to rule out.
+  await parkQuestion()
+  const parkedIdle = vt.getViewport().join('\n')
+  assert.ok(!parkedIdle.includes('Type your answer…'), `the Question is parked, not visible:\n${parkedIdle}`)
+  assert.ok(parkedIdle.includes('? 1 awaiting'), `the parked figure is back:\n${parkedIdle}`)
   await tasksHandler()
   await settle()
   await vt.waitForRender()
   const reparked = vt.getViewport().join('\n')
   assert.ok(reparked.includes('Use staging or production?'), `the parked Question is reachable again:\n${reparked}`)
+  assert.ok(reparked.includes('awaiting answer'), `and renders as awaiting an answer:\n${reparked}`)
 
   // Authority ends the interaction: with no other work or failure attention,
   // BOTH the attention figure and the trigger disappear — the affordance never
   // outlives the truth that produced it.
-  input('\x1b')
-  await settle()
-  await vt.waitForRender()
+  await parkQuestion()
   queuedReply = true
   projectionListener?.()
   await settle()
