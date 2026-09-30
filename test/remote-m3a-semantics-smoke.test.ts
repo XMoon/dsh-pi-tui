@@ -50,6 +50,8 @@ import * as toolTodoInvariant from '@deepseek-ai/dsh-tool-todo/invariant'
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../src/app/remote/m3a-semantics.ts'
+import { createRemoteBackendRuntime } from '../src/app/remote/runtime.ts'
+import { REMOTE_IMPLEMENTED_CAPABILITIES } from '../src/runtime/capability.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../src/runtime/remote/session-reference.ts'
 import { contextPressureOccupancy } from '../src/runtime/session-reader-port.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -543,6 +545,118 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
   } finally {
     off?.()
     reference.release()
+    await runtime.dispose()
+  }
+})
+
+test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
+  // IN PROGRESS (M3-3B closure). The legs that pass already proved a real
+  // product bug (see the port fix) and the truthful contract; the remaining
+  // work is (a) a fixture decision for the config write leg (`dsh-settings` is
+  // unmounted and `dsh-config-editor` is not a package of this repository, so a
+  // real settings write cannot be exercised here) and (b) a Cordis
+  // `cannot get property "href" without inject` failure later in the test
+  // (interaction/dispose leg) that needs another pass.
+  skip: 'P1-B in progress: fixture services + the Cordis inject failure on the tail legs',
+}, async (t) => {
+  // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
+  // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
+  // with the composition-owned carrier fetch. The earlier suites prove the
+  // adapters against structural fakes; this proves the ASSEMBLY over the real
+  // wire.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+  seedTurn(host, MAIN, {
+    turn: 1,
+    prompt: 'archive me',
+    response: 'archived answer',
+    usage: { inputTokens: 7, outputTokens: 3 },
+  })
+  const { runtime, semantics } = await compose(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+  await reference.ready
+  try {
+    // 1. The exact Remote advertisement, never the Direct set.
+    assert.equal(assembled.backend.kind, 'remote')
+    assert.deepEqual(
+      [...assembled.backend.capabilities].sort(),
+      [...REMOTE_IMPLEMENTED_CAPABILITIES].sort(),
+      'the assembled backend advertises exactly the Remote capability set',
+    )
+
+    // 2. Config over the REAL generated settings Remote. This in-process
+    // composition mounts no settings service (`@deepseek-ai/dsh-settings` is
+    // not mounted here and `@deepseek-ai/dsh-config-editor` is not a package
+    // this repository even has), so the real wire answers TRUTHFULLY: the
+    // mirror is unavailable with the Host's own diagnostic, no namespace is
+    // invented, and a write is refused instead of succeeding locally (§9.1).
+    // The important part this leg proves is that the adapter REACHES the real
+    // settings Remote at all: the official Client exposes its namespaces
+    // through prototype accessors, so an own-property copy of `remote` would
+    // make every namespace `undefined` (caught here, fixed in the port).
+    assert.equal(assembled.backend.config.configReadiness(), 'unavailable')
+    const failure = (assembled.backend.config as unknown as { lastRefreshFailure?: () => Error }).lastRefreshFailure?.()
+    assert.match(
+      String(failure?.message),
+      /settings service is absent/u,
+      'the Host diagnostic reaches the consumer instead of a fabricated value',
+    )
+    assert.equal(assembled.backend.config.tuiSettings, undefined, 'no settings view is fabricated')
+    await assert.rejects(
+      () => assembled.backend.config.permissions.setDefaultPreset('any-preset'),
+      /settings\.describe failed|has not been read yet|not current/u,
+      'a write against an unreadable Remote configuration is refused, never a local success',
+    )
+
+    // 3. Archive over the REAL Host route: the composition carrier fetch
+    // reaches `/api/session.export` for real (not a fake fetch), so the outcome
+    // is the Host's own answer. This fixture's JSONL log is not flushed to the
+    // persistence root the export route reads, so the Host can legitimately
+    // report a REAL read failure — and the contract this leg must prove is that
+    // such a failure is a THROWN error, never silently collapsed into `none`
+    // (absent Session) or `unavailable` (missing services).
+    let archiveOutcome: string
+    try {
+      const opened = await assembled.backend.sessionArchive.open(MAIN)
+      archiveOutcome = opened.kind
+      if (opened.kind === 'ready') {
+        assert.ok(opened.artifact.filename.length > 0, 'the archive carries an upstream filename')
+        const chunks: Uint8Array[] = []
+        const reader = opened.artifact.stream.getReader()
+        for (;;) {
+          const next = await reader.read()
+          if (next.done === true) break
+          chunks.push(next.value)
+        }
+        assert.ok(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0) > 0, 'the stream yields real bytes')
+      }
+    } catch (error) {
+      archiveOutcome = 'threw'
+      // A real Host read failure travels as an error with the Host's diagnostic.
+      assert.match(String((error as Error).message), /session export failed/u,
+        'a real archive failure is thrown, never classified as none/unavailable')
+    }
+    assert.notEqual(archiveOutcome, 'none', 'a real read failure is never collapsed to an absent Session')
+    assert.notEqual(archiveOutcome, 'unavailable', 'nor to missing archive services')
+
+    // 4. Interaction identity: the assembled backend serves the SAME instance
+    // on this official Client graph (no second wiring).
+    assert.equal(assembled.backend.interaction, semantics.interaction)
+
+    // 5. Dispose the adapters BEFORE the Client/Context, then the runtime.
+    assembled.dispose()
+    assembled.dispose()
+    semantics.dispose()
+  } finally {
+    reference.release()
+    assembled.dispose()
+    semantics.dispose()
     await runtime.dispose()
   }
 })

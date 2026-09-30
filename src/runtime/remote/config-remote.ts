@@ -352,7 +352,7 @@ class RemoteConfigMirror {
    *  before construction finishes. */
   private constructed = false
 
-  constructor(source: RemoteConfigRuntimeSource) {
+  constructor(source: RemoteConfigRuntimeSource, on: RemoteConfigEventsSource['$on']) {
     this.settings = source.remote.settings
     this.llm = source.remote.llm
     this.permissionPresets = source.remote.permissionPresets
@@ -362,7 +362,6 @@ class RemoteConfigMirror {
     // first describe(), so an invalidation that lands between construction
     // and the first describe is observed by the fence instead of being
     // silently missed.
-    const on = source.remote.$on
     this.subscriptions.push(on('settings/document-updated', () => { this.invalidate() }))
     this.subscriptions.push(on('llm/adapters-updated', () => { this.invalidate() }))
     this.subscriptions.push(on('permission-presets/catalog-changed', () => { this.invalidate() }))
@@ -1330,11 +1329,18 @@ export class RemoteConfigPort implements ConfigPort {
   constructor(source: RemoteConfigRuntimeSource) {
     // Bind the event seat to its service BEFORE anything subscribes.
     const on = source.remote.$on.bind(source.remote) as unknown as RemoteConfigEventsSource['$on']
+    // NEVER rebuild `remote` with a spread: the official Client remote exposes
+    // its namespaces through prototype accessors, so an own-property copy keeps
+    // only its bookkeeping fields (`connection`, `ctx`, `events`, ...) and every
+    // namespace (`settings`, `credentials`, `llm`, `permissionPresets`, ...)
+    // silently becomes `undefined` — which only a real-wire test can catch.
+    // The original object is passed through and the bound seat travels beside
+    // it.
     const bound: RemoteConfigRuntimeSource = {
-      remote: { ...source.remote, $on: on },
+      remote: source.remote,
       connection: source.connection,
     }
-    this.mirror = new RemoteConfigMirror(bound)
+    this.mirror = new RemoteConfigMirror(bound, on)
     this.tuiSettingsWrapper = new RemoteTuiSettingsConfig(this.mirror)
     this.footerCommandTrust = new RemoteFooterCommandTrust(this.mirror)
     this.footerCustomItems = new RemoteFooterCustomItems(this.mirror)
