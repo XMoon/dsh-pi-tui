@@ -248,6 +248,10 @@ test('REAL CHAIN: selectApplicationRuntime -> backend-loader -> the real Remote 
       promptSerializer: testPromptSerializer,
     },
   })
+  // The transport disposal is deferred through the lifecycle so an assertion
+  // failure after the composition still unwinds the Client/Host graph (the
+  // host fixture's own deferral only covers the ordinary Host Context).
+  life.defer(() => selected.disposeTransport())
   try {
     assert.equal(direct.constructionCount(), 0, 'the real Remote selection constructed no Direct graph')
     assert.equal(prerequisites, 1, 'the composition waited on the Host prerequisite barrier')

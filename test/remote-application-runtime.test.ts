@@ -50,144 +50,22 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
-import { Context, type Fiber, RegistryService } from '@deepseek-ai/cordis'
-import Loader from '@deepseek-ai/cordis-plugin-loader'
-import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
-import CommandRuntime from '@deepseek-ai/dsh-commands'
-import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
-import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
-import JobController from '@deepseek-ai/dsh-api-job-controller'
-import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import FileUploads from '@deepseek-ai/dsh-client-file-upload'
-import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
-import Storage from '@deepseek-ai/dsh-storage'
-import * as StorageJson from '@deepseek-ai/dsh-storage-json'
-import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
-import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
-import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
-import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { loadRemoteApplicationRuntime } from '../src/runtime/backend-loader.ts'
-import type { RemotePromptSerializer } from '../src/runtime/remote/session-writer-remote.ts'
-import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+import {
+  createRemoteApplicationHostFixture,
+  testLifecycle,
+  testPromptSerializer,
+  waitFor,
+} from './support/remote-application-fixture.ts'
 
 const PRESET = 'm3-4-pr1-preset'
 const SEED_SESSION_ID = 'm3-4-pr1-seed'
 
-/** In-process stub LLM route (the proven M2 fixture shape). */
-class StubLlmAdapter extends LlmAdapter {
-  override resolveModel(_provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
-    return Promise.resolve({ provider: 'smoke', id: model, name: model })
-  }
-
-  override listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string }>> {
-    return Promise.resolve([{ provider: 'smoke', id: 'smoke', name: 'smoke' }])
-  }
-
-  override async *stream(_options: unknown): AsyncGenerator<never> {}
-}
-
-/** The unsupported prompt serializer stand-in: PR1's only substitution. */
-const testPromptSerializer: RemotePromptSerializer = {
-  preflight: () => ({ kind: 'unsupported', reason: 'm3-4 pr1 composition test: no production serializer yet' }),
-  serialize: async () => ({ kind: 'unsupported', reason: 'm3-4 pr1 composition test: no production serializer yet' }),
-}
-
-/** Bounded test-local wait. */
-async function waitFor(label: string, predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
-  const started = Date.now()
-  while (!predicate()) {
-    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${label}`)
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
-}
-
-/** The ordinary Host fixture (the same rc.2 base shape as the M3-1 L5 suite). */
-async function createHostFixture(life: TestLifecycle): Promise<{
-  ctx: Context
-  workRoot: string
-  anchorDir: string
-  dispose(): Promise<void>
-}> {
-  const workRoot = life.tempDir('dsh-m3-4-pr1-')
-  const anchorDir = join(workRoot, 'anchor')
-  mkdirSync(anchorDir, { recursive: true })
-  const ctx = new Context()
-  let persistenceFiber: Fiber | undefined
-  try {
-    await ctx.plugin(TypertRegistry)
-    await mountAgentLoopTestDependencies(ctx)
-    persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
-    await mountAgentLoopTestHarness(ctx)
-    ctx.llm.registerAdapter(['smoke'], new StubLlmAdapter())
-    await ctx.plugin(CommandRuntime)
-    ctx.provide('agentDefaultModel', {
-      currentSelection: () => ({ provider: 'smoke', model: 'smoke' }),
-      saveSelection: async () => {},
-    })
-    ctx.provide('attachments', {
-      imageLimits: {
-        maxImageBytes: 5 * 1024 * 1024,
-        maxImagesPerMessage: 20,
-        maxMessageImageBytes: 100 * 1024 * 1024,
-        maxImagePixels: 40_000_000,
-        maxImageDimension: 2000,
-        mediaTypes: ['image/png'],
-      },
-      admitPromptContent: async (content: unknown) => content,
-    } as never)
-    ctx.provide('webServer', { registerUpgrade: () => () => {} })
-    await ctx.plugin(UserQuestionService)
-    await ctx.plugin(Loader)
-    await ctx.plugin(AgentPresetRegistry, { default: PRESET })
-    await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3-4 PR1 preset', plugins: [] })
-    await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
-      new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
-    })
-    await ctx.plugin(LocalFileSystem)
-    await ctx.plugin(Storage)
-    await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
-    await ctx.plugin(StorageDomain, { backend: 'json' })
-    await ctx.plugin(WorkspaceRegistry)
-    await ctx.plugin(pluginCtx => {
-      Reflect.construct(CredentialProvider, [pluginCtx])
-    })
-    await ctx.plugin(LocalJobRegistry, {})
-    await ctx.plugin(toolJobs)
-    await ctx.plugin(JobController, {})
-    await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
-      new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
-    })
-  } catch (error) {
-    try {
-      await persistenceFiber?.dispose()
-    } catch {
-      // The context disposal below still runs.
-    }
-    await ctx.fiber.dispose().catch(() => {})
-    throw error
-  }
-  let disposed = false
-  const dispose = async (): Promise<void> => {
-    if (disposed) return
-    disposed = true
-    try {
-      await persistenceFiber?.dispose()
-    } catch (error) {
-      await ctx.fiber.dispose().catch(() => {})
-      throw error
-    }
-    await ctx.fiber.dispose()
-  }
-  life.defer(dispose)
-  return { ctx, workRoot, anchorDir, dispose }
+/** The ordinary Host fixture (shared with the selection suite). */
+function createHostFixture(life: import('./support/temp-lifecycle.ts').TestLifecycle) {
+  return createRemoteApplicationHostFixture(life, PRESET)
 }
 
 /** Load the Remote application runtime through the sanctioned lazy boundary. */
@@ -329,34 +207,34 @@ test('C2. disposeTransport preserves errors from every step and never truncates 
   })
   t.after(() => host.dispose())
 
-  // Induce a REAL adapter-side disposal failure. The backend runtime's
-  // disposal ledger runs its parts in REVERSE construction order (config
-  // mirror first, then the semantics bundle — both adapters, still strictly
-  // before the Client/Host wire). An error thrown from EITHER step must
-  // surface (never be swallowed), never truncate the other step, and the
-  // wire must still unwind. The probe below throws from the semantics step:
-  // the config step (which the ledger runs FIRST) has then already executed.
+  // The backend runtime's disposal ledger runs its parts in REVERSE
+  // construction order: config mirror FIRST, then the semantics bundle (both
+  // adapters, still strictly before the Client/Host wire). To prove the loop
+  // CONTINUES past a throwing step (not merely that an earlier step ran), the
+  // failure is injected into the FIRST step (config) and the SECOND step
+  // (semantics) is asserted to have still executed afterwards.
   const semantics = runtime.backendRuntime.semantics as unknown as { dispose(): void }
   const configMirror = runtime.selected.backend.config as unknown as { dispose(): void }
   const induced = new Error('induced adapter disposal failure')
-  let configDisposed = false
+  let semanticsDisposed = false
   const originalSemanticsDispose = semantics.dispose.bind(semantics)
   const originalConfigDispose = configMirror.dispose.bind(configMirror)
-  semantics.dispose = () => {
-    originalSemanticsDispose()
+  configMirror.dispose = () => {
+    originalConfigDispose()
     throw induced
   }
-  configMirror.dispose = () => {
-    configDisposed = true
-    originalConfigDispose()
+  semantics.dispose = () => {
+    semanticsDisposed = true
+    originalSemanticsDispose()
   }
   await assert.rejects(() => runtime.selected.disposeTransport(), (error: unknown) => {
     assert.equal(error, induced, 'the adapter disposal failure surfaces as the primary error')
     return true
   })
-  // The backend-internal cleanup did NOT truncate: the config mirror's
-  // subscriptions were released despite the semantics failure.
-  assert.ok(configDisposed, 'the config mirror disposal must still run after a throwing semantics dispose')
+  // The ledger did NOT truncate at the throwing config step: the semantics
+  // disposal (which the reverse order runs AFTER config) still executed.
+  assert.ok(semanticsDisposed,
+    'the semantics disposal must still run after a throwing config dispose — the ledger continues past a failure')
   // The wire still unwound despite the adapter failure (error-isolated steps).
   assert.equal(host.ctx.reflect.get('connection'), undefined, 'the wire disposal still ran after the adapter failure')
   // Idempotent even on the failure path.
