@@ -81,7 +81,16 @@ interface HostFixture {
   dispose(): Promise<void>
 }
 
-async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
+async function createHostFixture(
+  life: TestLifecycle,
+  options: {
+    /** Mount the production config plane: a real profile directory plus the
+     *  official `ConfigEditor` (service `configEditor`) and `SettingsForms`
+     *  (service `settings`). OPT-IN so the fail-closed "no settings service"
+     *  deployment contract stays testable. */
+    readonly configPlane?: boolean
+  } = {},
+): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3a-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
@@ -146,21 +155,23 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     // loader + profileContext) and the official `SettingsForms` (service
     // `settings`, injecting configEditor + profileContext). The M3 Remote
     // composition must NOT mount these; they belong to the profile lifecycle.
-    // A minimal but REAL dsh profile directory: the official settings service
-    // reads the profile manifest + its patch file, so the plane needs both.
-    writeFileSync(join(workRoot, 'package.json'), JSON.stringify({
-      name: 'dsh-m3a-profile',
-      private: true,
-      dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
-    }, null, 2))
-    writeFileSync(join(workRoot, 'cordis.patch.yml'), '[]\n')
-    ctx.provide('profileContext', {
-      dir: workRoot,
-      patchPath: join(workRoot, 'cordis.patch.yml'),
-      installAnchor: workRoot,
-    } as never)
-    await ctx.plugin(ConfigEditor)
-    await ctx.plugin(SettingsForms)
+    if (options.configPlane === true) {
+      // A minimal but REAL dsh profile directory: the official settings service
+      // reads the profile manifest + its patch file, so the plane needs both.
+      writeFileSync(join(workRoot, 'package.json'), JSON.stringify({
+        name: 'dsh-m3a-profile',
+        private: true,
+        dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
+      }, null, 2))
+      writeFileSync(join(workRoot, 'cordis.patch.yml'), '[]\n')
+      ctx.provide('profileContext', {
+        dir: workRoot,
+        patchPath: join(workRoot, 'cordis.patch.yml'),
+        installAnchor: workRoot,
+      } as never)
+      await ctx.plugin(ConfigEditor)
+      await ctx.plugin(SettingsForms)
+    }
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
     await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3-3A smoke preset', plugins: [] })
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
@@ -699,6 +710,41 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
     reference.release()
     assembled.dispose()
     semantics.dispose()
+    await runtime.dispose()
+  }
+})
+
+test('P15: without a settings service the Remote config fails closed', async (t) => {
+  // The complementary contract, deliberately kept testable now that the config
+  // plane is opt-in: on a deployment whose profile composition carries no
+  // settings service the Remote configuration must never fabricate values and
+  // must never report a local success.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+  const { runtime } = await compose(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  try {
+    const config = assembled.backend.config
+    assert.equal(config.configReadiness(), 'unavailable')
+    const failure = (config as unknown as { lastRefreshFailure?: () => Error }).lastRefreshFailure?.()
+    assert.match(
+      String(failure?.message),
+      /settings service is absent/u,
+      'the Host diagnostic reaches the consumer instead of a fabricated value',
+    )
+    assert.equal(config.tuiSettings, undefined, 'no settings view is fabricated')
+    await assert.rejects(
+      () => config.permissions.setDefaultPreset('any-preset'),
+      /settings\.describe failed|has not been read yet|not current/u,
+      'a write against an unreadable Remote configuration is refused, never a local success',
+    )
+  } finally {
+    assembled.dispose()
     await runtime.dispose()
   }
 })
