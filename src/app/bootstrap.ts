@@ -147,16 +147,19 @@ export async function selectApplicationRuntime(
   selection: ApplicationRuntimeSelection,
 ): Promise<SelectedApplicationRuntime> {
   if (selection.kind === 'remote') {
-    if (selection.loadRemote === undefined) {
+    if (selection.createRemote === undefined) {
       throw new Error('tui-runner: the Remote application runtime requires the lazy backend-loader boundary')
     }
-    return selection.loadRemote()
+    // The Direct factory is deliberately NOT invoked on this branch: a Remote
+    // selection must not construct (or half-construct) a Direct graph.
+    return selection.createRemote()
   }
+  const direct = selection.createDirect()
   return {
     kind: 'direct',
-    backend: selection.direct.backend,
-    owners: selection.direct.owners,
-    retirement: selection.direct.retirement,
+    backend: direct.backend,
+    owners: direct.owners,
+    retirement: direct.retirement,
     disposeTransport: async (): Promise<void> => {},
   }
 }
@@ -453,11 +456,14 @@ export function applyRunner(ctx: Context, config: Config): void {
     // CLI option, config field, env var, cordis.patch row or public root
     // export that selects Remote — only this seam may construct the Remote
     // application runtime (through `runtime/backend-loader.ts`), and only
-    // internal/test M3-4 paths do.
+    // internal/test M3-4 paths do. The Direct runtime is constructed THROUGH
+    // the seam's factory, so a Remote selection cannot leave a Direct graph
+    // half-composed behind it (plan §10.2: no Direct factory invoked on the
+    // Remote path).
     const selectedRuntime = await selectApplicationRuntime({
       kind: 'direct',
-      direct: directRuntime,
-      loadRemote: undefined,
+      createDirect: () => directRuntime,
+      createRemote: undefined,
     })
     /**
      * The selected runtime's transport disposer, hoisted so every teardown
@@ -1408,14 +1414,22 @@ export function applyRunner(ctx: Context, config: Config): void {
               // No lower sink.
             }
           }
-          // M3-4 PR1 teardown order: the session retirement completes FIRST,
-          // then the selected runtime's transport disposer runs (a no-op on
-          // Direct today). The retirement promise is returned either way; the
-          // transport disposal is a detached step with rejection capture (a
-          // failure is logged, never an unhandled rejection).
-          return sessionRuntime.retireOwnedSession().finally(() => {
-            runDetached('selected transport disposal', () => disposeSelectedTransport(), { diag })
-          })
+          // M3-4 PR1 teardown order: the session retirement SETTLES first,
+          // then the selected runtime's transport disposer runs and is
+          // AWAITED (a no-op on Direct today) — the fiber unload observes the
+          // full teardown, so a Remote transport graph can never outlive the
+          // unloading fiber or race it. The retirement's settlement is the
+          // returned outcome; a disposal failure is recorded, never swapped
+          // in front of a retirement failure.
+          return sessionRuntime.retireOwnedSession()
+            .then(
+              report => disposeSelectedTransport()
+                .catch(error => { diag.warn('selected transport disposal failed', { error: safeErrorMessage(error) }) })
+                .then(() => report),
+              error => disposeSelectedTransport()
+                .catch(disposeError => { diag.warn('selected transport disposal failed', { error: safeErrorMessage(disposeError) }) })
+                .then(() => { throw error }),
+            )
         }
       })
     }
@@ -2174,13 +2188,14 @@ export function applyRunner(ctx: Context, config: Config): void {
     // teardown settles in milliseconds. diag is closed by the
     // retirement's own finalizer (or by the no-owner branch below).
     try {
+      let retirementSettled = false
       if (currentOwnerPresentRef?.() === true) {
         const retirement = retireOwnedSessionRef?.()
         if (retirement !== undefined) {
           let timer: NodeJS.Timeout | undefined
           try {
             await Promise.race([
-              retirement,
+              retirement.finally(() => { retirementSettled = true }),
               new Promise<void>(resolve => { timer = setTimeout(resolve, 2000) }),
             ])
           } finally {
@@ -2191,28 +2206,36 @@ export function applyRunner(ctx: Context, config: Config): void {
           // exist (see the hoisted declaration), so an owner without a
           // coordinator is unreachable. Close diag and exit.
           diag.dispose()
+          retirementSettled = true
         }
       } else {
         diag.dispose()
+        retirementSettled = true
+      }
+      // M3-4 PR1 ordering guard: the selected transport disposes ONLY after
+      // the session retirement SETTLED. A timed-out fatal retirement leaves
+      // the transport undisposed (the process-exit watchdog owns the rest)
+      // rather than racing Client/Host disposal against the still-running
+      // retirement — plan §4: retirement -> transport disposal, never the
+      // reverse. Direct is a no-op either way.
+      if (retirementSettled) {
+        try {
+          await disposeSelectedTransportRef?.()
+        } catch {
+          // The last disposal attempt; never block the fatal exit.
+        }
       }
     } catch {
       // TDZ (startup failed before the live-owner declarations ran — no
       // owner existed then either) or a synchronous retirement failure:
-      // never block the fatal exit.
+      // never block the fatal exit. The transport disposal is skipped for
+      // the same ordering reason — an unknown retirement state must not be
+      // raced by transport disposal.
       try {
         diag.dispose()
       } catch {
         // The dispose must not block the process exit.
       }
-    }
-    // M3-4 PR1: dispose the selected runtime's transport after the (bounded)
-    // retirement window on the fatal path too (Direct: no-op). Contained like
-    // every step of this terminal root — a transport failure must never block
-    // the fatal exit.
-    try {
-      await disposeSelectedTransportRef?.()
-    } catch {
-      // The last disposal attempt; never block the exit.
     }
     try {
       exit(1)

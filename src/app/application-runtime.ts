@@ -44,18 +44,19 @@ export interface SelectedApplicationRuntime {
   disposeTransport(): Promise<void>
 }
 
-/** The internal application runtime-selection seam input (M3-4 PR1): the
- *  Direct application runtime plus, when the (internal/test-only) M3-4 path
- *  selects Remote, the lazily loaded Remote aggregate constructor reached
- *  through `runtime/backend-loader.ts`. */
+/** The internal application runtime-selection seam input (M3-4 PR1): which
+ *  branch to select and HOW to construct it. Both branches take FACTORIES,
+ *  never pre-built runtimes: a Remote selection must not have a Direct
+ *  runtime already constructed (plan §10.2 "no Direct factory invoked"), and
+ *  a Direct selection must not even load the Remote module. */
 export interface ApplicationRuntimeSelection {
   readonly kind: BackendKind
-  /** The constructed Direct application runtime (the Direct branch's source). */
-  readonly direct: {
+  /** Construct the Direct application runtime (the Direct branch's source). */
+  readonly createDirect: () => {
     readonly backend: Backend
     readonly owners: SessionOwnerAccess
     readonly retirement: SessionOwnerRetirement
   }
   /** Lazily construct the Remote application runtime (internal/test M3-4). */
-  readonly loadRemote: (() => Promise<SelectedApplicationRuntime>) | undefined
+  readonly createRemote: (() => Promise<SelectedApplicationRuntime>) | undefined
 }

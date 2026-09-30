@@ -272,25 +272,39 @@ test('C. disposeTransport disposes adapters before the Client and the Client bef
     promptSerializer: testPromptSerializer,
   })
 
-  // The disposal ORDER proof uses observable lifetime facts, not internal
-  // hooks: (1) while the backend adapters live, the ConfigPort mirror answers
-  // readiness; (2) the Client Context disposal is observable through the
-  // official generation store going quiet; (3) the M3 Host additive rows are
-  // removed LAST (they belong to the Host runtime disposal). The relative
-  // order adapters -> Client is proven by generation-subscription poisoning:
-  // an adapter-side dispose error would surface through disposeTransport
-  // (error preservation), and the Host rows below can only be gone after the
-  // whole wire unwound.
-  const config = runtime.selected.backend.config as unknown as { readiness(): string }
-  assert.ok(config.readiness() === 'ready' || config.readiness() === 'unavailable',
-    'the Remote ConfigPort mirror is live before disposal')
+  // The disposal-ORDER proof observes each step's ACTUAL lifetime event:
+  // - adapter disposal: a probe on the semantic bundle's own dispose step
+  //   (the backend adapter caches/subscriptions drop);
+  // - Client disposal: an effect disposer registered ON the Client Context
+  //   (Cordis runs it during `wire.client.dispose()`), which SAMPLES the M3
+  //   Host row presence at that instant;
+  // - Host disposal: the M3 additive Host rows' removal (the K-suite's
+  //   observable), sampled inside the Client disposer (must STILL be present
+  //   — Client disposes before the Host fibers) and after the whole
+  //   transport disposal (must be gone — the Host unwound last).
+  const order: string[] = []
+  let hostRowAtClientDispose: boolean | undefined
+  const semantics = runtime.backendRuntime.semantics as unknown as { dispose(): void }
+  const originalSemanticsDispose = semantics.dispose.bind(semantics)
+  semantics.dispose = () => { order.push('adapters'); originalSemanticsDispose() }
+  runtime.wire.client.context.effect(() => () => {
+    order.push('client')
+    hostRowAtClientDispose = host.ctx.reflect.get('connection') !== undefined
+  })
 
   await runtime.selected.disposeTransport()
   await runtime.selected.disposeTransport() // idempotent: a second call is a contained no-op
 
+  // The MEASURED order: adapters -> Client -> Host additive fibers.
+  assert.deepEqual(order, ['adapters', 'client'],
+    'the adapter disposal must fire before the Client Context disposal, exactly once each (idempotence)')
+  assert.equal(hostRowAtClientDispose, true,
+    'at Client disposal the M3 Host rows must STILL be present — the Client disposes before the Host additive fibers')
+  assert.equal(host.ctx.reflect.get('connection'), undefined,
+    'the M3 Host connection row is removed after the whole transport disposal (Host unwound last)')
+
   // The M3 additive Host rows are removed (Client + Host fibers unwound in
   // order) and the ordinary Host survives.
-  assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 Host connection row is removed (Host disposed last)')
   assert.equal(host.ctx.reflect.get('fileUploads'), undefined, 'the M3 fileUploads row is removed')
   assert.equal(host.ctx.reflect.get('sessionController'), undefined, 'the M3 session controller row is removed')
   assert.ok(host.ctx.sessions.list().some(session => String(session.id) === SEED_SESSION_ID),
@@ -328,12 +342,13 @@ test('C2. disposeTransport preserves errors from every step (aggregation, non-tr
   await assert.doesNotReject(() => runtime.selected.disposeTransport())
 })
 
-test('D. a backend construction failure unwinds the wire: no leaked Host/Client fibers', async (t) => {
+test('D1. a Host-side wire construction failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   // A foreign fileUploads double makes the REAL Host row fail loudly inside
-  // the wire construction — the aggregate must surface the error with no
-  // surviving M3 fibers (FACT 12 fail-closed).
+  // the wire construction (createExperimentalRemoteRuntime's Host stage) —
+  // the aggregate must surface the error with no surviving M3 fibers (plan
+  // §12 fail-closed; the Client never existed on this path).
   host.ctx.provide('fileUploads', { fake: true })
   const registryBefore = [...host.ctx.registry.keys()]
   await assert.rejects(
@@ -348,6 +363,41 @@ test('D. a backend construction failure unwinds the wire: no leaked Host/Client 
   assert.equal(host.ctx.reflect.get('connection'), undefined, 'no M3 Host row may survive the failure')
   assert.deepEqual([...host.ctx.registry.keys()], registryBefore,
     'the failed composition must leave no plugin runtime behind')
+  assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
+  await host.dispose()
+})
+
+test('D2. a post-wire application composition failure (Client exists) unwinds the wire and surfaces the original error', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
+  const induced = new Error('induced post-wire composition failure')
+  let clientRowsMountedAtInjection = false
+  // The injection point is the aggregate's own application-composition input:
+  // a throwing getter for promptSerializer, evaluated INSIDE the aggregate's
+  // post-wire stage (createRemoteBackendRuntime's options read) — after the
+  // Client exists, before any backend adapter state is retained.
+  const options = {
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    get promptSerializer(): never {
+      clientRowsMountedAtInjection = host.ctx.reflect.get('connection') !== undefined
+      throw induced
+    },
+  }
+  await assert.rejects(
+    (await loadApplicationRuntimeModule()).createRemoteApplicationRuntime(options as never),
+    (error: unknown) => {
+      assert.equal(error, induced, 'the original composition error surfaces (never masked by unwind failures)')
+      return true
+    },
+  )
+  assert.ok(clientRowsMountedAtInjection, 'the failure was induced while the M3 Host rows (and thus the Client) existed')
+  assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 Host rows unwound with the wire')
+  assert.equal(host.ctx.reflect.get('fileUploads'), undefined, 'the M3 fileUploads row unwound with the wire')
+  assert.equal(host.ctx.reflect.get('sessionController'), undefined, 'the M3 session controller unwound with the wire')
+  assert.ok(host.ctx.sessions.list().some(session => String(session.id) === SEED_SESSION_ID),
+    'the ordinary Host survives the failed composition')
   assert.equal('window' in globalThis, false, 'no loader shim may survive the failure')
   await host.dispose()
 })

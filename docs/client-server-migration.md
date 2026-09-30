@@ -2981,19 +2981,35 @@ Closure evidence for PR1:
 
 - Composition/wire proof (below the real runner, NOT L6):
   `test/remote-application-runtime.test.ts` — ONE Host/Client/Backend/owner
-  registry (identity assertions), a retained handle -> exact owner ->
-  retirement releases the exact reference, `disposeTransport` ordering +
-  idempotence + ordinary-Host survival, and a backend construction failure
-  unwinding the wire with zero leaked fibers/registry rows.
+  registry (identity assertions); a retained handle -> exact owner ->
+  retirement releases the exact reference; MEASURED `disposeTransport`
+  ordering (the adapter dispose fires before the Client Context disposal,
+  which samples the M3 Host rows as still present; the Host rows are removed
+  only after the whole disposal) + idempotence + ordinary-Host survival;
+  error-preserving disposal (a real adapter-side dispose failure surfaces
+  while the wire still unwinds); a Host-side wire construction failure
+  (before any Client) unwinding with zero leaked fibers/registry rows; and a
+  post-wire application composition failure (induced after the Client
+  exists) unwinding the Client + Host additive fibers with the original
+  error surfacing.
 - Selection proof: `test/application-runtime-selection.test.ts` — Direct
   selection never loads the Remote module and carries the exact Direct
-  instances; Remote selection invokes the loader exactly once and returns the
-  ONE aggregate; missing lazy boundary fails closed; the production bootstrap
-  calls the seam with the Direct branch only.
+  instances; Remote selection invokes the loader exactly once, invokes NO
+  Direct factory, and returns the ONE aggregate; missing lazy boundary fails
+  closed; the production bootstrap calls the seam with the Direct branch
+  only.
 - Boundary proof: `test/pre-m3-architecture-gate.test.mjs` — the M3-4
   `bootstrap -> backend-loader -> dynamic app/remote/application-runtime`
   shape is the sanctioned one; any other dynamic importer and any static
   Remote edge (including from startup) still fail.
+- Coverage note (honest residual): the unwind of a backend that was fully
+  CONSTRUCTED before a later construction failure (the
+  constructed-backend-then-failure branch in the aggregate's unwind) has no
+  natural injection point today — `createRemoteBackendRuntime` has no
+  test-controllable throwing input after its adapters are retained. The
+  branch is implemented and exercised only via the post-wire failure path
+  (D2); its dedicated behavioral proof lands with the first M3-4 PR that
+  adds a real post-backend construction seam.
 - Regression support: `test/remote-client-runtime.test.ts`,
   `test/remote-backend.test.ts`, `test/remote-session-owners.test.ts`,
   `test/session-runtime-remote-owner-handoff.test.ts`,
