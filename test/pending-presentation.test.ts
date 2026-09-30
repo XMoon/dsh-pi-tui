@@ -152,6 +152,27 @@ test('a parked context occurrence (subject no longer running) reads waiting for 
   assert.ok(!view.includes('waiting for next step…'), `the running label must not render:\n${view}`)
 })
 
+test('the SAME context occurrence flips its waiting label when the subject parks (running -> idle)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // ONE occurrence identity across both presentations: the flip must repaint
+  // the label through the setter's rebuild, never keep the constructed-time
+  // status of the first component. This locks the lifecycle against a future
+  // content-only refresh optimization of the pending tail.
+  const row = { id: 'ctx-1', text: 'flip probe context' }
+  app.setPendingInputPresentation({ queued: [], tail: [{ kind: 'context', row }], running: true })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('waiting for next step…'), `a running subject reads next step:\n${view}`)
+  assert.ok(!view.includes('waiting for next turn…'), `the parked label must not render yet:\n${view}`)
+
+  app.setPendingInputPresentation({ queued: [], tail: [{ kind: 'context', row }], running: false })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('waiting for next turn…'), `the SAME occurrence must flip to next turn:\n${view}`)
+  assert.ok(!view.includes('waiting for next step…'), `the OLD running label must disappear:\n${view}`)
+})
+
 test('the pending Context tail renders in every display preset (UI acceptance matrix)', async () => {
   for (const preset of ['focus', 'compact', 'full'] as const) {
     const { vt, app } = startApp(80, preset)

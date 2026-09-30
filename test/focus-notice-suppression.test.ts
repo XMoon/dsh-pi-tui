@@ -218,8 +218,68 @@ test('F7. the notice disposition never moves or swallows a user/steer row', () =
   assert.ok(rows.includes(noticeRow), 'the mid-turn notice is visible too')
 })
 
-// --- F8: turn-less split keeps the consecutive-run grouping ------------------
+// --- F7c: mid-turn Notice across the committed-answer fence -------------------
 
+test('F7c. a mid-turn notice before a committed answer keeps Thought -> Notice -> Answer -> Steer (fence preserved)', () => {
+  // The exact high-risk combination this PR touched: User -> Process ->
+  // mid-turn Notice -> Assistant A committed-before-steer -> Steer. The
+  // collapsed emit must keep the committed-answer fence: the answer and the
+  // steer stay in raw chronology AFTER the Thought and the post-Thought
+  // notice, never duplicated, swallowed, or reordered across the fence.
+  const folder = new TranscriptFolder()
+  const initial = { id: MessageId('u1'), role: 'user' as const, content: [{ type: 'text' as const, text: 'go' }], source: { kind: 'user' } }
+  const steerMsg = { id: MessageId('u2'), role: 'user' as const, content: [{ type: 'text' as const, text: 'human steer' }], source: { kind: 'user' } }
+  const noticeSource = { kind: 'tool-jobs', form: 'notice', summary: 'FENCE_NOTICE_SUMMARY', senderSessionId: 'job-1' }
+  const eventAtSeq = (type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent =>
+    ({ type, seq, time, data } as SessionEvent)
+  folder.apply([
+    eventAtSeq('turn/start', { turn: 1 }, 1000, 0),
+    eventAtSeq('user/message', initial, 1001, 1),
+    eventAtSeq('tool/call', { turn: 1, step: 0, callId: 'c1', name: 'read', arguments: '{}' }, 1002, 2),
+    // The mid-turn notice lands BEFORE the committed answer.
+    eventAtSeq('user/message', { id: MessageId('notice-1'), role: 'user', content: [{ type: 'text', text: 'notice payload' }], source: noticeSource }, 1003, 3),
+    eventAtSeq('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'text-delta', index: 0, text: 'committed answer A' } }, 1004, 4),
+    eventAtSeq('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [steerMsg] }, 1005, 5),
+    eventAtSeq('assistant/message', {
+      turn: 1, step: 0,
+      stream: [{ type: 'text-chunks', time0: 1004, index: 0, dt: [], texts: ['committed answer A'] }],
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'committed answer A' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1006, 6),
+    eventAtSeq('step/end', { turn: 1, step: 0 }, 1007, 7),
+    eventAtSeq('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1008, 8),
+    eventAtSeq('step/start', { turn: 1, step: 1 }, 1009, 9),
+    eventAtSeq('user/message', steerMsg, 1010, 10),
+    eventAtSeq('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1011, 11),
+  ])
+  const messages = folder.messages()
+  const noticeRow = messages.find(message => message.kind === 'system' && message.contextPresentation?.form === 'notice')
+  assert.ok(noticeRow !== undefined, 'fixture: the mid-turn notice folds')
+  const answerRow = messages.find(message => message.kind === 'assistant')
+  assert.ok(answerRow !== undefined, 'fixture: the committed answer folds')
+  const steerRow = messages.find(message => message.kind === 'user' && message.steer === true)
+  assert.ok(steerRow !== undefined, 'fixture: the post-fence steer folds')
+
+  // Collapsed: User -> Thought -> Notice -> committed Answer -> Steer, each
+  // exactly once. The notice stays post-Thought; the answer and the steer
+  // keep their post-fence chronology and never cross back over the Thought.
+  const order = collapsedBlockOrder(messages, folder.turnActivity(1) ?? liveActivity())
+  assert.deepEqual(
+    order,
+    ['user', '<Thought>', 'tool-jobs', 'assistant', 'user'],
+    'Thought -> Notice -> committed Answer -> Steer, fence preserved',
+  )
+  assert.equal(order.filter(entry => entry === 'tool-jobs').length, 1, 'the notice is never duplicated')
+  assert.equal(order.filter(entry => entry === 'assistant').length, 1, 'the answer is never duplicated')
+
+  // Expanded: the exact raw chronology returns.
+  const expandedRows = expanded(messages)
+  assert.ok(expandedRows.indexOf(answerRow) > expandedRows.indexOf(noticeRow),
+    'expanded keeps Notice before the committed answer (raw order)')
+  assert.ok(expandedRows.indexOf(steerRow) > expandedRows.indexOf(answerRow),
+    'expanded keeps the steer after the answer (raw order)')
+})
+
+// --- F8: turn-less split keeps the consecutive-run grouping ------------------
 test('F8. a turn split by a turn-less row keeps the consecutive-run grouping (a notice starting its own run is opening foundation)', () => {
   // A turn-less entry SPLITS turn 1 into two runs. The notice starts the second
   // run, so its own lead boundary is the run start and the projection renders
