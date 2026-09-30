@@ -21,6 +21,15 @@
 > placement/fail-closed behavior, Remote turn-end flush semantics and Host-local
 > legacy-settings migration readiness. These are frozen decisions, not TODOs.
 
+## Amendment register
+
+Architecture/semantic amendments to this frozen contract (not implementation
+progress):
+
+| Date | Baseline | Section | Old assumption | New authority | Reason |
+|---|---|---|---|---|---|
+| 2026-09-30 | `next @ 25295d7f3ac688cd95c94c6ac7c256f4060be218` | §2.1 `interaction` | Approval and Question both described as waterfall-only | Approval remains waterfall/fail-closed for unsupported policy operations; Question gains official `attachWait` + projection + `answer` authority | DSH `0.2.0-rc.2` publishes the full Question contract |
+
 ## 1. Baseline
 
 | Fact | Value | Evidence |
@@ -79,6 +88,69 @@ body read (`skills/list` is Session-addressed and list-only; no `skills/read`),
 Remote-event selection), and `refreshTitle` (no official Client verb;
 `session/rename` is a distinct explicit rename, not regeneration).
 
+### 1.2 Entry state vs live implementation status
+
+This document is the frozen architecture/semantic contract. It answers:
+
+```text
+what the semantic contract is
+which official authority owns it
+which composition owner is allowed to provide it
+which lifecycle/currentness rules are frozen
+which fallbacks are forbidden
+which unsupported classes must fail closed
+```
+
+It does NOT answer which PR is currently coding a capability, whether an adapter
+has landed, whether CI is green, or how far the current stage has progressed.
+Those facts belong in `docs/client-server-migration.md` only.
+
+The `Status` column of the §2.1 capability matrix is therefore **M3-0 entry
+state** — what was true when the contract/baseline was frozen — not live
+implementation status, and it must not be mutated merely because implementation
+progressed. A cell that names a later stage (for example `IMPLEMENTED (M3-3B)`)
+is a requalification annotation retained for traceability; the status it implies
+is owned by `docs/client-server-migration.md`. The §2.2/§2.3 sub-domain `Status`
+columns are the frozen classification of record for the catalog/config
+decomposition (last requalified at M3-3B); from this amendment onward they are no
+longer updated for progress either.
+
+Amend this frozen contract only when one of these changes:
+
+```text
+released DSH semantic authority
+public Client/Remote/projection contract
+composition ownership
+lifetime/currentness invariant
+locality classification
+failure taxonomy
+forbidden fallback
+M3 stage boundary itself
+```
+
+A Remote adapter implementation landing, or a new regression test being added,
+does not by itself require a contract amendment. Never preserve an obsolete
+statement merely because an accepted stage plan was written against it;
+conversely, do not reopen unrelated frozen decisions without evidence.
+
+### 1.3 M3-4 entry baseline
+
+M3-4 starts from the M3-3B closed baseline:
+
+```text
+next = 25295d7f3ac688cd95c94c6ac7c256f4060be218
+DSH exact target = 0.2.0-rc.2 @ 639ed015397290b3745d163aafe02ffee4aa3f84
+complete experimental Backend(kind='remote') exists
+Direct remains production/default
+```
+
+Before M3-4 implementation, if either the repository baseline or the published
+DSH contract has moved, run Contract Requalification first
+(`docs/client-server-migration.md` §Migration process and qualification
+governance). Do not begin M3-4 by editing this document for progress; edit it
+only if M3-4 discovers that a frozen architecture/semantic assumption is
+actually wrong.
+
 ## 2. Backend capability matrix
 
 ### 2.1 The 13 semantic `Backend` properties
@@ -89,7 +161,7 @@ Remote-event selection), and `refreshTitle` (no official Client verb;
 without its own capability-name entry, so the two inventories are deliberately not
 1:1.
 
-| Backend property | Port (consumer) | Direct impl | Existing Remote impl | Exact rc.2 public source | Status | M3 owner/stage | Acceptance proof |
+| Backend property | Port (consumer) | Direct impl | Existing Remote impl | Exact rc.2 public source | M3-0 entry state | M3 owner/stage | Acceptance proof |
 |---|---|---|---|---|---|---|---|
 | `subagent` | `SubagentPort` (viewer prompt, Task Center interrupt) | `runtime/direct/subagent-direct.ts` | `runtime/remote/subagent-remote.ts` | `ClientRemote['subagents'].prompt` / `.interruptByParent`; `dsh-subagent/remote` (`lib/typert.remote-client.d.ts:15-16`); child catalog is the `subagentCatalog` Session projection (`dsh-subagent/lib/types/projection-types.d.ts:64-67`) | READY | M3-3A | L3 `test/remote-subagent-port.test.ts` + published-contract gate `test/remote-official-contract.test.ts:105` |
 | `sessionReader` | `SessionReader` (picker list/projection/search, `/status` context row) | `runtime/direct/session-direct.ts` (+`session-search-direct.ts`, `session-projection-direct.ts`) | `runtime/remote/session-reader-remote.ts` (list/blank/projectionBatch/search) | `ISessions.list/refresh/search/binding` (`dsh-api-session-controller/lib/types/client/contract/sessions.d.ts:43-153`); `session/search`, `session/projections` Remotes | READY (M3-3A closed it) — `measureContext` reads the official `contextPressure` projection (`projectedTokens ?? pressureTokens`); the same projection face feeds `turnOutline` and the subject-neutral `sessionStatus` snapshot (`dsh-token-meter/lib/types/projection.d.ts:65-72`), **not** a new RPC | M3-3A | parity test Direct vs Remote `measureContext` on a live Session; the D1 "no Client equivalent" skip is retired here |
@@ -288,6 +360,58 @@ Forwarded Host events consumed by the TUI come from the mounted
 `commands/change`. `skills/change` is intentionally **not** in that allowlist in
 rc.2; §2.2 freezes the resulting M3 behavior rather than inventing a private
 forwarder.
+
+#### 2.4.4 Composition ownership inventory (frozen)
+
+For every Host/Client service that materially affects M3 composition, this
+contract freezes its locality, composition owner, consumer, reuse-vs-additive
+rule and duplicate-mount prohibition. Owner classes:
+
+```text
+BASE_HOST_PREREQUISITE   owned by ordinary DSH/base/profile composition;
+                         migration code may require/read/adapt/verify identity
+                         but MUST NOT mount a second copy
+M3_ADDITIVE_HOST         a Host contribution genuinely added by the M3
+                         composition contract; it may mount only the rows frozen
+                         in §2.4.1
+GENERATED_CLIENT_REMOTE  official Client-side generated Remote/service
+                         contribution; the TUI consumes it and never
+                         reconstructs its namespace object
+CLIENT_LOCAL             terminal/editor/clipboard/draft/overlay/keybinding/
+                         local-shell/UI extension state; no Host semantic
+                         coupling is invented for it
+```
+
+| Domain/service | Class | Composition owner | Consumer | Reuse vs additive mount | Duplicate-owner rule |
+|---|---|---|---|---|---|
+| `userQuestions` Host service | `BASE_HOST_PREREQUISITE` | `@deepseek-ai/dsh-base` (row `user-questions`) | `InteractionPort` (Direct + Remote) | reuse; `RemoteHostRuntime` asserts presence and verifies the stable Typert binding identity before/after | never mount a second `UserQuestionService`: it would replace the namespace owner and register the `userQuestions` projection unit twice |
+| `userQuestions` Client Remote | `GENERATED_CLIENT_REMOTE` | official client contribution (`@deepseek-ai/dsh-user-questions/remote`) | `QuestionInteractionPort` + the `userQuestions` Session projection | additive Client contribution; identity preserved | never rebuild/copy the generated namespace object |
+| `configEditor` | `BASE_HOST_PREREQUISITE` | profile/base composition when `profileContext` enables the config plane | `ConfigPort` settings mirror | reuse | `RemoteHostRuntime` must not mount it to satisfy Remote composition |
+| `settings` | `BASE_HOST_PREREQUISITE` | profile/base composition | Remote Config adapter over the generated `settings` Remote | reuse | no second settings authority or namespace |
+| `jobController` | `BASE_HOST_PREREQUISITE` | the existing TUI row | `JobObservationPort` | reuse | no second job observation authority |
+| M3 Host API/session helper rows | `M3_ADDITIVE_HOST` | `RemoteHostRuntime` (§2.4.1) | the M3 adapters | additive, §2.4.1 only | mount only the frozen additive closure |
+| TUI Task Center / Question presentation | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | n/a | presentation over semantic authority; never becomes Host authority |
+
+The exact package/row names may evolve; the ownership class and the
+duplicate-owner rule may not.
+
+#### 2.4.5 Wire-shape invariants (frozen)
+
+These are permanent M3 correctness constraints that apply to every lifetime and
+composition change governed by this contract:
+
+```text
+generated Remote namespace object identity is preserved
+prototype accessors are not copied via object spread
+receiver-sensitive event methods are passed method-bound
+one Client runtime owns one semantic assembly
+base-owned service namespace/projection ownership is never replaced by additive M3 composition
+```
+
+The normative statements and forbidden forms are recorded in
+`docs/client-server-migration.md` §Hard invariants; the detailed coupling and
+composition-owner inventory is in `docs/client-server-coupling.md`; qualification
+evidence is in `docs/client-server-migration.md`.
 
 ## 3. Non-Backend application seams
 
@@ -702,6 +826,25 @@ No fake `Agent` wrapper is introduced anywhere, including inside the command run
 No Host callback is moved into the Client: tool presentation and TUI command
 callbacks become Client-owned behavior, while Host tool/command semantics remain
 Host-owned.
+
+### 6.1 Surface reachability classification (frozen)
+
+The contract may state that a surface owns input or that a concurrent surface is
+forbidden. It must not require a test-only navigation path: a state may exist in
+a projection without being user-navigable. Use the migration document's
+classification vocabulary (§Migration process and qualification governance):
+
+```text
+SURFACE_REACHABLE
+PROJECTION_ONLY
+TRANSIENT
+FORBIDDEN_CONCURRENT_STATE
+```
+
+Reachability is stated only where it affects ownership/focus semantics. Example:
+a visible Question owns the response seat, so opening the Task Center is not an
+allowed competing input path; the projection may still define an `answering` row
+for that Question without making the concurrent state user-navigable.
 
 ## 7. Locality matrix
 

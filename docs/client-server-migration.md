@@ -293,6 +293,188 @@ implementation target. Redesign the adapter around the DSH Connection, official
 Session client object, and domain/generated remotes before starting M3. Do not
 add old/new DSH runtime capability branches to the 0.4 Direct backend.
 
+## Migration process and qualification governance
+
+Permanent process rules for the migration (added after M3-3B; normative for
+every stage closure from now on). They do not replace the phase plan above; they
+define what "DONE" may mean.
+
+### Mandatory stage closure protocol
+
+A migration stage may be marked DONE only when four axes are closed:
+
+```text
+1. CONTRACT
+   the exact released DSH authority is current
+2. IMPLEMENTATION
+   the semantic owner, adapter and composition are correct
+3. QUALIFICATION
+   the required L3/L5/L6 evidence is complete
+   the supported success path is proven
+   the required negative/fail-closed paths are proven
+4. SURFACE / REACHABILITY
+   user-visible state/action/recovery has an explicit disposition
+   reachability is classified
+```
+
+`CI green`, `adapter exists`, `RPC succeeds` or `unit tests pass` cannot
+substitute for any missing axis.
+
+### Qualification evidence levels
+
+The layer vocabulary is `## M3 test-layer contract (T0 handoff)`; these are the
+qualification meanings a stage closure cites:
+
+- **L3 — semantic/adapter contract.** Structural fakes are allowed. Proves
+  mapping, state machine, generation fences, error taxonomy and
+  serialization-independent semantics. Does NOT prove official generated Client
+  object shape or production composition.
+- **L5 — official-wire qualification.** Must use a real DSH Host composition and
+  the real generated Client/Remote object graph. Proves prototype/accessor object
+  shape, method receiver binding, real Remote namespace availability, production
+  prerequisite composition, transport path, supported success-path
+  interoperability and reverse disposal/lifetime where relevant. Every
+  wire-sensitive Remote capability needs at least one L5 proof before closure.
+- **L6 — application/surface qualification.** Uses the real Backend and the
+  actual application navigation/presentation path. Proves input/focus ownership,
+  surface navigation, user recovery, presentation parity, forbidden-fallback
+  unreachability and stale-generation behavior at the application boundary.
+
+### Positive and negative evidence are separate
+
+For a capability classified SUPPORTED in the production-equivalent topology,
+positive success-path qualification is mandatory:
+
+```text
+Config supported
+-> a real write must mutate Host authority and an authoritative reread must return it
+
+Archive supported
+-> real Host persistence must produce a real export stream/ZIP
+
+Question continued answer supported
+-> real projection/claim/answer path must complete
+```
+
+Negative evidence remains valuable:
+
+```text
+service absent -> unavailable
+stale generation -> reject
+unsupported sub-capability -> fail closed
+Host 500 -> propagate
+```
+
+But a negative path never substitutes for a supported success path.
+
+### Production-equivalent fixture manifest
+
+Every L5 fixture MUST state at its declaration site or immediately above the
+test:
+
+```text
+PRODUCTION PREREQUISITES REPRODUCED
+  ...
+
+TEST STAND-INS / SUBSTITUTIONS
+  ...
+
+DELIBERATELY ABSENT
+  ...
+```
+
+A fixture may use stubs for unrelated domains, but it must not claim to prove a
+normal product topology while omitting a base prerequisite ordinary production
+composition owns. `profileContext` + `ConfigEditor` + `Settings` are the
+canonical example: they are production base/profile prerequisites, and
+`RemoteHostRuntime` must not mount them merely to make a test pass.
+
+### Surface reachability classification
+
+Every row in a semantic/UI impact matrix carries a reachability value:
+
+```text
+SURFACE_REACHABLE
+  -> L6 navigation/input proof when important
+
+PROJECTION_ONLY
+  -> semantic/projection proof is sufficient
+
+TRANSIENT
+FORBIDDEN_CONCURRENT_STATE
+  -> MUST NOT weaken modal/input guards merely to make the state testable
+```
+
+A visible Question with an `answering` row in a Task Center projection is a valid
+projection fact while Task Center stays intentionally non-navigable because the
+Question owns the response seat; a product-invalid concurrent surface must never
+be manufactured to make a state testable. The M3-3B impact matrix predates this
+vocabulary; M3-4 onward matrices carry the value per row.
+
+### Contract requalification on a DSH baseline change
+
+If the exact DSH target changes during an active stage:
+
+```text
+STOP assumption-driven coding
+-> diff released public contract
+-> classify changed semantics / composition / outward behavior
+-> amend frozen contract only where authority changed
+-> update qualification matrix
+-> rerun targeted L5/L6
+-> resume stage
+```
+
+Classify each delta as `INHERITED`, `CONTRACT_AMENDMENT`,
+`QUALIFICATION_ONLY`, `DEFERRED_WITH_OWNER` or `N/A`. Do not broadly reopen
+unaffected stages merely because the version changed.
+
+### Original-plan closure review (required gate)
+
+Before setting a stage to DONE:
+
+```text
+1. reopen the original accepted implementation plan
+2. check every Must / Must-not / Acceptance item
+3. compare final code, not only latest addendum
+4. verify supported success-path evidence
+5. verify required failure/reconnect evidence
+6. verify UI/reachability disposition
+7. reconcile this live migration document
+8. promote only intentional leftovers to the Debt Ledger
+9. run broad gates
+```
+
+This review is distinct from normal PR review.
+
+### Closure evidence template
+
+Each completed M3-x status section carries one compact block:
+
+```md
+### Closure evidence
+
+- Contract authority:
+- Composition owner:
+- L3:
+- L5:
+- L6:
+- Supported success path:
+- Fail-closed/error paths:
+- Reachability/UI disposition:
+- Forbidden fallback verified:
+- Original-plan closure review:
+- Deferred items promoted to Debt:
+```
+
+### Debt boundary
+
+Do not write stage-local qualification failures into the historical Debt Ledger.
+A current-stage test/fixture/review gap belongs in the current plan or PR; only a
+stage that intentionally exits with an unresolved obligation gets a later owner
+and a Debt Ledger entry. This avoids turning transient implementation work into
+permanent architecture debt.
+
 ## Hard invariants (enforced by AGENTS.md guardrails)
 
 - Direct stays the production default until an explicit milestone flips it.
@@ -306,6 +488,22 @@ add old/new DSH runtime capability branches to the 0.4 Direct backend.
 - `src/startup.ts` stays a zero-dependency compatibility island; experimental
   backend code loads only after startup selection (dynamic import).
 - Migration work is off by default; every migration PR leaves Direct green.
+- Generated Client Remote namespaces may be prototype accessors. Preserve the
+  original Remote object identity; NEVER use `{ ...remote }` or rebuild/copy the
+  namespace object.
+- Forwarded event methods read receiver-owned state. Pass method seats bound to
+  the source object; NEVER detach `$on` (or equivalent) without preserving
+  `this`.
+- ONE runtime graph owns ONE semantic assembly. A qualification test must not
+  create an extra semantic bundle beside the Backend assembly and then claim
+  "one wiring".
+- Base-owned Host services are reused, not remounted. Additive migration
+  composition may require/check them but must not silently replace their
+  namespace/projection ownership.
+
+These four are correctness contracts, not implementation style preferences; the
+per-invariant forbidden forms and the composition-ownership rules live in
+`docs/client-server-coupling.md`.
 
 ## Feature locality ledger (M0–M5 footer/status work)
 
@@ -1988,6 +2186,33 @@ in-process path (proven by the trapped-globals L5 case). The frozen wording
 in `docs/m3-entry-contract.md` §2.4.3/§4.2 has been corrected in place; no
 ownership, stage boundary, or seam policy changed.
 
+### Closure evidence
+
+- Contract authority: `docs/m3-entry-contract.md` §2.4 (Host/Client composition
+  closure), §4.1–§4.3 (lifetime, scoped loader, dynamic boundary); DSH
+  `0.1.7-rc.2` at stage time, requalified to `0.2.0-rc.2` in M3-3B.
+- Composition owner: `src/app/remote/host-runtime.ts` (`RemoteHostRuntime`) and
+  `src/app/remote/client-runtime.ts` (`RemoteClientRuntime`), reachable only
+  through `src/runtime/backend-loader.ts`.
+- L3: n/a — M3-1 introduced composition, not a Remote adapter contract.
+- L5: `test/remote-client-runtime.test.ts` (prerequisite barrier, loader
+  exactness/single-flight, real connect + ready list, `sessionStats` +
+  `turnOutline` projections, Job roster, reconnect, archive route, reverse
+  disposal).
+- L6: n/a — no product cutover; the Direct runner regression
+  (`test/runner-startup-lifecycle.test.ts`) stays the application proof.
+- Supported success path: real in-process connect and the dependency-closed
+  official Host composition.
+- Fail-closed/error paths: unknown/duplicate bundle registration rejected;
+  Host-partial and Client-failure classes fully unwound.
+- Reachability/UI disposition: `NO_USER_VISIBLE_CHANGE` — no production call
+  site and no backend selector.
+- Forbidden fallback verified: no `WebSocket`, `document`, `navigator`, global
+  `fetch` or browser `Worker` reachable on the in-process path.
+- Original-plan closure review: not recorded — M3-1 closed before this protocol
+  existed.
+- Deferred items promoted to Debt: none.
+
 ## M3-2 status (COMPLETE, zero product cutover)
 
 M3-2 landed the Remote **Session owner spine**: `app/session`'s ownership
@@ -2125,6 +2350,34 @@ the composition and presentation.
   `SessionOwnershipCore`; the production bootstrap still injects
   `directRuntime.owners`).
 
+### Closure evidence
+
+- Contract authority: `docs/m3-entry-contract.md` §5 (exact identity, handle
+  mapping, retirement semantics, transition ordering, lifecycle reference
+  table).
+- Composition owner: `src/app/remote/session-owners.ts`
+  (`createRemoteSessionOwnerServices`), consumed by the transport-neutral
+  `src/app/session/**` orchestration.
+- L3: covered inside the L6 owner suites; the stage added no Remote transport
+  adapter.
+- L5: same-binding identity and full same-id re-materialize identity are locked
+  by `test/remote-session-lifecycle.test.ts` and the lifecycle parity smoke.
+- L6: `test/remote-session-owners.test.ts` (R1–R12) and
+  `test/session-runtime-remote-owner-handoff.test.ts` (H1–H12) over the real
+  `bindSessionRuntime` and real Remote owner services.
+- Supported success path: ordinary switch/open/fork `retain → commit → release`
+  with exactly-once release and Remote fork publication→open adoption.
+- Fail-closed/error paths: a pre-publication failure releases NEW exactly once
+  and keeps OLD current; a post-publication seam failure is contained; a
+  released wrapper is refused; a stale-after-open adoption releases exactly
+  once.
+- Reachability/UI disposition: `NO_USER_VISIBLE_CHANGE` — zero product cutover,
+  no production call site.
+- Forbidden fallback verified: no Direct-owner resurrection and no extra
+  adoption open on the Direct path.
+- Original-plan closure review: not recorded — M3-2 closed before this protocol
+  existed.
+- Deferred items promoted to Debt: none.
 
 ## M3-3A status (COMPLETE, zero product cutover)
 
@@ -2302,6 +2555,32 @@ build a `ChildStatusReader`, `ViewerStatusPort` or any parent-fallback.
   literal-mention realignment, where the whole rewrite path was retired
   rather than mutation-guarded.)
 
+### Closure evidence
+
+- Contract authority: DSH `0.2.0-rc.1` (`next @ fa71168…`, package `0.5.0`) per
+  `docs/m3-entry-contract.md` §1.1; requalified to `0.2.0-rc.2` in M3-3B.
+- Composition owner: `src/app/remote/m3a-semantics.ts`
+  (`createRemoteM3ASemantics`) over ONE M3-1 `RemoteClientRuntime`.
+- L3: the adapter suites listed under Evidence (session reader, skill catalog,
+  host file, presentation read, model port, assembly).
+- L5: `test/remote-m3a-semantics-smoke.test.ts` (P1–P10) same-Host
+  qualification through the real in-process carrier.
+- L6: n/a — zero product cutover; the Projection / Presentation Availability
+  Map is the M3-4/M3-5 input, not a surface.
+- Supported success path: real `contextPressure` / `turnOutline` /
+  `sessionStatus` projection reads, the official `modelCatalog` directory,
+  `skills/list`, `fileReferences/list` and `PresentationReader.loadThrough`.
+- Fail-closed/error paths: sessionless standing skill reads, the skill body
+  read, `skills/change` hot invalidation, workspace-scope `@file` and
+  existence canonicalization stay unavailable rather than faked; an aborted
+  signal rejects on both adapters.
+- Reachability/UI disposition: `NO_USER_VISIBLE_CHANGE`; the availability map
+  records what M3-4/M3-5 may display.
+- Forbidden fallback verified: no `tokenMeter` second authority, no private
+  `llm/listModels` RPC, no local-filesystem canonicalization.
+- Original-plan closure review: not recorded — M3-3A closed before this
+  protocol existed.
+- Deferred items promoted to Debt: none.
 
 ## Known coverage follow-ups
 
@@ -2352,6 +2631,10 @@ confirmed break.
 - Every coupling relocation: update `docs/client-server-coupling.md` and
   the gate baseline in the same PR.
 - Every new blocker or removed blocker: update the table.
+- Every stage closure: close the four protocol axes, add/refresh the
+  `### Closure evidence` block, and run the original-plan closure review.
+- Every DSH baseline change during an active stage: run the contract
+  requalification flow before resuming implementation.
 
 ## M3-3B status (COMPLETE, zero product cutover)
 
@@ -2560,6 +2843,10 @@ still reaches the Remote graph only through the dynamic
 | generic Queue per-row actions | not implemented here | `DEFERRED_WITH_OWNER: Post-M3 Q1` | official inbox semantics |
 | clientTimeZone | not corrected here | `DEFERRED_WITH_OWNER: Post-M3 T1` | official Client request metadata |
 
+This matrix predates the reachability classification in §Migration process and
+qualification governance; M3-4 onward matrices carry an explicit `Reachability`
+value per row.
+
 ### Validation evidence
 
 `test:product` (6436 passing) + `test:fork` (1178), `typecheck:*`, the
@@ -2567,3 +2854,35 @@ client-boundary and naming/architecture/keybinding gates, `gen:dsh-presets` +
 parity, `compat:dsh:npm` (tarball × DSH 0.2.0-rc.2), the same-Host Remote
 parity smokes, and the source-mode verification against the exact rc.2
 release commit.
+
+### Closure evidence
+
+- Contract authority: DSH `0.2.0-rc.2` at
+  `639ed015397290b3745d163aafe02ffee4aa3f84`; `docs/m3-entry-contract.md` §2.1
+  (separate Approval/Question rows), §2.3 and §2.4.
+- Composition owner: `src/app/remote/runtime.ts#createRemoteBackendRuntime`
+  (`src/runtime/remote/backend-remote.ts`) over the M3-1 composition spine;
+  `RemoteHostRuntime` reuses the base `userQuestions` service.
+- L3: `test/remote-config-port.test.ts` plus the M3-3B interaction/archive
+  adapter suites.
+- L5: `test/remote-m3a-semantics-smoke.test.ts` same-Host qualification (rc.2
+  Question wire, a real settings write with authoritative re-read, the archive
+  ZIP bytes, reverse disposal).
+- L6: `src/app/surface/question-controller.ts` over the unchanged
+  `QuestionFlow`; M3-4 owns the main-application cutover.
+- Supported success path: a real Config write mutating Host authority, the real
+  `/api/session.export` ZIP, and a live Question running request → claim →
+  timeout → late answer.
+- Fail-closed/error paths: no-settings deployment reports unavailable and
+  refuses the write; approval policy returns `false`/`undefined`; credential
+  records reject; OAuth/device login states unavailability; archive 404 →
+  `none`, 500 → `unavailable`.
+- Reachability/UI disposition: recorded in the M3-3B semantic/UI impact matrix
+  above.
+- Forbidden fallback verified: no second `userQuestions` mount, no
+  `{ ...remote }` copy, method-bound `$on`, generated namespace identity kept.
+- Original-plan closure review: not recorded — M3-3B closed before this
+  protocol existed.
+- Deferred items promoted to Debt: none in this change; the matrix carries
+  `Post-M3 Q1` (generic Queue per-row actions) and `Post-M3 T1`
+  (`clientTimeZone`) as `DEFERRED_WITH_OWNER`.
