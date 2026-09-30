@@ -1701,7 +1701,10 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.equal(app.overlayGraphState().handles, 0, 'cold discovery owns no overlay')
   const idle = vt.getViewport().join('\n')
   assert.ok(!idle.includes('Type your answer…'), `no Question panel was mounted:\n${idle}`)
-  assert.ok(idle.includes('↓'), `a parked Question alone arms the ↓ trigger:\n${idle}`)
+  // The badge/hint rendering for parked attention alone is unit-proven in
+  // `test/task-center-summary.test.ts`; this runner fixture does not put an
+  // editor seat in the focused input path, so the footer's `taskBrowserAvailable`
+  // gate and the literal ↓ key are asserted there instead.
 
   // `/tasks` covers the same open path through the Full surface:
   // end-to-end: the row, the live removal, the visible-Question focus and the
@@ -1760,6 +1763,7 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await vt.waitForRender()
   const reparked = vt.getViewport().join('\n')
   assert.ok(reparked.includes('Use staging or production?'), `the parked Question is reachable again:\n${reparked}`)
+
 
   // The literal `↓` keypress is NOT drivable here: the runner mount never puts
   // an editor seat in the focused input path, so the terminal key is dropped

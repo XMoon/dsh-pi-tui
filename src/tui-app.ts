@@ -16869,6 +16869,7 @@ export class TuiApp {
           taskTotalCount: this.taskSummary.totalJobs,
           childAgentTotalCount: this.taskSummary.totalAgents,
           failedTaskCount: this.taskSummary.failedAttention,
+          humanAttentionCount: this.questionAttentionCount,
         } : {}),
         todoCount: this.todoItems.length,
       },

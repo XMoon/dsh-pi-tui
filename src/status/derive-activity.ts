@@ -39,6 +39,7 @@ export function deriveActivityStatus(
     taskTotalCount?: number
     childAgentTotalCount?: number
     failedTaskCount?: number
+    humanAttentionCount?: number
     todoCount: number
   },
 ): ActivityStatus {
@@ -51,6 +52,7 @@ export function deriveActivityStatus(
     ...(counts.taskTotalCount === undefined ? {} : { taskTotalCount: counts.taskTotalCount }),
     ...(counts.childAgentTotalCount === undefined ? {} : { childAgentTotalCount: counts.childAgentTotalCount }),
     ...(counts.failedTaskCount === undefined ? {} : { failedTaskCount: counts.failedTaskCount }),
+    ...(counts.humanAttentionCount === undefined ? {} : { humanAttentionCount: counts.humanAttentionCount }),
     todoCount: counts.todoCount,
   }
 }
