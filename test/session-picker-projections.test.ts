@@ -142,7 +142,13 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },

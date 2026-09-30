@@ -59,6 +59,23 @@ interface Draft {
   skipped: boolean
 }
 
+/**
+ * The serializable local progress of one QuestionFlow (M3-3B park/reopen,
+ * addendum §6): which question the user was on and every draft they had built.
+ * It is deliberately detached from the live flow — a parked continued Question
+ * is destroyed with its editor seat, so the controller owns the snapshot and
+ * seeds it back when the SAME `(sessionId, callId)` is reopened.
+ */
+export interface QuestionFlowDraft {
+  /** Current question index; `questions.length` is the review page. */
+  readonly tab: number
+  readonly answers: readonly {
+    readonly selected: readonly string[]
+    readonly custom: string
+    readonly skipped: boolean
+  }[]
+}
+
 /** The "type your own answer" row shown below options (pi isOther parity). */
 const OTHER_ROW = '\u0000other'
 /** The scroll-marker row's hit identity (mouse parity): the marker is a
@@ -274,6 +291,13 @@ export interface QuestionMouseGesture {
  * Enter submits, Esc cancels, ← edits the last answer (plan item 4). Esc
  * cancels the whole flow; the app layer resolves the batch on done().
  */
+/** Caller-owned presentation status of one live Question flow: a mutable
+ * status line the flow renders above its tabs while set. M3-3B uses it for
+ * the timed-claim / remaining-time / continued-late-answer guidance. */
+export interface QuestionFlowStatus {
+  text?: string
+}
+
 export class QuestionFlow implements Component, Focusable {
   private readonly questions: readonly QuestionFlowQuestion[]
   private readonly onDone: (answers: QuestionFlowAnswer[]) => void
@@ -359,16 +383,46 @@ export class QuestionFlow implements Component, Focusable {
   /** Whether the page content overflows the scrollport on the last render —
    * 'e' (and the scroll verbs) are available when true. */
   private lastExpandable = false
+  /**
+   * Optional presentation status (claiming / remaining time /
+   * continued-late-answer guidance). The CALLER owns the object and may
+   * mutate `text` at any time; the flow reads it on every render, so a
+   * countdown tick only needs a repaint. The flow never derives a duration.
+   */
+  private status: QuestionFlowStatus | undefined
+  /**
+   * Real-answer-mutation hook (M3-3B timed lifecycle): the caller freezes its
+   * local countdown on the FIRST real answer mutation. Cursor moves, focus
+   * changes and other read-only operations never fire it.
+   */
+  private readonly onAnswerMutation: (() => void) | undefined
+  private readonly onDraftChange: ((draft: QuestionFlowDraft) => void) | undefined
 
   constructor(
     questions: readonly QuestionFlowQuestion[],
     onDone: (answers: QuestionFlowAnswer[]) => void,
     onCancel: () => void,
+    onAnswerMutation?: () => void,
+    onDraftChange?: (draft: QuestionFlowDraft) => void,
+    /** Local progress to restore (park/reopen of the SAME call). */
+    initialDraft?: QuestionFlowDraft,
   ) {
     this.questions = questions
     this.onDone = onDone
     this.onCancel = onCancel
-    this.drafts = questions.map(() => ({ selected: new Set<string>(), custom: '', skipped: false }))
+    this.onAnswerMutation = onAnswerMutation
+    this.onDraftChange = onDraftChange
+    this.drafts = questions.map((_question, index) => {
+      const seed = initialDraft?.answers[index]
+      return {
+        selected: new Set(seed?.selected ?? []),
+        custom: seed?.custom ?? '',
+        skipped: seed?.skipped ?? false,
+      }
+    })
+    if (initialDraft !== undefined) {
+      this.tab = Math.min(Math.max(0, initialDraft.tab), questions.length)
+    }
     // The free-text input keeps the last answer for re-entry.
     this.otherInput.onSubmit = (value) => this.commitOther(value)
     // The Input's generic cancel (Esc/Ctrl+C) ALWAYS leaves the text
@@ -404,6 +458,35 @@ export class QuestionFlow implements Component, Focusable {
    */
   setMaxRows(rows: number): void {
     this.budget = Math.max(MIN_SUPPORTED_BUDGET, Math.min(MAX_BUDGET, Math.floor(rows)))
+  }
+
+  /**
+   * Replace the caller-owned status line (claiming / remaining time /
+   * continued guidance). `undefined` renders no status row; the flow itself
+   * never fabricates a duration.
+   */
+  setStatus(status: QuestionFlowStatus | undefined): void {
+    this.status = status
+  }
+
+  /** Fire the real-answer-mutation hooks: the timed-lifecycle countdown freeze
+   *  and the controller's draft keeper (park preserves in-progress answers). */
+  private notifyMutation(): void {
+    this.onAnswerMutation?.()
+    this.onDraftChange?.(this.draftSnapshot())
+  }
+
+  /** Snapshot the local progress for a park (addendum §6). Kept separate from
+   *  the internal per-question `draft()` accessor. */
+  draftSnapshot(): QuestionFlowDraft {
+    return {
+      tab: this.tab,
+      answers: this.drafts.map(entry => ({
+        selected: [...entry.selected],
+        custom: entry.custom,
+        skipped: entry.skipped,
+      })),
+    }
   }
 
   /** Whether the panel is expanded (the frame grows toward 80% of the
@@ -886,6 +969,7 @@ export class QuestionFlow implements Component, Focusable {
       if (option !== undefined) {
         draft.selected.clear()
         draft.selected.add(option.label)
+        this.notifyMutation()
         // An ordinary single-select choice REPLACES a custom answer (Web
         // parity — submit prefers a nonblank custom for single-select, so
         // leaving it would silently submit the OLD text instead of the
@@ -920,6 +1004,7 @@ export class QuestionFlow implements Component, Focusable {
     if (draft.selected.has(label)) draft.selected.delete(label)
     else draft.selected.add(label)
     draft.skipped = false
+    this.notifyMutation()
   }
 
   /** Activate the highlighted option row with the SELECTION semantics the
@@ -1016,6 +1101,7 @@ export class QuestionFlow implements Component, Focusable {
     if (this.hasCustomAnswer(draft) && this.questions[this.tab]?.multiSelect !== true) {
       draft.selected.clear()
     }
+    this.notifyMutation()
   }
 
   /** Skip the current question (empty answer) and move on. */
@@ -1025,6 +1111,7 @@ export class QuestionFlow implements Component, Focusable {
     draft.selected.clear()
     draft.custom = ''
     draft.skipped = true
+    this.notifyMutation()
     // The skip's advance() runs syncEditMode, which invalidates the
     // free-text Input's owner on the tab change — a later re-entry
     // reseeds from the EMPTY draft, so the (skipped) row never shows
@@ -1359,6 +1446,13 @@ export class QuestionFlow implements Component, Focusable {
     tabs.push(this.tab === this.questions.length
       ? color.textStrong(submitText)
       : color.textDim(submitText))
+    // Caller-owned status (timed claim / remaining time / continued
+    // guidance) rides ABOVE the tabs and INSIDE the budget, so the header
+    // math below accounts for it. It never renders without room.
+    const statusText = this.status?.text
+    if (statusText !== undefined && this.budget > MIN_SUPPORTED_BUDGET + 1) {
+      appendWrappedBudgeted(lines, '', '', color.textDim(statusText), safeWidth, 1)
+    }
     lines.push(tabs.join('  '))
     lines.push('')
     if (this.tab >= this.questions.length) {

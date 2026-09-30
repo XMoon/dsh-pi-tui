@@ -59,6 +59,7 @@ import type {
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
+  ConfigReadiness,
 } from '../config-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -117,6 +118,12 @@ export interface AgentPresetsServiceLike {
 /** The Direct backend's config: the `ctx` services behind the semantic
  * `ConfigPort` interfaces. */
 export class DirectConfigPort implements ConfigPort {
+  /** Direct reads hit the in-process Host authority, so its config facts are
+   *  always the current ones (§9.1). */
+  configReadiness(): ConfigReadiness {
+    return 'ready'
+  }
+
   readonly tuiSettings: TuiSettingsConfig | undefined
   readonly footerCommandTrust: FooterCommandTrust
   readonly footerCustomItems: FooterCustomItemsConfig
@@ -538,6 +545,10 @@ export class DirectCredentialConfig implements CredentialConfig {
     return { configured: info.configured, ...typeof info.source === 'string' ? { source: info.source } : {} }
   }
 
+  recordsSupported(): boolean {
+    return true
+  }
+
   async listRecords(): Promise<readonly { key: string; kind?: string }[]> {
     const credentials = this.credentials()
     if (credentials === undefined) return []
@@ -873,6 +884,11 @@ export class DirectPermissionConfig implements PermissionConfig {
     await mutateSettings(settings, 'permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
+  }
+
+  approvalOverrideAvailable(): boolean {
+    // Direct reads and writes the official session approval policy in-process.
+    return true
   }
 
   approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined {

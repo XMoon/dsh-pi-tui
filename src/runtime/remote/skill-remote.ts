@@ -9,7 +9,7 @@
  * success), and caller cancellation is honored.
  *
  * Explicitly unsupported on the wire (docs/m3-entry-contract.md §10,
- * requalified against 0.2.0-rc.1): the sessionless STANDING catalog (every
+ * requalified through 0.2.0-rc.2): the sessionless STANDING catalog (every
  * skills endpoint is Session-addressed), the Client skill-body read (no
  * `skills/read`; human gestures stay literal and the Host pre-step owns
  * injection), and `onSkillsChange` hot invalidation (no `skills/*` entry in
@@ -138,7 +138,7 @@ export class RemoteSkillCatalog implements SkillCatalogCapability {
   }
 
   onSkillsChange(_listener: () => void): void {
-    // No `skills/*` forwarded Remote event exists (0.2.0-rc.1). No private
+    // No `skills/*` forwarded Remote event exists (through 0.2.0-rc.2). No private
     // event seam: the consumers' strong re-read boundaries (Session/binding
     // entry, explicit /reload, connection/reset) own freshness instead.
   }

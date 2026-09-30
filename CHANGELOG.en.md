@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The DSH dependency baseline moves to the published `0.2.0-rc.2` family as
+  a whole: every `@deepseek-ai/dsh-*` peer floor rises to `>=0.2.0-rc.2`,
+  and the development/source qualification target pins exact `0.2.0-rc.2`.
+  This line's Question lifecycle depends on contracts published only in
+  rc.2 (the `userQuestions` Remotes and Session projection), so rc.1 and
+  older families are no longer inside this line's declared compatibility
+  range; older runtimes should keep using the paired `0.5.0` TUI line.
+
 - The Question tool's input semantics now split into selection / editing /
   progression: multi-select questions toggle checkboxes with `Space` (or
   digits / clicks), while `Enter` only continues like `→` (skipping when

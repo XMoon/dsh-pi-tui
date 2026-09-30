@@ -61,7 +61,7 @@ const LLM_PI_AI_SECTION = {
 
 /** A fake credentials service recording every set/unset and serving the
  * rc.1 record enumeration /logout's picker reads. */
-function fakeCredentials(options: { failSet?: boolean } = {}) {
+function fakeCredentials(options: { failSet?: boolean; failListRecords?: boolean } = {}) {
   const sets: string[] = []
   const unsets: string[] = []
   const deletes: string[] = []
@@ -78,7 +78,12 @@ function fakeCredentials(options: { failSet?: boolean } = {}) {
       },
       unset: async (ref: string): Promise<void> => { unsets.push(ref) },
       describe: async (ref: string): Promise<{ configured: boolean; source?: string }> => ({ configured: true }),
-      listRecords: async (): Promise<{ key: string; kind?: string }[]> => [...records],
+      listRecords: async (): Promise<{ key: string; kind?: string }[]> => {
+        if (options.failListRecords === true) {
+          throw new Error('the Remote credentials backend cannot enumerate stored credential records')
+        }
+        return [...records]
+      },
       deleteRecord: async (key: string): Promise<void> => { deletes.push(key) },
     },
   }
@@ -127,7 +132,13 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort(() => undefined),
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
@@ -203,6 +214,8 @@ function setup(options: {
   pick?: (items: readonly { value: string; label?: string }[]) => string
   withLlmpiAi?: boolean
   failSet?: boolean
+  /** A backend that cannot enumerate stored credential records (Remote rc.2). */
+  failListRecords?: boolean
   questions?: () => { id: string; selected: string[]; custom?: string }[]
   llm?: ReturnType<typeof fakeLlm>
 } = {}) {
@@ -221,7 +234,7 @@ function setup(options: {
     },
   }
   ctx.provide('commands', commands.service as never)
-  const credentials = fakeCredentials({ failSet: options.failSet })
+  const credentials = fakeCredentials({ failSet: options.failSet, failListRecords: options.failListRecords })
   ctx.provide('credentials', credentials.service as never)
   let settings: ReturnType<typeof fakeSettings> | undefined
   if (options.withLlmpiAi !== false) {
@@ -250,7 +263,7 @@ function setup(options: {
   assert.ok(logout?.handler !== undefined, 'logout handler missing')
   const run = async <T>(def: { handler?: unknown }, rawInput: string): Promise<T> =>
     (def!.handler as (inv: CommandInvocation) => Promise<T>)(invoke(rawInput))
-  return { app, credentials, settings, llm: options.llm, signal: runner.signal, pickerRows, run, login, logout }
+  return { app, credentials, settings, llm: options.llm, signal: runner.signal, pickerRows, run, login, logout, runnerConfig: runner.config }
 }
 
 test('credentialOptionsFor lists deepseek official plus deduped llm-pi-ai routes', () => {
@@ -527,5 +540,104 @@ test('/login Add New Platform rejects a malformed route id', async () => {
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /invalid provider route/)
   assert.deepEqual(t.credentials.sets, [])
+  t.app.stop()
+})
+
+test('/logout keeps the reference picker usable when the backend cannot enumerate records', async () => {
+  // Remote rc.2 publishes no record-read Remote: the adapter REJECTS
+  // listRecords() instead of pretending the list is empty. That must not make
+  // the whole /logout picker fail — the configured references are still
+  // clearable, and the result states the record limitation plainly (§9.4).
+  const t = setup()
+  // A Remote-shaped credential backend: the port reports the capability gap
+  // (rc.2 has no record-read Remote), so the picker must not depend on it.
+  ;(t.runnerConfig.credentials as unknown as { recordsSupported: () => boolean }).recordsSupported = () => false
+  const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
+  assert.equal(result.kind, 'success')
+  assert.ok(t.pickerRows.length > 0, 'the picker still opens with the clearable references')
+  assert.ok(
+    t.pickerRows.every(row => !row.value.startsWith('\u0000record:')),
+    'no fabricated record row is offered',
+  )
+  assert.match(result.text ?? '', /cannot be enumerated or removed on this backend/u,
+    'the reference clear says what it did NOT clean up')
+  assert.deepEqual(t.credentials.unsets, ['DEEPSEEK_API_KEY'])
+  t.app.stop()
+})
+
+test('/logout reports nothing-to-sign-out with the record limitation instead of failing', async () => {
+  const t = setup()
+  ;(t.runnerConfig.credentials as unknown as { recordsSupported: () => boolean }).recordsSupported = () => false
+  // No reference is configured for this deployment: the picker would be empty.
+  t.credentials.service.describe = async () => ({ configured: false })
+  const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /cannot be enumerated or removed on this backend/u)
+  t.app.stop()
+})
+
+test('/logout surfaces a real record-read failure on a backend that CAN enumerate', async () => {
+  // The port owns the capability distinction: a supported backend whose read
+  // fails must not be mislabelled as "records are unavailable here".
+  const t = setup({ failListRecords: true })
+  await assert.rejects(() => t.run(t.logout, ''), /cannot enumerate stored credential records/u)
+  t.app.stop()
+})
+
+test('/login never presents provider-native sign-in as silently available', async () => {
+  // §9.3: the backend's provider-auth sub-capability must never be SILENTLY
+  // unavailable. Remote rc.2 publishes no authorization surface and the wire
+  // cannot say whether a keyless route is OAuth-only or uses the conventional
+  // env-var reference, so the supported reference prompt carries an explicit
+  // note instead of a hard block (which would hide provider login entirely).
+  const t = setup()
+  ;(t.runnerConfig.providers as unknown as { listCredentialOptions: () => unknown[] }).listCredentialOptions = () => [{
+    route: 'anthropic',
+    label: 'Anthropic (native sign-in)',
+    ref: 'ANTHROPIC_API_KEY',
+    configured: true,
+    declared: false,
+    namesCredential: false,
+    group: 'available',
+    canProvisionProfile: true,
+  }]
+  ;(t.runnerConfig.authorization as unknown as { available: () => boolean }).available = () => false
+
+  const questions: string[] = []
+  t.app.askQuestions = (async (asked: readonly { question: string }[]) => {
+    questions.push(...asked.map(entry => entry.question))
+    return [{ id: 'key', selected: [], custom: 'sk-ant' }]
+  }) as never
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
+  assert.equal(result.kind, 'success')
+  assert.match(questions.join('\n'), /provider sign-in \(OAuth\/device\) is unavailable on this backend/u,
+    'the prompt states the unavailable sign-in capability instead of hiding it')
+  assert.deepEqual(t.credentials.sets, ['ANTHROPIC_API_KEY=sk-ant'])
+  t.app.stop()
+})
+
+test('/login names no sign-in limitation when the route uses an explicit reference', async () => {
+  const t = setup()
+  ;(t.runnerConfig.providers as unknown as { listCredentialOptions: () => unknown[] }).listCredentialOptions = () => [{
+    route: 'acme',
+    label: 'Acme',
+    ref: 'ACME_GATEWAY_API_KEY',
+    configured: true,
+    declared: false,
+    namesCredential: true,
+    group: 'configured',
+    canProvisionProfile: true,
+  }]
+  ;(t.runnerConfig.authorization as unknown as { available: () => boolean }).available = () => false
+
+  const questions: string[] = []
+  t.app.askQuestions = (async (asked: readonly { question: string }[]) => {
+    questions.push(...asked.map(entry => entry.question))
+    return [{ id: 'key', selected: [], custom: 'sk-test' }]
+  }) as never
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme')
+  assert.equal(result.kind, 'success')
+  assert.doesNotMatch(questions.join('\n'), /provider sign-in/u, 'a named-reference route carries no auth note')
+  assert.deepEqual(t.credentials.sets, ['ACME_GATEWAY_API_KEY=sk-test'])
   t.app.stop()
 })

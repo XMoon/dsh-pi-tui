@@ -54,17 +54,20 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
+| `0.5.1` (in development, `next` line) | `dsh-v0.2.0-rc.2` | M3-3B line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
 | `0.5.0` (stable / `@latest`) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Current stable line; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. The `0.5.0` line unifies its
-whole DSH peer floor at `>=0.1.7-rc.2` (the rc.2 preset registry peers
-`dsh-agent` exactly, so a wider legacy floor no longer satisfies a standalone
-tarball install), while its exact validation and recommended upgrade target is
-the published `0.2.0-rc.1` family; older runtimes fail at the normal
+Do not mix the stable and `@next` prerelease lines. The M3-3B line on `next`
+lifts the whole DSH peer floor to `>=0.2.0-rc.2`: the Question lifecycle
+consumes contracts published only in rc.2 (the `userQuestions.attachWait`/
+`answer` Remotes and the `userQuestions` Session projection), so mixing in the
+rc.1 family would be a false compatibility statement. The published `0.5.0`
+line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
+older runtimes fail at the normal
 incompatible-runtime boundary, so install the paired TUI line from the table
 above. The startup notice
 is best-effort rather than a Loader startup-order guarantee. See the [full
@@ -630,8 +633,8 @@ This section contains DSH compatibility and CI validation details only; ordinary
 ### npm mode (current `next`)
 
 The current compatibility-train line is npm mode: it targets the published
-`dsh-v0.2.0-rc.1` family declared by this checkout's `package.json` and
-resolved by its lockfile (the runtime peer floor stays `>=0.1.7-rc.2`). The
+`dsh-v0.2.0-rc.2` family declared by this checkout's `package.json` and
+resolved by its lockfile (the runtime peer floor is also `>=0.2.0-rc.2`). The
 isolated npm driver installs that exact
 family from the public registry and exercises the TUI build/test/package path:
 

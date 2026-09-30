@@ -60,7 +60,13 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     fork: async () => ({}) as never,
   }
   const interaction = {
-    registerQuestionProvider: () => true,
+    questions: {
+      onRequest: () => true,
+      subscribe: () => undefined,
+      snapshot: () => undefined,
+      claimTimedWait: async () => undefined,
+      answerContinued: async () => 'not-continued' as const,
+    },
     onApprovalRequest: () => {},
     setApprovalPolicy: () => true,
   }
@@ -93,6 +99,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
   }
   const config = {
+    configReadiness: () => 'ready' as const,
     tuiSettings: undefined,
     footerCommandTrust: {
       userFooterMode: undefined,
@@ -111,6 +118,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       writeKeylessProfile: async () => ({ kind: 'written' as const }),
     },
     credentials: {
+      recordsSupported: () => true,
       available: () => true,
       setReference: async () => {},
       unsetReference: async () => {},
@@ -128,6 +136,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       cancel: async () => {},
     },
     permissions: {
+      approvalOverrideAvailable: () => true,
       presetNames: () => [],
       defaultPreset: () => undefined,
       setDefaultPreset: async () => {},

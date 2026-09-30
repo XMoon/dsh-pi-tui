@@ -97,7 +97,7 @@ test('A4: the runner owns no surface construction or mount', () => {
     'the surface owner must own the jobs-event subscription')
   assert.doesNotMatch(indexSource, /backend\.interaction\.onApprovalRequest\(/u,
     'the runner must not register the approval provider directly')
-  assert.doesNotMatch(indexSource, /backend\.interaction\.registerQuestionProvider\(/u,
+  assert.doesNotMatch(indexSource, /backend\.interaction\.questions\.onRequest\(/u,
     'the runner must not register the question provider directly')
   assert.match(indexSource, /surface\.attachInteraction\(backend\.interaction,/u,
     'the runner must attach the interaction providers through the surface owner')

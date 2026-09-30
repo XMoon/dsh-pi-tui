@@ -35,7 +35,9 @@ export interface TaskPanelItem {
   /** Type-filter identity (`subagent`, `bash`, `pwsh`, ...). */
   readonly type?: string
   /** Source and semantic capabilities. */
-  readonly source?: 'subagent' | 'job'
+  /** Work-domain source, or `question` for human-required Question attention
+   *  (a NON-work row: it has no stop semantics and never counts as active work). */
+  readonly source?: 'subagent' | 'job' | 'question'
   readonly canOpen?: boolean
   readonly canStop?: boolean
   readonly active?: boolean
@@ -207,6 +209,15 @@ export function projectTaskItems(
     // M3).
     for (const item of all) {
       if (!typeMatches(item)) continue
+      // Human-required Question attention is NEITHER work NOR failure
+      // attention. It is included by its own rule so a pending Question can
+      // never be hidden by the `includeAttentionInActive` (no-live-work)
+      // condition — one running Job plus one pending Question must still show
+      // the Question (addendum §10.3).
+      if (item.source === 'question' && queryMatches(item)) {
+        includeWithAncestors(item)
+        continue
+      }
       if (isTaskItemActive(item) && queryMatches(item)) includeWithAncestors(item)
       else if (options.includeAttentionInActive === true && !isTaskItemActive(item)
         && (item.attention === true || isTaskItemFailure(item.status)) && queryMatches(item)) includeWithAncestors(item)
@@ -273,7 +284,13 @@ export function projectTaskItems(
     // the view exists to show, even when a search query did not match it
     // (a matching inactive branch pulls its running descendants in, PR
     // review M3).
-    const context = !isTaskItemActive(item) && ((options.scope === 'active') || !matchedIds.has(item.value))
+    // Human-required Question attention is a PRIMARY row, never an ancestor
+    // context row: it is deliberately not "active work", so the generic rule
+    // would dim the very thing the user must act on (Quick's Active scope has
+    // no work row above it to explain).
+    const context = item.source !== 'question'
+      && !isTaskItemActive(item)
+      && ((options.scope === 'active') || !matchedIds.has(item.value))
     visible.push({
       ...item,
       kind: item.kind ?? 'task',

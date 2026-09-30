@@ -1132,7 +1132,7 @@ async function provisionKeylessProfile(
 
 /** The credential surface /logout's picker needs — the config port's
  * credentials sub-interface (presence-only reads). */
-type LogoutCredentialsLike = Pick<import('./runtime/config-port.ts').CredentialConfig, 'listRecords' | 'describeReference'>
+type LogoutCredentialsLike = Pick<import('./runtime/config-port.ts').CredentialConfig, 'recordsSupported' | 'listRecords' | 'describeReference'>
 
 /** Value prefixes for the /logout picker rows (no collision with a ref). */
 const LOGOUT_REF_VALUE = '\u0000ref:'
@@ -1147,7 +1147,7 @@ async function logoutPickerRows(
   credentials: LogoutCredentialsLike,
   options: readonly CredentialProviderOption[],
   targets: readonly AuthorizationTarget[],
-): Promise<PickerItem[]> {
+): Promise<{ rows: PickerItem[]; recordCleanupUnavailable: boolean }> {
   const rows: PickerItem[] = []
   const seenRefs = new Set<string>()
   for (const option of options) {
@@ -1162,7 +1162,19 @@ async function logoutPickerRows(
       // A throwing describe degrades to "not configured".
     }
   }
-  const records = await credentials.listRecords()
+  // An enumeration-UNAVAILABLE backend (Remote: rc.2 publishes no record-read
+  // Remote) must NOT make the whole picker fail: the reference rows above are
+  // still clearable, so the picker opens and the RESULT wording states that
+  // stored-record cleanup is unavailable here (plan §9.4). The port owns the
+  // capability distinction, so a SUPPORTED backend whose read really fails
+  // propagates that failure instead of being mislabelled a capability gap.
+  let recordCleanupUnavailable = false
+  let records: readonly { key: string; kind?: string }[] = []
+  if (credentials.recordsSupported()) {
+    records = await credentials.listRecords()
+  } else {
+    recordCleanupUnavailable = true
+  }
   const seenKeys = new Set<string>()
   for (const record of records) {
     if (seenKeys.has(record.key)) continue
@@ -1173,7 +1185,7 @@ async function logoutPickerRows(
       : `${record.key}${record.kind === undefined ? '' : ` (${record.kind})`}`
     rows.push({ value: LOGOUT_RECORD_VALUE + record.key, label, group: 'stored credentials' })
   }
-  return rows
+  return { rows, recordCleanupUnavailable }
 }
 
 /** The add-provider wizard outcome. */
@@ -1988,6 +2000,28 @@ export function registerTuiCommands(
       // retargets to a replacement session. Never creates a Session.
       const liveScope = runner.captureLiveSessionScope()
       const tuiSettings = runner.tuiSettings
+      // §9.1 currentness: a backend whose config reads are not current must
+      // say so. The rows below show LAST KNOWN values, so the panel announces
+      // the staleness explicitly (and every write is refused with an explicit
+      // reconnecting reason by the port itself) instead of presenting
+      // last-known values as authoritative.
+      const configReadiness = runner.config.configReadiness()
+      if (configReadiness !== 'ready') {
+        // The wording must match what the rows actually show: without a
+        // settings document the rows fall back to the panel's BUILT-IN
+        // defaults, which are not Host values at all — calling them
+        // "last known" would fabricate authority the backend never had
+        // (§9.1). With a document they are the last-known Host values.
+        const hasHostValues = tuiSettings !== undefined
+        app.notify(
+          configReadiness === 'unavailable'
+            ? hasHostValues
+              ? 'the configuration backend is unavailable — the values shown are the last known ones and changes cannot be saved'
+              : 'the configuration backend is unavailable — the settings below show built-in defaults, not Host values, and changes cannot be saved'
+            : 'the configuration is not current (reconnecting) — the values shown are the last known ones; changes will be refused until it reconnects',
+          'error',
+        )
+      }
       let settingsDoc: TuiSettingsDoc | undefined
       if (tuiSettings !== undefined) {
         try {
@@ -2064,7 +2098,12 @@ export function registerTuiCommands(
       let settingsOpen = true
       const closeSettings = app.openSettings(
         [
-          ...liveScope === undefined ? [] : [{
+          // The independent session approval override exists only where the
+          // backend can actually read AND write it. On a backend without the
+          // capability the row is OMITTED: rendering the consumer's own `ask`
+          // default would present an unavailable policy as a real one
+          // (§9.2/§10).
+          ...liveScope === undefined || !runner.config.permissions.approvalOverrideAvailable() ? [] : [{
             id: 'approval',
             label: 'Approval policy (this session)',
             description: 'How tool approvals are handled in this session',
@@ -5124,15 +5163,33 @@ export function registerTuiCommands(
       const option = route === undefined ? undefined : options.find(candidate => candidate.route === route)
       const targetRef = ref ?? option?.ref ?? deriveKeyRef(route ?? '')
       const label = option?.label ?? route ?? targetRef
+      // §9.3: the backend's provider-auth sub-capability must never be
+      // SILENTLY unavailable. When the authorization surface is absent here
+      // (Remote rc.2 publishes none) and the route's profile names no
+      // credential reference, the API-key path below is still the supported
+      // one — but the user has to be told that OAuth/device sign-in is not
+      // offered on this backend, because the wire cannot say whether this
+      // particular keyless route is OAuth-only or uses the conventional
+      // env-var reference. A hard block would hide provider login entirely,
+      // which §9.3 also forbids.
+      const providerSignInNote = runner.config.authorization.available() || option === undefined || option.namesCredential
+        ? ''
+        : ' — provider sign-in (OAuth/device) is unavailable on this backend'
       try {
         const answers = await app.askQuestions([
-          { id: 'key', question: `Enter the API key for ${label}:`, masked: true },
+          { id: 'key', question: `Enter the API key for ${label}${providerSignInNote}:`, masked: true },
         ])
         const key = answers[0]?.custom ?? ''
         if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
         await credentials.setReference(targetRef, key)
         return { kind: 'success', text: `API key ${targetRef} set` }
-      } catch {
+      } catch (error) {
+        // A superseded completion is NOT a user cancellation: the key cannot
+        // be confirmed as set on the current Host (the Remote credential
+        // write re-checks its Connection generation before reporting success).
+        if (error instanceof SupersededReadError) {
+          return { kind: 'error', text: 'the connection changed while setting the key; it was not confirmed — retry' }
+        }
         return { kind: 'error', text: 'login cancelled' }
       }
     },
@@ -5177,8 +5234,20 @@ export function registerTuiCommands(
       // No argument: aggregate what actually exists — stored records plus
       // configured references (§13.3). Presence and kind only; a secret's
       // value never leaves the credentials service.
-      const rows = await logoutPickerRows(credentials, options, targets)
-      if (rows.length === 0) return { kind: 'error', text: 'nothing to sign out' }
+      const { rows, recordCleanupUnavailable } = await logoutPickerRows(credentials, options, targets)
+      if (rows.length === 0) {
+        return {
+          kind: 'error',
+          text: recordCleanupUnavailable
+            ? 'nothing to sign out; stored credential records cannot be enumerated or removed on this backend'
+            : 'nothing to sign out',
+        }
+      }
+      // §9.4: a reference clear must not imply that stored records were also
+      // cleaned up when this backend cannot even enumerate them.
+      const recordLimitationNote = recordCleanupUnavailable
+        ? '; stored credential records cannot be enumerated or removed on this backend'
+        : ''
       const picked = await new Promise<string | undefined>((resolve) => {
         app.openPicker(
           rows,
@@ -5194,7 +5263,7 @@ export function registerTuiCommands(
       }
       const targetRef = picked.slice(LOGOUT_REF_VALUE.length)
       await credentials.unsetReference(targetRef)
-      return { kind: 'success', text: `API key ${targetRef} cleared` }
+      return { kind: 'success', text: `API key ${targetRef} cleared${recordLimitationNote}` }
     },
   })
 

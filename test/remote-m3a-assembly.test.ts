@@ -34,6 +34,7 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
     refresh: async () => {},
     search: async () => ({ ok: true as const, value: { items: [], hasMore: false } }),
     binding: () => undefined,
+    scopeOf: () => undefined,
     retain: () => { throw new Error('not needed for wiring proofs') },
     create: async () => ({ ok: true as const, value: { sessionId: 's' } }),
     fork: async () => ({ ok: true as const, value: { sessionId: 'f' } }),
@@ -57,6 +58,12 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
     skills: { list: async () => ({ ok: true as const, value: { skills: [] } }) },
     fileReferences: { list: async () => ({ ok: true as const, value: [] }) },
     commands: { execute: async () => ({ ok: true as const, value: undefined }) },
+    userQuestions: {
+      attachWait: () => (async function* () { /* no frames */ })(),
+      answer: async () => ({ ok: true as const, value: true }),
+    },
+    pluginManager: { list: async () => ({ ok: true as const, value: {} }) },
+    $on: () => () => {},
     subagents: {
       prompt: async () => ({ ok: true as const, value: { messageId: 'm' } }),
       interruptByParent: async () => ({ ok: true as const, value: {} }),
@@ -69,6 +76,7 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
     source: {
       sessions: sessions as never,
       remote: remote as never,
+      jobs: { state: { getSnapshot: () => ({ rows: {}, observed: {} }), subscribe: () => () => {} } } as never,
       connection: { generation: generation.source },
     },
   }

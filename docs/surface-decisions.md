@@ -1293,7 +1293,41 @@ fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
 
 Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
 Task Center in Tracked scope. Both surfaces consume the same durable preorder and
-runtime projection. Scope, type, search, selection, and disclosure are
+runtime projection.
+
+**Attention dataset (M3-3B).** Task Center is current actionable state, not
+execution history, and different sources own their own retention:
+
+```text
+Work dataset:       the shared Job/Subagent catalog + runtime projection
+Attention dataset:  surface-composed current human interactions
+                    (M3-3B starts with the continued Question)
+Quick:              hidden actionable attention + active work
+Full:               every current actionable attention row + tracked work
+```
+
+The Question controller owns the authority interpretation and exposes a
+detached presentation model (`QuestionAttentionRow`); the pure
+`task-center-attention.ts` maps it onto panel rows (stable
+`question:<sessionId>:<callId>` identity, `Needs attention` group, `?` glyph,
+`awaiting answer` / `answering`), and the surface composes attention ABOVE the
+work rows before the browser's first frame.
+
+**Footer attention fact.** A parked actionable Question publishes its own `?N`
+figure in the Task Center badge (`[? 1 awaiting · ↓ view]`, compact `[?1·↓]`),
+together with the `↓ view` hint when the editor seat is available. It is a
+fourth independent fact: it never joins the task/agent counts or the failure
+count, and a visible Question is NOT counted because it already owns the
+response seat (queued/settled/unavailable Questions are not counted either). A
+Questions-only session therefore still advertises — and can open — its Task
+Center reopen path.
+
+Question rows are NOT work rows:
+they carry no `startedAt`, never join the active-work count, never inherit stop
+semantics, and the panel includes them by an explicit rule so a running Job can
+never hide a pending Question. `Enter` on such a row reopens the controller
+entry (closing the browser and returning the seat); a row that went stale
+between rendering and selection fails closed and keeps the browser usable. Scope, type, search, selection, and disclosure are
 presentation state, so promoting Quick to Full never reorders or deduplicates
 rows and Esc can restore the prior context. Their keyboard ownership is
 deliberately asymmetric: Quick is navigation-only (arrows, `←`/`→` tree,
@@ -1514,3 +1548,111 @@ tool whose outcome was not durably recorded stays a normal Tool card with
 error outcome. Pinned by `test/session-v4-tool-result.test.ts`,
 `test/transcript-semantics.test.ts`, `test/compact-process-preview.test.ts`,
 `test/compact-display.test.ts`, and `test/focus-ui.test.ts`.
+
+## Timed / continued Question (M3-3B terminal-native contract)
+
+The rc.2 `ask_user_question` tool may declare a FOREGROUND WAIT (`timeout`
+seconds). The Host keeps the durable deadline and the durable answerability;
+the Client owns only presentation while it holds a claim. The TUI therefore
+splits the lifecycle into three explicit layers:
+
+```text
+userQuestions projection  -> whether a question is open / continued / settled
+inbox projection          -> whether a late reply is durably queued
+QuestionSurfaceController -> the mounted card, the local countdown, the
+                             wire-preserved rejection, reachability
+QuestionFlow              -> the current form state / navigation only
+```
+
+Decisions (all terminal-native; none of them copies a Web button):
+
+1. **Claim before countdown.** A timed request claims the Host wait
+   (`userQuestions.attachWait`) and only then starts its local clock, seeded
+   from the first frame's Host-computed `remainingMs`. Until that frame
+   arrives the flow shows a non-destructive "claiming" line and NEVER guesses
+   a duration. A refused/absent claim keeps the blocking flow without a
+   countdown.
+2. **The countdown is presentation only.** A local countdown reaching zero
+   ends the FOREGROUND answer attempt. It never cancels the Turn and never
+   cancels the question: the provider rejects the forwarded waterfall with
+   the wire-preserved `ASK_TIMED_OUT` (matching the released Client), the Host
+   returns pending, and the question stays durably answerable as `continued`.
+   `Esc` rejects `ASK_CANCELLED`; a Host/delivery abort rejects `ASK_ABORTED`.
+3. **First real answer mutation freezes the clock.** A selection toggle, a
+   real free-text change, or a skip freezes the local deadline into indefinite
+   local editing while the claim remains held; cursor moves, focus changes and
+   other read-only operations never freeze it. No synthetic Host timer write is
+   made. Focus/blur never releases the claim; teardown/disconnect does.
+4. **Reachability is projection-driven and REACTIVE.** The port exposes
+   `snapshot(sessionId)` plus `subscribe(sessionId, listener)`: Direct observes
+   the Host projection registry's change feed, Remote observes BOTH Client
+   projection faces (`userQuestions` + `inbox`) AND the Connection generation
+   (a disconnect notifies even though the Client only clears its stores when a
+   NEW generation connects; a generation change re-arms the faces against the
+   current binding). The controller keeps exactly one registration for the
+   session it presents and re-derives answerability from authority — never from
+   a local timer, an old transcript card or a local store.
+5. **A queued late reply removes the interaction.** While the Inbox holds a
+   `user-question-reply` for the call, the controller keeps no entry and no
+   editable submission; `REPLY_QUEUED` keeps the intent as a read-only notice.
+   Discarding the queued reply (Host-side) makes the call answerable again.
+6. **Final answers come from the projection.** A settled card renders the
+   authoritative `userQuestions.settled` batch — a timed-out call's own tool
+   result records the timeout, not the answer — as a presentation enrichment
+   over the unchanged durable transcript event. An EMPTY settled batch is a
+   real authoritative outcome (a late reply settled the call with no readable
+   batch): only an ABSENT settled entry falls back to the call's own result.
+7. **The Question outlives its editor seat (park / reopen).** Answerability and
+   seat ownership are separate facts, exactly as in the released Web client:
+   the controller keeps one `ContinuedQuestionEntry` per `(sessionId, callId)`
+   with local presentation state `visible | parked`, and an entry outlives the
+   mounted `QuestionFlow`.
+   - `Esc` on a continued form PARKS it: the Host question is untouched, no
+     `ASK_CANCELLED` is sent, the editor seat returns, and the user's answers /
+     free text / current question are preserved.
+   - **A parked Question never auto-reopens.** Projection invalidation, session
+     events, assistant chunks, job updates, agent status, Task Center refreshes
+     and repaints may update the row or remove the interaction, but only an
+     explicit human reopen turns it back into a panel. Cold recovery (a
+     reconnect, a session switch, or the initial attach discovering a
+     still-continued call) creates the entry PARKED; only a live foreground
+     interaction that locally transitions into `continued` keeps its form
+     visible, because the user was already handling it.
+   - The keyboard reopen path is the Task Center (`↓` Quick / `/tasks` Full):
+     a parked actionable Question appears as a `Needs attention` row and
+     `Enter` reopens the SAME entry (with its preserved draft). No `/answer`
+     command and no dedicated global Question shortcut exist.
+   - A queued reply, a settlement, a vanished call, or an unreadable authority
+     removes the entry and its rows immediately; the transcript remains the
+     durable historical/context anchor.
+   - The mounted form owns an abort controller: authority withdrawal and user
+     parking are different outcomes, and neither is reported as the other.
+8. **The claim outlives nothing it shouldn't.** The claim attempt receives the
+   caller's lifetime from the first moment, so a surface teardown (or a
+   countdown end) during the opening frame releases the Host wait instead of
+   leaving it held; a torn-down surface never mounts a countdown after the
+   fact. A Host-driven claim end is reported as `ASK_ABORTED` — never as
+   `ASK_CANCELLED`, which would record a cancellation the human never made —
+   and the call is then re-derived from the projection.
+9. **A superseded completion is silent.** A late answer whose Connection
+   generation was replaced reports nothing: no "answer queued" line and no
+   repaint, because the answer no longer describes the live surface (the new
+   generation re-derives its own truth). A disconnected Connection likewise
+   presents no answerable card from a last-known binding.
+
+## A credential backend that cannot enumerate records still has a usable /logout
+
+Remote rc.2 publishes no record-read Remote, so the Remote credential adapter
+REJECTS `listRecords()` rather than reporting an empty list (an empty list
+would assert "you have no stored records").
+
+The terminal-native consequence: the no-argument `/logout` picker opens with
+the references it CAN clear (`describeReference`), offers no fabricated record
+row, and the outcome text states that stored credential records cannot be
+enumerated or removed on this backend. Clearing a reference never implies that
+stored records were cleaned up. `/logout <ref>` remains the direct path.
+
+Credential operations also re-check the Connection generation before reporting
+their outcome: a `setReference` that completed against a replaced Host is
+reported as unconfirmed (never as a new-Host success), and a superseded
+`describeReference` degrades to "not configured" in the picker.

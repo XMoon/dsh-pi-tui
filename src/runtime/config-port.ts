@@ -3,8 +3,8 @@
  * and the Host-owned CONFIGURATION it reads and mutates: the TUI settings
  * document, provider profiles, credentials, authorization flows, permission
  * presets and the saved preset default. Implemented by
- * `src/runtime/direct/` (Direct) today and by a Remote adapter in a later
- * milestone.
+ * `src/runtime/direct/` (Direct, the production default) and by
+ * `src/runtime/remote/config-remote.ts` (the experimental Remote backend).
  *
  * The port deliberately exposes semantic operations, never generic
  * settings/credentials/authorization service objects (no
@@ -17,9 +17,11 @@
  * never a namespace or a path (the adapter maps its schema knowledge to
  * the flag; a Remote adapter computes the same flag from the wire).
  *
- * Future wire mapping (M2): `settings.*` / `credentials.*` remotes and the
- * authorization capabilities; operations with no 1:1 Remote today are
- * recorded as gaps in the contract comments.
+ * Wire mapping: `settings.*` / `credentials.*` remotes plus the Session
+ * `userQuestions` / Inbox projections. Operations with no 1:1 Remote are
+ * marked `INTENTIONAL_UNSUPPORTED_IN_M3` in the contract comments and in
+ * `docs/m3-entry-contract.md` §10 (credential record read/delete, session
+ * approval-policy override, authorization flows).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/config-port
@@ -271,6 +273,18 @@ export interface CredentialConfig {
   setReference(ref: string, secret: string): Promise<void>
   /** Clear one reference credential (/logout). */
   unsetReference(ref: string): Promise<void>
+  /**
+   * Whether this backend can enumerate and delete stored credential RECORDS
+   * (plan §8.5). Direct: yes — the credentials service owns them. Remote
+   * rc.2: NO — the wire publishes no record read and no record delete, so
+   * `listRecords()` rejects and `deleteRecord()` fails closed.
+   *
+   * The distinction is the point: a consumer must present "this backend
+   * cannot list stored records" instead of treating a rejection as an empty
+   * list, and a SUPPORTED backend whose read really failed must still surface
+   * that failure rather than being reported as a capability gap.
+   */
+  recordsSupported(): boolean
   /** Delete one stored credential record (/logout; the authorization
    * flow's durable record). */
   deleteRecord(key: string): Promise<void>
@@ -352,12 +366,25 @@ export interface PermissionConfig {
   defaultPreset(): string | undefined
   /** Persist the default preset for future sessions. */
   setDefaultPreset(name: string): Promise<void>
+  /**
+   * Whether this backend READS and WRITES the session's independent
+   * approval-policy override at all. Direct: yes (the official approval
+   * service). Remote rc.2: NO — no public Client read of the override and no
+   * synchronous policy carrier exist, so the UI must hide/disable the row.
+   *
+   * This is what keeps `undefined` from `approvalOverrideOf` unambiguous: on a
+   * backend where the capability is absent, "undefined" is UNAVAILABLE and
+   * must never be rendered as the consumer's own `ask` default (docs/
+   * m3-entry-contract.md §10).
+   */
+  approvalOverrideAvailable(): boolean
   /** The session's own approval-policy override, resolved from the EXACT
    * live Agent of `sessionId` (the official approval service's
    * `overrideOf(session)` read — alpha.4; the configured default is
    * deliberately NOT applied, an override-less session answers undefined
    * and the consumer shows its own default). Degrades to undefined when
-   * the approval service is absent or the session has no live Agent. */
+   * the approval service is absent or the session has no live Agent — which
+   * is only meaningful while `approvalOverrideAvailable()` is true. */
   approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
@@ -371,15 +398,15 @@ export interface PermissionConfig {
 }
 
 /** One official allowed child-LLM route (the exact provider+model pair
- * the official `subagent-model-selection` section authorizes). */
+ * the official `subagent-model-selection-settings` section authorizes). */
 export interface SubagentAllowedModelRoute {
   readonly provider: string
   readonly model: string
 }
 
 /** The official subagent model-selection preference (the DSH
- * `subagent-model-selection` settings section, owned Host-side by the
- * `subagent-model-selection-settings` service). The TUI reads and writes
+ * `subagent-model-selection-settings` settings namespace, whose values the
+ * `subagent-model-selection` service owns Host-side). The TUI reads and writes
  * the OFFICIAL section through this sub-domain — it never maintains a
  * parallel TUI-owned subagent routing setting. Sampling is per NEW
  * session composition: a settings change never rewrites the tool schema
@@ -409,10 +436,31 @@ export interface PresetDefaultConfig {
   set(id: string): Promise<void>
 }
 
+/**
+ * How current this backend's config reads are (M3-3B, plan §9.1).
+ *
+ * `ready` — the values below are authoritative for the live backend;
+ * `stale` — they are the LAST KNOWN values of a backend that is reconnecting
+ * or whose authority just changed; the UI must mark them non-current and
+ * refuse writes until a read makes them current again;
+ * `unavailable` — there is no authority to read at all (disconnected).
+ *
+ * This is deliberately part of the SEMANTIC contract rather than a
+ * Remote-adapter detail: a consumer must be able to tell "this is the value"
+ * from "this was the value", and a backend that cannot know must say so.
+ */
+export type ConfigReadiness = 'ready' | 'stale' | 'unavailable'
+
 /** The config assembly — one narrow sub-interface per config domain.
  * Consumers depend on the sub-interface they use, never on the whole
  * assembly (no generic settings god API). */
 export interface ConfigPort {
+  /** How current the reads below are (§9.1). Direct is always `ready`: its
+   *  reads hit the in-process Host authority. A Remote backend reports its
+   *  settings mirror's currentness, and a non-`ready` value means the UI
+   *  must mark the values non-current and refuse writes with an explicit
+   *  reason instead of presenting last-known values as authoritative. */
+  configReadiness(): ConfigReadiness
   /** The TUI settings document (theme/footer/...). */
   readonly tuiSettings: TuiSettingsConfig | undefined
   /** The M5 footer-command trust read (USER-layer only). */

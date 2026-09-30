@@ -10,17 +10,25 @@
  * projection · P3 modelCatalog grouped directory · P4 llm/discoverModels ·
  * P5 skills/list · P6 Session-scoped fileReferences/list · P7
  * PresentationReader.loadThrough · P8 turnOutline projection · P9 retained
- * child Session projection read · P10 reconnect/generation replacement.
+ * child Session projection read · P10 reconnect/generation replacement ·
+ * P11 rc.2 Question wire surfaces (the live forwarded request, the
+ * `attachWait` claim, the non-cancelling timeout, the late-answer mapping).
  *
  * @module @xmoon76/dsh-pi-tui/remote-m3a-semantics-smoke.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { SESSION_LOG_FILENAME, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
+import ConfigEditor from '@deepseek-ai/dsh-config-editor'
+import SettingsForms from '@deepseek-ai/dsh-settings'
+import { loadProfileDirectory, mountRootInclude } from '@deepseek-ai/dsh-app-boot'
+import { unzipEntries } from './support/zip-entries.ts'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -35,10 +43,12 @@ import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { createUserMessage, LlmAdapter, MessageId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
@@ -46,6 +56,7 @@ import * as toolTodoInvariant from '@deepseek-ai/dsh-tool-todo/invariant'
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../src/app/remote/m3a-semantics.ts'
+import { createRemoteBackendRuntime } from '../src/app/remote/runtime.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../src/runtime/remote/session-reference.ts'
 import { contextPressureOccupancy } from '../src/runtime/session-reader-port.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -73,7 +84,16 @@ interface HostFixture {
   dispose(): Promise<void>
 }
 
-async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
+async function createHostFixture(
+  life: TestLifecycle,
+  options: {
+    /** Mount the production config plane: a real profile directory plus the
+     *  official `ConfigEditor` (service `configEditor`) and `SettingsForms`
+     *  (service `settings`). OPT-IN so the fail-closed "no settings service"
+     *  deployment contract stays testable. */
+    readonly configPlane?: boolean
+  } = {},
+): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3a-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
@@ -127,7 +147,122 @@ async function createHostFixture(life: TestLifecycle): Promise<HostFixture> {
     ctx.provide('fileReferences', {
       list: async () => [{ path: 'anchor/notes.md', kind: 'file' as const }],
     } as never)
+    // The rc.2 user-questions service is a HOST PREREQUISITE of the M3 Remote
+    // composition (the production Host gets it from `@deepseek-ai/dsh-base`),
+    // so the fixture mounts the official service itself — the composition must
+    // REUSE it, never mount a second one.
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
+    // The production config plane the base bundle mounts while a
+    // `profileContext` exists: `ConfigEditor` (service `configEditor`, injecting
+    // loader + profileContext) and the official `SettingsForms` (service
+    // `settings`, injecting configEditor + profileContext). The M3 Remote
+    // composition must NOT mount these; they belong to the profile lifecycle.
+    if (options.configPlane === true) {
+      // A minimal but REAL dsh profile directory: the official settings service
+      // reads the profile manifest + its patch file, so the plane needs both.
+      // A real dsh layout: the PROFILE directory holds the manifest + patch,
+      // while `home` is its parent (a home-layer patch file must not shadow the
+      // profile one, or the official editor refuses the write as overridden).
+      const profileDir = join(workRoot, 'profile')
+      mkdirSync(profileDir, { recursive: true })
+      const profilePatchPath = join(profileDir, 'cordis.patch.yml')
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+        name: 'dsh-m3a-profile',
+        private: true,
+        dsh: { profile: { bundles: ['m3b-tui-bundle'], patch: 'cordis.patch.yml' } },
+      }, null, 2))
+      // The row's id IS the settings namespace the Remote config port writes:
+      // `tui-app`. The row plugin is a stub — mounting the real TUI here would register
+      // this repository's own commands and surface inside the fixture — but its
+      // Config IS the product schema (`src/tui-config.ts`), so the section's
+      // fields, defaults and volatile markers are the shipped ones and the
+      // Remote config path is exercised against the real shape.
+      const rowModulePath = join(workRoot, 'm3b-tui-settings-row.mjs')
+      writeFileSync(rowModulePath, [
+        `import { Config } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/tui-config.ts')).href)}`,
+        "export const name = 'm3b-tui-settings-row'",
+        'export { Config }',
+        'export function apply() {}',
+        '',
+      ].join('\n'))
+      // The production LAYOUT: a bundle declares the row and its base config,
+      // while the profile patch carries only the user's own change. Both halves
+      // matter — the official editor compares the effective (layer + document)
+      // configuration against the live entry, so a row that exists only in the
+      // profile patch can never be written.
+      const bundleDir = join(workRoot, 'bundle')
+      mkdirSync(bundleDir, { recursive: true })
+      writeFileSync(join(bundleDir, 'package.json'), JSON.stringify({
+        name: 'm3b-tui-bundle',
+        version: '0.0.0',
+        private: true,
+        dsh: { bundle: { patch: ['./cordis.patch.yml'] } },
+      }, null, 2))
+      // Bundle patches use the include's `insert` dialect: only an insertion
+      // patch can materialize a row, a flat row list is inert.
+      writeFileSync(join(bundleDir, 'cordis.patch.yml'), [
+        '- insert:',
+        '    - id: tui-app',
+        `      name: ${JSON.stringify(rowModulePath)}`,
+        '      config:',
+        "        sessionId: ''",
+        '',
+      ].join('\n'))
+      // A profile resolves its bundles from its OWN node_modules, exactly what
+      // `dsh plugin --profile <p> install` creates.
+      const linkedScope = join(profileDir, 'node_modules')
+      mkdirSync(linkedScope, { recursive: true })
+      symlinkSync(bundleDir, join(linkedScope, 'm3b-tui-bundle'), 'dir')
+      writeFileSync(profilePatchPath, '[]\n')
+
+      ctx.provide('profileContext', {
+        // The COMPLETE production contract: the official write flow reads more
+        // than `dir`/`patchPath` (it also resolves the home-layer patch file and
+        // the launch overlays), so a partial context fails deep inside the write.
+        name: 'm3a-smoke',
+        dir: profileDir,
+        patchPath: profilePatchPath,
+        // The REPOSITORY root: the Loader resolves the row by package name from
+        // its node_modules, exactly like a real profile install anchor.
+        installAnchor: process.cwd(),
+        cwd: workRoot,
+        home: workRoot,
+        startedBundles: [],
+        overlays: [],
+        telemetryDisabledEnv: undefined,
+      } as never)
+      await ctx.plugin(ConfigEditor)
+      await ctx.plugin(SettingsForms)
+      // SECTIONS come from Loader-managed profile rows whose plugin declares a
+      // Config schema (a directly mounted plugin contributes nothing), and a
+      // section's ns is the row id. App boot's own root `Include` entry plus its
+      // apply path is exactly that shape, so the fixture uses them: the row id
+      // is the namespace the Remote config port writes.
+      const loadedProfile = loadProfileDirectory('dsh', profileDir, process.cwd(), { userLayer: false })
+      // RAW patch options (each may be an `insert` group): the include's own
+      // patch algorithm needs the insertion form to materialize a new row, so
+      // the composed/flattened view is NOT what a tree is built from.
+      const profilePatches = [
+        ...loadedProfile.layers.flatMap(layer => layer.patches),
+        ...loadedProfile.patches,
+      ]
+      await mountRootInclude(
+        ctx,
+        // App boot's root include reads the profile PATCH file and applies the
+        // composed layer rows to it — `patches` is how a bundle row reaches the
+        // tree, and only its `insert` dialect can materialize a new row.
+        profilePatchPath,
+        profilePatches,
+        // The profile's install anchor as a URL: the include subtree resolves
+        // row plugin names from here (a bare path does not resolve).
+        pathToFileURL(join(process.cwd(), 'package.json')).href,
+        'dsh',
+      )
+      // Wait for the root include's rows to settle before the settings service
+      // reads their schemas.
+      await (ctx.get('loader' as never) as unknown as { await: () => Promise<void> }).await()
+    }
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
     await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3-3A smoke preset', plugins: [] })
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
@@ -181,13 +316,19 @@ function seedTurn(
   const session = host.ctx.sessions.get(SessionId(sessionId))
   if (session === undefined) throw new Error(`seedTurn: no Host session ${sessionId}`)
   session.append('turn/start', { turn: input.turn })
+  // The official step lifecycle: an `assistant/message` is only legal inside an
+  // OPEN turn+step, and the durable reader enforces it (`SessionFormatError`
+  // otherwise). Without these two events every seeded log was corrupt on the
+  // persistence READ path — the path `/api/session.export` uses — so the archive
+  // route could never serve a seeded Session.
+  session.append('step/start', { turn: input.turn, step: 1 })
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: input.prompt }],
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   session.append('assistant/message', {
     turn: input.turn,
-    step: 0,
+    step: 1,
     message: {
       id: MessageId(`${sessionId}-assistant-${input.turn}`),
       role: 'assistant',
@@ -200,6 +341,7 @@ function seedTurn(
   if (input.todos !== undefined) {
     session.append('todo/write', { todos: [...input.todos] })
   }
+  session.append('step/end', { turn: input.turn, step: 1 })
   session.append('turn/end', { turn: input.turn, reason: { kind: 'completed' } })
 }
 
@@ -215,11 +357,16 @@ interface Composed {
   semantics: RemoteM3ASemantics
 }
 
-async function compose(host: HostFixture): Promise<Composed> {
-  const runtime = await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+/** The real Host + generated Client runtime, with no M3 semantic bundle yet. */
+async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
+  return await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })
+}
+
+async function compose(host: HostFixture): Promise<Composed> {
+  const runtime = await composeRuntime(host)
   return { runtime, semantics: createRemoteM3ASemantics(runtime.client, { promptSerializer: stubSerializer() }) }
 }
 
@@ -400,3 +547,280 @@ async function waitFor(label: string, predicate: () => boolean, timeoutMs = 15_0
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
+
+test('P11: the rc.2 Question wire surfaces (live request → claim → timeout → late-answer mapping)', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  const { runtime, semantics } = await compose(host)
+  try {
+    const agent = await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+    acquireMainSurfaceReference(runtime.client.sessions, SessionId(MAIN))
+    await waitFor('the MAIN window to open', () =>
+      runtime.client.sessions.binding(SessionId(MAIN))?.session.getSnapshot().openState === 'open')
+
+    const questions = [{ id: 'q1', question: 'Continue?', options: [{ label: 'yes' }, { label: 'no' }] }]
+    const captured: Array<{ sessionId: string; callId: string | undefined; timed: boolean }> = []
+    const resolvers = new Map<string, (answer: AskUserQuestionAnswer) => void>()
+    const registered = semantics.interaction.questions.onRequest((request) => {
+      captured.push({ sessionId: request.sessionId, callId: request.callId, timed: request.timed })
+      return new Promise((resolve, reject) => {
+        if (request.callId !== undefined) resolvers.set(request.callId, resolve)
+        // Mirror the real client: the delivery lifetime ends the attempt with
+        // the wire-preserved abort code when the Host closes the wait.
+        request.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('ask_user_question was aborted before the user answered'), {
+            name: 'UserQuestionError', code: 'ASK_ABORTED',
+          }))
+        }, { once: true })
+      })
+    })
+    assert.equal(registered, true, 'the forwarded user-questions waterfall is subscribed')
+
+    const service = host.ctx.get('userQuestions') as unknown as {
+      askTimed(
+        request: { questions: readonly unknown[]; agent: unknown; signal?: AbortSignal },
+        callId: unknown,
+        timeoutMs: number,
+      ): Promise<unknown>
+      attachWait(agent: unknown, callId: unknown, signal: AbortSignal): AsyncIterable<{ remainingMs: number }>
+    }
+
+    // A — an UNCLAIMED timed request reaches its Host deadline: the question
+    // stays durably answerable as `continued` and never cancels the Turn.
+    const callA = ToolCallId('m3b-call-a')
+    const pendingA = await service.askTimed({ questions, agent }, callA, 40)
+    assert.deepEqual(pendingA, { pending: true, callId: callA }, 'the Host returns the pending result, not an error')
+    await waitFor('the captured live request', () => captured.length >= 1)
+    assert.deepEqual(captured[0], { sessionId: MAIN, callId: 'm3b-call-a', timed: true },
+      'the live request carries the derived Session identity, call identity and timed flag')
+
+    // A timed-out call is no longer answerable through the FOREGROUND path:
+    // the same semantic call is not "continued" without the durable tool
+    // events that produce the projection row, so the wire answers truthfully
+    // instead of inventing a queue.
+    assert.equal(
+      await semantics.interaction.questions.answerContinued(MAIN, 'm3b-call-a', { answers: [{ id: 'q1', selected: ['yes'] }] }),
+      'not-continued',
+      'the late-answer boolean maps truthfully when the call is not durably continued',
+    )
+
+    // B — a CLAIMED timed request: the first attachWait frame carries the
+    // Host-computed remaining duration and the foreground answer settles it.
+    const callB = ToolCallId('m3b-call-b')
+    const askB = service.askTimed({ questions, agent }, callB, 5_000)
+    await waitFor('the second captured request', () => captured.length >= 2)
+    const claim = await semantics.interaction.questions.claimTimedWait(MAIN, 'm3b-call-b')
+    assert.ok(claim !== undefined, 'a live timed wait yields a claim')
+    assert.ok(claim.remainingMs > 0 && claim.remainingMs <= 5_000, `the first frame seeds the Host remaining duration: ${String(claim.remainingMs)}`)
+    resolvers.get('m3b-call-b')?.({ answers: [{ id: 'q1', selected: ['no'] }] })
+    const answered = await askB
+    assert.deepEqual(answered, { answers: [{ id: 'q1', selected: ['no'] }] }, 'the foreground answer reaches the Host')
+    claim.release()
+    await claim.ended
+    assert.equal(semantics.interaction.setApprovalPolicy(MAIN, 'ask'), false,
+      'the Remote approval-policy write fails closed (no public rc.2 carrier)')
+  } finally {
+    semantics.dispose()
+    await runtime.dispose()
+  }
+})
+
+test('P12: the M3 composition REUSES the existing userQuestions service (never a second mount)', async (t) => {
+  // `@deepseek-ai/dsh-base` already mounts `id: user-questions ->
+  // @deepseek-ai/dsh-user-questions`, and this bundle layers on top of that
+  // base without disabling it. The M3 additive closure therefore must not
+  // mount a second service: the Host's stable Typert binding has to be the
+  // very same one after the composition (docs/m3-entry-contract.md §2.4.1).
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  const before = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote
+  assert.ok(before !== undefined, 'the fixture Host already provides the rc.2 userQuestions service')
+
+  const { runtime, semantics } = await compose(host)
+  try {
+    const after = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote
+    assert.equal(after, before, 'the composition reuses the existing service binding')
+    // The Remote Client still reaches the namespace that binding publishes.
+    assert.equal(typeof semantics.interaction.questions.onRequest, 'function')
+  } finally {
+    semantics.dispose()
+    await runtime.dispose()
+  }
+  const afterDispose = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote
+  assert.equal(afterDispose, before, 'disposal leaves the Host service untouched')
+})
+
+test('P13: the Remote question subscription follows a REAL reconnect', async (t) => {
+  // The contract the adapter claims must hold against the real Client, not only
+  // a fake: a generation change notifies the consumer (which re-reads the
+  // fenced snapshot), and authority is restored on the new generation.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+  const { runtime, semantics } = await compose(host)
+  const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+  await reference.ready
+
+  const first = runtime.client.connection.generation.getSnapshot()
+  assert.notEqual(first, undefined)
+  assert.notEqual(semantics.interaction.questions.snapshot(MAIN), undefined,
+    'authority to present while connected')
+
+  let notifications = 0
+  const off = semantics.interaction.questions.subscribe(MAIN, () => { notifications += 1 })
+  try {
+    assert.ok(off !== undefined, 'the real Client provides the observation seam')
+    runtime.client.connection.reconnect()
+    await waitFor('a different connection generation', () =>
+      runtime.client.connection.generation.getSnapshot()?.id !== first?.id)
+    await waitFor('the generation change to notify the question surface', () => notifications >= 1)
+    // Authority comes back on the new generation (the fenced read answers
+    // again), so the consumer's reconcile can re-derive reachability.
+    await waitFor('authority on the new generation', () =>
+      semantics.interaction.questions.snapshot(MAIN) !== undefined)
+  } finally {
+    off?.()
+    reference.release()
+    await runtime.dispose()
+  }
+})
+
+test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', async (t) => {
+  // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
+  // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
+  // with the composition-owned carrier fetch. The earlier suites prove the
+  // adapters against structural fakes; this proves the ASSEMBLY over the real
+  // wire.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { configPlane: true })
+  await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+  seedTurn(host, MAIN, {
+    turn: 1,
+    prompt: 'archive me',
+    response: 'archived answer',
+    usage: { inputTokens: 7, outputTokens: 3 },
+  })
+  // Deliberately NOT `compose(...)`: that would also build an M3A semantic
+  // bundle over this same Client graph, and the closure evidence must carry
+  // exactly ONE M3 wiring — the one `createRemoteBackendRuntime` assembles.
+  const runtime = await composeRuntime(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+  await reference.ready
+  try {
+    // 1. This assembly is the Remote backend. The exact advertised set (and its
+    // equality with the whole port vocabulary) is locked in
+    // `test/remote-backend.test.ts`; repeating it here against the same
+    // constant the backend is built from would assert nothing.
+    assert.equal(assembled.backend.kind, 'remote')
+
+    // 2. Config over the REAL generated settings Remote with the
+    // production-equivalent config plane mounted: the mirror reached the
+    // official settings namespace (the namespace-loss P1 fixed in the port),
+    // committed its first describe, and a REAL write is followed by the
+    // authoritative Host read.
+    assert.equal(assembled.backend.config.configReadiness(), 'ready', 'the first real describe committed')
+    const tuiSettings = assembled.backend.config.tuiSettings
+    assert.ok(tuiSettings !== undefined, 'the settings section is served over the wire')
+    const before = tuiSettings.get()
+    const nextTheme = before.theme === 'dark' ? 'light' : 'dark'
+    await tuiSettings.replace({ ...before, theme: nextTheme })
+    assert.equal(tuiSettings.get().theme, nextTheme, 'the authoritative re-read sees the Host mutation')
+    assert.equal(assembled.backend.config.configReadiness(), 'ready', 'and the mirror stays current')
+    await tuiSettings.replace(before)
+    assert.equal(tuiSettings.get().theme, before.theme, 'and the revert is authoritative too')
+
+    // 3. Archive over the REAL Host route: the composition carrier fetch reaches
+    // `/api/session.export` for real (never a fake fetch), and the returned ZIP
+    // is unpacked here to prove the whole chain carried the ACTUAL durable log
+    // of this AgentLoop-backed Session: seeded prompt and answer, in the root
+    // entry the upstream exporter names. The fail-closed classification (absent
+    // Session → `none`, missing services → `unavailable`, any other failure →
+    // thrown) is locked separately in `test/remote-session-archive.test.ts`.
+    const opened = await assembled.backend.sessionArchive.open(MAIN)
+    assert.ok(opened.kind === 'ready', `the Host serves a real archive (got ${opened.kind})`)
+    assert.equal(opened.artifact.filename, sessionLogZipFilename(MAIN), 'the upstream archive filename')
+    const chunks: Uint8Array[] = []
+    const reader = opened.artifact.stream.getReader()
+    for (;;) {
+      const next = await reader.read()
+      if (next.done === true) break
+      chunks.push(next.value)
+    }
+    const archiveBytes = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0))
+    let archiveOffset = 0
+    for (const chunk of chunks) {
+      archiveBytes.set(chunk, archiveOffset)
+      archiveOffset += chunk.byteLength
+    }
+    const archiveEntries = unzipEntries(archiveBytes)
+    const rootLog = archiveEntries.get(SESSION_LOG_FILENAME)
+    assert.ok(rootLog !== undefined,
+      `the archive carries the root session log (entries: ${[...archiveEntries.keys()].join(', ') || 'none'})`)
+    const logText = new TextDecoder().decode(rootLog)
+    assert.match(logText, /archive me/u, 'the ZIP carries the seeded prompt')
+    assert.match(logText, /archived answer/u, 'the ZIP carries the seeded answer')
+
+    // 4. The ONE M3 wiring here is the assembly's own: it serves the adapter
+    // INSTANCE it built, never a second one constructed inside
+    // `createRemoteBackend` (the pass-through could be replaced by a rebuilt
+    // adapter).
+    assert.equal(
+      assembled.backend.interaction,
+      assembled.semantics.interaction,
+      'the backend serves the assembly\'s own interaction adapter',
+    )
+
+    // 5. Reverse disposal: the adapters go first, then the Client/Context, and
+    // the borrowed Client stays usable in between — the adapters own only their
+    // own state.
+    assembled.dispose()
+    assembled.dispose()
+    const survivor = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+    await survivor.ready
+    survivor.release()
+  } finally {
+    reference.release()
+    assembled.dispose()
+    await runtime.dispose()
+  }
+})
+
+test('P15: without a settings service the Remote config fails closed', async (t) => {
+  // The complementary contract, deliberately kept testable now that the config
+  // plane is opt-in: on a deployment whose profile composition carries no
+  // settings service the Remote configuration must never fabricate values and
+  // must never report a local success.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+  const runtime = await composeRuntime(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  try {
+    const config = assembled.backend.config
+    assert.equal(config.configReadiness(), 'unavailable')
+    const failure = (config as unknown as { lastRefreshFailure?: () => Error }).lastRefreshFailure?.()
+    assert.match(
+      String(failure?.message),
+      /settings service is absent/u,
+      'the Host diagnostic reaches the consumer instead of a fabricated value',
+    )
+    assert.equal(config.tuiSettings, undefined, 'no settings view is fabricated')
+    await assert.rejects(
+      () => config.permissions.setDefaultPreset('any-preset'),
+      /settings\.describe failed|has not been read yet|not current/u,
+      'a write against an unreadable Remote configuration is refused, never a local success',
+    )
+  } finally {
+    assembled.dispose()
+    await runtime.dispose()
+  }
+})

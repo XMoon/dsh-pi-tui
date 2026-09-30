@@ -19,8 +19,14 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Backend } from '../../runtime/backend.ts'
+import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
+import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
+import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
+import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
-import { createRemoteHostRuntime, mergeCause, type RemoteHostRuntime } from './host-runtime.ts'
+import { createRemoteHostRuntime, mergeCause, type InProcessHostCarrier, type RemoteHostRuntime } from './host-runtime.ts'
+import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ASemantics } from './m3a-semantics.ts'
 
 /**
  * Run one disposal step with per-step error isolation: the step's failures
@@ -108,6 +114,77 @@ export async function createExperimentalRemoteRuntime(
         }
         throw failure
       }
+    },
+  }
+}
+
+/** Compile-time proof that the ONE M3-1 Client runtime satisfies the Remote
+ *  ConfigPort's narrow source face (never called; referenced by the
+ *  official-contract gate). */
+export function remoteConfigRuntimeSourceOf(runtime: RemoteClientRuntime): RemoteConfigRuntimeSource {
+  return runtime
+}
+
+/** Inputs for the complete experimental Remote `Backend` assembly. */
+export interface RemoteBackendRuntimeOptions {
+  /** The ONE M3-1 Client runtime every adapter shares. */
+  readonly runtime: RemoteClientRuntime
+  /** The application-owned prompt serializer (the D2.2 writer dependency). */
+  readonly promptSerializer: RemotePromptSerializer
+  /** The composition-owned fetch the archive adapter addresses. */
+  readonly fetch: InProcessHostCarrier['fetch']
+}
+
+/** The complete experimental Remote `Backend` plus its disposal owner. */
+export interface RemoteBackendRuntime {
+  readonly backend: Backend
+  readonly semantics: RemoteM3ASemantics
+  /** Drop adapter-owned caches/subscriptions. Runs BEFORE the Client
+   *  Context disposal (`RemoteClientRuntime.dispose()`). Idempotent. */
+  dispose(): void
+}
+
+/**
+ * Assemble the complete experimental Remote `Backend` (M3-3B) from ONE M3-1
+ * Client runtime: the M3-3A semantic bundle (session/runtime/catalog/host-file
+ * + the M3-3B interaction and Plugin Manager/Job-observation adapters), the
+ * Remote ConfigPort mirror, and the Remote session archive. It is NOT a
+ * production cutover: normal startup still selects Direct.
+ */
+export async function createRemoteBackendRuntime(
+  options: RemoteBackendRuntimeOptions,
+): Promise<RemoteBackendRuntime> {
+  const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
+    promptSerializer: options.promptSerializer,
+  })
+  const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
+  const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
+  // §2.3/§4.1 config readiness barrier: the mirror's invalidation listeners
+  // are already installed (the port's constructor), the M3-1 Client runtime
+  // already awaited its own initial readiness (so a Connection generation
+  // exists), and THIS is the first read. Awaiting it here is what makes a
+  // freshly assembled Remote backend's settings/providers/permissions
+  // readable instead of permanently 'stale'.
+  //
+  // A transient failure must not prevent the backend from existing: the mirror
+  // RECORDS it (`lastRefreshFailure()`), `readiness()` stays 'stale', and the
+  // next invalidation / write pre-flight / explicit read retries. The
+  // consumer then shows a truthful unavailable state instead of fabricated
+  // values (docs/m3-entry-contract.md §9.1).
+  try {
+    await config.describe()
+  } catch {
+    // Recorded by `RemoteConfigPort.describe()`; construction continues.
+  }
+  let disposed = false
+  return {
+    backend: createRemoteBackend({ ...semantics, config, sessionArchive }),
+    semantics,
+    dispose(): void {
+      if (disposed) return
+      disposed = true
+      semantics.dispose()
+      config.dispose()
     },
   }
 }

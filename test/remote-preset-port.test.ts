@@ -109,6 +109,14 @@ test('resolve returns the concrete roster id and refuses an unknown one', async 
   await assert.rejects(harness.catalog.resolve('nope'), /not found/)
 })
 
+test('a roster with no Host default resolves to no id instead of inventing one', async () => {
+  const harness = presetHarness()
+  harness.setListResult({ ok: true, value: { presets: [{ id: 'minimal' }, { id: 'local' }] } })
+  assert.deepEqual(await harness.catalog.resolve(), {}, 'the default-less Host answers with no id')
+  assert.deepEqual(await harness.catalog.resolve('local'), { id: 'local' }, 'an explicit id still resolves')
+  assert.equal(harness.catalog.defaultId(), undefined, 'the synchronous projection stays absent too')
+})
+
 test('selectSessionPreset sends the exact official session and preset ids', async () => {
   const harness = presetHarness()
   const { outcome } = await harness.catalog.selectSessionPreset('session-a', 'minimal')

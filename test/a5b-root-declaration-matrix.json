@@ -1739,7 +1739,7 @@
         "action-tool-card.test.ts",
         "busy-enter.test.ts",
         "preset.test.ts",
-        "remote-m3a-assembly.test.ts"
+        "remote-backend.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",

@@ -32,6 +32,14 @@ afterEach(() => {
 })
 
 
+/** The minimal live-Agent surface the settings handler's scope reads need
+ *  (`sessionScopeFacts` validates currency, so the row requires a real one). */
+const LIVE_AGENT = {
+  session: { id: 'settings-scope-session', header: { cwd: '/ws' }, snapshotEvents: () => [] },
+  options: { provider: 'p', model: 'm' },
+  status: 'idle',
+}
+
 const ENTER = '\r'
 
 function fakeCommands(): { defs: Array<{ name: string; handler?: unknown }>; service: unknown } {
@@ -119,7 +127,7 @@ async function settle(harness: ReturnType<typeof makeHarness>, expectedWrites: n
   for (let i = 0; i < 4; i += 1) await Promise.resolve()
 }
 
-function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } = {}): {
+function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; liveAgent?: unknown } = {}): {
   runner: TuiCommandRunner
   app: TuiApp
   vt: VirtualTerminal
@@ -179,7 +187,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
     ctx,
     app,
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
-    ...sessionScopeFacts(() => undefined, () => 0),
+    ...sessionScopeFacts(() => options.liveAgent as never, () => 0),
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -194,7 +202,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -464,4 +472,60 @@ test('a fullscreen teardown suppresses the late allowlist settle repaint', async
   assert.equal(allowlistRow.currentValue, '1 route', 'the detached row still converges for bookkeeping')
   harness.app.setFullscreen(false)
   await harness.vt.waitForRender()
+})
+
+test('/settings announces a non-current config backend instead of presenting last-known values as current', async () => {
+  // §9.1: a backend whose config reads are not current must SAY so. The rows
+  // still show the last-known values (that is the documented disposition), so
+  // the panel carries the explicit non-current notice. ONE harness per test:
+  // the process allows a single live TuiApp.
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  ;(harness.runner.config as unknown as { configReadiness: () => string }).configReadiness = () => 'stale'
+  await openSettingsPanel(harness)
+  const notice = harness.notices.find(entry => /not current \(reconnecting\)/u.test(entry.message))
+  assert.ok(notice !== undefined, `the panel must announce the non-current backend:\n${harness.notices.map(n => n.message).join('\n')}`)
+  assert.equal(notice.kind, 'error')
+})
+
+test('/settings announces a disconnected config backend as unavailable', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  ;(harness.runner.config as unknown as { configReadiness: () => string }).configReadiness = () => 'unavailable'
+  await openSettingsPanel(harness)
+  assert.ok(
+    harness.notices.some(entry => /configuration backend is unavailable/u.test(entry.message)),
+    'a disconnected config backend is announced as unavailable',
+  )
+  // The harness has no settings document, so the rows show the panel's
+  // BUILT-IN defaults: the notice must not call those "last known" Host values.
+  assert.ok(
+    harness.notices.some(entry => /built-in defaults, not Host values/u.test(entry.message)),
+    'without a Host document the notice says so instead of claiming last-known values',
+  )
+})
+
+test('/settings stays silent when the config backend is current', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  assert.equal(harness.notices.filter(entry => /not current|unavailable/u.test(entry.message)).length, 0,
+    'a ready backend raises no false alarm (Direct is always ready)')
+})
+
+test('/settings omits the approval-policy row on a backend that cannot read or write it', async () => {
+  // §9.2/§10: the Remote backend cannot read or write the independent session
+  // approval override, so the row must be OMITTED. Rendering the consumer's own
+  // `ask` default would present an unavailable policy as a real one.
+  // A live session scope is required for the row to even be considered.
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { liveAgent: LIVE_AGENT })
+  ;(harness.runner.config.permissions as unknown as { approvalOverrideAvailable: () => boolean })
+    .approvalOverrideAvailable = () => false
+  await openSettingsPanel(harness)
+  const ids = (harness.settingsItems ?? []).map(item => item.id)
+  assert.ok(!ids.includes('approval'), `the approval row must be omitted:\n${ids.join(', ')}`)
+})
+
+test('/settings keeps the approval-policy row where the capability exists', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { liveAgent: LIVE_AGENT })
+  await openSettingsPanel(harness)
+  const ids = (harness.settingsItems ?? []).map(item => item.id)
+  assert.ok(ids.includes('approval'), `the approval row must stay on a capable backend:\n${ids.join(', ')}`)
 })

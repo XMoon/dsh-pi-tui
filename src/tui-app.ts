@@ -140,7 +140,7 @@ import { CompactTextPreview } from './compact-text-preview.ts'
 import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
-import { QuestionFlow } from './question.ts'
+import { QuestionFlow, type QuestionFlowDraft } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
@@ -2539,6 +2539,24 @@ export interface TuiQuestionAnswer {
   custom?: string
 }
 
+/** Caller-owned presentation status of one live Question flow (M3-3B timed
+ * lifecycle): a mutable status line plus the real-answer-mutation hook the
+ * countdown freeze observes. The flow never derives either from a guess. */
+export interface TuiQuestionStatus {
+  /** Status line rendered above the tabs; `undefined` renders none. */
+  text?: string
+  /** Fired on the FIRST real answer mutation (selection / text / skip). */
+  onAnswerMutation?: () => void
+  /**
+   * Fired on EVERY real answer mutation with the flow's current local
+   * progress, so an owner that parks the flow (M3-3B continued Question) can
+   * keep the user's answers, free text and current question across reopen.
+   */
+  onDraftChange?: (draft: QuestionFlowDraft) => void
+  /** Local progress to seed the flow with (reopening the SAME parked call). */
+  initialDraft?: QuestionFlowDraft
+}
+
 /** Live state of one user-questions flow (the QuestionFlow seat). */
 interface QuestionState {
   flow: QuestionFlow
@@ -2555,6 +2573,8 @@ interface QuestionState {
   reject: (error: unknown) => void
   signal?: AbortSignal
   onAbort?: () => void
+  /** Caller-owned status line for this flow (timed claim / remaining time). */
+  status?: TuiQuestionStatus
   /** Latched by settle/cancel: every askQuestions promise settles exactly once. */
   settled?: boolean
 }
@@ -3567,6 +3587,13 @@ export class TuiApp {
   private activeApproval: PendingApproval | undefined
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
+  /**
+   * M3-3B final-answer enrichment: the authoritative settled answers of one
+   * timed `ask_user_question` call (the `userQuestions.settled` projection),
+   * keyed by the card's `callId`. A timed-out call's own tool result records
+   * the timeout, so the FINAL (possibly late) answers come from here.
+   */
+  private settledQuestionAnswers: ((callId: string) => readonly { id: string; selected: string[]; custom?: string }[] | undefined) | undefined
   /** The press-time question gesture (mouse parity): the release click
    * validates it before acting — a question advance / repaint between
    * press and release must never transfer the click. */
@@ -3673,6 +3700,13 @@ export class TuiApp {
 
   /** Whether any job/subagent is running/stopping. */
   private tasksActive = false
+  /**
+   * Parked human-required Question attention (M3-3B addendum §11): a hidden
+   * actionable Question must arm the Task Center trigger and keep the keyboard
+   * reopen path (`↓` Quick / `/tasks` Full) reachable even when no Job or
+   * Subagent is running. It is deliberately NOT part of the active-work count.
+   */
+  private questionAttentionCount = 0
   /** Independent Task Center counts; footer consumes this through status. */
   private taskSummary: TaskBrowserSummary = {
     runningAgents: 0,
@@ -15322,7 +15356,7 @@ export class TuiApp {
         // shows no summary at all (its error identity is the verdict), and
         // an unparseable result shows no preview either — the no-JSON
         // contract holds even for malformed text.
-        const summary = message.error === undefined ? askAnswersSummary(message.result) : undefined
+        const summary = message.error === undefined ? askAnswersSummary(this.questionAnswerText(message)) : undefined
         resultPreview = summary === undefined ? '' : ` — ${summary}`
       } else if (GOAL_TOOL_NAMES.has(message.name)) {
         // Same rule for the goal family: the folded preview summarizes the
@@ -15967,18 +16001,23 @@ export class TuiApp {
     // This branch precedes the empty-result early return so a cancelled flow
     // (which carries an error and an empty result) still renders its verdict.
     if (message.name === 'ask_user_question') {
-      if (message.error !== undefined) {
+      // M3-3B: the authoritative settled batch (a late answer) outranks the
+      // call's own recorded result, which for a timed-out call is the
+      // timeout payload rather than the answer.
+      const answerText = this.questionAnswerText(message)
+      const authoritative = answerText !== message.result
+      if (message.error !== undefined && !authoritative) {
         card.addChild(new Text(color.textDim(`${message.error.name}: ${message.error.code}`), 0, 0))
         return
       }
-      const summary = message.status === 'ok' ? askAnswersSummary(message.result) : undefined
+      const summary = message.status === 'ok' || authoritative ? askAnswersSummary(answerText) : undefined
       if (summary !== undefined) {
         card.addChild(new Text(color.textDim(summary), 0, 0))
         // The expanded card carries the actual answers, one line per
         // question (`● id → answer`; skipped questions dimmed) — the
         // count alone would leave the user unable to recall their choices
         // once the question flow closed.
-        const answerLines = askAnswersLines(message.result)
+        const answerLines = askAnswersLines(answerText)
         if (answerLines !== undefined) {
           for (const line of answerLines) {
             card.addChild(new Text(`  ${line.skipped ? color.textMuted(line.text) : color.textDim(line.text)}`, 0, 0))
@@ -16831,6 +16870,10 @@ export class TuiApp {
           childAgentTotalCount: this.taskSummary.totalAgents,
           failedTaskCount: this.taskSummary.failedAttention,
         } : {}),
+        // Human attention is NOT a runtime summary fact: it can be the only
+        // thing on screen (a Questions-only session has no TaskBrowserRuntime
+        // commit at all), so it is published unconditionally.
+        questionAttentionCount: this.questionAttentionCount,
         todoCount: this.todoItems.length,
       },
     )
@@ -17099,9 +17142,9 @@ export class TuiApp {
     // caller happens to pass here: the badge callback may legitimately
     // receive a subset (e.g. running-only) and length-based derivation
     // would corrupt the totals. setTasks/setAgents stay pure UI mirrors.
-    this.tasksActive = this.taskSummaryRich
+    this.tasksActive = this.questionAttentionCount > 0 || (this.taskSummaryRich
       ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
-      : tasks.length > 0 || this.dockAgents.length > 0
+      : tasks.length > 0 || this.dockAgents.length > 0)
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
@@ -17116,9 +17159,9 @@ export class TuiApp {
   setAgents(agents: readonly { id: string; label: string; activity: string }[]): void {
     this.dockAgents = agents
     // RICH mode: see the setTasks note — counts are commitSummary-owned.
-    this.tasksActive = this.taskSummaryRich
+    this.tasksActive = this.questionAttentionCount > 0 || (this.taskSummaryRich
       ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
-      : this.dockTasks.length > 0 || agents.length > 0
+      : this.dockTasks.length > 0 || agents.length > 0)
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.syncExtensionState()
@@ -17128,12 +17171,41 @@ export class TuiApp {
   setTaskSummary(summary: TaskBrowserSummary): void {
     this.taskSummary = { ...summary }
     this.taskSummaryRich = true
-    this.tasksActive = summary.runningJobs > 0 || summary.runningAgents > 0 || summary.failedAttention > 0
+    this.tasksActive = this.questionAttentionCount > 0
+      || summary.runningJobs > 0 || summary.runningAgents > 0 || summary.failedAttention > 0
     this.projectActivity()
     this.syncExtensionState()
   }
 
-  /** Whether active jobs/subagents or unacknowledged failures are available. */
+  /**
+   * Publish the number of PARKED actionable Questions (M3-3B addendum §11):
+   * hidden human attention alone must arm the Task Center trigger, so a
+   * Questions-only session can still reach its reopen path. A visible Question
+   * is not counted (it already owns the seat), and the count never joins the
+   * active-work totals.
+   */
+  setQuestionAttention(count: number): void {
+    const next = Math.max(0, count)
+    if (next === this.questionAttentionCount) return
+    this.questionAttentionCount = next
+    this.tasksActive = next > 0 || this.tasksActive
+    if (next === 0) {
+      // Dropping back to zero must not latch the trigger on: recompute from the
+      // work facts instead of keeping the previous value.
+      this.tasksActive = this.taskSummaryRich
+        ? this.taskSummary.runningJobs > 0 || this.taskSummary.runningAgents > 0 || this.taskSummary.failedAttention > 0
+        : this.dockTasks.length > 0 || this.dockAgents.length > 0
+    }
+    this.projectActivity()
+    this.syncExtensionState()
+    this.renderFooter()
+  }
+
+  /**
+   * Whether the Task Center has anything to show: active jobs/subagents,
+   * unacknowledged failures, or parked human-required Question attention (a
+   * Questions-only session must still reach its reopen path).
+   */
   isTasksActive(): boolean {
     return this.tasksActive
   }
@@ -19527,7 +19599,40 @@ export class TuiApp {
    * @param signal - optional abort; settles the flow rejected.
    * @returns the answers, in question order.
    */
-  askQuestions(questions: readonly TuiQuestion[], signal?: AbortSignal): Promise<TuiQuestionAnswer[]> {
+  /**
+   * Install the authoritative settled-answer lookup (M3-3B): the surface
+   * wires it to the `userQuestions` projection so a timed-out question's card
+   * shows what the user finally answered. `undefined` clears it (teardown).
+   */
+  setSettledQuestionAnswersLookup(
+    lookup: ((callId: string) => readonly { id: string; selected: string[]; custom?: string }[] | undefined) | undefined,
+  ): void {
+    this.settledQuestionAnswers = lookup
+  }
+
+  /**
+   * The result text a settled `ask_user_question` card should render: the
+   * authoritative projection batch when one exists, else the card's own
+   * recorded result. Presentation-only enrichment — persisted Session events
+   * are never rewritten.
+   */
+  private questionAnswerText(message: { readonly callId?: string; readonly result: string }): string {
+    if (message.callId === undefined || this.settledQuestionAnswers === undefined) return message.result
+    const answers = this.settledQuestionAnswers(message.callId)
+    // ONLY an absent settled entry falls back to the call's own recorded
+    // result. An EMPTY answer batch is a real rc.2 outcome (a late reply
+    // settled the question without a readable batch), so the settled entry is
+    // the authoritative fact and the card must not keep showing the timeout /
+    // pending payload it recorded earlier.
+    if (answers === undefined) return message.result
+    return JSON.stringify({ answers })
+  }
+
+  askQuestions(
+    questions: readonly TuiQuestion[],
+    signal?: AbortSignal,
+    status?: TuiQuestionStatus,
+  ): Promise<TuiQuestionAnswer[]> {
     // A disposed surface must never leave the caller hanging: settle
     // rejected immediately (M0 stale-generation contract — the runner's
     // questions provider may fire during exit teardown).
@@ -19553,12 +19658,17 @@ export class TuiApp {
           })),
           (answers) => this.settleQuestions(state, answers),
           () => this.settleQuestions(state, undefined),
+          status?.onAnswerMutation,
+          status?.onDraftChange,
+          status?.initialDraft,
         ),
         suspendedOverlays: new Set(),
         resolve,
         reject,
         signal,
+        ...status === undefined ? {} : { status },
       }
+      state.flow.setStatus(status)
       if (signal?.aborted === true) {
         reject(cancellationError('question flow aborted'))
         return
@@ -19655,6 +19765,11 @@ export class TuiApp {
     if (this.activeQuestions !== state || state.settled === true) return
     this.keybindings.cancelLeader()
     state.settled = true
+    // M3-3B park/reopen: the owner receives the flow's FINAL local progress
+    // before the seat is torn down, so parking a continued Question keeps the
+    // user's answers, free text and current question exactly as they left them
+    // (a mutation-time notification alone would miss tab/page moves).
+    state.status?.onDraftChange?.(state.flow.draftSnapshot())
     this.clearFullscreenPointerGestures()
     if (state.onAbort !== undefined && state.signal !== undefined) {
       state.signal.removeEventListener('abort', state.onAbort)
@@ -19666,6 +19781,7 @@ export class TuiApp {
       // between two queued flows (a restore would flash the editor row and
       // reveal overlays that must stay hidden under the question).
       next.suspendedOverlays = state.suspendedOverlays
+      next.flow.setStatus(next.status)
       state.suspendedOverlays = new Set()
       const frame = new QuestionFrame(next.flow, () => this.terminal.rows)
       next.frame = frame

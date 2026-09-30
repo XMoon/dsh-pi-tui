@@ -129,7 +129,7 @@ const modelItem: FooterItemDefinition = {
 const tasksItem: FooterItemDefinition = {
   id: 'tasks',
   label: 'Tasks',
-  description: 'The Task Center active/tracked badge with failure attention and the ↓ view hint.',
+  description: 'The Task Center active/tracked badge with failure attention, parked human Question attention and the ↓ view hint.',
   defaultZone: 'left',
   defaultImportance: 85,
   formats: ['badge'],
@@ -139,9 +139,14 @@ const tasksItem: FooterItemDefinition = {
     const tasks = snapshot.activity.taskCount
     const agents = snapshot.activity.childAgentCount
     const failed = snapshot.activity.failedTaskCount ?? 0
+    // Parked Questions are the ONE attention fact that can exist without any
+    // runtime task summary (a Questions-only session): their presence makes the
+    // badge rich even though the work totals are absent.
+    const human = snapshot.activity.questionAttentionCount ?? 0
     const rich = snapshot.activity.taskTotalCount !== undefined
       || snapshot.activity.childAgentTotalCount !== undefined
       || snapshot.activity.failedTaskCount !== undefined
+      || human > 0
     if (!rich) {
       if (tasks <= 0 && agents <= 0) return null
       // The old direct-setter contract remains available to non-runtime
@@ -162,7 +167,10 @@ const tasksItem: FooterItemDefinition = {
     }
     const totalJobs = snapshot.activity.taskTotalCount ?? tasks
     const totalAgents = snapshot.activity.childAgentTotalCount ?? agents
-    if (tasks <= 0 && agents <= 0 && failed <= 0) return null
+    // Parked Questions are human attention, not work: they render as their own
+    // `?N` figure and must be able to show the badge (and therefore the ↓ view
+    // hint) on their own — a Questions-only session still needs its reopen path.
+    if (tasks <= 0 && agents <= 0 && failed <= 0 && human <= 0) return null
     const hint = context.taskBrowserAvailable ? ' · ↓ view' : ''
     const tone = failed > 0 ? 'warning' : 'primary'
     if (density === 'compact') {
@@ -179,6 +187,7 @@ const tasksItem: FooterItemDefinition = {
       } else if (tasks > 0) {
         parts.push(`${tasks}/${totalJobs}j`)
       }
+      if (human > 0) parts.push(`?${human}`)
       if (context.taskBrowserAvailable) parts.push('↓')
       return { spans: [{ text: `[${parts.join('·')}]`, tone }] }
     }
@@ -196,6 +205,7 @@ const tasksItem: FooterItemDefinition = {
     } else if (tasks > 0) {
       parts.push(`● ${tasks}/${totalJobs} tracked jobs`)
     }
+    if (human > 0) parts.push(`? ${human} awaiting`)
     return { spans: [{ text: `[${parts.join(' · ')}${hint}]`, tone }] }
   },
 }

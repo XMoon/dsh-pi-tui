@@ -82,7 +82,13 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
@@ -113,6 +119,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
     },
     config: {
+      configReadiness: () => 'ready' as const,
       tuiSettings: undefined,
       footerCommandTrust: {
         userFooterMode: undefined,
@@ -131,6 +138,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         writeKeylessProfile: async () => ({ kind: 'written' as const }),
       },
       credentials: {
+        recordsSupported: () => true,
         available: () => true,
         setReference: async () => {},
         unsetReference: async () => {},
@@ -148,6 +156,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         cancel: async () => {},
       },
       permissions: {
+        approvalOverrideAvailable: () => true,
         presetNames: () => [],
         defaultPreset: () => undefined,
         setDefaultPreset: async () => {},

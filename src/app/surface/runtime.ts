@@ -118,9 +118,11 @@ import {
 } from '../../tasks-browser.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from '../../task-browser-runtime.ts'
 import type { TaskBrowserViewState, TaskPanelItem } from '../../task-panel.ts'
+import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from '../../task-center-attention.ts'
 import type { TaskBrowserHandle, WorkflowAction } from '../../tui-app.ts'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
+import { QuestionSurfaceController } from './question-controller.ts'
 import type { JobObservationPort, JobObservedSnapshot } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
@@ -841,6 +843,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let quickTaskState: TaskBrowserViewState | undefined
   let activeTaskBrowser: TaskBrowserHandle | undefined
   let activeTaskBrowserToken: object | undefined
+  /** The open browser's mode: Question attention rows are mode-dependent
+   *  (Quick lists parked ones only, Full lists every actionable one). */
+  let activeTaskBrowserMode: 'quick' | 'full' | undefined
+  /** The controller's attention subscription, released with the surface. */
+  let questionAttentionDisposal: (() => void) | undefined
   let activeJobViewerClose: (() => void) | undefined
   let jobsEventsDispose: (() => void) | undefined
   // The surface-owned CATALOG refresh GATE (coalescing): every production Task
@@ -863,6 +870,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // (which compaction bracket is live for the presentation), not Direct state.
   let routingSource: SurfaceEventRoutingSource<Event> | undefined
   let compactingId: string | undefined
+  /** The ONE Question surface owner (M3-3B timed/continued lifecycle). */
+  let questionController: QuestionSurfaceController | undefined
 
   /** The injected event-routing source; only reachable while attached. */
   const routing = (): SurfaceEventRoutingSource<Event> => {
@@ -1587,10 +1596,41 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // browser's select path always reflects the latest commit, and the repaint
   // targets ONLY the open handle. Every commit keeps the runner's `cleanedUp`
   // fence.
+  /**
+   * Task Center rows = Question attention ABOVE the work rows (§7.2/§9.3).
+   * Attention is composed from the controller's detached presentation model
+   * only — Task Center never reads the Question projection or the Inbox — and
+   * it is composed BEFORE the first frame so a work-only list never flashes.
+   */
+  /**
+   * Publish how many PARKED actionable Questions exist, so the footer's ↓
+   * trigger and the Quick Task Center stay reachable for a Questions-only
+   * session (addendum §11). A visible Question is not counted: it already owns
+   * the editor seat. This never touches the active-work counts.
+   */
+  const publishQuestionAttention = (): void => {
+    if (isCleanedUp()) return
+    const rows = questionController?.attentionRows() ?? []
+    mounted().setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
+  }
+
+  const taskPanelItemsWithAttention = (
+    rows: readonly TaskBrowserRow[],
+    mode: 'quick' | 'full',
+  ): TaskPanelItem[] => {
+    const attention = questionController?.attentionRows() ?? []
+    const questionItems = mode === 'quick' ? quickQuestionRows(attention) : fullQuestionRows(attention)
+    return [...questionItems, ...taskPanelItems(rows)]
+  }
+
   const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string): void => {
     if (isCleanedUp()) return
     taskBrowserRows = [...rows]
-    activeTaskBrowser?.setItems(taskPanelItems(rows), preferred)
+    if (activeTaskBrowserMode === undefined) {
+      // No browser open: only the select-path identity source is updated.
+      return
+    }
+    activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows, activeTaskBrowserMode), preferred)
   }
   const commitBadge = (running: ReadonlyArray<{ id: string; label: string }>): void => {
     if (isCleanedUp()) return
@@ -1829,6 +1869,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     }
     const selectRow = (value: string): 'close' | 'keep-open' => {
       if (isCleanedUp()) return 'close'
+      // A Question attention row is NOT a Job: it never enters the Job
+      // stop/detail paths. Enter reopens the SAME controller entry, and a row
+      // that went stale between rendering and selection (another client
+      // queued/settled the call) fails closed and keeps the browser usable.
+      const questionIdentity = questionIdentityOf(value)
+      if (questionIdentity !== undefined) {
+        const reopened = questionController?.reopen(questionIdentity.sessionId, questionIdentity.callId) ?? false
+        return reopened ? 'close' : 'keep-open'
+      }
       const row = taskBrowserRows.find(candidate => candidate.value === value)
       if (row === undefined) return source.rowSelectionDisposition(undefined, 'keep-open')
       if (row.kind === 'subagent') {
@@ -1935,6 +1984,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
       }
     }
+    // Read Question authority BEFORE composing the first frame: the attention
+    // rows Task Center shows must reflect the current projection, never only
+    // whatever the last routed event happened to reconcile (addendum §9.3).
+    questionController?.reconcile()
+    // Re-publish the parked count with the same fresh authority: the footer
+    // affordance must never lag a Question that is already known to be pending.
+    publishQuestionAttention()
     const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
     const initialQuery = restoreState?.searchQuery ?? ''
     const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
@@ -1942,7 +1998,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       ?? taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
       ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
     const handle = mounted().openTaskBrowser(
-      taskPanelItems(taskBrowserRows),
+      taskPanelItemsWithAttention(taskBrowserRows, viewMode),
       // Selection disposition decides whether the browser survives: a Job
       // detail keeps it MOUNTED underneath (the overlay stack hides and
       // restores the exact instance/state on Esc); a terminal navigation
@@ -1956,6 +2012,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         if (disposition === 'keep-open') return 'keep-open'
         activeTaskBrowser = undefined
         activeTaskBrowserToken = undefined
+        activeTaskBrowserMode = undefined
         resetTaskBrowserScope()
         return 'close'
       },
@@ -1964,6 +2021,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         const current = activeTaskBrowser?.getViewState?.()
         activeTaskBrowser = undefined
         activeTaskBrowserToken = undefined
+        activeTaskBrowserMode = undefined
         resetTaskBrowserScope()
         if (viewMode === 'full' && restoreState !== undefined) {
           // Esc from a promoted full view returns to Quick with the latest
@@ -2010,6 +2068,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           if (isCleanedUp()) return
           activeTaskBrowser = undefined
           activeTaskBrowserToken = undefined
+          activeTaskBrowserMode = undefined
           quickTaskState = state
           openTasksBrowser('full', state)
         },
@@ -2018,6 +2077,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       },
     )
     activeTaskBrowser = handle
+    activeTaskBrowserMode = viewMode
     // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
     // panel reports each attention row the first time it enters the
     // open viewport (first frame AND every later scroll/page/jump), and
@@ -2128,6 +2188,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     if (mainEvent) {
       const observed = source.observeMainEvent(session.id, event)
       settledViewChildId = observed.settledViewChildId
+      // M3-3B continued-question reachability: any activity on the current
+      // Session re-derives answerability from the authoritative projection
+      // (never from a local timer or the transcript). Mounting only happens
+      // when a continued call is actually awaiting an answer.
+      questionController?.reconcile()
       // The subagent tool/call refresh is a surface-owned presentation
       // decision; the runner only reports the intent (A4-7 P2).
       if (observed.refreshAgents) refreshAgents()
@@ -2690,9 +2755,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           // ONLY refresh channel for an OPEN browser. Keep it in step with
           // the registry, or a Job detail's hidden parent returns with stale
           // status (the subagents path commits through TaskBrowserRuntime).
-          if (taskRuntime === undefined && activeTaskBrowser !== undefined) {
+          if (taskRuntime === undefined && activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
             taskBrowserRows = buildTaskRows(snapshots, [])
-            activeTaskBrowser.setItems(taskPanelItems(taskBrowserRows))
+            activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
           }
         }
         // Events route by SEMANTICS, mirroring the TaskBrowserRuntime's own
@@ -2795,6 +2860,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       return taskHasChild(childId)
     },
     resetTasks() {
+      // A session switch drops the old session's Question attention with the
+      // rest of the Task Center state: its parked count must not arm the new
+      // session's footer trigger.
+      mounted().setQuestionAttention(0)
       // Invalidate the coalescing gate BEFORE any close/dispose that can
       // synchronously run a callback: the old session's slow traversal must
       // neither hold the new session's refresh back (`inFlight`) nor clear the
@@ -2815,6 +2884,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       activeTaskBrowser?.close()
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
+      activeTaskBrowserMode = undefined
       taskRuntime?.reset()
       // The dataset scope is session-scoped too: a switched-in session must
       // never inherit a Workflow-scoped browser (PR2 plan §10.8).
@@ -2848,25 +2918,38 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         })
       })
       // The interactive question answerer: ask_user_question tool calls
-      // become dialog flows; the tool receives the structured answers.
-      port.registerQuestionProvider(async (request) => {
-        const answers = await mounted().askQuestions(request.questions.map(question => ({
-          id: question.id,
-          question: question.question,
-          ...question.header !== undefined ? { header: question.header } : {},
-          ...question.detail !== undefined ? { detail: question.detail } : {},
-          ...question.options !== undefined ? { options: question.options } : {},
-          ...question.multiSelect !== undefined ? { multiSelect: question.multiSelect } : {},
-          ...question.intent !== undefined ? { intent: question.intent } : {},
-        })), request.signal)
-        return {
-          answers: answers.map(answer => ({
-            id: answer.id,
-            selected: answer.selected,
-            ...answer.custom !== undefined ? { custom: answer.custom } : {},
-          })),
-        }
+      // become dialog flows; the tool receives the structured answers. M3-3B
+      // layers the timed/continued lifecycle AROUND the same QuestionFlow
+      // (`QuestionSurfaceController`): the live request is the only mount
+      // path, the controller owns the claim/countdown, and a timed-out
+      // question stays reachable as a continued late answer.
+      // M3-3B: the settled `userQuestions` projection is the authoritative
+      // final answer of a timed-out call, so the transcript card renders what
+      // the user finally answered instead of the timeout payload.
+      mounted().setSettledQuestionAnswersLookup((callId) => {
+        const sessionId = routingSource?.currentSessionId()
+        if (sessionId === undefined) return undefined
+        return port.questions.snapshot(sessionId)?.settled.find(entry => entry.callId === callId)?.answers
       })
+      const controller = new QuestionSurfaceController({
+        port: port.questions,
+        ask: (questions, signal, status) => mounted().askQuestions(questions, signal, status),
+        notify: (message, level) => { mounted().notify(message, level) },
+        repaint: () => schedulePaint(),
+        currentSessionId: () => routingSource?.currentSessionId(),
+        diag: taskDiag(),
+      })
+      controller.attach()
+      questionController = controller
+      // Task Center attention invalidation is a PRESENTATION-only refresh: it
+      // never re-lists the Subagent catalog or touches the Job registry
+      // (addendum §9.4).
+      questionAttentionDisposal = controller.subscribeAttention(() => {
+        publishQuestionAttention()
+        if (isCleanedUp() || activeTaskBrowserMode === undefined) return
+        activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
+      })
+      publishQuestionAttention()
     },
     attachEventRouting(source) {
       routingSource = source
@@ -2903,6 +2986,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // the dead surface after teardown.
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
+      activeTaskBrowserMode = undefined
     },
     start(deps) {
       if (disposed) throw new Error('the surface is already disposed')
@@ -2936,6 +3020,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     dispose() {
       if (disposed) return
       disposed = true
+      questionAttentionDisposal?.()
+      questionAttentionDisposal = undefined
+      questionController?.dispose()
+      questionController = undefined
+      app?.setSettledQuestionAnswersLookup(undefined)
       // The mounted app is released first (its options captured the extension
       // host), then the extension surface resources in the runner's original
       // cleanup order.

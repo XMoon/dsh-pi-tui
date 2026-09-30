@@ -115,6 +115,12 @@ export interface ActivityStatus {
   readonly childAgentTotalCount?: number
   /** Unacknowledged failed/timed-out/lost job records. */
   readonly failedTaskCount?: number
+  /**
+   * Parked human-required Questions (M3-3B). Deliberately SEPARATE from the
+   * work counts: a Question is not a task, so it renders as its own `?N`
+   * attention figure and never inflates the active/tracked totals.
+   */
+  readonly questionAttentionCount?: number
   readonly todoCount: number
 }
 

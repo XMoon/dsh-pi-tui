@@ -39,6 +39,7 @@ import llmRemote from '@deepseek-ai/dsh-llm/remote'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
+import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import { mergeCause, type InProcessHostCarrier } from './host-runtime.ts'
 
@@ -261,6 +262,7 @@ const REMOTE_CONTRIBUTIONS = [
   permissionPresetsRemote,
   llmRemote,
   fileUploadsRemote,
+  userQuestionsRemote,
 ] as const
 
 /** The composed official Client runtime. Not exported from the package root. */
@@ -305,7 +307,7 @@ export async function disposeRemoteContributions(
 
 /**
  * Compose one fresh official Client `Context` over the Host carrier:
- * typert -> Connection (explicit transport) -> Gateway -> the ten explicit
+ * typert -> Connection (explicit transport) -> Gateway -> the eleven explicit
  * `/remote` contributions -> fileUpload -> Sessions -> Jobs, then wait for
  * initial readiness. On construction failure the partial composition unwinds
  * immediately; the loader shim is never active during plugin execution.

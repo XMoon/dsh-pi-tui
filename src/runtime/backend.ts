@@ -25,9 +25,11 @@ import type { HostCommandPort } from './host-command-port.ts'
 import type { PluginManagerPort } from './plugin-manager-port.ts'
 import type { JobObservationPort } from './job-observation-port.ts'
 
-/** The transport backends the TUI can run on. `direct` is the only one
- * today; the migration adds opt-in backends milestone by milestone. */
-export type BackendKind = 'direct'
+/** The transport backends the TUI can run on. `direct` remains the
+ * production/default; `remote` is the experimental M3-3B assembly that can be
+ * constructed and tested but is NOT selected by normal startup (M3-4 owns the
+ * main-application cutover). */
+export type BackendKind = 'direct' | 'remote'
 
 /** The semantic surface a backend serves: one narrow port per domain. */
 export interface Backend {
