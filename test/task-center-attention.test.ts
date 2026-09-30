@@ -4,6 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { projectTaskItems } from '../src/task-presentation.ts'
 import {
   QUESTION_ATTENTION_GROUP,
   fullQuestionRows,
@@ -84,4 +85,24 @@ test('labels are compact, single-physical-row, and never raw argument JSON', () 
 test('status ordering follows authority order', () => {
   const rows = [row('visible', { callId: 'a' }), row('parked', { callId: 'b' }), row('parked', { callId: 'c' })]
   assert.deepEqual(fullQuestionRows(rows).map(item => questionIdentityOf(item.value)?.callId), ['a', 'b', 'c'])
+})
+
+test('the Question row is a PRIMARY row, never a dimmed ancestor context', () => {
+  // In Quick's Active scope the generic rule marks every non-active row as
+  // context (`ancestorContext: true`) and the panel dims it — which for a
+  // pending Question is exactly backwards.
+  const rows = fullQuestionRows([row('parked')])
+  const projected = projectTaskItems(rows, { scope: 'active' })
+  assert.equal(projected.rows.length, 1)
+  assert.equal(projected.rows[0]!.ancestorContext, false, 'a parked Question is not an ancestor context row')
+  assert.equal(projected.rows[0]!.status, 'awaiting answer')
+
+  // The same holds when a running Job is present: the Question stays primary.
+  const withWork = projectTaskItems([
+    ...rows,
+    { value: 'job:1', label: 'bash · build', status: 'running', type: 'bash' },
+  ], { scope: 'active' })
+  const question = withWork.rows.find(entry => entry.value === rows[0]!.value)
+  assert.ok(question !== undefined, 'the Question row survives active work')
+  assert.equal(question.ancestorContext, false)
 })

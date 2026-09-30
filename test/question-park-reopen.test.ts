@@ -402,6 +402,8 @@ test('dispose releases the observation and every entry', async () => {
 
 test('an answer submitted through the reopened form is delivered exactly once', async () => {
   const h = harness()
+  const notifications: number[] = []
+  h.controller.subscribeAttention(() => { notifications.push(h.attention().length) })
   h.setSnapshot(continuedSurface())
   h.attach()
   h.controller.reopen(SESSION, CONTINUED_CALL)
@@ -410,6 +412,9 @@ test('an answer submitted through the reopened form is delivered exactly once', 
   await settleFrames()
   assert.deepEqual(h.answered, [{ sessionId: SESSION, callId: CONTINUED_CALL }])
   assert.deepEqual(h.attention(), [], 'the submitted interaction is spent')
+  // Chrome that mirrors the attention count must be invalidated by the removal
+  // itself, not by whatever projection refresh happens to come next.
+  assert.deepEqual(notifications, [1, 1, 0])
 })
 
 test('a refused answer batch parks the entry instead of looping', async () => {

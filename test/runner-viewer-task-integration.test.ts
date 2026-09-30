@@ -1703,7 +1703,7 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.ok(!idle.includes('Type your answer…'), `no Question panel was mounted:\n${idle}`)
   assert.ok(idle.includes('↓'), `a parked Question alone arms the ↓ trigger:\n${idle}`)
 
-  // The reopen surface is the Task Center. `/tasks` covers the SAME open path
+  // `/tasks` covers the same open path through the Full surface:
   // end-to-end: the row, the live removal, the visible-Question focus and the
   // re-park cycle. The literal `↓` keypress is not drivable in this headless
   // fixture (the runner mount has no focused editor seat, so the terminal key
@@ -1761,9 +1761,10 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   const reparked = vt.getViewport().join('\n')
   assert.ok(reparked.includes('Use staging or production?'), `the parked Question is reachable again:\n${reparked}`)
 
-  // The visible-Question `answering` row is covered by the pure
-  // attention-projection test: opening Full while the Question owns the seat
-  // leaves the Question's frame painting over the browser and holding input
-  // ownership (the existing response-ownership rule, which the addendum's §16.4
-  // explicitly forbids weakening just to make that row selectable).
+  // The literal `↓` keypress is NOT drivable here: the runner mount never puts
+  // an editor seat in the focused input path, so the terminal key is dropped
+  // before the keybinding predicate is consulted. What IS asserted is the
+  // production affordance (a parked Question alone advertises `↓`) plus the
+  // whole open -> select -> reopen path through the same surface entry the
+  // trigger calls.
 })

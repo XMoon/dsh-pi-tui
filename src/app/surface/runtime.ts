@@ -1988,6 +1988,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // rows Task Center shows must reflect the current projection, never only
     // whatever the last routed event happened to reconcile (addendum §9.3).
     questionController?.reconcile()
+    // Re-publish the parked count with the same fresh authority: the footer
+    // affordance must never lag a Question that is already known to be pending.
+    publishQuestionAttention()
     const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
     const initialQuery = restoreState?.searchQuery ?? ''
     const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined

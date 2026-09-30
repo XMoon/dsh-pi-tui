@@ -284,7 +284,13 @@ export function projectTaskItems(
     // the view exists to show, even when a search query did not match it
     // (a matching inactive branch pulls its running descendants in, PR
     // review M3).
-    const context = !isTaskItemActive(item) && ((options.scope === 'active') || !matchedIds.has(item.value))
+    // Human-required Question attention is a PRIMARY row, never an ancestor
+    // context row: it is deliberately not "active work", so the generic rule
+    // would dim the very thing the user must act on (Quick's Active scope has
+    // no work row above it to explain).
+    const context = item.source !== 'question'
+      && !isTaskItemActive(item)
+      && ((options.scope === 'active') || !matchedIds.has(item.value))
     visible.push({
       ...item,
       kind: item.kind ?? 'task',

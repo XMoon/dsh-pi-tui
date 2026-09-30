@@ -275,7 +275,7 @@ export class QuestionSurfaceController {
     // 2. another session's entries are not this surface's business any more.
     for (const [key, entry] of [...this.entries]) {
       if (entry.sessionId === sessionId) continue
-      this.removeEntry(key, undefined)
+      this.removeEntry(key, undefined, false)
       changed = true
     }
     const snapshot = this.deps.port.snapshot(sessionId)
@@ -297,11 +297,11 @@ export class QuestionSurfaceController {
     for (const [key, entry] of [...this.entries]) {
       if (answerable.has(key)) continue
       if (snapshot.queuedReplyCallIds.has(entry.callId)) {
-        this.removeEntry(key, 'A reply for this question is already queued; the local form was withdrawn.')
+        this.removeEntry(key, 'A reply for this question is already queued; the local form was withdrawn.', false)
       } else if (snapshot.settled.some(settled => settled.callId === entry.callId)) {
-        this.removeEntry(key, 'This question is no longer awaiting an answer.')
+        this.removeEntry(key, 'This question is no longer awaiting an answer.', false)
       } else {
-        this.removeEntry(key, undefined)
+        this.removeEntry(key, undefined, false)
       }
       changed = true
     }
@@ -410,9 +410,17 @@ export class QuestionSurfaceController {
     this.notifyAttention()
   }
 
-  /** Delete one entry (authority ended it, or the surface is done with it) and
-   *  abort the form it owned. */
-  private removeEntry(key: string, notice: string | undefined): void {
+  /**
+   * Delete one entry (authority ended it, the answer was delivered, or the
+   * surface is done with it) and abort the form it owned.
+   *
+   * `notify` is false only while {@link reconcile} is batching a whole pass into
+   * ONE invalidation; every standalone removal (an accepted late answer, a
+   * REPLY_QUEUED outcome) invalidates immediately, so chrome that mirrors the
+   * attention count (the footer's Task Center affordance) can never show a
+   * Question that is already gone.
+   */
+  private removeEntry(key: string, notice: string | undefined, notify = true): void {
     const entry = this.entries.get(key)
     if (entry === undefined) return
     this.entries.delete(key)
@@ -420,6 +428,7 @@ export class QuestionSurfaceController {
     entry.mounted = undefined
     mounted?.abort()
     if (notice !== undefined && !this.disposed) this.deps.notify(notice, 'info')
+    if (notify) this.notifyAttention()
   }
 
   /** Ensure an entry exists (parked) for one answerable call. */
