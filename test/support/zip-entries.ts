@@ -42,6 +42,11 @@ export function unzipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
     const localExtraLength = view.getUint16(localOffset + 28, true)
     const dataStart = localOffset + 30 + localNameLength + localExtraLength
     const data = bytes.subarray(dataStart, dataStart + compressedSize)
+    // The upstream session-log exporter deflates every entry. Anything else is
+    // an archive this reader cannot interpret, and treating it as DEFLATE would
+    // inflate garbage into a confusing assertion failure further downstream.
+    assert.ok(method === 0 || method === 8,
+      `unsupported ZIP compression method ${method} for entry "${name}"`)
     entries.set(name, method === 0 ? data : inflateRawSync(data))
     cursor += 46 + nameLength + extraLength + commentLength
   }
