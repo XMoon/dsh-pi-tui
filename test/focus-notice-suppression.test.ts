@@ -16,8 +16,8 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { projectFocus } from '../src/focus-activity.ts'
-import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { projectFocus, type FocusProjectedBlock } from '../src/focus-activity.ts'
+import { TranscriptFolder, type TurnActivity, type TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/display-preset.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -33,6 +33,17 @@ afterEach(() => {
 
 const TURN = 1
 const noActivities = new Map()
+
+/** One live turn activity so the collapsed projection materializes an actual
+ * Thought block (the positional assertions below need the real block order,
+ * not only the emitted rows). */
+function liveActivity(turn = TURN): TurnActivity {
+  return {
+    turn, startedAt: 1000, endedAt: 0, completed: false,
+    think: { text: 'work reasoning', running: true },
+    tools: new Map(), toolCalls: 0, assistantMessages: 0, revision: 0,
+  }
+}
 
 const user = (text: string): TranscriptMessage => ({ kind: 'user', turn: TURN, text })
 const steer = (text: string): TranscriptMessage => ({ kind: 'user', turn: TURN, text, steer: true })
@@ -70,6 +81,26 @@ function expanded(messages: readonly TranscriptMessage[]): TranscriptMessage[] {
   return flatRows(projectFocus(messages, noActivities, new Set([TURN]), true))
 }
 
+/** The BLOCK-order signature of one collapsed projection with a live Thought:
+ * each entry is the message row's label (falling back to its kind), or
+ * `'<Thought>'` for the activity block. This is what locks the pre/post-
+ * Thought POSITION semantics. */
+function collapsedBlockOrder(
+  messages: readonly TranscriptMessage[],
+  activity: TurnActivity = liveActivity(),
+): string[] {
+  const blocks = projectFocus(messages, new Map([[TURN, activity]]), new Set(), true)
+  const out: string[] = []
+  for (const block of blocks) {
+    if (block.kind === 'activity') out.push('<Thought>')
+    else if (block.kind === 'message') {
+      const message = block.message as TranscriptMessage & { label?: string }
+      out.push(message.label ?? message.kind)
+    } else out.push('<work>')
+  }
+  return out
+}
+
 // --- F1: busy tool-jobs Notice renders AFTER the Thought ---------------------
 
 test('F1. a busy-turn tool-jobs notice is visible after the Thought and never a hidden Action candidate', () => {
@@ -78,15 +109,23 @@ test('F1. a busy-turn tool-jobs notice is visible after the Thought and never a 
   const collapsedRows = collapsed(messages)
   const noticeIndex = collapsedRows.indexOf(noticeRow)
   assert.ok(noticeIndex >= 0, 'the mid-turn notice is VISIBLE while collapsed')
-  const thoughtIndex = collapsedRows.findIndex(row => row.kind === 'thinking')
-  // The notice renders after the Thought (its position within the visible
-  // pre/post rows), never hoisted before it as causal input.
-  assert.ok(thoughtIndex < 0 || noticeIndex > collapsedRows.indexOf(user('go')),
-    'the notice renders after the opening causal input')
-  const blocks = projectFocus(messages, noActivities, new Set(), true)
-  const actionBlock = blocks.find(block => block.kind === 'activity')
-  assert.ok(actionBlock === undefined || !('action' in actionBlock) || actionBlock.action?.message !== noticeRow,
-    'a visible notice never contaminates the Thought Action candidate set')
+  // The BLOCK order locks the position: the opening user, then the Thought,
+  // then the post-Thought notice.
+  assert.deepEqual(
+    collapsedBlockOrder(messages),
+    ['user', '<Thought>', 'Background job'],
+    'collapsed Focus renders User -> Thought -> Notice',
+  )
+  // With a LIVE activity the Thought block exists, and its Action winner is
+  // selected from the hidden rows only: the latest hidden tool evidence,
+  // never the now-visible post-Thought notice.
+  const lastToolRow = messages[messages.length - 2]!
+  assert.equal(lastToolRow.kind, 'tool', 'fixture: a tool row is the latest hidden evidence')
+  const liveBlocks = projectFocus(messages, new Map([[TURN, liveActivity()]]), new Set(), true)
+  const actionBlock = liveBlocks.find(block => block.kind === 'activity')
+  assert.ok(actionBlock !== undefined, 'fixture: the live activity materializes a Thought block')
+  assert.equal(actionBlock?.action?.message, lastToolRow,
+    'the Action winner is the hidden tool evidence, never the visible notice')
 
   const expandedRows = expanded(messages)
   assert.deepEqual(expandedRows, messages, 'expanded Focus restores the exact raw chronology')
@@ -106,21 +145,31 @@ test('F2. a busy-turn subagent-settled and future-producer notice render by form
 
 // --- F3: opening Notice stays BEFORE the Thought -----------------------------
 
-test('F3. a leading wakeup notice stays visible above the Working row', () => {
+test('F3. a leading wakeup notice stays visible BEFORE the Thought', () => {
   const noticeRow = notice('Background job', 'woke the agent', 'tool-jobs')
   const messages = [noticeRow, thinking('why I resumed'), tool(), assistant('final')]
   const rows = collapsed(messages)
   assert.ok(rows.includes(noticeRow), 'the opening foundation notice stays surfaced')
-  assert.equal(rows[0], noticeRow, 'it renders before the Thought')
+  // The BLOCK order locks the pre-Thought position of the opening notice.
+  assert.deepEqual(
+    collapsedBlockOrder(messages),
+    ['Background job', '<Thought>'],
+    'an opening notice renders before the Thought',
+  )
 })
 
-test('F3b. a notice inside the opening foundation burst stays visible', () => {
+test('F3b. a notice inside the opening foundation burst stays visible before the Thought', () => {
   const ambientRow = ambient('AGENTS.md')
   const noticeRow = notice('Background job', 'woke the agent', 'tool-jobs')
   const thinkingRow = thinking('process')
   const messages = [ambientRow, noticeRow, thinkingRow]
   const rows = collapsed(messages)
   assert.ok(rows.includes(ambientRow) && rows.includes(noticeRow), 'opening foundation rows survive')
+  assert.deepEqual(
+    collapsedBlockOrder(messages),
+    ['AGENTS.md', 'Background job', '<Thought>'],
+    'the whole opening foundation burst precedes the Thought',
+  )
 })
 
 // --- F4: mid-turn relay stays visible (unchanged) ----------------------------
@@ -142,6 +191,12 @@ test('F5. a notice between Process regions renders after the Thought; expanded r
   const collapsedRows = collapsed(messages)
   assert.ok(collapsedRows.includes(noticeRow), 'the between-regions notice renders a standalone visible row while collapsed')
   assert.equal(collapsedRows.filter(row => row.kind === 'user').length, 1, 'the causal opening user row still renders')
+  // The BLOCK order: user before the Thought, notice after it.
+  assert.deepEqual(
+    collapsedBlockOrder(messages),
+    ['user', '<Thought>', 'Background job'],
+    'the between-regions notice renders after the Thought',
+  )
 
   const expandedRows = expanded(messages)
   const beforeIndex = expandedRows.indexOf(firstProcess)
@@ -168,10 +223,15 @@ test('F7. the notice disposition never moves or swallows a user/steer row', () =
 test('F8. a turn split by a turn-less row keeps the consecutive-run grouping (a notice starting its own run is opening foundation)', () => {
   // A turn-less entry SPLITS turn 1 into two runs. The notice starts the second
   // run, so its own lead boundary is the run start and the projection renders
-  // it as that run's opening foundation.
+  // it as that run's opening foundation — BEFORE that run's Thought.
   const noticeRow = notice('Background job', 'after the split', 'tool-jobs')
   const messages = [user('opening'), thinking('before'), summary('… older'), noticeRow, thinking('after')]
   assert.ok(collapsed(messages).includes(noticeRow), 'the projection renders the notice in its own run')
+  assert.deepEqual(
+    collapsedBlockOrder(messages),
+    ['user', '<Thought>', 'summary', 'Background job', '<Thought>'],
+    'the split-run notice opens its own run BEFORE that run\'s Thought (the turn-less summary stays standalone)',
+  )
 })
 
 // --- F6 + F9/F10: real-TUI search / Compact / Full controls -------------------
@@ -237,4 +297,28 @@ test('F9. a Compact notice stays a standalone row (this disposition is Focus-onl
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('NOTICE_SUMMARY'), `Compact keeps the notice standalone:\n${view}`)
+})
+
+test('F10. a Full notice keeps the raw chronology (no disposition applies)', async () => {
+  const { vt, app } = startApp('full')
+  const { folder, noticeRow } = busyTurnWithNoticeFixture()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('NOTICE_SUMMARY'), `Full keeps the notice visible:\n${view}`)
+  // Full is the identity projection: the folder folds to
+  // user -> read -> notice -> read, and the notice's rendered position sits
+  // between its raw tool neighbors (after the first read card, before the
+  // second one) — never hoisted or reordered.
+  const raw = folder.messages()
+  assert.deepEqual(
+    raw.map(message => message.kind),
+    ['user', 'tool', 'system', 'tool'],
+    'fixture: the notice sits between two tool rows',
+  )
+  const firstReadAt = view.indexOf('Read')
+  const noticeAt = view.indexOf('NOTICE_SUMMARY')
+  const lastReadAt = view.lastIndexOf('Read')
+  assert.ok(firstReadAt >= 0 && noticeAt > firstReadAt && lastReadAt > noticeAt,
+    `the notice renders between its raw neighbors in Full:\n${view}`)
 })
