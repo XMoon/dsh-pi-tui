@@ -19,13 +19,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import ConfigEditor from '@deepseek-ai/dsh-config-editor'
 import SettingsForms from '@deepseek-ai/dsh-settings'
-import PermissionPresets from '@deepseek-ai/dsh-permission-presets'
+import { loadProfileDirectory, mountRootInclude } from '@deepseek-ai/dsh-app-boot'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -159,33 +160,107 @@ async function createHostFixture(
     if (options.configPlane === true) {
       // A minimal but REAL dsh profile directory: the official settings service
       // reads the profile manifest + its patch file, so the plane needs both.
-      writeFileSync(join(workRoot, 'package.json'), JSON.stringify({
+      // A real dsh layout: the PROFILE directory holds the manifest + patch,
+      // while `home` is its parent (a home-layer patch file must not shadow the
+      // profile one, or the official editor refuses the write as overridden).
+      const profileDir = join(workRoot, 'profile')
+      mkdirSync(profileDir, { recursive: true })
+      const profilePatchPath = join(profileDir, 'cordis.patch.yml')
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
         name: 'dsh-m3a-profile',
         private: true,
-        dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
+        dsh: { profile: { bundles: ['m3b-tui-bundle'], patch: 'cordis.patch.yml' } },
       }, null, 2))
-      writeFileSync(join(workRoot, 'cordis.patch.yml'), [
-        '# The ONE Loader entry this fixture profile declares: the official preset',
-        '# registry, whose Config schema is the settings section the Remote config',
-        '# success leg writes through.',
-        '- id: agent-preset-registry',
-        "  name: '@deepseek-ai/dsh-agent-preset-registry'",
-        '  config:',
-        `    default: ${PRESET}`,
+      // The row's id IS the settings namespace the Remote config port writes:
+      // `tui-app`. The row plugin is a stub — mounting the real TUI here would register
+      // this repository's own commands and surface inside the fixture — but its
+      // Config IS the product schema (`src/tui-config.ts`), so the section's
+      // fields, defaults and volatile markers are the shipped ones and the
+      // Remote config path is exercised against the real shape.
+      const rowModulePath = join(workRoot, 'm3b-tui-settings-row.mjs')
+      writeFileSync(rowModulePath, [
+        `import { Config } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/tui-config.ts')).href)}`,
+        "export const name = 'm3b-tui-settings-row'",
+        'export { Config }',
+        'export function apply() {}',
         '',
       ].join('\n'))
+      // The production LAYOUT: a bundle declares the row and its base config,
+      // while the profile patch carries only the user's own change. Both halves
+      // matter — the official editor compares the effective (layer + document)
+      // configuration against the live entry, so a row that exists only in the
+      // profile patch can never be written.
+      const bundleDir = join(workRoot, 'bundle')
+      mkdirSync(bundleDir, { recursive: true })
+      writeFileSync(join(bundleDir, 'package.json'), JSON.stringify({
+        name: 'm3b-tui-bundle',
+        version: '0.0.0',
+        private: true,
+        dsh: { bundle: { patch: ['./cordis.patch.yml'] } },
+      }, null, 2))
+      // Bundle patches use the include's `insert` dialect: only an insertion
+      // patch can materialize a row, a flat row list is inert.
+      writeFileSync(join(bundleDir, 'cordis.patch.yml'), [
+        '- insert:',
+        '    - id: tui-app',
+        `      name: ${JSON.stringify(rowModulePath)}`,
+        '      config:',
+        "        sessionId: ''",
+        '',
+      ].join('\n'))
+      // A profile resolves its bundles from its OWN node_modules, exactly what
+      // `dsh plugin --profile <p> install` creates.
+      const linkedScope = join(profileDir, 'node_modules')
+      mkdirSync(linkedScope, { recursive: true })
+      symlinkSync(bundleDir, join(linkedScope, 'm3b-tui-bundle'), 'dir')
+      writeFileSync(profilePatchPath, '[]\n')
+
       ctx.provide('profileContext', {
-        dir: workRoot,
-        patchPath: join(workRoot, 'cordis.patch.yml'),
-        // The REPOSITORY root: the Loader resolves the entry by package name
-        // from its node_modules, exactly like a real profile install anchor.
+        // The COMPLETE production contract: the official write flow reads more
+        // than `dir`/`patchPath` (it also resolves the home-layer patch file and
+        // the launch overlays), so a partial context fails deep inside the write.
+        name: 'm3a-smoke',
+        dir: profileDir,
+        patchPath: profilePatchPath,
+        // The REPOSITORY root: the Loader resolves the row by package name from
+        // its node_modules, exactly like a real profile install anchor.
         installAnchor: process.cwd(),
+        cwd: workRoot,
+        home: workRoot,
+        startedBundles: [],
+        overlays: [],
+        telemetryDisabledEnv: undefined,
       } as never)
       await ctx.plugin(ConfigEditor)
       await ctx.plugin(SettingsForms)
-      // An official settings-OWNING plugin: its profile entry is what makes the
-      // `permission` namespace writable through the Remote config mirror.
-      await ctx.plugin(PermissionPresets)
+      // SECTIONS come from Loader-managed profile rows whose plugin declares a
+      // Config schema (a directly mounted plugin contributes nothing), and a
+      // section's ns is the row id. App boot's own root `Include` entry plus its
+      // apply path is exactly that shape, so the fixture uses them: the row id
+      // is the namespace the Remote config port writes.
+      const loadedProfile = loadProfileDirectory('dsh', profileDir, process.cwd(), { userLayer: false })
+      // RAW patch options (each may be an `insert` group): the include's own
+      // patch algorithm needs the insertion form to materialize a new row, so
+      // the composed/flattened view is NOT what a tree is built from.
+      const profilePatches = [
+        ...loadedProfile.layers.flatMap(layer => layer.patches),
+        ...loadedProfile.patches,
+      ]
+      await mountRootInclude(
+        ctx,
+        // App boot's root include reads the profile PATCH file and applies the
+        // composed layer rows to it — `patches` is how a bundle row reaches the
+        // tree, and only its `insert` dialect can materialize a new row.
+        profilePatchPath,
+        profilePatches,
+        // The profile's install anchor as a URL: the include subtree resolves
+        // row plugin names from here (a bare path does not resolve).
+        pathToFileURL(join(process.cwd(), 'package.json')).href,
+        'dsh',
+      )
+      // Wait for the root include's rows to settle before the settings service
+      // reads their schemas.
+      await (ctx.get('loader' as never) as unknown as { await: () => Promise<void> }).await()
     }
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
     await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3-3A smoke preset', plugins: [] })
@@ -604,25 +679,7 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
   }
 })
 
-test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
-  // Proven on the real graph: exact capability set; the config plane reaching
-  // `ready`; the archive returning a REAL `ready` with
-  // `dsh-session-m3a-main.zip` and readable bytes; backend/assembly interaction
-  // identity; reverse disposal. The absent deployment contract is its own
-  // passing regression (P15).
-  //
-  // Measured blocker for the last leg (write -> authoritative re-read): the
-  // official settings `describe()` returns an EMPTY section list here. Sections
-  // come from Loader entries whose plugins declare a Config schema; mounting a
-  // plugin directly (as this fixture does) contributes nothing, and a
-  // hand-written single patch entry did not register one either. The success
-  // leg therefore needs a PRODUCTION-SHAPED profile (a manifest whose bundles
-  // resolve the same official plugins a real dsh profile mounts, so their
-  // Config schemas become sections) — the smallest faithful way to reach a
-  // writable section, and the same shape the owner asked for with the `tui-app`
-  // entry.
-  skip: 'P1-B: needs a production-shaped fixture profile (Loader entries with Config schemas) before the write leg can target a section',
-}, async (t) => {
+test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
   // with the composition-owned carrier fetch. The earlier suites prove the
@@ -660,17 +717,15 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
     // committed its first describe, and a REAL write is followed by the
     // authoritative Host read.
     assert.equal(assembled.backend.config.configReadiness(), 'ready', 'the first real describe committed')
-    const permissions = assembled.backend.config.permissions
-    const presets = permissions.presetNames()
-    assert.ok(presets.length > 0, 'the official permission-preset catalog is served over the wire')
-    const beforeSelection = permissions.defaultPreset()
-    const targetPreset = presets[presets.length - 1]!
-    await permissions.setDefaultPreset(targetPreset)
-    assert.equal(permissions.defaultPreset(), targetPreset, 'the authoritative re-read sees the Host mutation')
+    const tuiSettings = assembled.backend.config.tuiSettings
+    assert.ok(tuiSettings !== undefined, 'the settings section is served over the wire')
+    const before = tuiSettings.get()
+    const nextTheme = before.theme === 'dark' ? 'light' : 'dark'
+    await tuiSettings.replace({ ...before, theme: nextTheme })
+    assert.equal(tuiSettings.get().theme, nextTheme, 'the authoritative re-read sees the Host mutation')
     assert.equal(assembled.backend.config.configReadiness(), 'ready', 'and the mirror stays current')
-    if (beforeSelection !== undefined && beforeSelection !== targetPreset) {
-      await permissions.setDefaultPreset(beforeSelection)
-    }
+    await tuiSettings.replace(before)
+    assert.equal(tuiSettings.get().theme, before.theme, 'and the revert is authoritative too')
 
     // 3. Archive over the REAL Host route: the composition carrier fetch
     // reaches `/api/session.export` for real (not a fake fetch), so the outcome
