@@ -45,12 +45,19 @@ import { selectApplicationRuntime } from '../src/app/bootstrap.ts'
 import type { SelectedApplicationRuntime } from '../src/app/application-runtime.ts'
 
 /** A minimal Direct application runtime double: identity probes for the
- *  backend/owners/retirement the selected core must carry EXACTLY. */
+ *  backend/owners/retirement the selected core must carry EXACTLY, with
+ *  access observation so a Remote selection can prove it read nothing. */
 function directDouble() {
   const backend = { kind: 'direct', sessionLifecycle: {} }
   const owners = { fromHandle: () => undefined }
   const retirement = { retire: async () => ({ failures: [], durabilityFailure: undefined }) }
-  return { backend, owners, retirement } as never
+  let reads = 0
+  const observed = {
+    get backend() { reads += 1; return backend },
+    get owners() { reads += 1; return owners },
+    get retirement() { reads += 1; return retirement },
+  }
+  return { runtime: observed as never, readCount: () => reads }
 }
 
 test('Direct selection: the Remote loader is never invoked and the exact Direct instances are carried', async () => {
@@ -58,7 +65,7 @@ test('Direct selection: the Remote loader is never invoked and the exact Direct 
   let remoteLoads = 0
   const selected = await selectApplicationRuntime({
     kind: 'direct',
-    direct,
+    direct: direct.runtime,
     loadRemote: () => {
       remoteLoads += 1
       return Promise.resolve({ kind: 'remote' } as never)
@@ -66,15 +73,15 @@ test('Direct selection: the Remote loader is never invoked and the exact Direct 
   })
   assert.equal(remoteLoads, 0, 'a Direct selection must not even load the Remote module')
   assert.equal(selected.kind, 'direct')
-  assert.equal(selected.backend, (direct as { backend: object }).backend, 'the exact Direct backend instance')
-  assert.equal(selected.owners, (direct as { owners: object }).owners, 'the exact Direct owner provider instance')
-  assert.equal(selected.retirement, (direct as { retirement: object }).retirement, 'the exact Direct retirement instance')
+  assert.equal(selected.backend, (direct.runtime as { backend: object }).backend, 'the exact Direct backend instance')
+  assert.equal(selected.owners, (direct.runtime as { owners: object }).owners, 'the exact Direct owner provider instance')
+  assert.equal(selected.retirement, (direct.runtime as { retirement: object }).retirement, 'the exact Direct retirement instance')
   // The no-op transport disposer settles without effect and is idempotent.
   await assert.doesNotReject(selected.disposeTransport())
   await assert.doesNotReject(selected.disposeTransport())
 })
 
-test('Remote selection: the loader is invoked exactly once and returns the ONE application runtime', async () => {
+test('Remote selection: the loader is invoked exactly once, no Direct part is read, and the ONE application runtime is returned', async () => {
   const direct = directDouble()
   let remoteLoads = 0
   const remoteSelected: SelectedApplicationRuntime = {
@@ -86,20 +93,21 @@ test('Remote selection: the loader is invoked exactly once and returns the ONE a
   }
   const selected = await selectApplicationRuntime({
     kind: 'remote',
-    direct,
+    direct: direct.runtime,
     loadRemote: () => {
       remoteLoads += 1
       return Promise.resolve(remoteSelected)
     },
   })
   assert.equal(remoteLoads, 1, 'the Remote aggregate is constructed exactly once')
+  assert.equal(direct.readCount(), 0, 'a Remote selection must not read or construct any Direct part (no Direct factory invoked)')
   assert.equal(selected, remoteSelected, 'the selected core IS the aggregate the loader returned — no second graph')
   assert.equal(selected.kind, 'remote')
 })
 
 test('Remote selection without the lazy boundary fails closed', async () => {
   await assert.rejects(
-    selectApplicationRuntime({ kind: 'remote', direct: directDouble(), loadRemote: undefined }),
+    selectApplicationRuntime({ kind: 'remote', direct: directDouble().runtime, loadRemote: undefined }),
     /requires the lazy backend-loader boundary/,
     'the Remote branch must never fall back to constructing the Remote graph itself',
   )
@@ -109,7 +117,7 @@ test('the Remote selection propagates a loader failure (no partial selected core
   await assert.rejects(
     selectApplicationRuntime({
       kind: 'remote',
-      direct: directDouble(),
+      direct: directDouble().runtime,
       loadRemote: () => Promise.reject(new Error('induced remote construction failure')),
     }),
     /induced remote construction failure/,
