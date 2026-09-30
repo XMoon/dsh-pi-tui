@@ -129,6 +129,9 @@ const CLASSIFICATION = {
   // M3-4 PR1: the selected application runtime core (backend/owners/retirement
   // + the transport-dispose slot) is the owner-construction seam product.
   selectedRuntime: BIND,
+  // M3-4 PR1: the Direct construction lives inside the selection seam's
+  // factory; the accessor is the only Direct-only read path.
+  constructedDirectRuntime: BIND, createDirectApplication: BIND, createDirectRuntime: CONN,
   // Narrow owner-to-owner connectors (incl. the late-bound viewed-queue slot).
   agentNow: CONN, handleNow: CONN, captureMatches: CONN, isCurrentOwnerAgent: CONN,
   directAgentOfOwner: CONN, requireLiveScope: CONN, viewedQueueAgent: CONN,
@@ -164,6 +167,7 @@ const LIFECYCLE = {
   captureMatches: 'live read, per call (ownership subject fence)',
   requireLiveScope: 'per-write admission seam (scope capture or throw)',
   viewedQueueAgent: 'late-bound slot: written by the viewer owner, read by the Direct runtime',
+  createDirectRuntime: 'lazy accessor, per call (throws when the Direct branch never constructed)',
   compose: 'process-lifetime: created once at startup (Direct compose wrapper)',
   lifecycleAgents: 'process-lifetime: immutable create/open bridge bound to the runner signal',
 }
@@ -184,6 +188,7 @@ const CAPABILITIES = {
   viewedQueueAgent: 'viewer publishQueueAuthority + Direct runtime getViewedQueueAgent',
   compose: 'DirectApplicationRuntime.compose',
   lifecycleAgents: 'Backend.sessionLifecycle create/open through the runner signal',
+  createDirectRuntime: 'DirectApplicationRuntime accessor (the seam-constructed instance)',
 }
 // ── A5b-6 zero-assumption sweep verdict (plan §7.6.1 / §7.6.3) ───────────────
 // Every remaining root declaration was re-checked from zero assumptions: the
@@ -256,7 +261,10 @@ const SWEEP_NOTES = {
   artifacts: 'createArtifactSaveOwner<Agent>(...) — the A5b-3c artifact-save owner.',
   pluginManager: 'surface.attachPluginManager(...) result — the ONE plugin-manager owner handle.',
   // M3-4 PR1: the application runtime-selection seam product.
-  selectedRuntime: 'selectApplicationRuntime(...) — the M3-4 PR1 selected application runtime core (kind/backend/owners/retirement/disposeTransport); owner-construction seam product over directRuntime.',
+  selectedRuntime: 'selectApplicationRuntime(...) — the M3-4 PR1 selected application runtime core (kind/backend/owners/retirement/disposeTransport); the Direct branch constructs the Direct runtime through its factory.',
+  constructedDirectRuntime: 'the one Direct runtime the selection seam\'s Direct factory constructed; a Remote selection leaves it undefined (no Direct graph).',
+  createDirectApplication: 'the Direct factory handed to the selection seam — the ONLY createDirectApplicationRuntime call site; runs inside the seam on the Direct branch only.',
+  createDirectRuntime: 'lazy Direct-only accessor over the seam-constructed runtime; throws loudly if a Remote selection left it unconstructed instead of silently building a second graph.',
   // owner-connector: a narrow, late-bound composition-to-owner seam (plan
   // §7.6.1).
   requireLiveScope: 'sessionScope.captureLive plus throw; synchronous admission connector into owners.',
@@ -267,6 +275,7 @@ const SWEEP_NOTES = {
   directAgentOfOwner: 'directRuntime.owners.attachmentOf — owner-to-attachment connector.',
   compose: 'narrow wrapper over directRuntime.compose consumed by launchComposition; owner-to-owner connector, not a Host lookup (reclassified in the A5b-6 sweep).',
   lifecycleAgents: 'TuiCommandRunner agents create/open bridge over backend.sessionLifecycle; owner-to-owner connector (reclassified in the A5b-6 sweep).',
+  createDirectRuntime: 'lazy accessor, per call (throws when the Direct branch never constructed)',
   // startup-resume-create-orchestration (plan §7.6.1).
   launchComposition: 'startup compose wrapper (compose plus failure capture); startup orchestration.',
   resumeQuiesce: 'sessionRuntime.publishResumedOwner(...) resume transaction step; startup/resume orchestration.',

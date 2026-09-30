@@ -92,7 +92,7 @@ import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerAgentLike } from '../steer.ts'
-import { createDirectApplicationRuntime } from '../app/direct/runtime.ts'
+import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
 import type { ApplicationRuntimeSelection, SelectedApplicationRuntime } from '../app/application-runtime.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
@@ -254,13 +254,6 @@ export function applyRunner(ctx: Context, config: Config): void {
    * inert slot.
    */
   let disposeSelectedTransportRef: (() => Promise<void>) | undefined
-  /**
-   * Whether a current Direct owner (agent + handle) exists, for the fatal catch
-   * below. The ownership core lives INSIDE the async root, so the catch reads it
-   * through this ref (the same visibility the old outer
-   * `liveAgent`/`liveHandle` declarations had).
-   */
-  let currentOwnerPresentRef: (() => boolean) | undefined
 
   const startRunner = async (): Promise<void> => {
     // The TUI required surface is committed to running: synchronous init
@@ -433,38 +426,61 @@ export function applyRunner(ctx: Context, config: Config): void {
     // the single `liveAgent` mutable truth (A2 relocates that authority into
     // `app/session`). The viewed-queue authority is VIEWER-owned (A5b-6): the
     // Direct queue resolver reads it through the late-bound `viewerRef` getter.
-    const directRuntime = createDirectApplicationRuntime({
-      ctx,
-      diag,
-      tuiSettings,
-      defaultModel: defaultModel as unknown as DefaultModelServiceLike,
-      // The Direct owner pool is built and owned inside the Direct runtime; it
-      // reads the ONE ownership-core release ledger through these two seams.
-      waitForRelease: ownership.waitForOwnerRelease,
-      currentOwner: () => ownership.owner(),
-      isLifecycleAborted: () => lifecycleController.signal.aborted,
-      // Behavior preserved: the same `composeDirectAgent` wiring, now with the
-      // runtime's Agent-scoped model-selection install.
-      compose: (installSelection, presetId) =>
-        composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState),
-      getViewedQueueAgent: () => viewerRef?.viewedQueueAuthority(),
-    })
+    //
+    // M3-4 PR1: the construction itself lives INSIDE the selection seam's
+    // Direct factory, so a Remote selection constructs NO Direct graph (plan
+    // §10.2). Direct-only consumers below read it through the lazy
+    // `directRuntime()` accessor; on the Direct branch the factory has already
+    // run, so the accessor never constructs twice.
+    let constructedDirectRuntime: DirectApplicationRuntime | undefined
+    const createDirectRuntime = (): DirectApplicationRuntime => {
+      if (constructedDirectRuntime === undefined) {
+        throw new Error('tui-runner: the Direct application runtime is only available on the Direct selection')
+      }
+      return constructedDirectRuntime
+    }
+    const createDirectApplication = (): DirectApplicationRuntime => {
+      constructedDirectRuntime = createDirectApplicationRuntime({
+        ctx,
+        diag,
+        tuiSettings,
+        defaultModel: defaultModel as unknown as DefaultModelServiceLike,
+        // The Direct owner pool is built and owned inside the Direct runtime; it
+        // reads the ONE ownership-core release ledger through these two seams.
+        waitForRelease: ownership.waitForOwnerRelease,
+        currentOwner: () => ownership.owner(),
+        isLifecycleAborted: () => lifecycleController.signal.aborted,
+        // Behavior preserved: the same `composeDirectAgent` wiring, now with the
+        // runtime's Agent-scoped model-selection install.
+        compose: (installSelection, presetId) =>
+          composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState),
+        getViewedQueueAgent: () => viewerRef?.viewedQueueAuthority(),
+      })
+      return constructedDirectRuntime
+    }
     // M3-4 PR1: the internal application runtime-selection seam. The selected
     // core is the ONE common input the transport-neutral session runtime
-    // consumes (`owners`/`retirement`/`backend`); Direct-only helpers stay on
-    // `directRuntime`. Normal package `apply()` stays Direct: there is no
-    // CLI option, config field, env var, cordis.patch row or public root
-    // export that selects Remote — only this seam may construct the Remote
-    // application runtime (through `runtime/backend-loader.ts`), and only
-    // internal/test M3-4 paths do. The Direct runtime is constructed THROUGH
-    // the seam's factory, so a Remote selection cannot leave a Direct graph
-    // half-composed behind it (plan §10.2: no Direct factory invoked on the
-    // Remote path).
+    // consumes (`owners`/`retirement`/`backend`); Direct-only helpers stay
+    // behind `directRuntime()`. Normal package `apply()` stays Direct: there
+    // is no CLI option, config field, env var, cordis.patch row or public
+    // root export that selects Remote — only this seam may construct the
+    // Remote application runtime (through `runtime/backend-loader.ts`), and
+    // only internal/test M3-4 paths do. The Direct factory runs INSIDE the
+    // seam, so a Remote selection constructs no Direct graph at all (plan
+    // §10.2: no Direct factory invoked on the Remote path).
     const selectedRuntime = await selectApplicationRuntime({
       kind: 'direct',
-      createDirect: () => directRuntime,
+      createDirect: createDirectApplication,
       createRemote: undefined,
     })
+    /**
+     * The lazy Direct-only accessor: the Direct helpers below read the ONE
+     * Direct runtime the selection seam constructed. On the Direct branch
+     * (the only branch bootstrap selects in PR1) it is already constructed;
+     * a Remote selection never materializes it and any accidental Direct
+     * read fails loudly instead of silently constructing a second graph.
+     */
+    const directRuntime = createDirectRuntime
     /**
      * The selected runtime's transport disposer, hoisted so every teardown
      * path (the fiber disposer, the pre-mount abort, the fatal catch) can
@@ -480,13 +496,7 @@ export function applyRunner(ctx: Context, config: Config): void {
      * stored second current-agent truth. Direct DATA/OPERATION reads only —
      * identity/currentness goes through the ownership subject.
      */
-    const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()
-    /** The Direct owner handle of the CURRENT owner (retirement/teardown only). */
-    const handleNow = (): AgentHandle | undefined => {
-      const owner = ownership.owner()
-      return owner === undefined ? undefined : directRuntime.owners.handleOf(owner) as AgentHandle | undefined
-    }
-    currentOwnerPresentRef = (): boolean => ownership.owner() !== undefined && handleNow() !== undefined
+    const agentNow = (): Agent | undefined => directRuntime().owners.currentDirectAttachment()
     /**
      * Whether the ownership subject captured at ADMISSION is still the CURRENT
      * one (exact owner + generation). `captureSubject()` is undefined for a
@@ -500,14 +510,14 @@ export function applyRunner(ctx: Context, config: Config): void {
      */
     const isCurrentOwnerAgent = (candidate: Agent): boolean => {
       const owner = ownership.owner()
-      return owner !== undefined && directRuntime.owners.attachmentOf(owner)?.agent === candidate
+      return owner !== undefined && directRuntime().owners.attachmentOf(owner)?.agent === candidate
     }
     /**
      * The Direct attachment of one opaque owner: the runner IS the Direct
      * composition root, and the session layer only ever hands it an `OwnerRef`.
      */
     const directAgentOfOwner = (owner: SessionOwnerRef): Agent | undefined =>
-      directRuntime.owners.attachmentOf(owner)?.agent
+      directRuntime().owners.attachmentOf(owner)?.agent
     /**
      * The BOUND session runtime (A2 plan §1.1 phase 3): the session layer owns
      * the session orchestration; the runner supplies the surface operations, the
@@ -522,8 +532,8 @@ export function applyRunner(ctx: Context, config: Config): void {
       liveAgent: () => agentNow(),
       generation: () => ownership.generation(),
       currentDefault: () => defaultModel.currentSelection() as ModelSelection | undefined,
-      currentOf: (agent) => directRuntime.modelSelections.current(agent as Agent),
-      setCurrentOf: (agent, next) => directRuntime.modelSelections.setCurrent(agent as Agent, next),
+      currentOf: (agent) => directRuntime().modelSelections.current(agent as Agent),
+      setCurrentOf: (agent, next) => directRuntime().modelSelections.setCurrent(agent as Agent, next),
     })
     const sessionRuntime = bindSessionRuntime(ownership, {
       // M3-4 PR1: the common session-runtime inputs come from the selected
@@ -637,7 +647,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       extensions: () => extensionService,
     })
     /** Resolve one preset composition through the runtime's model-selection install. */
-    const compose = (presetId?: string): Promise<DirectAgentComposition> => directRuntime.compose(presetId)
+    const compose = (presetId?: string): Promise<DirectAgentComposition> => directRuntime().compose(presetId)
 
     // Migrate legacy/invalid display settings without delaying composition or
     // changing the initial frame. The canonical field always wins at boot;
@@ -820,7 +830,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // just-created owner would never be retired. Cancel the agent on
       // abort so whenIdle settles, then the pre-mount abort path below
       // retires the owner.
-      return directRuntime.retirement.whenIdleOrAbort(owner, lifecycleController.signal)
+      return directRuntime().retirement.whenIdleOrAbort(owner, lifecycleController.signal)
     })
     if (resumeQuiesce !== undefined) await resumeQuiesce
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
@@ -915,7 +925,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       isCleanedUp: () => cleanedUp,
       folds: { title: (events) => foldSessionTitle(events)?.title },
       direct: {
-        installModelSelection: (agent) => { directRuntime.modelSelections.installForAgent(agent as Agent) },
+        installModelSelection: (agent) => { directRuntime().modelSelections.installForAgent(agent as Agent) },
         assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent as Agent),
         planActive: (agent) => projectedPlanActive(
           ctx.get('sessionProjections') as PlanProjectionLike | undefined,
@@ -1117,7 +1127,7 @@ export function applyRunner(ctx: Context, config: Config): void {
           }
           return undefined
         },
-        promptAdmission: (agent, hasImages, task) => directRuntime.withPromptAdmission(agent, hasImages, async () => task()),
+        promptAdmission: (agent, hasImages, task) => directRuntime().withPromptAdmission(agent, hasImages, async () => task()),
       },
       surfaceCatalogContext: ctx as unknown as SurfaceCatalogContext,
       logError: (message) => ctx.logger.error(message),
@@ -1383,7 +1393,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // all defined by this point — the resume that produced the live
       // agent ran after them). Without a live owner there is nothing to
       // retire; close the diagnostics handle either way (idempotent).
-      if (ownership.owner() !== undefined || directRuntime.hasParkedOwners() || sessionRuntime.hasPendingForks()) {
+      if (ownership.owner() !== undefined || directRuntime().hasParkedOwners() || sessionRuntime.hasPendingForks()) {
         await sessionRuntime.retireOwnedSession()
       } else {
         diag.dispose()
@@ -1551,7 +1561,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       tuiSettings,
       captureMatches,
       direct: {
-        withPromptAdmission: (agent, hasImages, task) => directRuntime.withPromptAdmission(agent as Agent, hasImages, task),
+        withPromptAdmission: (agent, hasImages, task) => directRuntime().withPromptAdmission(agent as Agent, hasImages, task),
       },
       requestExit,
       isPlanActive: (agent) => projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, (agent as Agent).session) === true,
@@ -1614,7 +1624,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       // the Backend prompt/writer/host-file ports; the composition root only
       // forwards them.
       subagentDelivery: {
-        queueAgentFor: (childId) => directRuntime.queueAgentFor(childId) as unknown as SteerAgentLike | undefined,
+        queueAgentFor: (childId) => directRuntime().queueAgentFor(childId) as unknown as SteerAgentLike | undefined,
         pendingInputReader: backend.pendingInputReader,
         writer: backend.sessionWriter,
         writerSection: (task) => submission.withWriterSection(task),
@@ -1777,7 +1787,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       hasLiveAgent: () => agentNow() !== undefined,
       completionOwnerId: () => {
         const owner = ownership.owner()
-        return owner === undefined ? undefined : directRuntime.owners.completionIdentity(owner)
+        return owner === undefined ? undefined : directRuntime().owners.completionIdentity(owner)
       },
       // Direct bookkeeping (plan §16): model-selection observation, the
       // request-header consume, the call-args cache, the pending-subagent feed
@@ -1788,7 +1798,7 @@ export function applyRunner(ctx: Context, config: Config): void {
         let refreshAgents = false
         const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
         if (selectionEvent.type === 'model/selection') {
-          if (runtimeAgent !== undefined) directRuntime.modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
+          if (runtimeAgent !== undefined) directRuntime().modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
         } else if (event.type === 'request/header' && runtimeAgent !== undefined) {
           const data = event.data as unknown
           const header = typeof data === 'object' && data !== null
@@ -1796,7 +1806,7 @@ export function applyRunner(ctx: Context, config: Config): void {
             : undefined
           const raw = rawSelectionFromRequestHeader(header)
           if (raw !== undefined) {
-            directRuntime.modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
+            directRuntime().modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
           }
         }
         if (event.type === 'tool/call') {
@@ -1867,7 +1877,7 @@ export function applyRunner(ctx: Context, config: Config): void {
       flushTurn: () => flushTurn(),
       // The assistant-stream routing's exact-Agent facts (never a Direct import
       // in the surface).
-      registeredAgentIs: (sessionId, agent) => directRuntime.registeredAgentFor(sessionId) === agent,
+      registeredAgentIs: (sessionId, agent) => directRuntime().registeredAgentFor(sessionId) === agent,
       isCurrentOwnerAgent: (agent) => isCurrentOwnerAgent(agent as Agent),
       viewedChildAgent: () => viewer.viewedChildAgent(),
       setViewedChildAgent: (agent) => viewer.setViewedChildAgent(agent as Agent),
@@ -2056,7 +2066,7 @@ export function applyRunner(ctx: Context, config: Config): void {
     // child — and stamps the first-token latency. The identity fence
     // re-reads the live surface so a stale stream from a retired agent
     // never reaches the presentation.
-    const assistantStreamHandle = directRuntime.installAssistantStream({
+    const assistantStreamHandle = directRuntime().installAssistantStream({
       // A4-7 (plan §16): the routing bodies are surface-owned. The Direct
       // INSTALL stays Direct-owned; the surface exposes the neutral entry
       // points for the identity fence and the per-target fold + repaint.
@@ -2189,26 +2199,27 @@ export function applyRunner(ctx: Context, config: Config): void {
     // retirement's own finalizer (or by the no-owner branch below).
     try {
       let retirementSettled = false
-      if (currentOwnerPresentRef?.() === true) {
-        const retirement = retireOwnedSessionRef?.()
-        if (retirement !== undefined) {
-          let timer: NodeJS.Timeout | undefined
-          try {
-            await Promise.race([
-              retirement.finally(() => { retirementSettled = true }),
-              new Promise<void>(resolve => { timer = setTimeout(resolve, 2000) }),
-            ])
-          } finally {
-            if (timer !== undefined) clearTimeout(timer)
-          }
-        } else {
-          // Defensive only: the coordinator is defined BEFORE any owner can
-          // exist (see the hoisted declaration), so an owner without a
-          // coordinator is unreachable. Close diag and exit.
-          diag.dispose()
-          retirementSettled = true
+      // The retirement coordinator covers MORE than the current Direct owner:
+      // it also drains parked owners and pending forks (the same facts the
+      // pre-mount abort path checks). Running it whenever it exists — never
+      // gating it on a Direct-handle owner-presence check — keeps those
+      // states from being falsely declared settled (a parked-owner drain is
+      // still a retirement the transport disposal must not race).
+      const retirement = retireOwnedSessionRef?.()
+      if (retirement !== undefined) {
+        let timer: NodeJS.Timeout | undefined
+        try {
+          await Promise.race([
+            retirement.finally(() => { retirementSettled = true }),
+            new Promise<void>(resolve => { timer = setTimeout(resolve, 2000) }),
+          ])
+        } finally {
+          if (timer !== undefined) clearTimeout(timer)
         }
       } else {
+        // The coordinator is defined BEFORE any owner can exist (see the
+        // hoisted declaration); an undefined coordinator means the startup
+        // root never reached the session runtime — nothing to retire.
         diag.dispose()
         retirementSettled = true
       }

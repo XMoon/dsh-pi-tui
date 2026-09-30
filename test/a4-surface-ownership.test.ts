@@ -374,7 +374,7 @@ test('A4-8: the active-target, repaint and search/transcript wiring are surface-
   // The Host registrations, the Direct install and the credential
   // subscription/disposal stay in the runner.
   assert.match(indexSource, /ctx\.on\('session\/event'/u, 'the runner keeps the session/event registration')
-  assert.match(indexSource, /directRuntime\.installAssistantStream\(/u, 'the runner keeps the Direct assistant-stream install')
+  assert.match(indexSource, /directRuntime\(\)\.installAssistantStream\(/u, 'the runner keeps the Direct assistant-stream install')
   assert.match(indexSource, /credentials\.onChanged\(/u, 'the runner keeps the credential subscription')
   assert.match(indexSource, /disposeCredentialSubscription/u, 'the runner keeps the credential disposal')
 })
