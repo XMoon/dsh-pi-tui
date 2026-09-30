@@ -557,17 +557,17 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
 })
 
 test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
-  // IN PROGRESS (M3-3B closure). Already proven on this real graph: the exact
-  // capability advertisement, that the config adapter REACHES the real settings
-  // Remote and reports its truthful `unavailable` state (no fabricated values,
-  // writes refused) — this leg is what caught the namespace-loss P1 — and the
-  // archive leg now returns a REAL `ready` with the upstream
-  // `dsh-session-m3a-main.zip` after the seed gained the official step
-  // lifecycle. Remaining: (a) reading `assembled.backend.interaction` throws a
-  // Cordis `cannot get property "href" without inject`, which also blocks the
-  // dispose leg; (b) the config SUCCESS path needs a production-equivalent
-  // config plane in the fixture (official `dsh-settings` + `dsh-config-editor`).
-  skip: 'P1-B in progress: backend.interaction access + the config success plane',
+  // The ONLY leg still missing is the config SUCCESS plane (the owner's item 3):
+  // a production-equivalent config plane in this fixture (official
+  // `dsh-settings` + `dsh-config-editor` + a temp profileContext) so a real
+  // settings write can be followed by the authoritative re-read. Everything
+  // else already passes on the real wire and is asserted below: the exact
+  // capability set, the config adapter REACHING the real settings Remote with
+  // its truthful `unavailable` state (no fabricated values, writes refused —
+  // the leg that caught the namespace-loss P1), the archive returning a real
+  // `ready` with the upstream `dsh-session-m3a-main.zip` and readable bytes,
+  // the backend/assembly interaction identity, and reverse disposal.
+  skip: 'P1-B: only the config success plane (real settings write -> authoritative re-read) remains',
 }, async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
@@ -657,7 +657,15 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
 
     // 4. Interaction identity: the assembled backend serves the SAME instance
     // on this official Client graph (no second wiring).
-    assert.equal(assembled.backend.interaction, semantics.interaction)
+    // The backend serves the instance its OWN assembly built: the identity
+    // invariant is backend === assembly semantics (a second semantics instance
+    // would mean two wirings over one Client graph).
+    assert.equal(
+      assembled.backend.interaction,
+      assembled.semantics.interaction,
+      'the backend serves the assembly\'s own interaction adapter',
+    )
+
 
     // 5. Dispose the adapters BEFORE the Client/Context, then the runtime.
     assembled.dispose()
