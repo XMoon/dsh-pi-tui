@@ -94,6 +94,7 @@ import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerAgentLike } from '../steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
 import type { ApplicationRuntimeSelection, SelectedApplicationRuntime } from '../app/application-runtime.ts'
+import { loadRemoteApplicationRuntime } from '../runtime/backend-loader.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
@@ -132,27 +133,63 @@ function presetErrorCode(error: unknown): string | undefined {
 }
 
 /**
+ * The loader the selection seam uses to reach the Remote aggregate. The
+ * production binding is the module-level `loadRemoteApplicationRuntime`
+ * (below); the setter exists ONLY for the selection unit suite to inject a
+ * counting double — it never changes what the seam OWNS (the canonical
+ * backend-loader reach), and no product path calls it.
+ */
+let loadRemoteApplicationRuntimeForSelection = loadRemoteApplicationRuntime
+
+/** Test-only loader injection for the selection seam; returns the restore. */
+export function __setApplicationRuntimeLoaderForTests(
+  loader: typeof loadRemoteApplicationRuntime,
+): () => void {
+  const previous = loadRemoteApplicationRuntimeForSelection
+  loadRemoteApplicationRuntimeForSelection = loader
+  return () => {
+    loadRemoteApplicationRuntimeForSelection = previous
+  }
+}
+
+/**
  * Select ONE application runtime core. The Direct branch adapts the existing
- * Direct objects WITHOUT semantic change (`disposeTransport` is a no-op); the
- * Remote branch awaits the aggregate constructed through the lazy boundary —
- * this seam never builds a second Remote graph itself. The selected core
- * exposes exactly kind/backend/owners/retirement/disposeTransport;
- * branch-specific capabilities stay branch-specific. There is no user-visible
- * selector: normal package `apply()` selects Direct.
+ * Direct objects WITHOUT semantic change, constructing them through the
+ * supplied factory (a Remote selection invokes no Direct factory — plan
+ * §10.2). The Remote branch is THIS SEAM's own ownership: it loads the Remote
+ * application aggregate through `runtime/backend-loader.ts` (the sole
+ * sanctioned dynamic boundary) and composes it with the caller's input — the
+ * canonical selection owner, never an arbitrary injected callback. The
+ * selected core exposes exactly kind/backend/owners/retirement/
+ * disposeTransport; branch-specific capabilities stay branch-specific. There
+ * is no user-visible selector: normal package `apply()` selects Direct.
  *
- * Exported for the selection unit suite only (tests import the seam
- * directly); no public root export re-exports it.
+ * Exported for the selection suites only (tests import the seam directly);
+ * no public root export re-exports it.
  */
 export async function selectApplicationRuntime(
   selection: ApplicationRuntimeSelection,
 ): Promise<SelectedApplicationRuntime> {
   if (selection.kind === 'remote') {
-    if (selection.createRemote === undefined) {
-      throw new Error('tui-runner: the Remote application runtime requires the lazy backend-loader boundary')
+    if (selection.remote === undefined) {
+      throw new Error('tui-runner: the Remote application runtime requires the Remote composition input')
     }
-    // The Direct factory is deliberately NOT invoked on this branch: a Remote
-    // selection must not construct (or half-construct) a Direct graph.
-    return selection.createRemote()
+    // THE canonical Remote reach (plan §5): this seam — and nothing else in
+    // product code — constructs the Remote application runtime, and only
+    // through the lazy backend-loader boundary. The static
+    // `bootstrap -> backend-loader` import is the sanctioned edge; the
+    // loader's internal dynamic import is not a static Remote edge. The
+    // prompt serializer crosses as the structural D2.2 dependency the
+    // aggregate declares (the neutral selection type keeps this module
+    // transport-clean; the cast only restores the aggregate's declared type).
+    const { createRemoteApplicationRuntime } = await loadRemoteApplicationRuntimeForSelection()
+    const runtime = await createRemoteApplicationRuntime({
+      hostContext: selection.remote.hostContext as Context,
+      waitForHostPrerequisites: selection.remote.waitForHostPrerequisites,
+      signal: selection.remote.signal,
+      promptSerializer: selection.remote.promptSerializer as Parameters<typeof createRemoteApplicationRuntime>[0]['promptSerializer'],
+    })
+    return runtime.selected
   }
   const direct = selection.createDirect()
   return {
@@ -463,15 +500,15 @@ export function applyRunner(ctx: Context, config: Config): void {
     // consumes (`owners`/`retirement`/`backend`); Direct-only helpers stay
     // behind `directRuntime()`. Normal package `apply()` stays Direct: there
     // is no CLI option, config field, env var, cordis.patch row or public
-    // root export that selects Remote — only this seam may construct the
-    // Remote application runtime (through `runtime/backend-loader.ts`), and
-    // only internal/test M3-4 paths do. The Direct factory runs INSIDE the
-    // seam, so a Remote selection constructs no Direct graph at all (plan
-    // §10.2: no Direct factory invoked on the Remote path).
+    // root export that selects Remote — the seam above is the sole
+    // product-level Remote construction owner (through
+    // `runtime/backend-loader.ts`), and only internal/test M3-4 paths hand it
+    // a Remote composition input. The Direct factory runs INSIDE the seam, so
+    // a Remote selection constructs no Direct graph at all (plan §10.2).
     const selectedRuntime = await selectApplicationRuntime({
       kind: 'direct',
       createDirect: createDirectApplication,
-      createRemote: undefined,
+      remote: undefined,
     })
     /**
      * The lazy Direct-only accessor: the Direct helpers below read the ONE

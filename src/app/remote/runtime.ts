@@ -150,61 +150,88 @@ export interface RemoteBackendRuntime {
  * + the M3-3B interaction and Plugin Manager/Job-observation adapters), the
  * Remote ConfigPort mirror, and the Remote session archive. It is NOT a
  * production cutover: normal startup still selects Direct.
+ *
+ * Construction is TRANSACTIONAL in the caller's ownership sense: every part
+ * that installs its own subscriptions/caches (the semantics bundle, the
+ * ConfigPort mirror) is unwound — adapters before anything the caller owns —
+ * when a LATER assembly step throws before this function returns. The caller
+ * therefore never receives or leaks backend partial state (plan §12).
  */
 export async function createRemoteBackendRuntime(
   options: RemoteBackendRuntimeOptions,
 ): Promise<RemoteBackendRuntime> {
-  const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
-    promptSerializer: options.promptSerializer,
-  })
-  const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
-  const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
-  // §2.3/§4.1 config readiness barrier: the mirror's invalidation listeners
-  // are already installed (the port's constructor), the M3-1 Client runtime
-  // already awaited its own initial readiness (so a Connection generation
-  // exists), and THIS is the first read. Awaiting it here is what makes a
-  // freshly assembled Remote backend's settings/providers/permissions
-  // readable instead of permanently 'stale'.
-  //
-  // A transient failure must not prevent the backend from existing: the mirror
-  // RECORDS it (`lastRefreshFailure()`), `readiness()` stays 'stale', and the
-  // next invalidation / write pre-flight / explicit read retries. The
-  // consumer then shows a truthful unavailable state instead of fabricated
-  // values (docs/m3-entry-contract.md §9.1).
-  try {
-    await config.describe()
-  } catch {
-    // Recorded by `RemoteConfigPort.describe()`; construction continues.
+  // Reverse-unwind ledger of the constructed parts, in construction order.
+  // Each entry runs that part's disposal exactly once, error-isolated from
+  // the others; the first collected error surfaces with the rest attached.
+  const unwind: Array<() => void> = []
+  const runReverse = (): void => {
+    const errors: unknown[] = []
+    for (let index = unwind.length - 1; index >= 0; index -= 1) {
+      try {
+        unwind[index]()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    if (errors.length > 0) {
+      const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+      if (errors.length > 1) {
+        mergeCause(failure, new AggregateError(errors.slice(1), 'remote backend runtime: remaining disposal failures'))
+      }
+      throw failure
+    }
   }
-  let disposed = false
-  return {
-    backend: createRemoteBackend({ ...semantics, config, sessionArchive }),
-    semantics,
-    dispose(): void {
+  try {
+    const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
+      promptSerializer: options.promptSerializer,
+    })
+    unwind.push(() => semantics.dispose())
+    const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
+    unwind.push(() => config.dispose())
+    const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
+    // §2.3/§4.1 config readiness barrier: the mirror's invalidation listeners
+    // are already installed (the port's constructor), the M3-1 Client runtime
+    // already awaited its own initial readiness (so a Connection generation
+    // exists), and THIS is the first read. Awaiting it here is what makes a
+    // freshly assembled Remote backend's settings/providers/permissions
+    // readable instead of permanently 'stale'.
+    //
+    // A transient failure must not prevent the backend from existing: the mirror
+    // RECORDS it (`lastRefreshFailure()`), `readiness()` stays 'stale', and the
+    // next invalidation / write pre-flight / explicit read retries. The
+    // consumer then shows a truthful unavailable state instead of fabricated
+    // values (docs/m3-entry-contract.md §9.1).
+    try {
+      await config.describe()
+    } catch {
+      // Recorded by `RemoteConfigPort.describe()`; construction continues.
+    }
+    let disposed = false
+    const dispose = (): void => {
       if (disposed) return
       disposed = true
-      // Per-step error isolation (the M3-4 PR1 transport disposal contract):
-      // a throwing semantic-bundle dispose must not skip the config mirror's
-      // subscription release. The first collected error surfaces with the
-      // rest attached as its cause.
-      const errors: unknown[] = []
-      try {
-        semantics.dispose()
-      } catch (error) {
-        errors.push(error)
-      }
-      try {
-        config.dispose()
-      } catch (error) {
-        errors.push(error)
-      }
-      if (errors.length > 0) {
-        const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
-        if (errors.length > 1) {
-          mergeCause(failure, new AggregateError(errors.slice(1), 'remote backend runtime: remaining disposal failures'))
-        }
-        throw failure
-      }
-    },
+      runReverse()
+    }
+    return {
+      backend: createRemoteBackend({ ...semantics, config, sessionArchive }),
+      semantics,
+      dispose,
+    }
+  } catch (error) {
+    // A failure at ANY point after the first constructed part (including the
+    // final `createRemoteBackend` assembly) unwinds every constructed part
+    // before the caller sees the rejection: backend partial state does not
+    // survive. An unwind failure rides the original error's cause chain
+    // without masking it.
+    let unwindFailure: unknown
+    try {
+      runReverse()
+    } catch (secondary) {
+      unwindFailure = secondary
+    }
+    if (unwindFailure !== undefined) {
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), unwindFailure)
+    }
+    throw error
   }
 }

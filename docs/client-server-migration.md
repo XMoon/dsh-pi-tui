@@ -2965,7 +2965,13 @@ Remote-ready):
   single owner with its exact two targets. No static Remote edge exists
   anywhere (startup graph unchanged).
 - `src/app/bootstrap.ts`: the internal application runtime-selection seam
-  (`selectApplicationRuntime`). The common session-runtime inputs
+  (`selectApplicationRuntime`). The Remote branch is the SEAM's own
+  ownership: it loads the Remote application aggregate through
+  `runtime/backend-loader.ts` (the sole sanctioned dynamic boundary, making
+  this seam the one product-level Remote construction owner) and composes it
+  with the caller's Remote composition input; the Direct branch constructs
+  the Direct runtime through its factory (a Remote selection constructs no
+  Direct graph). The common session-runtime inputs
   (`owners`/`retirement`/`lifecycle` via `backend.sessionLifecycle`) and the
   `backend` constant now read from the selected core; Direct-only helpers
   (compose/agentFor/queueAgentFor/modelSelections/installAssistantStream/
@@ -3005,16 +3011,18 @@ Closure evidence for PR1:
   `bootstrap -> backend-loader -> dynamic app/remote/application-runtime`
   shape is the sanctioned one; any other dynamic importer and any static
   Remote edge (including from startup) still fail.
-- Coverage note (honest residual): the unwind of a backend that was fully
-  CONSTRUCTED before a later construction failure (the
-  constructed-backend-then-failure branch in the aggregate's unwind) has no
-  natural injection point today — `createRemoteBackendRuntime` has no
-  test-controllable throwing input after its adapters are retained. The
-  branch is implemented but exercised only at the SOURCE level; D2's
-  injection (a throwing promptSerializer getter) fires while composing the
-  backend factory's arguments, before `backendRuntime` is assigned. Its
-  dedicated behavioral proof lands with the first M3-4 PR that adds a real
-  post-backend construction seam.
+- Construction-failure closure (plan §12): `createRemoteBackendRuntime` is
+  TRANSACTIONAL — a failure at any point after the first constructed part
+  (semantics bundle, ConfigPort with its mirror subscriptions) reverse-unwinds
+  every constructed part before the caller sees the rejection, so backend
+  partial state never survives and adapters are always disposed ahead of the
+  Client the caller then unwinds. The regression
+  (`test/remote-backend.test.ts` "post-adapter construction failure") injects
+  exactly in the adapters-constructed / factory-not-returned window (a
+  throwing `fetch` getter, read after the semantics + config construction)
+  and observes the real subscription release; it was mutation-verified (the
+  test fails with the unwind disabled). The aggregate's own post-wire failure
+  path (D2) covers the before-backend stage.
 - Regression support: `test/remote-client-runtime.test.ts`,
   `test/remote-backend.test.ts`, `test/remote-session-owners.test.ts`,
   `test/session-runtime-remote-owner-handoff.test.ts`,
