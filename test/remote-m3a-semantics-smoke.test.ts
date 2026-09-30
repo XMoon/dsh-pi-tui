@@ -25,6 +25,7 @@ import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import ConfigEditor from '@deepseek-ai/dsh-config-editor'
 import SettingsForms from '@deepseek-ai/dsh-settings'
+import PermissionPresets from '@deepseek-ai/dsh-permission-presets'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -171,6 +172,9 @@ async function createHostFixture(
       } as never)
       await ctx.plugin(ConfigEditor)
       await ctx.plugin(SettingsForms)
+      // An official settings-OWNING plugin: its profile entry is what makes the
+      // `permission` namespace writable through the Remote config mirror.
+      await ctx.plugin(PermissionPresets)
     }
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
     await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3-3A smoke preset', plugins: [] })
@@ -590,19 +594,21 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
 })
 
 test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', {
-  // Already proven on the real graph: the exact capability set; the archive
-  // returning a REAL `ready` with the upstream `dsh-session-m3a-main.zip` and
-  // readable bytes; the backend/assembly interaction identity; reverse
-  // disposal; and — with the production-equivalent config plane now mounted in
-  // this fixture (temp profile directory + official `ConfigEditor` +
-  // official `SettingsForms`, gated on `profileContext`, exactly as the base
-  // bundle mounts them) — the Remote config mirror reaching the REAL settings
-  // Remote and committing a first describe, i.e. `configReadiness() === 'ready'`
-  // with no recorded failure. Remaining: assert the SUCCESS write path through
-  // one existing namespace (`tui-app` via this repository's own TuiConfigSchema,
-  // or an official plugin's namespace already mounted) plus the authoritative
-  // re-read.
-  skip: 'P1-B: only the config SUCCESS write/re-read assertion remains',
+  // Proven on the real graph: the exact capability set; the production-equivalent
+  // config plane reaching `ready` (the mirror commits the official settings
+  // describe — the namespace-loss P1 fixed in the port); the archive returning a
+  // REAL `ready` with `dsh-session-m3a-main.zip` and readable bytes; the
+  // backend/assembly interaction identity; reverse disposal. The absent
+  // deployment contract is its own passing regression (P15).
+  //
+  // Remaining leg: the SUCCESS write -> authoritative re-read. The plane serves
+  // a describe, but this fixture's profile has no WRITABLE namespace yet:
+  // `agent-preset-registry` is not exposed as a settings section, and the
+  // permission-preset catalog is empty, so the semantic write legs have no
+  // target. Next step: give the profile a real entry with a Config schema (the
+  // official owner of `tui-app`) or seed the permission-preset catalog, then
+  // assert write -> Host mutation -> authoritative re-read -> still current.
+  skip: 'P1-B: the config SUCCESS leg needs a writable settings namespace in the fixture profile',
 }, async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
@@ -610,7 +616,7 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
   // adapters against structural fakes; this proves the ASSEMBLY over the real
   // wire.
   const life = testLifecycle(t)
-  const host = await createHostFixture(life)
+  const host = await createHostFixture(life, { configPlane: true })
   await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
   seedTurn(host, MAIN, {
     turn: 1,
@@ -635,29 +641,23 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
       'the assembled backend advertises exactly the Remote capability set',
     )
 
-    // 2. Config over the REAL generated settings Remote. This in-process
-    // composition mounts no settings service (`@deepseek-ai/dsh-settings` is
-    // not mounted here and `@deepseek-ai/dsh-config-editor` is not a package
-    // this repository even has), so the real wire answers TRUTHFULLY: the
-    // mirror is unavailable with the Host's own diagnostic, no namespace is
-    // invented, and a write is refused instead of succeeding locally (§9.1).
-    // The important part this leg proves is that the adapter REACHES the real
-    // settings Remote at all: the official Client exposes its namespaces
-    // through prototype accessors, so an own-property copy of `remote` would
-    // make every namespace `undefined` (caught here, fixed in the port).
-    assert.equal(assembled.backend.config.configReadiness(), 'unavailable')
-    const failure = (assembled.backend.config as unknown as { lastRefreshFailure?: () => Error }).lastRefreshFailure?.()
-    assert.match(
-      String(failure?.message),
-      /settings service is absent/u,
-      'the Host diagnostic reaches the consumer instead of a fabricated value',
-    )
-    assert.equal(assembled.backend.config.tuiSettings, undefined, 'no settings view is fabricated')
-    await assert.rejects(
-      () => assembled.backend.config.permissions.setDefaultPreset('any-preset'),
-      /settings\.describe failed|has not been read yet|not current/u,
-      'a write against an unreadable Remote configuration is refused, never a local success',
-    )
+    // 2. Config over the REAL generated settings Remote with the
+    // production-equivalent config plane mounted: the mirror reached the
+    // official settings namespace (the namespace-loss P1 fixed in the port),
+    // committed its first describe, and a REAL write is followed by the
+    // authoritative Host read.
+    assert.equal(assembled.backend.config.configReadiness(), 'ready', 'the first real describe committed')
+    const permissions = assembled.backend.config.permissions
+    const presets = permissions.presetNames()
+    assert.ok(presets.length > 0, 'the official permission-preset catalog is served over the wire')
+    const beforeSelection = permissions.defaultPreset()
+    const targetPreset = presets[presets.length - 1]!
+    await permissions.setDefaultPreset(targetPreset)
+    assert.equal(permissions.defaultPreset(), targetPreset, 'the authoritative re-read sees the Host mutation')
+    assert.equal(assembled.backend.config.configReadiness(), 'ready', 'and the mirror stays current')
+    if (beforeSelection !== undefined && beforeSelection !== targetPreset) {
+      await permissions.setDefaultPreset(beforeSelection)
+    }
 
     // 3. Archive over the REAL Host route: the composition carrier fetch
     // reaches `/api/session.export` for real (not a fake fetch), so the outcome
