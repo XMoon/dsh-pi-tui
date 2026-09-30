@@ -143,7 +143,7 @@ conversely, do not reopen unrelated frozen decisions without evidence.
 
 ### 1.3 M3-4 entry baseline
 
-M3-4 starts from the M3-3B closed baseline:
+M3-3B product closure baseline:
 
 ```text
 next = 25295d7f3ac688cd95c94c6ac7c256f4060be218
@@ -152,12 +152,25 @@ complete experimental Backend(kind='remote') exists
 Direct remains production/default
 ```
 
-Before M3-4 implementation, if either the repository baseline or the published
-DSH contract has moved, run Contract Requalification first
+The M3-4 implementation branch starts from the then-current `next` after the
+pre-M3-4 governance/documentation changes are merged.
+
+Before M3-4 implementation, run Contract Requalification
 (`docs/client-server-migration.md` §Migration process and qualification
-governance). Do not begin M3-4 by editing this document for progress; edit it
-only if M3-4 discovers that a frozen architecture/semantic assumption is
-actually wrong.
+governance) if:
+
+```text
+the published DSH target changed
+- or -
+product/runtime changes after the M3-3B closure baseline could invalidate a
+frozen semantic/composition assumption
+```
+
+Docs-only governance changes that preserve the frozen contract do not by
+themselves trigger requalification.
+
+Do not begin M3-4 by editing this document for progress; edit it only if M3-4
+discovers that a frozen architecture/semantic assumption is actually wrong.
 
 ## 2. Backend capability matrix
 
