@@ -2385,12 +2385,10 @@ the composition and presentation.
 - Composition owner: `src/app/remote/session-owners.ts`
   (`createRemoteSessionOwnerServices`), consumed by the transport-neutral
   `src/app/session/**` orchestration.
-- Adapter-level evidence (L1–L3): n/a — the stage added the Remote owner provider
-  (`src/app/remote/session-owners.ts`), not a Remote adapter against the
-  official Client/Remote face.
-- Direct ↔ Remote parity (L4): `test/remote-session-lifecycle.test.ts` and
-  `smoke:remote-session-lifecycle-parity` — same-binding identity and same-id
-  rollover semantics.
+- Adapter-level evidence (L1–L3): `test/remote-session-lifecycle.test.ts` — the
+  pre-existing Remote `SessionLifecycle` adapter contract (structural Client
+  lifetime harness) consumed by M3-2.
+- Direct ↔ Remote parity (L4): `smoke:remote-session-lifecycle-parity`.
 - Wire evidence (L5): n/a — the stage added no wire-sensitive adapter.
 - Application/surface evidence (L6): `test/remote-session-owners.test.ts`
   (R1–R12) and `test/session-runtime-remote-owner-handoff.test.ts` (H1–H12)
@@ -2898,7 +2896,8 @@ release commit.
   `RemoteHostRuntime` reuses the base `userQuestions` service.
 - Adapter-level evidence (L1–L3): `test/remote-config-port.test.ts` plus the
   M3-3B interaction/archive adapter suites.
-- Direct ↔ Remote parity (L4): the same-Host Remote parity smokes.
+- Direct ↔ Remote parity (L4): n/a for the M3-3B-specific Config / Question /
+  Archive closure; the existing parity smokes remain broad regression coverage.
 - Wire evidence (L5): `test/remote-m3a-semantics-smoke.test.ts` same-Host
   qualification (rc.2 Question wire, a real settings write with authoritative
   re-read, the archive ZIP bytes, reverse disposal).
