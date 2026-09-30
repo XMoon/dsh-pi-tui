@@ -1749,28 +1749,11 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
     assert.equal(editableFlows(), 0, 'the Question is parked')
   }
 
-  // VISIBLE Question + Full Task Center: `/tasks` mounts the browser beneath the
-  // Question, which keeps its seat and its single flow; parking the Question
-  // reveals the browser, and selecting that row returns focus to the SAME flow.
-  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
-  assert.ok(tasksHandler, 'the real runner must register /tasks')
-  assert.equal(editableFlows(), 1, 'the Question is visible before the transition')
-  await tasksHandler()
-  await settle()
-  await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 1, 'the browser mounts beneath the visible Question')
-  assert.equal(editableFlows(), 1, 'and no second flow was created')
-  await parkQuestion()
-  const revealed = vt.getViewport().join('\n')
-  assert.ok(revealed.includes('awaiting answer'), `parking reveals the Full row:\n${revealed}`)
-  input('\r')
-  await settle()
-  await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 0, 'Enter returns to the original flow')
-  assert.equal(editableFlows(), 1, 'exactly one flow has focus again')
-
-  // VISIBLE -> Esc -> literal ↓ -> Quick: the missing transition, with the
-  // affordance restored by the park.
+  // VISIBLE -> Esc -> literal ↓ -> Quick: the affordance comes back with the
+  // park. (`visible -> answering` is NOT driven here: while a Question owns
+  // input the Task Center is unreachable by design — only the modal-safe
+  // inspection actions pass — so a concurrent state would be a fabricated
+  // navigation contract. The mapping is covered by the pure projection test.)
   await parkQuestion()
   const parkedAgain = vt.getViewport().join('\n')
   assert.ok(parkedAgain.includes('? 1 awaiting'), `parking restores the attention figure:\n${parkedAgain}`)
@@ -1794,8 +1777,12 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await vt.waitForRender()
   assert.equal(editableFlows(), 1, 'and Enter reopens the QuestionFlow')
 
-  // Park it once more so the row/live-removal leg below starts parked.
+  // Park it once more so the row/live-removal leg below starts parked. This is
+  // the reachable path to Full: park FIRST (the Question owns input while it is
+  // visible), then open the Task Center.
   await parkQuestion()
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
   await tasksHandler()
   await settle()
   await vt.waitForRender()
