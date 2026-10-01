@@ -162,6 +162,9 @@ export interface SessionStatusProjection {
   /** The effective model selection (`next ?? lastUsed` of the official
    *  `modelSelection` projection). */
   readonly model?: ModelSelectionFact
+  /** The recorded agent preset of THIS session (the official `agentPreset`
+   *  projection's string value; `null` normalizes to absent here). */
+  readonly preset?: string
   readonly context?: SessionStatusContextProjection
   /** The official `todos` projection value: the whole list snapshot, or
    *  `null` = the projection exists but no `todo/write` has landed yet (a

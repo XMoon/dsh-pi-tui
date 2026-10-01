@@ -39,6 +39,7 @@
  * @module @xmoon76/dsh-pi-tui/support/remote-application-fixture
  */
 
+import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
@@ -98,10 +99,17 @@ export class StubLlmAdapter extends LlmAdapter {
 export async function createRemoteApplicationHostFixture(
   life: TestLifecycle,
   presetId: string,
+  options: {
+    /** Replace the default `smoke` LLM adapter (e.g. a streaming stand-in).
+     *  The default registers the non-streaming `StubLlmAdapter`. */
+    readonly llmAdapter?: LlmAdapter
+  } = {},
 ): Promise<{
   ctx: Context
   workRoot: string
   anchorDir: string
+  /** The production AgentLoop test driver (composes real live Agents). */
+  harness: Awaited<ReturnType<typeof mountAgentLoopTestHarness>>
   dispose(): Promise<void>
 }> {
   const workRoot = life.tempDir('dsh-m3-4-pr1-')
@@ -109,12 +117,13 @@ export async function createRemoteApplicationHostFixture(
   mkdirSync(anchorDir, { recursive: true })
   const ctx = new Context()
   let persistenceFiber: Fiber | undefined
+  let harness: Awaited<ReturnType<typeof mountAgentLoopTestHarness>> | undefined
   try {
     await ctx.plugin(TypertRegistry)
     await mountAgentLoopTestDependencies(ctx)
     persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
-    await mountAgentLoopTestHarness(ctx)
-    ctx.llm.registerAdapter(['smoke'], new StubLlmAdapter())
+    harness = await mountAgentLoopTestHarness(ctx)
+    ctx.llm.registerAdapter(['smoke'], options.llmAdapter ?? new StubLlmAdapter())
     await ctx.plugin(CommandRuntime)
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'smoke', model: 'smoke' }),
@@ -175,7 +184,8 @@ export async function createRemoteApplicationHostFixture(
     await ctx.fiber.dispose()
   }
   life.defer(dispose)
-  return { ctx, workRoot, anchorDir, dispose }
+  assert.ok(harness !== undefined, 'the agent-loop harness must be mounted')
+  return { ctx, workRoot, anchorDir, harness, dispose }
 }
 
 export { testLifecycle }

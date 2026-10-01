@@ -143,6 +143,13 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     readonly sessionWriter: SessionWriter
     readonly hostCommand: HostCommandPort
   }
+  /**
+   * The INJECTED submission-presentation source (M3-4 PR2): the official
+   * `SessionSnapshot.pendingSubmissions` read on the Remote branch. Absent
+   * on Direct — the controller then wires its own ledger (the unchanged
+   * Direct optimistic identity).
+   */
+  readonly submissionPresentation?: SubmissionPresentationSource
   /** The per-TUI draft stores. */
   readonly drafts: {
     readonly images: DraftImageStore
@@ -419,16 +426,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const pendingSubmissions = new PendingSubmissions()
 
   /**
-   * The client-local presentation source the queue/transcript handoff reads.
-   * Production Direct wires the ledger above. D2.2 has NO production Remote
-   * backend, so this runner intentionally has no substitution point; the
-   * experimental Remote assembly (tests/smoke) composes
-   * `RemoteSubmissionPresentation` directly. A complete Remote backend (M3)
-   * is what would inject the official `SessionSnapshot.pendingSubmissions`
-   * source here instead of running two optimistic identities (D2.2 §21/§22).
+   * The client-local presentation source the queue/transcript handoff reads
+   * (D2.2 → M3-4 PR2): Direct wires the ledger above; a Remote selection
+   * injects the official `SessionSnapshot.pendingSubmissions` source
+   * (`RemoteSubmissionPresentation`) so the two optimistic identities never
+   * run together. The pending-presentation join stays the ONE UI join.
    */
-  
-  const submissionPresentation: SubmissionPresentationSource = new DirectSubmissionPresentation(pendingSubmissions)
+  const submissionPresentation: SubmissionPresentationSource = deps.submissionPresentation
+    ?? new DirectSubmissionPresentation(pendingSubmissions)
 
   /**
    * Accept one submission: show the pending row NOW (Submit/Queued by

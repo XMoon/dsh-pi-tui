@@ -38,6 +38,7 @@ import {
   type RemoteBackendRuntime,
 } from './runtime.ts'
 import { createRemoteSessionOwnerServices, type RemoteSessionOwnerServices } from './session-owners.ts'
+import { createRemotePresentationSource, type RemoteApplicationSource } from './presentation-source.ts'
 
 /** Start input for the Remote application runtime aggregate. */
 export interface RemoteApplicationRuntimeOptions {
@@ -62,6 +63,14 @@ export interface RemoteApplicationRuntime {
   readonly selected: SelectedApplicationRuntime
   readonly wire: ExperimentalRemoteRuntime
   readonly backendRuntime: RemoteBackendRuntime
+  /**
+   * The M3-4 PR2 branch-specific presentation source bundle (the reader by
+   * identity, the official pending-submissions echo source, the eventSource
+   * live ingress, the Session-scoped status facts) — built from the SAME
+   * wire/aggregate, never a second graph. It constructs no subscription and
+   * owns no disposal; the consuming bootstrap owns the ingress handles.
+   */
+  readonly presentation: RemoteApplicationSource
 }
 
 /** Run one disposal step with per-step error isolation: the step's failures
@@ -156,5 +165,6 @@ export async function createRemoteApplicationRuntime(
     },
     wire,
     backendRuntime,
+    presentation: createRemotePresentationSource(wire, backendRuntime),
   }
 }

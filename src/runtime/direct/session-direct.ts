@@ -359,6 +359,7 @@ export class DirectSessionReader implements SessionReader {
         'contextBreakdown',
         'tokenUsage',
         'todos',
+        'agentPreset',
       ])?.values
       if (values === undefined) return undefined
       return detachedSessionStatus(sessionId, values, agent.session.header.cwd)

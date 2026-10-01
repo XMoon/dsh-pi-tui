@@ -22,6 +22,9 @@
  * @module @xmoon76/dsh-pi-tui/app/application-runtime
  */
 
+import type { PresentationReader } from '../runtime/presentation-read-port.ts'
+import type { SessionReader } from '../runtime/session-reader-port.ts'
+import type { SubmissionPresentationSource } from '../submission-presentation.ts'
 import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
 
@@ -70,6 +73,65 @@ export interface RemoteApplicationSelection {
   readonly promptSerializer: object
 }
 
+/**
+ * The Remote branch's application presentation sources (M3-4 PR2),
+ * declared STRUCTURALLY here so the composition root (`app/bootstrap.ts`)
+ * consumes the bundle without any static `app/remote/**` edge — the real
+ * bundle is assembled inside `app/remote/presentation-source.ts` from the
+ * ONE aggregate and satisfies these shapes by construction.
+ */
+export interface RemoteApplicationSources {
+  /** The ONE shared presentation reader (the M3-3A Remote adapter). */
+  readonly presentationReader: PresentationReader
+  /** The official pending-submissions optimistic echo source. */
+  readonly submissionPresentation: SubmissionPresentationSource
+  /** The eventSource live-ingress subscription factory. */
+  readonly liveIngress: RemoteLiveIngressFactory
+  /** The official Session-scoped facts (sessionStatus/plan/running). */
+  readonly sessionFacts: RemoteSessionFactsSource
+}
+
+/** The neutral live-ingress factory face (see `app/remote/live-ingress.ts`
+ *  for the official-contract documentation; this structural mirror keeps
+ *  the bootstrap transport-clean). */
+export interface RemoteLiveIngressFactory {
+  subscribe(
+    sessionId: string,
+    sinks: {
+      onDurableEvent: (sessionId: string, event: { readonly type: string; readonly seq: number; readonly time: number }) => void
+      onLiveInput: (input: import('../runtime/assistant-stream-port.ts').AssistantLiveInput) => void
+      onWindowReplaced: (sessionId: string) => void
+      onSessionSnapshotChanged: (sessionId: string) => void
+    },
+    /** The cold-hydration snapshot revision: a higher subscription-time
+     *  revision means events landed in the hydrate→subscribe gap and the
+     *  ingress recovers through `onWindowReplaced` (never a lost event). */
+    hydrateRevision?: number,
+  ): { dispose(): void } | undefined
+}
+
+/** The pre-composed Remote application input for the internal L6
+ *  composition entry (M3-4 PR2): the aggregate the caller already built
+ *  through `createRemoteApplicationRuntime` (ONE Host/Client/Backend/owner
+ *  graph), plus its presentation source bundle. The selection seam re-uses
+ *  the aggregate's selected core instead of constructing a second Remote
+ *  graph; internal/test paths only. */
+export interface RemoteApplicationOverride {
+  readonly selected: SelectedApplicationRuntime
+  readonly presentation: RemoteApplicationSources
+}
+
+/** The neutral Session-scoped facts face. */
+export interface RemoteSessionFactsSource {
+  sessionStatus: SessionReader['sessionStatus']
+  plan(sessionId: string): { readonly active: boolean; readonly pending: boolean } | undefined
+  running(sessionId: string): boolean | undefined
+  /** The §6.5 transport identity capture/compare pair (Connection
+   *  generation + exact binding object; see the owning module). */
+  captureTransportToken(sessionId: string): unknown
+  isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+}
+
 /** The internal application runtime-selection seam input (M3-4 PR1): which
  *  branch to select and HOW to construct it. The Direct branch takes a
  *  FACTORY, never a pre-built runtime; the Remote branch takes the
@@ -86,4 +148,12 @@ export interface ApplicationRuntimeSelection {
   }
   /** The Remote composition input (internal/test M3-4 paths only). */
   readonly remote: RemoteApplicationSelection | undefined
+  /**
+   * A pre-built selected core the seam adopts VERBATIM (M3-4 PR2 internal
+   * L6 composition): the caller already constructed the ONE Remote
+   * application aggregate through the canonical path; the seam constructs
+   * nothing and returns this core by identity. Internal/test paths only —
+   * the production `apply()` selection never supplies it.
+   */
+  readonly preselected?: SelectedApplicationRuntime
 }

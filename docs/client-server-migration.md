@@ -2954,6 +2954,226 @@ release commit.
   `Post-M3 Q1` (generic Queue per-row actions) and `Post-M3 T1`
   (`clientTimeZone`) as `DEFERRED_WITH_OWNER`.
 
+## M3-4 PR2 — Main Session Read / Presentation / Status (COMPLETE)
+
+PR2 makes an internally selected Remote main Session run the read/presentation
+side of the REAL main TUI (plan: `temp/m3/dsh-pi-tui-m3-4-pr2-pr5-sequential-
+execution-plan-20260930.md` §7). Direct remains the production default; the
+Remote composition is reachable only through the internal selection seam (a
+pre-selected aggregate — no CLI/config/env selector exists).
+
+### What landed
+
+- **Application presentation-source handoff (§7.4)**: the Remote application
+  aggregate (`app/remote/application-runtime.ts`) now constructs ONE
+  branch-specific presentation bundle (`app/remote/presentation-source.ts`,
+  satisfying the transport-neutral `RemoteApplicationSources` declared in
+  `app/application-runtime.ts` — the bootstrap holds no static `app/remote`
+  edge): the M3-3A `presentationReader` BY IDENTITY, the official
+  `SessionSnapshot.pendingSubmissions` echo source
+  (`RemoteSubmissionPresentation`), the eventSource live-ingress factory, and
+  the Session-scoped official facts (sessionStatus / plan projection /
+  running bit). The internal L6 composition entry is
+  `applyRunnerWithRuntime(ctx, config, override)`; the production `apply()`
+  stays Direct through the unchanged seam (source-locked).
+- **Cold hydration through PresentationReader (§7.5)**: the presentation
+  owner's ONE shared hydrate body now serves both branches — Direct keeps the
+  full-log snapshot + live baseline; the Remote branch reads the bounded
+  official window (`PresentationReader.read`), merges the opening-journal cut
+  by seq, replays the reconstructed live inputs, and derives the same
+  presentation-only folds (goal/title/todo/compaction). The bounded-window
+  working fold falls back to the official `SessionSnapshot.running` bit only
+  when the window cannot prove a turn boundary (see the closure condition
+  below).
+- **History paging (§7.6)**: the fullscreen transcript boundary gesture
+  (`onTranscriptMoveOlder` at the loaded floor) dispatches ONE official
+  `PresentationReader.loadOlder` page + a window re-hydrate
+  (`rehydrateFromWindow`) — never a hand-rolled page chain; Direct returns
+  false (its fold already holds the complete log).
+- **Live ingress (§7.6)**: `app/remote/live-ingress.ts` subscribes the CURRENT
+  binding's `eventSource` and feeds the EXISTING canonical pipeline — durable
+  appends through `surface.routeSessionEvent`, transient `assistant/live-chunk`
+  entries mapped onto the neutral `AssistantLiveInput` plane (one synthetic
+  `start` per attempt tuple, the read-side partition rule), `replace` windows
+  (reconnect/gap repair) triggering the full re-hydrate. Identity is the exact
+  binding object + Connection generation; a stale publication detaches itself.
+- **Pending-input / submission presentation (§7.7)**: the submission
+  controller's presentation source is now INJECTED — Direct keeps its ledger;
+  the Remote branch reads the official `pendingSubmissions` (the ONE
+  optimistic identity there; the TUI runs no second Remote ledger). The
+  pending-presentation join stays the single UI join.
+- **Status projection convergence (§7.8)**: `SessionStatusProjection` gained
+  the official `agentPreset` fact (both adapters map the same projection);
+  the status owner reads the Remote-branch facts bundle (sessionStatus /
+  plan wire view) for the Agent-shaped facts — welcome card, model label,
+  composition section, cwd — never `agent.options`, never a parent fallback,
+  never a zero-filled guess. Measurement fences bind by the current session
+  id on Remote.
+- **Lifecycle (§7.9)**: the resume quiesce uses the SELECTED runtime's
+  retirement (`selectedRuntime.retirement.whenIdleOrAbort`); the Remote
+  turn-end flush hook is a DELIBERATE no-op (no public Client flush verb; no
+  hidden Host `sessions.flush`); the `--session` resume reads the recorded
+  preset from the official projection and skips the launch-preset WRITE
+  (read/presentation-only scope); switch/new/fork drive the same session
+  runtime seams with `initLiveSession` dispatching to the Remote surface
+  init for Remote-owned generations.
+
+### In-stage known boundaries (active M3-4 findings — NOT promoted to Debt)
+
+- **Host command-name collisions (e.g. `/export`)**: the Remote Host
+  composition mounts `session-log-export`, which registers a Host `/export`
+  alongside the TUI built-in. Registration is PER-NAME isolated (M3-4 PR2):
+  the colliding name fails loudly with its exact name in the user notice and
+  the diagnostics, later registrations still install, and no broad catch
+  aborts the pass. The command-plane split (Client-local registry vs
+  `HostCommandPort`, plan §9.3) is the M3-4 command PR's ownership; M3-4
+  closure must prove Remote session export works.
+- **`refreshLiveCatalog` on Remote owners stays a no-op**: catalog-refresh
+  currentness over the binding generation is the command PR's ownership; the
+  startup prefetch snapshot remains the catalog until then (PR4-owned
+  unavailable behavior, not a completed Remote catalog).
+- **Launch-preset on Remote**: the requested preset is ALWAYS forwarded to
+  the official `session.create({agentPreset})` — the Host is the single
+  authority (an unknown/broken preset is refused at create time). The roster
+  preflight only shapes an EARLY UX notice (a broken roster answer warns
+  before the create); it never drops the requested value, and a preflight
+  ERROR (an unreadable roster) logs without changing the create input. The
+  `--preset` resume WRITE is skipped on Remote in PR2 (read-only scope); its
+  final seam is verified with the preset lifecycle in the command PR.
+
+### Working-fold proof hierarchy (the §7.5 equivalence closure)
+
+The bounded-window working/busy fold follows a two-level proof hierarchy,
+locked by `test/remote-working-fold-equivalence.test.ts`:
+
+0. The compaction consumer's cache (`currentWorkingFromLog`) is keyed by the
+   ownership generation + session id AND the Remote transport token it was
+   captured under; the cold hydrate SEEDS it (no first-use window) and a
+   window replace/reconnect INVALIDATES it (the old window's proof is void).
+1. A COMPLETE window (`hasMore === false`) ALWAYS prefers the
+   `workingFromLog` fold — including the transient wake gap where the
+   official `running` bit has already flipped but the durable `turn/start`
+   has not landed, and including the EMPTY window (the fold is false by
+   definition: no turn is open). This is deliberate DIRECT PARITY: the
+   canonical presentation is event-driven, and the Remote branch must not
+   lead it. BOTH consumers follow the rule: the cold hydrate and the
+   compaction-settle `currentWorkingFromLog` (once a complete-window fold
+   landed, the running bit cannot override it).
+2. A TRUNCATED window (`hasMore === true`) proves nothing about the LATEST
+   boundary, so the official `SessionSnapshot.running` bit is the
+   authoritative presentation fact. The upstream invariant (verified against
+   the rc.2 agent-loop source): `running === false` ⇒ every turn has a
+   durable `turn/end` (the driver exits only after the last `turn()`
+   returns), so the fallback can never answer `true` where the fold would
+   answer `false`; `running === true` covers the wake window before
+   `turn/start` and mid-turn windows — both are the UI working fact.
+
+### L6 evidence (plan §7.10/§7.11 subset landed)
+
+`test/runner-remote-presentation.test.ts` — the REAL runner
+(`applyRunnerWithRuntime` + a pre-selected aggregate) over a REAL rc.2 Host
+Context (the shared fixture + TokenMeter/toolTodo projection rows + a
+scripted real `LlmAdapter`) → the official in-process carrier → a real Client:
+
+- Remote resume → the official window's transcript rows painted ONCE (no
+  duplicate identity, no TUI ledger);
+- REAL Host-side `agent/assistant-stream` frames → the official wire → the
+  eventSource transient entries → the live chunk painted through the
+  canonical pipeline;
+- `loadOlder` extends the durable window through the OFFICIAL loader without
+  replacing the subject. The full SURFACE_REACHABLE chain is proven
+  dynamically: a REAL PageUp boundary gesture through the mounted surface
+  (real runner + real wire) extends the loaded official history
+  (mutation-verified: without the gesture the extension never happens);
+  the gesture dispatch and the production surface fall-through are
+  additionally locked in `test/transcript-history-extension.test.ts`;
+- `sessionStatus` absent-field discipline (an unretained session reads
+  `undefined`, never guessed facts);
+- zero Direct graph construction on the Remote selection;
+- the OFFICIAL pendingSubmissions echo drives the pending-presentation join:
+  a real `beginSubmission` on the retained binding surfaces its text through
+  the rendered pending rows (this closed a REAL PR2 defect — the Remote
+  pending SUBJECT read `agentNow()` alone, so the pending pane never joined
+  on the Remote branch; it now falls back to the current ownership session).
+
+Supporting contract suites: `test/remote-live-ingress.test.ts` (the
+ingress's own change partition, staleness detach by generation AND exact
+binding identity, the hydrate→subscribe gap recovery, settle-assistant
+routing, the replace tuple reset) and the §6.5 fence cases inside
+`test/remote-working-fold-equivalence.test.ts` (a superseded owner commits
+NOTHING; a current owner commits normally).
+
+Fixture manifest discipline follows the shared fixture header: the only
+SEMANTIC stand-in is the (unsupported) prompt serializer; the LLM endpoint
+stand-in streams real chunks through the real Host agent loop. DELIBERATELY
+NOT CLAIMED: production Remote submission, command catalog/execution, tool
+cards, permission cycle, rewind, secondary surfaces (their owning PRs).
+
+### PR2 UI/UX impact matrix (plan §5 / §7.10)
+
+Every changed user-observable semantic, with the plan's §5 field set. Two
+tables share the same row keys (the field set split for readability); a row's
+`reachability` uses the plan's frozen vocabulary. "shared" means the Remote
+row travels the SAME canonical presentation owner as Direct — PR2 introduces
+no Remote-specific renderer, display mode, disclosure owner or viewport rule.
+
+| # | Semantics | Semantic source (official) | Reachability | Surface | Visual state | Transition-in | Transition-out | Stale / reconnect | Session navigation |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | Cold-resume transcript | `SessionBinding.eventSource` window | SURFACE_REACHABLE | transcript | the bounded window's durable rows render once, in official order | startup resume / switch / new / fork commit → `PresentationReader.read` | generation reset clears the folder; the next hydrate replaces it | `replace`/gap → authoritative re-hydrate; a replaced generation/binding drops the commit (§6.5 fences) | same path for resume/switch/new/fork |
+| 2 | Older history | `Session.loadOlder` | SURFACE_REACHABLE | transcript (fullscreen history) | older rows become paintable at the loaded floor | fullscreen boundary gesture at the loaded floor | — (the window only grows) | a superseded/failed read is dropped | subject never replaced |
+| 3 | Live assistant output | `eventSource` transient `assistant/live-chunk` | TRANSIENT (durable settlement supersedes) | transcript tail | live text in the pending assistant row, converging | ingress transient `append` | durable `assistant/message` settlement | a stale generation/binding detaches the subscription silently | same pipeline; inputs filtered to the current session |
+| 4 | Reconnect | `SessionEventChange.replace` + `resync` | SURFACE_REACHABLE | transcript + status | the new window replaces the old baseline | reconnect `replace` change | the authoritative re-hydrate | this row IS the window replacement | — (no owner change) |
+| 5 | Pending queued | official `pendingSubmissions` echo + `inbox` projection | SURFACE_REACHABLE | queue pane | the queued row in the existing pending styling | official `beginSubmission`, or the Host queue occurrence | durable user message / queue acceptance by identity | the snapshot channel re-joins; a new owner starts empty | reset at the generation bump |
+| 6 | Pending steering | same | TRANSIENT | conversation tail (user row) | the ephemeral steering row | official echo placement `steering` | durable message by `requestId` | same | same |
+| 7 | Pending context | `inbox` non-user occurrence | TRANSIENT | generic non-user context tail | the context row + waiting-next-step/turn label | Host inbox occurrence | next step/turn, or removal | same | same |
+| 8 | Local echo → authoritative | `requestId` identity | SURFACE_REACHABLE | queue/tail → transcript | exactly one row, never duplicated | the matching durable/queue occurrence | identity handoff (never text equality) | the generation bump drops old echoes | same |
+| 9 | Status: identity / running / working | list/binding `running` + the event-window fold | SURFACE_REACHABLE | footer activity + working row | the working/busy indication | turn-boundary events; a complete window folds, a truncated one reads the official `running` bit | turn end / idle | the fold cache is keyed by owner generation + transport token; a replace invalidates it | reset at commit |
+| 10 | Status: cwd / model / preset | list-row `cwd`; `modelSelection`; `agentPreset` | SURFACE_REACHABLE | footer + welcome card | the session's OWN cwd/model/preset | the ingress snapshot channel | on projection change | an absent fact renders UNKNOWN/empty — never a client or global fallback | same |
+| 11 | Status: plan / goal / todos / usage / context | `plan` / `todos` / `tokenUsage` / `contextPressure` projections + goal events | SURFACE_REACHABLE | footer plan state, goal line, todo dock, stats/context items | the session's own facts | projection/event updates | on change/settle | an absent projection is omitted | reset at commit |
+| 12 | Access (permission / sandbox / approval) | Host permission/sandbox/approval services | PROJECTION_ONLY on Remote (unavailable) | footer badge / settings rows | Direct unchanged; Remote OMITS the section | — | — | — | omitted on Remote (§6.6) |
+| 13 | Display modes | the ONE `TranscriptFolder` pipeline | SURFACE_REACHABLE | transcript | Full/Compact/Focus semantics identical to Direct | mode switch | — | — | unchanged |
+| 14 | Fullscreen / narrow width | the shared window controller + renderer | SURFACE_REACHABLE | transcript viewport | follow-end/anchor and wrapping unchanged | fullscreen toggle / resize | — | — | unchanged |
+| 15 | Session switch / new / fork | `app/session` transition + the `initLiveSession` seam | SURFACE_REACHABLE | all surfaces | the new subject's presentation | transition commit | the old owner's surfaces clear at the generation reset | a stale commit is dropped by the fences | this row IS the navigation |
+| 16 | Unavailable projection | any absent official projection | PROJECTION_ONLY | omitted | nothing is shown | — | — | — | absent stays absent |
+| 17 | Command-name collision | Host command registration (in-process) | SURFACE_REACHABLE | notification | the EXACT colliding name is named | TUI command registration | once per boot | — | — |
+| 18 | Launch preset intent | official `session.create({agentPreset})` | SURFACE_REACHABLE | welcome card + notice | the new session runs the REQUESTED preset when the Host ACCEPTS it; a Host refusal surfaces as the create-failure notice | first-session / `/new` create with a launch or `/preset` intent | the session's own recorded preset takes over | a superseded create stays UI-silent | first-session and `/new` creates only (an existing session's preset is fixed) |
+| 19 | Sessionless `/model` marker | the model-selection owner's in-flight intent (client-local) + the persisted official default | SURFACE_REACHABLE | footer model item | `m1 → m2 (selecting…)`, or `(unconfirmed)` for an ambiguous write | a sessionless `/model` selection | a COMMITTED save clears it; an UNRESOLVED one is reconciled by an authoritative Host read | an unresolved write keeps the explicit `unconfirmed` marker until a Host read establishes truth | a COMMITTED sessionless write becomes the persisted default that later sessions read; an UNRESOLVED intent is NOT seeded into creation (the create uses the actual Host default); a live session reads its own projection |
+
+| # | Modes (Full/Compact/Focus) | Fullscreen | Narrow width | Search / disclosure | Interaction | Unsupported / error | Authority proof |
+|---|---|---|---|---|---|---|---|
+| 1 | shared folder — no Remote display mode | shared controller (anchor/follow-end) | shared wrapping | searchable via the shared search projection; disclosure owner unchanged | unchanged | an absent window yields no rows (never fabricated) | the ONE `TranscriptFolder` fed by the official `eventSource`; no second transcript |
+| 2 | same | the existing fullscreen-only gesture | shared | search covers loaded rows | PageUp/wheel (existing) | a failed page leaves the viewport at the edge | the official `loadOlder` only — no hand-rolled chain |
+| 3 | same | shared | shared | not search history until settled | unchanged | an abandoned attempt clears its previews | ONE ingress; no second stream tracker |
+| 4 | same | shared | shared | — | — | a failed re-hydrate publishes nothing stale | the official window is the only source |
+| 5 | shared queue pane | — | shared | not search history | the existing pane (per-row Queue actions intentionally not cloned) | an unavailable snapshot reads absent, not authoritative-empty | the official echo source is the ONLY Remote optimistic identity |
+| 6 | shared tail | — | shared wrapping | ephemeral, not searchable | unchanged | same | identity join by `requestId` |
+| 7 | shared tail (non-user) | — | shared | not searchable | none (display-only) | same | the Host projection owns the occurrence |
+| 8 | shared | — | shared | — | — | a failed dispatch retires the echo | identity-only correlation |
+| 9 | the working row in every mode | — | shared | — | Esc/cancel unchanged | a truncated window with no `running` bit reads not-working (fail-safe) | the fold + the official `running` bit; no second working state |
+| 10 | footer items, mode-dependent layout | — | truncation preserves the label | — | — | unknown reads `no model` / empty cwd | official projections; the client cwd is never the session's workspace |
+| 11 | dock/footer | — | shared | — | — | an absent projection is omitted | official projections; the goal text folds the official event |
+| 12 | — | — | — | — | Shift+Tab cycle is a no-op on Remote (no live Agent) | Remote availability is explicit (absent), never a guessed `ask`/mode | §6.6 — an unsupported capability stays unsupported |
+| 13 | these ARE the modes under review | — | — | — | — | — | no Remote-specific display state exists |
+| 14 | — | unchanged | unchanged wrapping/truncation | — | — | — | shared |
+| 15 | shared | shared | shared | search state resets per generation | — | — | the generation reset + exact-generation fences |
+| 16 | — | — | — | — | — | this row IS the unsupported disposition | the shared mapper's absent-field discipline |
+| 17 | — | — | — | — | — | the notice names the exact command | per-name isolation; the Host owns its command |
+| 18 | shared notice/welcome rendering | — | shared notice wrapping | — | unchanged | a broken roster answer warns EARLY; the requested value still reaches the Host, whose refusal is the single authority | the Host create owns preset admission; the client preflight never drops or substitutes the requested value |
+| 19 | the shared footer item | — | truncation preserves the label plus the marker | — | unchanged | an UNRESOLVED write keeps the explicit marker until an authoritative Host read reconciles it; a FAILED write walks the operation ancestry newest-first — a committed ancestor clears it, a nearer unresolved ancestor KEEPS its explicit marker, a pending ancestor restores the intent, and with none of those it clears | the marker is presentation-only client intent; the authoritative value stays the official default/projection |
+
+### Validation evidence
+
+The full suite (`pnpm test:bundle`) passes on the settled tree, including the
+new L6 suite (gesture-driven history paging, session-status and
+pending-join evidence), the live-ingress contract suite, the working-fold
+equivalence + §6.5 fence cases, and the updated A2/A4 ownership locks
+reflecting the branch-safe Direct-read shapes. `pnpm build`,
+`pnpm typecheck`, `gate:architecture` (single dynamic Remote edge intact),
+`gate:boundary` (no new Host coupling), the regenerated A5b root-declaration
+matrix, the docs lane, and the updated deprecated-reader allowance (the
+Remote `currentWorkingFromLog` folds the official window; the Direct
+allowance text tracks the branch-guarded line) are all green.
+
 ## M3-4 status (IN PROGRESS — PR1 landed)
 
 M3-4 composes the main TUI application over the Remote Backend. The stage is

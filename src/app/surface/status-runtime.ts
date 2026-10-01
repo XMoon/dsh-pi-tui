@@ -29,7 +29,7 @@ import { formatStats, StatsFolder } from '../../stats.ts'
 import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from '../../status/context-measurement.ts'
 import { deriveAccessStatus, type AccessDeriveDeps } from '../../status/derive-access.ts'
 import { foldGoal } from '../../status/derive-goal.ts'
-import { derivePlanStatus, type PlanModeLike, type PlanProjectionLike } from '../../status/derive-plan.ts'
+import { derivePlanStatus, deriveRemotePlanStatus, type PlanModeLike, type PlanProjectionLike } from '../../status/derive-plan.ts'
 import { deriveRunnerPermission } from '../../status/derive-permission.ts'
 import { usageFromStats } from '../../status/derive-usage.ts'
 import { plainSectionEqual } from '../../status/equal.ts'
@@ -51,6 +51,21 @@ export interface StatusLiveAgent {
 export interface StatusHostFacts extends AccessDeriveDeps {
   readonly planMode: PlanModeLike | undefined
   readonly sessionProjections: PlanProjectionLike | undefined
+}
+
+/**
+ * The Remote-branch official Session facts (M3-4 PR2): when the selected
+ * runtime is Remote there is no live Direct Agent, so the owner reads the
+ * session-scoped official projections through this bundle instead. Every
+ * read is `undefined`-total — an unavailable projection stays absent, never
+ * a guessed value and never another session's fact.
+ */
+export interface StatusRemoteFacts {
+  /** The official Session-scoped status projection (model/preset/cwd/
+   *  todos/usage/context of THIS exact session). */
+  readonly sessionStatus: (sessionId: string | undefined) => import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined
+  /** The official `plan` projection wire view of THIS session. */
+  readonly plan: (sessionId: string | undefined) => { readonly active: boolean; readonly pending: boolean } | undefined
 }
 
 /** The narrow surface capabilities the status owner needs. */
@@ -86,6 +101,12 @@ export interface StatusRuntimeDeps {
   }
   /** The official Host service values for the derivation helpers. */
   readonly host: () => StatusHostFacts
+  /**
+   * The Remote-branch official Session facts (M3-4 PR2): absent on Direct.
+   * When present, the owner prefers these projection reads for the
+   * Agent-shaped facts (cwd/model/preset/plan) — never `agent.options`.
+   */
+  readonly remote?: StatusRemoteFacts
   /** The live-session presentation owner (the legacy stats facts). */
   readonly presentation: { readonly mainStats: () => StatsFolder }
   /** The viewer owner (the display subject while a child is viewed). */
@@ -140,10 +161,29 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   /** Repaint the welcome card from the live agent's current facts. Re-read
    * on every call so a still-blank session's preset switch shows up. */
   
+  /** The Remote-branch Session-scoped projection read for the CURRENT
+   *  session (absent on Direct; `undefined` = unavailable, never guessed). */
+  const remoteStatus = (): import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined =>
+    deps.remote?.sessionStatus(deps.currentSessionId())
+
   const updateWelcomeCard = (): void => {
     const agent = deps.liveAgent()
     if (agent === undefined) {
-      deps.surface.app.setWelcomeIdle(true)
+      // A Remote-branch live session still owns the welcome card: its facts
+      // come from the official Session-scoped projections (never a parent
+      // fallback, never guessed defaults).
+      const facts = deps.remote === undefined ? undefined : remoteStatus()
+      if (facts === undefined) {
+        deps.surface.app.setWelcomeIdle(true)
+        return
+      }
+      deps.surface.app.setWelcomeCard({
+        cwd: facts.cwd ?? '',
+        sessionId: facts.sessionId,
+        model: facts.model === undefined ? 'unconfigured' : `${facts.model.provider}/${facts.model.model}`,
+        version: versionDisplay(),
+        ...facts.preset === undefined ? {} : { preset: facts.preset },
+      })
       return
     }
     const current = deps.model.selection()
@@ -168,7 +208,30 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * (the process cwd) stays for launch-relative concerns (/export paths).
    */
   
-  const sessionCwd = (): string => deps.liveAgent()?.session.header.cwd ?? deps.clientCwd
+  /**
+   * The OFFICIAL cwd fact of the live session (Remote branch: the list-row
+   * cwd). `undefined` when a LIVE session's official row carries none —
+   * the status presentation then OMITS the cwd fact rather than copying the
+   * Client cwd (Host/Client cwd equivalence is forbidden). Never consumed
+   * by execution paths (shell/history keep their own client-local fallback).
+   */
+  const sessionCwdFact = (): string | undefined => {
+    const agent = deps.liveAgent()
+    if (agent !== undefined) return agent.session.header.cwd
+    if (deps.remote !== undefined) {
+      const sessionId = deps.currentSessionId()
+      if (sessionId === undefined) return deps.clientCwd
+      return deps.remote.sessionStatus(sessionId)?.cwd
+    }
+    return deps.clientCwd
+  }
+
+  /**
+   * The EXECUTION cwd (shell runs, history scoping): the official session
+   * cwd when known, else the CLIENT cwd — a Client-local execution fallback,
+   * never presented as the session's own workspace fact.
+   */
+  const sessionCwd = (): string => sessionCwdFact() ?? deps.clientCwd
 
   /**
    * Derive + write the terminal window title from the CURRENT surface
@@ -183,7 +246,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   const refreshTerminalTitle = (): void => {
     const title = terminalTitleOf({
       sessionTitle: deps.surface.app.getSessionTitle(),
-      cwd: sessionCwd(),
+      // The OFFICIAL fact (a live session whose row carries no cwd yields
+      // the plain 'dsh' title — the client cwd never impersonates the
+      // session's Host workspace).
+      cwd: sessionCwdFact(),
     })
     setTerminalTitle(title)
   }
@@ -202,12 +268,40 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // (which is shown only by the marker below). Otherwise a pending
     // sessionless save would paint m1 as both base and pending.
     const agent = deps.liveAgent()
-    const selection = agent === undefined
-      ? (deps.model.defaultSelection() as ModelSelectionValue | undefined)
-      : deps.model.currentOf(agent)
-    const base = selection !== undefined
-      ? labelOf(selection)
-      : agent === undefined ? 'no model' : `${agent.options.provider}/${agent.options.model}`
+    // The AUTHORITATIVE base, per branch:
+    // - Remote (no live Agent): the official `modelSelection` projection
+    //   (`next ?? lastUsed`) of THIS session when it exists — it OUTRANKS the
+    //   sessionless default (a session-specific selection must never be
+    //   masked by the global default) and never falls back to `agent.options`.
+    //   Only a SESSIONLESS Remote surface reads the default; a live session
+    //   whose fact is unavailable reads UNKNOWN.
+    // - Direct: the live Agent's selection, else the persisted default.
+    // The in-flight marker below applies to EVERY branch — including the
+    // sessionless Remote surface (a `/model` write must show `selecting…`/
+    // `unconfirmed` there too, never the bare stale default).
+    let base: string
+    if (agent === undefined && deps.remote !== undefined) {
+      const remoteFact = remoteStatus()?.model
+      if (remoteFact !== undefined) {
+        base = labelOf({
+          provider: remoteFact.provider,
+          model: remoteFact.model,
+          ...remoteFact.reasoningEffort === undefined ? {} : { reasoningEffort: remoteFact.reasoningEffort },
+        })
+      } else if (deps.currentSessionId() !== undefined) {
+        base = 'no model'
+      } else {
+        const fallback = deps.model.defaultSelection() as ModelSelectionValue | undefined
+        base = fallback === undefined ? 'no model' : labelOf(fallback)
+      }
+    } else {
+      const selection = agent === undefined
+        ? (deps.model.defaultSelection() as ModelSelectionValue | undefined)
+        : deps.model.currentOf(agent)
+      base = selection !== undefined
+        ? labelOf(selection)
+        : agent === undefined ? 'no model' : `${agent.options.provider}/${agent.options.model}`
+    }
     const marker = deps.model.marker()
     if (marker === undefined) return base
     const pendingLabel = labelOf(marker.selection)
@@ -225,8 +319,26 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * permission, NOT plan). */
   
   const deriveCompositionStatus = (): CompositionStatus => {
-    const selection = deps.model.selection()
     const agent = deps.liveAgent()
+    // Remote branch (no live Agent): the model/preset facts come from the
+    // official Session-scoped projections of THIS session — they OUTRANK the
+    // sessionless selection (a session-specific selection must never be
+    // masked by the global intent/default).
+    if (agent === undefined && deps.remote !== undefined) {
+      const facts = remoteStatus()
+      return {
+        ...facts?.model === undefined ? {} : {
+          model: {
+            provider: facts.model.provider,
+            id: facts.model.model,
+            displayName: facts.model.model,
+            ...facts.model.reasoningEffort === undefined ? {} : { reasoningEffort: facts.model.reasoningEffort },
+          },
+        },
+        ...facts?.preset === undefined ? {} : { agentPreset: { id: facts.preset, label: facts.preset } },
+      }
+    }
+    const selection = deps.model.selection()
     const model = selection !== undefined
       ? {
           provider: selection.provider,
@@ -295,12 +407,18 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // the parent's measurement on the child's stats (same rule as before
     // the split); the legacy setStatus field keeps carrying the parent's
     // cached value exactly like the old path.
-    const contextTokens = contextMeasurement.valueFor(deps.liveAgent()?.session.id)
+    const contextTokens = contextMeasurement.valueFor(
+      deps.liveAgent()?.session.id ?? (deps.remote !== undefined ? deps.currentSessionId() : undefined),
+    )
     // The footer's [yolo]/[workspace-write]/[read-only]/[custom] mode badge
     // rides the effective preset (derived from the sandbox+approval knob
     // folds).
     const permission = deps.host().permissionPresets
-    const liveCwd = sessionCwd()
+    // The workspace section carries the OFFICIAL session cwd fact; an
+    // unknown live-session cwd renders EMPTY (the footer cwd item omits
+    // itself for an empty value) — the client cwd never impersonates the
+    // session's Host workspace here.
+    const liveCwd = sessionCwdFact() ?? (deps.currentSessionId() !== undefined && deps.remote !== undefined ? '' : deps.clientCwd)
     // M0: project the DSH-derived facts into the unified status store
     // FIRST — the footer paints the store (setStatus below repaints it),
     // so the derived sections must be committed before the paint or the
@@ -324,7 +442,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // wake the command runner's refresh on every streaming event.
     const current = deps.surface.status.snapshot()
     const composition = displaySubject === undefined ? deriveCompositionStatus() : {}
-    const access = displaySubject === undefined
+    // The access section (permission preset / sandbox mode / approval
+    // override) is derived from the in-process Host services, which are the
+    // LIVE-AGENT subject's facts. On the Remote branch (no live Agent) the
+    // plan's §6.6 rule applies: an unsupported capability stays unsupported —
+    // the section is OMITTED rather than showing a Host deployment default
+    // (e.g. `sandboxPolicy.resolve(undefined)` answers without a session).
+    // The projection-driven Remote replacement (`permissions.currentValue` +
+    // the preset catalog) is the command/action PR's ownership.
+    const access = displaySubject === undefined && deps.remote === undefined
       ? deriveAccessStatus(
           {
             permissionPresets: permission,
@@ -335,7 +461,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         )
       : {}
     const collaboration = displaySubject === undefined
-      ? { plan: derivePlanStatus(deps.host().planMode, deps.liveAgent(), deps.host().sessionProjections, deps.liveAgent()?.session) }
+      ? {
+          plan: deps.remote !== undefined && deps.liveAgent() === undefined
+            ? deriveRemotePlanStatus(deps.remote.plan(deps.currentSessionId()))
+            : derivePlanStatus(deps.host().planMode, deps.liveAgent(), deps.host().sessionProjections, deps.liveAgent()?.session),
+        }
       : { plan: { effective: false } }
     const workspace = deriveWorkspaceStatus(displayCwd)
     const usage = usageFromStats(displaySubject?.stats.snapshot() ?? stats, displaySubject === undefined ? contextTokens : undefined)
@@ -424,9 +554,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   
   const refreshContextMeasurement = (_reason: ContextMeasureReason): void => {
     const session = deps.liveAgent()?.session
-    if (session === undefined) return
-    contextMeasurement.bind(session.id)
-    contextMeasurement.measure(session.id, (id) => deps.measureContext(id))
+    // Remote branch: the CURRENT session id owns the measurement fence (the
+    // coordinator is session-bound; the semantic reader maps the official
+    // contextPressure projection of the exact retained binding).
+    const sessionId = session?.id ?? (deps.remote !== undefined ? deps.currentSessionId() : undefined)
+    if (sessionId === undefined) return
+    contextMeasurement.bind(sessionId)
+    contextMeasurement.measure(sessionId, (id) => deps.measureContext(id))
     refreshStatusCheap()
   }
 
@@ -439,10 +573,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   
   const forceContextMeasurement = (): number | undefined => {
     const session = deps.liveAgent()?.session
-    if (session === undefined) return undefined
-    contextMeasurement.bind(session.id)
+    const sessionId = session?.id ?? (deps.remote !== undefined ? deps.currentSessionId() : undefined)
+    if (sessionId === undefined) return undefined
+    contextMeasurement.bind(sessionId)
     contextMeasurement.markDirty()
-    const value = contextMeasurement.measure(session.id, (id) => deps.measureContext(id))
+    const value = contextMeasurement.measure(sessionId, (id) => deps.measureContext(id))
     refreshStatusCheap()
     return value
   }

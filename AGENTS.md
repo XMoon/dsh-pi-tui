@@ -171,6 +171,19 @@ published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
 staged), plus whatever stage-specific validation the authority plan for the
 current stage requires (e.g. the Pre-M3 plan's §35.5/§35.6 matrix).
 
+**Never re-run a lane that is already green on the same state.** Before a
+stage-final pass, take stock of what has already run against the CURRENT tree
+and run only the remainder — re-running a green lane after an edit that does
+not touch its inputs buys no evidence and costs the whole suite. A delta
+invalidates a lane only when it touches that lane's inputs: `packages/pi-tui/**`
+for the fork lanes, `src/**` + `test/**` + `scripts/**` for the bundle suites,
+`docs/**` and the doc-gate inputs for `test:docs`/the documentation gates.
+A docs-only or comment-only delta does not invalidate a suite already green on
+the same code. State which lanes were already green (and against which state)
+and which were run for the delta, so the evidence stays auditable. CI runs the
+full pipeline on the PR; the local stage-final pass exists to catch failures
+before pushing, not to reproduce CI.
+
 Validation mechanics for this toolchain:
 
 * `packages/pi-tui/dist` is a build INPUT to the root bundle and to the tests:

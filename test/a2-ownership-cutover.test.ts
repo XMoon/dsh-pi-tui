@@ -78,7 +78,10 @@ test('the current owner is published only through the injected SessionOwnerAcces
     'the M3-4 selection seam constructs the selected runtime core')
   assert.ok(indexSource.includes('      kind: \'direct\','),
     'normal package apply() selects Direct')
-  assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime().owners.currentDirectAttachment()'),
+  // M3-4 PR2: the read is branch-safe (optional chain — a Remote selection
+  // has no Direct runtime); it is still a DERIVED registry projection of the
+  // SAME accessor, never a stored second truth.
+  assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime()?.owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
   // M3-4 PR1 removed the runner's last Direct owner-handle read
   // (`handleNow`): the fatal catch now runs the ONE memoized retirement
@@ -177,7 +180,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the agent/status main branch compares against the core-derived completion identity')
   assert.ok(!agentStatus.includes('agentNow('), 'agent/status must not read the Direct attachment')
   assert.ok(indexSource.includes('completionOwnerId: () => {')
-    && indexSource.includes('directRuntime().owners.completionIdentity(owner)'),
+    && indexSource.includes('directRuntime()?.owners.completionIdentity(owner)'),
     'the runner must inject the completion identity from the core owner')
 
   // No identity/currentness judgement may use the Direct attachment as the

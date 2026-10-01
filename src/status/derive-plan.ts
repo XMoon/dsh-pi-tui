@@ -86,3 +86,16 @@ export function projectedPlanActive(
     return undefined
   }
 }
+
+/**
+ * Derive the plan section from the Remote-branch `plan` projection wire view
+ * (M3-4 PR2): `{ active, pending }` is the official whole-value shape, so the
+ * mapping is direct — a foreign-shaped value reads `effective: false` never
+ * a guessed pending.
+ */
+export function deriveRemotePlanStatus(
+  plan: { readonly active: boolean; readonly pending: boolean } | undefined,
+): PlanStatus {
+  if (plan === undefined) return { effective: false }
+  return plan.pending ? { effective: plan.active, pending: true } : { effective: plan.active }
+}

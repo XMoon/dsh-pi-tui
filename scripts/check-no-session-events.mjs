@@ -83,7 +83,7 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // `currentWorkingFromLog` capability (the surface owns only the WHEN); the
   // debt moved WITH the call site, never doubled. The surface never reads the
   // live session log itself.
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'return agent === undefined ? false : workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability)' },
+  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'if (agent !== undefined) return workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability; M3-4 PR2: the Remote branch folds the official reader window instead)' },
   { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },
   { file: 'src/runtime/direct/presentation-read-direct.ts', call: 'snapshotEvents', site: 'const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))', why: 'Direct presentation read fold over the in-process session log' },
   { file: 'src/transcript.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },
