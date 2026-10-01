@@ -144,6 +144,40 @@ test('submitShellResult: a session switch mid-send aborts stale', async () => {
   assert.equal(notices.some(n => n.message === 'stale'), true)
 })
 
+test('submitShell: a session switch while the Host command RAN skips the result submit entirely (generation fence)', async () => {
+  // The run STARTED under generation N; the switch bumps it before settle.
+  // The wrapper-level fence must skip the submit (zero writer call, zero
+  // card dismissal, a truthful notice) — the completed result NEVER enters
+  // the replacement session.
+  const { submitShell } = await import('../src/app/submission/runtime.ts')
+  const written: unknown[] = []
+  const notices: { message: string; kind: string }[] = []
+  const ackReasons: string[] = []
+  let generation = 7
+  submitShell({
+    command: 'pwd',
+    result: 'out\n[exit 0]',
+    generationAtRun: generation,
+    isDisposed: () => false,
+    currentGeneration: () => { generation += 1; return generation },
+    currentSessionId: () => 'session-b',
+    currentAgent: () => ({ session: { id: 'session-b' } }) as never,
+    terminalAck: (reason: string) => { ackReasons.push(reason) },
+    clearSettledLocalMessages: () => { throw new Error('the card must not be dismissed') },
+    notify: (message, kind) => notices.push({ message, kind }),
+    markDispatch: () => {},
+    writerSection: <T,>(task: () => Promise<T>) => task(),
+    writer: { prompt: async () => { written.push(1); return { kind: 'committed' as const, value: undefined } } },
+    createMessage: (text: string) => ({ text }),
+    diag: { debug: () => {}, warn: () => {}, error: () => {}, info: () => {} } as never,
+  })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(written.length, 0, 'the result is NEVER submitted into the replacement session')
+  assert.equal(ackReasons.length > 0, true, "the gesture's ack row terminates on the skip")
+  assert.equal(notices.some(n => n.message.includes('not submitted')), true,
+    'the skip is surfaced truthfully')
+})
+
 test('submitShellResult: cancelled semantic write is cancellation-shaped', async () => {
   const agent = fakeAgent()
   const { deps, cleared, notices } = makeDeps({
