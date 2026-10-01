@@ -6,6 +6,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
@@ -48,6 +50,7 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
     responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     signal: new AbortController().signal,
     commandRegistry: commands,
+    clientCommands: createClientCommandRegistry(parseCommand),
     recordExtensionError: () => {},
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},

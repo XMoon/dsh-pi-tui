@@ -31,6 +31,7 @@ import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftA
 import { expandImagePlaceholders } from '../../image/placeholder.ts'
 import { commandIsLocalForAttachments, isBareCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
+import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
 import { PendingSubmissions, type PendingSubmissionPlacement } from '../../pending-submission.ts'
 import { queueInboxMessageOf } from '../../pending-presentation.ts'
@@ -62,11 +63,15 @@ export type LocalCommandInvocation = Parameters<TuiLocalCommandHandler>[0]
 export type LocalCommandHandler = (invocation: LocalCommandInvocation) => ReturnType<TuiLocalCommandHandler>
 
 /** The raw Host command-registry plane (the composition root maps the
- *  official service; this owner never imports it). */
+ *  official service; this owner never imports it). Direct-only after PR4
+ *  §1.3: a TUI-owned command line NEVER routes through the Host executor on
+ *  the Remote branch — the Client registry owns that execution — so the
+ *  plane is supplied ONLY where a real Direct Agent exists. */
 export interface SubmissionCommandPlane<ExactAgent> {
   /** Whether the composition provides a command service at all. */
   available(): boolean
-  /** Execute one TUI-owned command line in-process. */
+  /** Execute one TUI-owned command line in-process (Direct compatibility:
+   *  the exact Direct Agent the line was captured against). */
   execute(agent: ExactAgent, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<HostCommandExecution | undefined>
   /** The command-service fallback handler for one local command name. */
   findHandler(name: string): LocalCommandHandler | undefined
@@ -80,6 +85,10 @@ export interface SubmissionCommandAuthority {
   isSkillInvocation(parsed: { name: string } | undefined, text: string): boolean
   withCommandDelivery<T>(delivery: SubmitDelivery, run: () => T): T
   takeCommandDraftDisposition(commandId?: string): 'restored' | 'suppressed' | undefined
+  /** The Client-owned command registry (PR4 §1.3): the TUI_BUILTIN route's
+   *  execution owner on the Remote branch (Direct keeps the in-process
+   *  command service for its unchanged dispatch surface). */
+  clientCommands: ClientCommandRegistry
 }
 
 /** The narrow client command-bridge read surface. */
@@ -136,6 +145,10 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly command: SubmissionCommandAuthority
   /** The raw command-registry plane. */
   readonly commandPlane: SubmissionCommandPlane<ExactAgent>
+  /** The selected backend kind (PR4 §1.3): 'direct' keeps the in-process
+   *  command-service dispatch surface for TUI-owned lines; any other value
+   *  routes them through the Client registry. */
+  readonly backendKind: 'direct' | 'remote'
   /** The semantic backend port slices the submission path reads. */
   readonly backend: {
     readonly hostFile: HostFilePort
@@ -811,6 +824,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
           return
         }
+        // PR4 §1.3: the REAL-Direct-Agent discriminator for the TUI_BUILTIN
+        // route. On Remote `liveAgent()` is the transport-neutral structural
+        // projection `{status, session:{id}}`; on Direct it is the in-process
+        // Agent. A cheap structural marker separates them: the Direct Agent
+        // always carries its mutable `status` string AND an `inbox`-bearing
+        // object graph — the projection never does. The Client registry
+        // executes the Remote branch (never `ctx.commands.execute` on the
+        // projection).
+        const directAgent = 'inbox' in (agent as object) ? (agent as ExactAgent) : undefined
         if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) {
           const merged = mergeDraft(deps.app().getDraft(), text)
           deps.app().setEditorText(merged)
@@ -845,7 +867,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // agentNow(): writing through a re-read closure variable could
       // target a session the identity check did not see (a switch
       // between the check and the write).
-      if (deps.commandPlane.available()) {
+      // PR4 §1.3: the command-dispatch window exists on BOTH branches —
+      // Direct through the in-process service, Remote through the Client
+      // registry + HostCommandPort. `commandPlane.available()` therefore no
+      // longer gates the window: the Remote branch supplies its own
+      // always-available execution owners.
+      {
         // Bare `/plan` toggles: when plan mode is already active it exits
         // instead of re-entering (the official command needs `/plan off`).
         const parsed = parseCommand(text)
@@ -922,17 +949,28 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
               }
               if (tuiOwnedCommand) {
-                // TUI-local commands and skill wrappers retain their existing
-                // in-process command service path; HostCommandPort is only
-                // for a line already selected as Host-owned.
-                return deps.commandPlane.execute(agent, commandLine, submittedAttachments, commandSignal).then((execution: HostCommandExecution | undefined) => {
+                // PR4 §1.3 — the explicit TUI_BUILTIN/SKILL_WRAPPER route.
+                // A REAL Direct Agent (the branch where the in-process
+                // command service owns the dispatch surface) keeps the
+                // existing executor path unchanged; the Remote structural
+                // projection executes through the CLIENT registry — the
+                // projected agent must never reach `ctx.commands.execute`.
+                if (directAgent !== undefined) {
+                  return deps.commandPlane.execute(directAgent, commandLine, submittedAttachments, commandSignal).then((execution: HostCommandExecution | undefined) => {
+                    return execution === undefined
+                      ? { kind: 'committed', matched: false } as const
+                      : { kind: 'committed', matched: true, execution } as const
+                  })
+                }
+                return deps.command.clientCommands.execute({ line: commandLine, signal: commandSignal }).then((execution) => {
                   return execution === undefined
                     ? { kind: 'committed', matched: false } as const
                     : { kind: 'committed', matched: true, execution } as const
                 })
               }
-              // The HostCommandPort submission enters the barrier through
-              // the submission runtime (the M3 insertion point).
+              // The HOST route: the HostCommandPort submission enters the
+              // barrier through the submission runtime (the M3 insertion
+              // point).
               return deps.submissionRuntime.withWriter(scope, () => deps.backend.hostCommand.execute({
                 sessionId: agent.session.id,
                 line: commandLine,
@@ -980,19 +1018,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         })
         return
       }
-      // No commands service: direct follow-up on the CAPTURED agent (see
-      // the note above — never a re-read closure variable). Images ride
-      // the same prepared message as every other path (§13). The submission
-      // runtime owns the ordered writer admission (transition drain +
-      // per-Agent image window) and its terminal ack/echo settlement.
-      await deps.submissionRuntime.submitPrompt({
-        text,
-        scope,
-        requestId: submitRequestId,
-        ackToken: submitAckToken,
-        generation,
-        echoInstalled: localEchoInstalled,
-      })
       },
       restore: (t) => restoreSubmissionDraft(t),
     }, text), {
@@ -1045,7 +1070,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // M5: a plugin-declared local command with a bridge handler routes
     // to the bridge FIRST (its rawInput is passed verbatim — never
     // re-parsed or rewritten, the skill rawInput regression gate); the
-    // commands service is the fallback for core commands.
+    // CLIENT command registry is the core-commands fallback (PR4 §1.5);
+    // the Direct commands service is the LAST fallback and exists only on
+    // the Direct branch (a Remote sessionless command must never reach a
+    // Host `findHandler` for a TUI callback).
     const bridgeHandler = deps.extensions.handlerFor(parsed.name)
     const bridgeCommandId = deps.extensions.commandIdFor(parsed.name)
     // Captured at INVOCATION START (same generation fence as the
@@ -1053,8 +1081,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const bridgeCommandRef = bridgeCommandId === undefined
       ? undefined
       : deps.extensions.recordHealthRef('command', bridgeCommandId)
-    const planeHandler = deps.commandPlane.findHandler(parsed.name)
-    if (bridgeHandler === undefined && planeHandler === undefined) {
+    const clientHandler = deps.command.clientCommands.get(parsed.name)
+    const planeHandler = clientHandler === undefined && deps.backendKind === 'direct'
+      ? deps.commandPlane.findHandler(parsed.name)
+      : undefined
+    if (bridgeHandler === undefined && clientHandler === undefined && planeHandler === undefined) {
       // The "sessionless" command is actually unknown: it falls back to
       // a session dispatch — the history row goes through the
       // deferred-start gate (persist AFTER the session exists, with the
@@ -1068,7 +1099,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       rawInput: parsed.rawInput,
       signal: deps.signal,
     } as LocalCommandInvocation
-    const handler = bridgeHandler ?? planeHandler
+    const handler = (bridgeHandler ?? (clientHandler !== undefined
+      ? (invocation: LocalCommandInvocation) => clientHandler.handler(invocation as never)
+      : planeHandler!)) as LocalCommandHandler
     if (handler === undefined) {
       dispatchViaSession(text, persistHistory, delivery)
       return

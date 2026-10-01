@@ -7,6 +7,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
@@ -628,6 +630,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
     interaction: {

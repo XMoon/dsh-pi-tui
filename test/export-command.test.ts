@@ -11,6 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -177,6 +179,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     hostFile: new DirectHostFilePort(() => undefined, null),
     hostShellCompletion: true,
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',

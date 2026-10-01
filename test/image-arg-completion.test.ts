@@ -11,6 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -99,6 +101,7 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
     interaction: {
