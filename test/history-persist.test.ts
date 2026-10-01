@@ -80,31 +80,55 @@ test('a sessionless submission persists with NO sessionId field', async (t) => {
   assert.equal(records[0]?.content, '/help')
 })
 
-test('a sessionless `!!`/bare-`!` shell row persists with NO sessionId even while a session is live', async (t) => {
+test('the history store accepts genuinely sessionless rows (no sessionId) regardless of content', async (t) => {
   const life = testLifecycle(t)
-  // Review finding: `!!` runs purely locally (no session write) and a
-  // bare `!` is a no-op — their rows must never be attributed to the live
-  // session (they would otherwise leak into the Current session scope).
+  // Generic sessionless-row behavior: the STORE must not invent a session
+  // id for a row its caller persisted without one (the identity is the
+  // caller's decision). NOTE the M3-4 PR3 shell amendment superseded the
+  // old semantics this test used to codify: `!!` is Session/model-EXCLUDED,
+  // never sessionless — the controller now ENSURES a Session for it and
+  // persists the row under that session id (asserted below); only a bare
+  // `!` (no command) remains a sessionless no-op row.
   const home = tempHome(life)
   const cwd = '/work/a'
   const file = historyFilePath(home, cwd)
-  // The runner passes `undefined` for these branches even though a live
-  // session exists (the row must stay out of Current session).
-  for (const content of ['!!ls', '!']) {
-    persistHistoryRecord({
-      content,
-      cwd,
-      sessionId: undefined,
-      ts: 1,
-      lastContent: undefined,
-      hasImages: false,
-      file,
-    })
-  }
+  persistHistoryRecord({
+    content: '!',
+    cwd,
+    sessionId: undefined,
+    ts: 1,
+    lastContent: undefined,
+    hasImages: false,
+    file,
+  })
   const records = loadHistoryRecords(file)
-  assert.equal(records.length, 2)
+  assert.equal(records.length, 1)
   assert.ok(records.every(record => record.sessionId === undefined),
-    'sessionless shell rows must not carry a sessionId')
+    'a genuinely sessionless row must not carry a sessionId')
+})
+
+test('a `!!` history row carries the ENSURED session id (M3-4 PR3 shell amendment)', async (t) => {
+  const life = testLifecycle(t)
+  // The amendment: `!!` is Session/model-excluded, NEVER sessionless — the
+  // gesture ensures a Session first and the row is persisted under THAT
+  // session id (the Ctrl+R Current-session scope must find it). The row's
+  // session association is independent of the result's model exclusion.
+  const home = tempHome(life)
+  const cwd = '/work/b'
+  const file = historyFilePath(home, cwd)
+  persistHistoryRecord({
+    content: '!!ls',
+    cwd,
+    sessionId: 'session-ensured-for-shell',
+    ts: 2,
+    lastContent: undefined,
+    hasImages: false,
+    file,
+  })
+  const records = loadHistoryRecords(file)
+  assert.equal(records.length, 1)
+  assert.equal(records[0]?.sessionId, 'session-ensured-for-shell',
+    'the `!!` row is attributed to the ensured Session (never sessionless)')
 })
 
 test('a steered draft persists with the LIVE session id (Ctrl+S / steer-draft)', async (t) => {
