@@ -209,32 +209,39 @@ test('the call-site decision table: agent-facing rows carry the session id, sess
   assert.equal(historySessionIdFor('sessionless', undefined), undefined)
 })
 
-test('the runner\'s `!` block end to end: `!!`/bare `!` rows are sessionless, a contextual `!` row carries the FINAL session id', async (t) => {
+test('the runner\'s `!` block end to end: `!!` and contextual `!` rows carry the ENSURED session id, bare `!` stays sessionless', async (t) => {
   const life = testLifecycle(t)
   // Simulates dispatchUserInput's `!` block with the ACTUAL functions the
   // runner uses (historySessionIdFor + persistHistoryRecord + the
   // ensureSession ordering via persistAfterSession), asserting the rows
-  // that land in the file.
+  // that land in the file. M3-4 PR3 shell amendment: BOTH `!` and `!!`
+  // with a command ensure a Session first and persist the row under that
+  // FINAL id (the `!!` result stays Session-excluded — that is result
+  // routing, not history association); only a bare `!` (no command) is a
+  // sessionless no-op row.
   const home = tempHome(life)
   const cwd = '/work/a'
   const file = historyFilePath(home, cwd)
   const write = (content: string, sessionId: string | undefined): void => {
     persistHistoryRecord({ content, cwd, sessionId, ts: 1, lastContent: undefined, hasImages: false, file })
   }
-  // `!!` branch: sessionless even while a session is live.
-  write('!!ls', historySessionIdFor('sessionless', 'ses_live'))
-  // bare `!` branch: sessionless.
+  // bare `!` branch (no command): sessionless.
   write('!', historySessionIdFor('sessionless', 'ses_live'))
-  // contextual `!` branch: the FINAL id, resolved AFTER the session
-  // exists (the deferred-start gate).
+  // `!!` branch: the ENSURED session id, resolved AFTER the session exists
+  // (the same deferred-start gate the contextual `!` uses).
+  await persistAfterSession(
+    async () => 'ses_ensured',
+    (sessionId) => write('!!ls', historySessionIdFor('agent-facing', sessionId)),
+  )
+  // contextual `!` branch: the FINAL id.
   await persistAfterSession(
     async () => 'ses_new',
     (sessionId) => write('!ls', historySessionIdFor('agent-facing', sessionId)),
   )
   const records = loadHistoryRecords(file)
-  assert.deepEqual(records.map(record => record.sessionId), [undefined, undefined, 'ses_new'],
-    'the `!` block rows carry exactly the session identities the decision table earns')
-  assert.deepEqual(records.map(record => record.content), ['!!ls', '!', '!ls'])
+  assert.deepEqual(records.map(record => record.sessionId), [undefined, 'ses_ensured', 'ses_new'],
+    'the `!` block rows carry exactly the session identities the amended decision earns')
+  assert.deepEqual(records.map(record => record.content), ['!', '!!ls', '!ls'])
 })
 
 test('the runner\'s steer path end to end: the draft persists with the LIVE session id after the session exists', async (t) => {

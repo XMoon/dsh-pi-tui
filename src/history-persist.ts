@@ -88,8 +88,11 @@ export async function persistAfterSession(
  *   creation on a deferred start (the gate), the LIVE one otherwise
  *   (steers into a running session);
  * - `'sessionless'` — `undefined`: the submission never touches a session
- *   (`!!` shells, bare `!`, local commands) and must stay out of the
- *   `Current session` scope.
+ *   (truly sessionless local commands, bare `!`) and must stay out of the
+ *   `Current session` scope. NOTE the M3-4 PR3 shell amendment: a `!!`
+ *   WITH a command is NOT sessionless — the gesture ensures a Session and
+ *   the row is persisted as agent-facing under that id (Session/model
+ *   exclusion is about the result, not the execution association).
  */
 export function historySessionIdFor(
   kind: 'agent-facing' | 'sessionless',
