@@ -1263,7 +1263,7 @@ single-row slots, history cwd rows, and attachment/file-name fallbacks.
 Do not move this normalization into runtime/domain models: search, persistence,
 replay, exports, and semantic projections must keep the original text.
 
-## Local shell display policy
+## User shell display policy
 
 - The capture layer (bounded-output byte/line/disk caps) is the memory
   safety boundary and is UNCHANGED; this policy only bounds what the card
@@ -1271,13 +1271,14 @@ replay, exports, and semantic projections must keep the original text.
   settled card to at most 20 VISUAL rows, with an honest hidden-line
   marker. Ctrl+O (the existing master switch) expands to the retained
   buffer — everywhere EXCEPT fullscreen Focus, where Ctrl+O owns the
-  Thought-root bulk and the shell cards keep their folded state (their
-  local `!`/`!!` presentation is otherwise unchanged); a running card's
+  Thought-root bulk and the shell cards keep their folded state (the
+  `!`/`!!` card presentation is otherwise unchanged); a running card's
   result is re-chained to the bounded tail on a throttle.
 - Quick dismiss (Alt+K) removes SETTLED cards only: a running card is
   never dismissed, the shell process is never cancelled (Esc owns that),
   no session event is deleted, and an already-submitted `!` context
-  payload is untouched. `!!` stays local-only.
+  payload is untouched. `!!` stays Session/model-excluded: the Host
+  executes it, while the completed result remains presentation-only.
 
 ## One live TUI per process (the vendored keybindings are process-global)
 

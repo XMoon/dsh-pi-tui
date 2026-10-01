@@ -256,13 +256,13 @@ The editor supports two Shell modes:
 ! git status
 ```
 
-Runs a local command and submits its output into the current Session.
+Runs the command in the Host environment and submits its output into the current Session.
 
 ```text
 !! git status
 ```
 
-Runs the command locally only. Its output is not added to model context.
+Runs the command in the Host environment as well; its output stays out of model context (card display only).
 
 `!` / `!!` are editor modes rather than plain text prefixes. The prompt and completion behavior switch together with the active mode.
 
@@ -292,7 +292,7 @@ request).
 
 Boundaries:
 
-- `!` / `!!` local shell commands and commits from your own terminal are completely untouched;
+- `!` / `!!` user shell commands and commits from your own terminal are completely untouched;
 - no `prepare-commit-msg` hook is installed and existing hooks are never modified;
 - **not effective under the `minimal` preset**: its persona is a complete system prompt
   (`complete: true`) that replaces every other section — the same existing behavior for the
@@ -387,7 +387,7 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | `Tab`         | Autocomplete slash commands and file paths          |
 | `@`           | File completion                                     |
 | `!`           | Enter Shell mode                                    |
-| `!!`          | Enter local-only Shell mode                         |
+| `!!`          | Enter Session-excluded Shell mode                   |
 
 Use `/help` inside the TUI for the current command and keybinding list. The table above shows the defaults; after customization, `/help` and `/keybindings` show the effective keys.
 

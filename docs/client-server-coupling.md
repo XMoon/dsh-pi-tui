@@ -73,8 +73,15 @@ GENERATED_CLIENT_REMOTE  official Client-side generated Remote/service
                          contribution; the TUI consumes it and does not
                          reconstruct its namespace object
 CLIENT_LOCAL             terminal/editor/clipboard/draft/overlay/keybinding/
-                         local-shell/UI extension state; no Host semantic
-                         coupling is invented for it
+                         shell gesture+card/UI extension state; no Host
+                         semantic coupling is invented for it
+HOST_OWNED               Host execution environment, process lifetime and
+                         Host-side policies (incl. user-shell execution —
+                         the M3-4 PR3 shell amendment)
+SPLIT                    one capability split across the Client gesture/
+                         presentation and the Host execution authority
+                         (incl. the user-shell request/stream bridge and
+                         the `!` result handoff into Session)
 ```
 
 ### Canonical M3-3B ownership rows
@@ -357,7 +364,9 @@ convergence sections in `docs/client-server-migration.md`.
 
 Terminal rendering, editor, keybindings, clipboard/OSC52, input history,
 search UI state, picker cursor, overlay state, fullscreen, theme, draft
-state, local shell card display, question/approval *presentation* (the
+state, the shell editor mode / gesture parsing / shell card / bounded tail /
+fold/copy presentation (execution is Host-owned — see the user-shell SPLIT
+below), question/approval *presentation* (the
 authority stays Host-owned), and session transition coordination
 (`src/transition-gate.ts`, `src/transition.ts`,
 `src/session-operation-barrier.ts` — the process-local single-writer
@@ -379,6 +388,43 @@ test-pinned against the upstream function (parity test in
 safe full-Session-id convention. `src/client-artifact-save.ts` and
 `src/save-location.ts` are the Client-local temp/atomic-commit sink and the
 Save Location UI — zero Host coupling.
+
+### User shell ownership (shell amendment, M3-4 PR3)
+
+`!` and `!!` are both Host-side user-shell operations; bypass/sandbox are
+Host execution policies, not locality choices, and the two gestures differ
+only in result routing (`!` submits into Session/model; `!!` stays
+presentation-only). The ownership split:
+
+```text
+CLIENT_LOCAL:
+  shell editor mode
+  gesture parsing
+  shell card / bounded-tail presentation
+  local bounded display cache / temp artifact (labelled Client-owned)
+
+HOST_OWNED:
+  user-shell execution
+  cwd / workspace
+  PATH / environment
+  shell discovery
+  process lifetime
+  process cancellation
+
+SPLIT:
+  request/stream/control bridge (HostUserShellPort)
+  `!` result handoff into Session (SessionWriter)
+```
+
+The application owner (`src/app/submission/local-shell.ts`, renamed by the
+PR3 refactor) consumes the narrow `HostUserShellPort` semantic port; it never
+owns Client process execution. The Direct adapter is the in-process Host
+(bypass spawn and the `ctx.shell` sandbox policy live behind adapter
+ownership); the Remote adapter reports the truthful unavailable state because
+the rc.2 terminal-controller Remote is a retained interactive PTY carrier and
+fails the one-shot qualification (CARRIER_GAP, U11a/U11b open). No row of
+this inventory may describe the application submission owner as the owner of
+Client process execution.
 
 Clipboard writes are CLIENT_LOCAL and share ONE app-level policy. The
 fullscreen drag selection and `/copy` are the same user copy intent and both

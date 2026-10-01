@@ -1,4 +1,4 @@
-# Input and card polish: bash completion, local-shell sandbox, question answers, goal cards, todo dock click, JSON folded previews, shell editor mode
+# Input and card polish: bash completion, user-shell sandbox policy, question answers, goal cards, todo dock click, JSON folded previews, shell editor mode
 
 Seven small, independent surface improvements, designed together because they
 land in the same release cycle. Each section records the decision, the
@@ -9,7 +9,7 @@ kept as-is.
 | # | Topic | Chosen approach |
 |---|---|---|
 | 1 | `!` / `!!` bash completion | Real-shell `compgen` bridge (command names + paths + a small subcommand table) |
-| 2 | `!` / `!!` sandbox | New `/settings` row, default **bypass** (pi/kimi parity), opt-in sandbox |
+| 2 | `!` / `!!` sandbox | New `/settings` row (Host user-shell policy), default **bypass** (pi/kimi parity), opt-in sandbox |
 | 3 | `ask_user_question` answers card | Folded: `N/M answered` summary; expanded: per-question answer lines |
 | 4 | Goal cards (`get_goal`/`create_goal`/`update_goal`) | Folded: goal summary; expanded: field lines; named headers |
 | 5 | Todo dock click (fullscreen) | Map the dock summary row to `toggleTodoPanel()` |
@@ -115,7 +115,17 @@ Decisions that matter:
 
 ---
 
-## 2. Local-shell sandbox: `/settings` row, default bypass
+## 2. User-shell sandbox policy: `/settings` row, default bypass
+
+> Terminology note (shell amendment, M3-4 PR3): the `!`/`!!` shell is the
+> **user shell**, executed in the **Host execution environment**. `bypass` and
+> `sandbox` are Host-side execution policies — `bypass` never means "runs on
+> the Client machine" and `sandbox` never means "runs on the Host machine".
+> `!` is the context shell (result enters Session/model); `!!` is the
+> session-excluded / presentation-only shell (result never enters
+> Session/model, but execution still uses the Session's Host workspace).
+> Where older text below says "local", read it as the Direct in-process
+> deployment of the SAME Host-owned execution, never as machine locality.
 
 ### Why
 
@@ -133,27 +143,33 @@ inconsistent with both references.
 New TUI settings field `localShellSandbox: 'bypass' | 'sandbox'`, **default
 `bypass`** (pi/kimi parity). Persisted in the existing TUI settings document
 (`settingsNamespace('tui')`, `src/index.ts` `tuiSettings` registration —
-same document as `busyEnter`).
+same document as `busyEnter`). The persisted key keeps its historical name
+(`localShellSandbox`); its meaning is the **Host user-shell execution
+policy**, never an execution locality.
 
 - `/settings` row (in `src/commands.ts`'s settings panel, next to
   `busy-enter`):
 
   ```text
   id:          'local-shell-sandbox'
-  label:       'Local shell sandbox'
-  description: '! / !! commands run outside the dsh sandbox (bypass, default) or under the sandbox policy'
+  label:       'User shell sandbox policy'
+  description: '! / !! execute in the Host environment outside the dsh sandbox (bypass, default) or under the sandbox policy'
   values:      ['bypass', 'sandbox']
   ```
 
   `onChange` persists through `tuiSettings.replace({ ...doc, localShellSandbox: value })`
   (same pattern as the `busy-enter` row).
 
-- `runLocalShell` (`src/index.ts`): read the preference once per run.
-  - `bypass` (default): execute through the **existing spawn path** — the
-    current `ctx.shell === undefined` fallback, promoted to the primary
-    path. It already has everything: bounded tail capture, 0600 full-output
-    temp file, abort via `localShellController`, per-stream `StringDecoder`.
-  - `sandbox`: keep the current `ctx.shell` resolve/run path unchanged.
+- `runLocalShell` (`src/index.ts`): read the preference once per run and pass
+  it to the Host user-shell execution adapter (`HostUserShellPort`,
+  M3-4 PR3).
+  - `bypass` (default): execute through the Direct Host adapter's plain
+    spawn path — bounded tail capture, 0600 full-output temp file, abort via
+    `localShellController`, per-stream `StringDecoder`.
+  - `sandbox`: execute through the Direct Host adapter's `ctx.shell`
+    resolve/run path (Host sandbox policy).
+  - A policy the composition cannot serve fails closed with a visible error;
+    it never downgrades sandbox to bypass.
   - The `!` context submission (re-validate → followup) is
     **untouched** — only the execution backend changes.
 
@@ -431,7 +447,7 @@ document (no cursor-offset/render hacks, no debounce to distinguish `!` from
 receiving the exact same wire text as before. kimi's `CustomEditor` stores
 `inputMode: 'prompt' | 'bash'` and never puts the `!` in the buffer; this
 extends that two-state model to dsh-pi-tui's two-shell-semantics (`!` =
-context, `!!` = local).
+context, `!!` = session-excluded — see the terminology note in §2).
 
 ### Design
 
@@ -440,7 +456,9 @@ Three explicit modes — `prompt`, `shell-context`, `shell-local` — owned by
 `src/editor-input-mode.ts` (`shellPrefixForMode` / `serializeEditorInput` /
 `editorModeFromHistoryEntry`). The buffer holds the bare command body; the
 mode is serialized back into the textual `!`/`!!` protocol ONLY at host
-boundaries.
+boundaries. The internal enum name `shell-local` is a COMPATIBILITY name:
+"local" means Session/model-excluded presentation mode, NEVER
+Client-machine execution.
 
 **Transitions** (empty body only): `!` → shell-context, `!` → shell-local,
 Backspace steps back (`!!` → `!` → prompt), Esc cancels the whole shell mode
@@ -718,7 +736,7 @@ rounds (codex / gpt-5.6-luna):
   The host editor's `onSubmit` serialized through `serializeSeatDraft`,
   which reads the VISIBLE seat (`'prompt'` for a mode-less plugin), so a
   declined-Enter submit of a `!!pwd` plugin document degraded into a
-  plain `pwd` — a LOCAL-ONLY command leaking into the model path. The
+  plain `pwd` — a session-excluded command leaking into the model path. The
   completion mode source read the same visible seat, so a declined
   `!gi` Tab lost the shell completion grammar and the extension query
   lost the `!` wire prefix. FIXED: the split is now explicit — HOST
