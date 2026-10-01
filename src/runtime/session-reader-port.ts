@@ -165,6 +165,15 @@ export interface SessionStatusProjection {
   /** The recorded agent preset of THIS session (the official `agentPreset`
    *  projection's string value; `null` normalizes to absent here). */
   readonly preset?: string
+  /** The durable session title (the official `title` projection's string
+   *  value; `null` — "no title yet" — normalizes to absent here). A bounded
+   *  event window cannot own this fact: the title event may precede it. */
+  readonly title?: string
+  /** The current durable goal (the official `goal` projection view). A LEGAL
+   *  `null` means the projection answered "no goal"; an ABSENT field means the
+   *  projection was unavailable — the two must never be conflated. A bounded
+   *  event window cannot own this fact: the goal event may precede it. */
+  readonly goal?: { readonly objective: string; readonly phase: 'active' | 'paused' | 'blocked' | 'complete' } | null
   readonly context?: SessionStatusContextProjection
   /** The official `todos` projection value: the whole list snapshot, or
    *  `null` = the projection exists but no `todo/write` has landed yet (a
