@@ -2087,6 +2087,9 @@ export function applyRunnerWithRuntime(
       // leg — otherwise a remote host helper would strand the copy in the
       // remote clipboard.
       copySelection: (text) => clientActions.copySelection(text),
+      // Headless-test seam (M3-4 PR3 image L6): the live image draft store.
+      // Production paths never read it.
+      draftImageStoreForTest: draftImages,
       // Fullscreen OSC 8 link clicks + the Windows right-click paste: the alt
       // screen's mouse capture swallows both native behaviors, so the host
       // opens http/https links itself and reads the clipboard through the same

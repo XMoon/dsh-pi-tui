@@ -103,10 +103,10 @@ process.env.FORCE_COLOR = ''
 /** The presentation fixture's host mount (re-exported shape). */
 type HostFixture = Awaited<ReturnType<typeof import('./support/remote-application-fixture.ts')['createRemoteApplicationHostFixture']>>
 
-async function mountHost(life: TestLifecycle, presetId: string) {
+async function mountHost(life: TestLifecycle, presetId: string, options: { readonly llmAdapter?: StubStreamingLlmAdapter } = {}) {
   const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
   const base = await createRemoteApplicationHostFixture(life, presetId, {
-    llmAdapter: new StubStreamingLlmAdapter(),
+    llmAdapter: options.llmAdapter ?? new StubStreamingLlmAdapter(),
   })
   const TokenMeter = (await import('@deepseek-ai/dsh-token-meter')).default
   const toolTodo = await import('@deepseek-ai/dsh-tool-todo')
@@ -296,7 +296,7 @@ test('L6 §37 image: known staged bytes → PromptContentPart → Host durable a
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
-  // A minimal valid PNG (1x1) whose bytes are the known discriminator.
+  // A minimal valid 1x1 PNG whose exact bytes are the known discriminator.
   const pngBytes = new Uint8Array([
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
@@ -305,19 +305,30 @@ test('L6 §37 image: known staged bytes → PromptContentPart → Host durable a
     0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
     0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
   ])
-  const app = fixture.runnerApp() as unknown as {
-    imageStoreForTest?: () => { add(input: unknown): { id: number; placeholder: string } }
-    setDraft(text: string): void
-    submitDraft(): void
-  }
-  if (app.imageStoreForTest === undefined) {
-    t.skip('the mounted app does not expose imageStoreForTest; the image L6 needs the draft-store seam')
-    return
-  }
-  const staged = app.imageStoreForTest().add({
-    bytes: pngBytes, mediaType: 'image/png', width: 1, height: 1,
+  // Stage through the PRODUCTION intake API (the same DraftImageStore.add +
+  // placeholder form /image's client-local staging produces); the /image
+  // COMMAND surface itself is PR4's Remote command-plane ownership — the
+  // image PATH (prepare → PromptContentPart → durable → read) is what this
+  // L6 proves.
+  const app = await (async (): Promise<{
+    getDraft(): string; setDraft(text: string): void; submitDraft(): void
+    draftImageStoreForTest?: import('../src/image/draft-store.ts').DraftImageStore
+  }> => {
+    for (let i = 0; i < 600; i++) {
+      const candidate = fixture.runnerApp() as unknown as { draftImageStoreForTest?: unknown }
+      if (candidate !== undefined && candidate.draftImageStoreForTest !== undefined) return fixture.runnerApp() as never
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed draftImageStoreForTest')
+  })()
+  const store = app.draftImageStoreForTest!
+  const staged = store.add({
+    bytes: pngBytes,
+    mediaType: 'image/png',
+    width: 1,
+    height: 1,
+    name: 'pr3-proof.png',
   })
-  app.setDraft('pr3 image proof ')
   app.setDraft(`pr3 image proof ${staged.placeholder}`)
   app.submitDraft()
   // Positive L6 image proof: the durable user row carries an image block
@@ -334,7 +345,9 @@ test('L6 §37 image: known staged bytes → PromptContentPart → Host durable a
   }
   const imageEvent = session.snapshotEvents().find(event => event.type === 'user/message'
     && JSON.stringify(event.data).includes('image'))!
-  const blocks = ((imageEvent.data as { message?: { content?: unknown[] } }).message?.content ?? []) as
+  // rc.2 durable user/message payload IS the message: content lives at
+  // event.data.content (never .data.message.content).
+  const blocks = ((imageEvent.data as { content?: unknown[] }).content ?? []) as
     Array<{ type: string; attachment?: { attachmentId?: string } }>
   const imageBlock = blocks.find(block => block.type === 'image')
   assert.ok(imageBlock?.attachment?.attachmentId !== undefined,
@@ -350,7 +363,7 @@ test('L6 §37 image: known staged bytes → PromptContentPart → Host durable a
   } | undefined
   assert.ok(binding !== undefined, 'the retained binding serves the official attachment read')
   const read = await binding.session.readAttachment(imageBlock.attachment!.attachmentId as never)
-  assert.ok(read.ok, `the official readAttachment must succeed: ${String(read.ok ? '' : read.error)}`)
+  assert.ok(read.ok, 'the official readAttachment must succeed')
   if (read.ok) {
     assert.deepEqual(
       Buffer.from(read.value.data).toString('hex'),
@@ -364,7 +377,6 @@ test('L6 §37 queue/steer: a busy queue prompt lands as an official queued occur
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-busy'
   const presetId = 'm3-4-pr3-preset'
-  const host = await mountHost(life, presetId)
   // A held-open first turn keeps the agent officially running.
   const llm = new StubStreamingLlmAdapter()
   const release = llm.hold()
@@ -373,15 +385,9 @@ test('L6 §37 queue/steer: a busy queue prompt lands as an official queued occur
   // the held gate (the stub itself is abort-aware; this covers the
   // non-aborted park).
   life.defer(release)
-  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
-  const base = await createRemoteApplicationHostFixture(life, presetId, { llmAdapter: llm })
-  const TokenMeter = (await import('@deepseek-ai/dsh-token-meter')).default
-  const toolTodo = await import('@deepseek-ai/dsh-tool-todo')
-  await base.ctx.plugin(TokenMeter)
-  await base.ctx.plugin(toolTodo, { allowParallelInProgress: false })
-  void host
-  await base.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: base.anchorDir })
-  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host: base })
+  const host = await mountHost(life, presetId, { llmAdapter: llm })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
   // Open a turn (the held adapter keeps it running).
   submitDraft(fixture, 'busy opener gamma')
@@ -473,4 +479,107 @@ test('L6: a Remote submit after /resume targets the replacement current Session,
   // Step 12 qualification.
   assert.equal(hostUserRows(fixture, 'pr3-stale-a').some(row => row.includes('switched-session row epsilon')), false,
     'the retired session A never receives the row addressed to B')
+})
+
+test('L6 §37 busy steer: a steer gesture while running lands as next-step with its own rpcId (never next-turn, never queued)', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr3-steer'
+  const presetId = 'm3-4-pr3-preset'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const host = await mountHost(life, presetId, { llmAdapter: llm })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  submitDraft(fixture, 'steer opener theta')
+  await waitFor('turn is running', () => {
+    return fixture.aggregate.presentation.sessionFacts.running(mainId) === true
+  }, 20_000)
+  // A REAL steer gesture: the accelerated submit chord is the PREFERENCE'S
+  // OPPOSITE — busyEnter defaults to queue, so 'accelerated' resolves to
+  // steer through the same composer policy the keys drive.
+  const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+  app.setDraft('steer while busy iota')
+  app.submitDraft('accelerated')
+  // AUTHORITATIVE evidence (the official echo is short-lived): the Host inbox
+  // splice for the steer marker targets next-STEP (steering semantics — it
+  // interrupts the running turn) with its OWN rpcId, while the first turn is
+  // STILL running.
+  const spliceOf = (marker: string): { target: string; rpcId: string } | undefined => {
+    const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    for (const event of session.snapshotEvents()) {
+      if (event.type !== 'agent/inbox/spliced') continue
+      if (!JSON.stringify(event.data).includes(marker)) continue
+      const parsed = event.data as {
+        target: string
+        inserted?: Array<{ content?: Array<{ type: string; text?: string }>; source?: { rpcId?: string } }>
+      }
+      const first = parsed.inserted?.[0]
+      const text = first?.content?.map(block => block.type === 'text' ? block.text ?? '' : '').join('') ?? ''
+      if (text.includes(marker)) return { target: parsed.target, rpcId: first?.source?.rpcId ?? '' }
+    }
+    return undefined
+  }
+  await waitFor('steer occurrence spliced', () => spliceOf('steer while busy iota') !== undefined, 20_000)
+  const steered = spliceOf('steer while busy iota')!
+  assert.equal(steered.target, 'next-step',
+    'steer semantics: the occurrence targets the RUNNING turn (next-step), never next-turn (queue)')
+  const opener = spliceOf('steer opener theta')
+  assert.ok(opener !== undefined && opener.rpcId !== '')
+  assert.notEqual(steered.rpcId, opener.rpcId, 'the steer occurrence carries its OWN identity')
+  assert.equal(fixture.aggregate.presentation.sessionFacts.running(mainId), true,
+    'the first turn is still running at the steer moment')
+  // Release: the steered message joins the current turn's flow and settles.
+  release()
+  await waitFor('turn settles', () => {
+    return fixture.aggregate.presentation.sessionFacts.running(mainId) === false
+  }, 20_000)
+  await waitFor('steer marker durable', () => {
+    return hostUserRows(fixture, mainId).some(row => row.includes('steer while busy iota'))
+  }, 20_000)
+})
+
+test('L6 §27 remote cancel: a real cancel gesture stops the running official turn and PRESERVES the queued next-turn work', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr3-cancel'
+  const presetId = 'm3-4-pr3-preset'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const host = await mountHost(life, presetId, { llmAdapter: llm })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  submitDraft(fixture, 'cancel opener kappa')
+  await waitFor('turn is running', () => {
+    return fixture.aggregate.presentation.sessionFacts.running(mainId) === true
+  }, 20_000)
+  // Queue a next-turn occurrence FIRST: the cancel must stop the running
+  // turn WITHOUT discarding queued work (Direct keepInbox parity).
+  const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+  app.setDraft('queued survives cancel lambda')
+  app.submitDraft('explicit-queue')
+  const spliceOf = (marker: string): boolean => {
+    const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced'
+      && JSON.stringify(event.data).includes(marker))
+  }
+  await waitFor('queued occurrence spliced', () => spliceOf('queued survives cancel lambda'), 20_000)
+  // The REAL cancel gesture: a single Esc while the agent is busy (the
+  // surface routes it to events.onCancel — the same seam cancel-activity
+  // drives).
+  fixture.vt.sendInput('\x1b')
+  await waitFor('turn cancelled', () => {
+    return fixture.aggregate.presentation.sessionFacts.running(mainId) === false
+  }, 20_000)
+  // The queued next-turn occurrence SURVIVES the cancel (official Host inbox
+  // keeps it for the next wake) — the durable row may not exist yet, but the
+  // splice must still be present and the message must never be destroyed.
+  assert.equal(spliceOf('queued survives cancel lambda'), true,
+    'the queued occurrence survives the running turn cancel (keepInbox parity)')
 })

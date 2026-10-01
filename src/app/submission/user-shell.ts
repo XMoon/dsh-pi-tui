@@ -337,7 +337,10 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       // off by an early `result()` resolution.
       const drained = (async (): Promise<void> => {
         for await (const chunk of execution.output()) {
-          if (deps.isCleanedUp()) return
+          if (deps.isCleanedUp()) continue // TEARDOWN QUISCENCE: keep draining
+          // (discard) — the only consumer must release the backpressured
+          // producer or the Host process can never reach close and the
+          // result() join below deadlocks during dispose.
           bounded.append(chunk.text, chunk.bytes)
           full.append(Buffer.from(chunk.text, 'utf8'))
           scheduleTailFlush()

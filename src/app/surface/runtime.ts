@@ -249,6 +249,10 @@ export interface SurfaceMountDeps {
   readonly onTerminalResize: OptionCapability<'onTerminalResize'>
   /** Fullscreen drag-selection copy (the runner owns the clipboard policy). */
   readonly copySelection: OptionCapability<'copySelection'>
+  /** Headless-test seam (M3-4 PR3 image L6): the runner's live image draft
+   * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
+   * paths never read it. */
+  readonly draftImageStoreForTest?: import('../../image/draft-store.ts').DraftImageStore
   /** OSC 8 link activation (the runner owns the platform opener). */
   readonly openExternalUrl: OptionCapability<'openExternalUrl'>
   /** Right-click clipboard read (the runner owns the platform policy). */
@@ -1475,6 +1479,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // Issue #7: the fullscreen drag selection and /copy are the SAME user copy
     // intent and share ONE clipboard policy owned by the runner.
     copySelection: deps.copySelection,
+    draftImageStoreForTest: deps.draftImageStoreForTest,
     // Fullscreen OSC 8 link clicks + the Windows right-click paste.
     openExternalUrl: deps.openExternalUrl,
     readClipboardText: deps.readClipboardText,

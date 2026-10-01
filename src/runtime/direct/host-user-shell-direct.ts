@@ -210,6 +210,12 @@ function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution 
         cwd: request.cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: true,
+        // POSIX process GROUP: the shell wrapper and every pipeline child
+        // share one killable group — `kill(-pid)` reaches the WHOLE command
+        // tree, so an Esc cannot leave a `sleep`/pipeline child running to
+        // natural exit while holding the stdio (§16/§23 Host process
+        // cancellation owns the full run).
+        detached: process.platform !== 'win32',
       })
     } catch (error) {
       // Nothing executed: an infrastructure failure rejects (the caller knows
@@ -221,7 +227,29 @@ function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution 
     childRef = child
     const stdout = new StreamDecoder('stdout')
     const stderr = new StreamDecoder('stderr')
-    const onAbort = (): void => { child.kill() }
+    // Kill the PROCESS GROUP on POSIX (the wrapper's children included); a
+    // bare child.kill() would only reach the shell wrapper and let pipeline
+    // children keep running (and hold the streams) after the cancel.
+    const killTree = (signal: NodeJS.Signals = 'SIGTERM'): void => {
+      // Drop the host-side pipe readers FIRST: a full pipe keeps the killed
+      // writer blocked (it can never drain once the consumer is gone), and a
+      // paused Node stream never emits 'end' — `close` (and therefore the
+      // result join) would deadlock. Destroying the readers releases both.
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      if (child.pid === undefined) { child.kill(signal); return }
+      if (process.platform === 'win32') {
+        child.kill(signal)
+        return
+      }
+      try {
+        process.kill(-child.pid, signal)
+      } catch {
+        // The group leader may already be gone; fall back to the direct child.
+        child.kill(signal)
+      }
+    }
+    const onAbort = (): void => { killTree() }
     request.signal.addEventListener('abort', onAbort, { once: true })
     child.stdout?.on('data', (buffer: Buffer) => bus.push(stdout.write(buffer)))
     child.stderr?.on('data', (buffer: Buffer) => bus.push(stderr.write(buffer)))
@@ -232,11 +260,17 @@ function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution 
     })
     child.on('close', (code, childSignal) => {
       request.signal.removeEventListener('abort', onAbort)
+      childRef = undefined
       const stdoutTail = stdout.end()
       if (stdoutTail !== undefined) bus.push(stdoutTail)
       const stderrTail = stderr.end()
       if (stderrTail !== undefined) bus.push(stderrTail)
       bus.end()
+      // Release the dead pipes' references so a run without a consumer (or
+      // with one that stopped early) cannot hold the host event loop through
+      // paused streams that will never be read again.
+      child.stdout?.destroy()
+      child.stderr?.destroy()
       resolve({
         exit: code !== null ? { kind: 'exit', code } : { kind: 'signal', signal: childSignal ?? 'unknown' },
         aborted: request.signal.aborted,
