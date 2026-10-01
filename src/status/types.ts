@@ -132,7 +132,10 @@ export interface UsageStatus {
     readonly windowTokens?: number
     readonly percent?: number
   }
-  readonly tokens: {
+  /** The cumulative token facts. ABSENT when the owning source cannot answer
+   *  (the Remote branch omits them rather than presenting a bounded window's
+   *  partial fold as a session total). */
+  readonly tokens?: {
     readonly input: number
     readonly output: number
     readonly cacheRead: number

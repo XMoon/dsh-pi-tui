@@ -232,13 +232,18 @@ export function formatTurnsSteps(turns: number, steps: number, format = 'both'):
  * `LLM ...` term beside the recent metrics) — footer chrome vs detail
  * surface, never forced into string equality. */
 export function formatStatsLine(usage: UsageStatus): string {
-  const piParts = [
-    `↑${formatTokens(usage.tokens.input)}`,
-    `↓${formatTokens(usage.tokens.output)}`,
-    usage.tokens.cacheRead > 0 ? `R${formatTokens(usage.tokens.cacheRead)}` : '',
-    usage.tokens.cacheWrite > 0 ? `W${formatTokens(usage.tokens.cacheWrite)}` : '',
-    usage.tokens.cacheRead > 0 || usage.tokens.cacheWrite > 0 ? `CH${(usage.cacheHitPct ?? 0).toFixed(1)}%` : '',
-  ].filter(part => part !== '')
+  const tokens = usage.tokens
+  // No owned token facts (an unavailable projection on the Remote branch):
+  // the token segment is omitted — never a zero or a partial window fold.
+  const piParts = tokens === undefined
+    ? []
+    : [
+        `↑${formatTokens(tokens.input)}`,
+        `↓${formatTokens(tokens.output)}`,
+        tokens.cacheRead > 0 ? `R${formatTokens(tokens.cacheRead)}` : '',
+        tokens.cacheWrite > 0 ? `W${formatTokens(tokens.cacheWrite)}` : '',
+        tokens.cacheRead > 0 || tokens.cacheWrite > 0 ? `CH${(usage.cacheHitPct ?? 0).toFixed(1)}%` : '',
+      ].filter(part => part !== '')
   const ownParts = [
     `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
     `${usage.performance.tokensPerSec} tok/s`,
@@ -252,10 +257,13 @@ export function formatStatsLine(usage: UsageStatus): string {
  * facts are omitted under width pressure. The structured UsageStatus is
  * untouched and the legacy formatStatsLine contract is unchanged. */
 export function formatStatsLineCompact(usage: UsageStatus): string {
-  const piParts = [
-    `↑${formatTokens(usage.tokens.input)}`,
-    `↓${formatTokens(usage.tokens.output)}`,
-  ]
+  const tokens = usage.tokens
+  const piParts = tokens === undefined
+    ? []
+    : [
+        `↑${formatTokens(tokens.input)}`,
+        `↓${formatTokens(tokens.output)}`,
+      ]
   const ownParts = [
     `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
     `${usage.performance.tokensPerSec}t/s`,

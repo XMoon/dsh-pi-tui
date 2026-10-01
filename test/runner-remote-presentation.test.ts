@@ -751,6 +751,10 @@ test('L6 navigation: switch, same-id rollover and reconnect re-init the presenta
   const viewport = (): string => fixture.vt.getViewport().join('\n')
   await waitFor('session A hydrated', () => viewport().includes('alpha answer 3'), 20_000)
   assert.equal(viewport().includes('beta answer 3'), false, 'session B is not mounted yet')
+  const bindingOf = (id: string): unknown =>
+    fixture.aggregate.wire.client.sessions.binding(SessionId(id))
+  const bindingAFirst = bindingOf(sessionA)
+  assert.ok(bindingAFirst !== undefined, 'A is retained while it is the current subject')
 
   const execute = (line: string): Promise<unknown> =>
     (seedHost.ctx.commands as unknown as {
@@ -764,40 +768,86 @@ test('L6 navigation: switch, same-id rollover and reconnect re-init the presenta
   assert.equal(viewport().includes('alpha answer 3'), false,
     'the replaced subject must not leak its transcript rows into the new one')
 
-  // ── SAME-ID ROLLOVER B: away and back — the same id, a NEW binding
-  // generation; the presentation must rebuild from the new binding.
+  // ── SAME-ID ROLLOVER B: away and back — the same id, a NEW binding OBJECT.
+  // The identity claim is asserted on the official binding, never inferred from
+  // the test's own steps: the binding captured while A was current must be a
+  // DIFFERENT object when the same id is retained again.
   await execute(`/resume ${sessionA}`)
   await waitFor('session A re-hydrated', () => viewport().includes('alpha answer 3'), 20_000)
   assert.equal(viewport().includes('beta answer 3'), false, 'B rows retired after the rollover back to A')
+  const bindingASecond = bindingOf(sessionA)
+  assert.ok(bindingASecond !== undefined, 'A is retained again after the rollover')
+  assert.notStrictEqual(bindingASecond, bindingAFirst,
+    'the same session id must come back as a REPLACED exact binding object (the identity the fences key on)')
   // A duplicate render would double the rendered row count for the last turn.
   const rowsForLastTurn = viewport().split('\n').filter(line => line.includes('alpha answer 3')).length
   assert.equal(rowsForLastTurn, 1, 'exactly ONE row for the last turn (no stale/duplicate frame)')
 
-  // ── RECONNECT: the official Connection generation restarts; the follow
-  // window is rebuilt and the presentation re-hydrates the CURRENT subject.
-  ;(fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }).reconnect()
-  await waitFor('post-reconnect hydration', () => viewport().includes('alpha answer 3'), 20_000)
-  // The reconnect restarts the Connection generation: wait for the Client to
-  // settle before driving the next official operation.
-  await waitFor('connection ready again', () => {
-    const connection = fixture.aggregate.wire.client.connection as unknown as {
-      generation: { getSnapshot(): unknown }
-    }
-    const list = fixture.aggregate.wire.client.sessions.list.getSnapshot()
-    return connection.generation.getSnapshot() !== undefined && list.phase === 'ready'
+  // ── RECONNECT: NOT "the old screen stayed". The new facts are committed
+  // SYNCHRONOUSLY after `reconnect()` aborted the previous generation and
+  // before the next one can attach, so the dead generation could not have
+  // delivered them: only the NEW generation's authoritative baseline (its
+  // durable window AND its projection values) can put them on screen.
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  seedTurns(appendOf(sessionA), 4, 4, 'offline')
+  appendOf(sessionA).append('model/selection', { provider: 'smoke', model: 'offline-model' })
+  assert.equal(viewport().includes('offline answer 4'), false,
+    'the aborted generation never delivered the new turn')
+  await waitFor('reconnected on a NEW generation', () => {
+    const id = connection.generation.getSnapshot()?.id
+    return id !== undefined && id !== generationBefore
   }, 20_000)
-  assert.equal(viewport().includes('alpha answer 3'), true, 'the current subject survives a reconnect')
+  await waitFor('the authoritative baseline re-hydrated', () => viewport().includes('offline answer 4'), 20_000)
+  assert.equal(viewport().includes('offline answer 4'), true,
+    'the reconnect re-hydrated the new authoritative baseline (not a stale frame that merely survived)')
   assert.equal(viewport().includes('beta answer 3'), false, 'no other subject appears after the reconnect')
+  await waitFor('the new generation projection value landed', () => {
+    return (app as unknown as {
+      statusStore: { snapshot(): { composition?: { model?: { id?: string } } } }
+    }).statusStore.snapshot().composition?.model?.id === 'offline-model'
+  }, 20_000)
 
   // ── /fork: the Host forks the current session at its latest completed
-  // prefix and the TUI adopts the child — a NEW subject whose presentation
-  // re-initializes from the child's own (inherited) history.
+  // prefix and the TUI ADOPTS the child. The inherited prefix alone cannot
+  // prove adoption, so the child is identified from the Host list and then
+  // discriminated by a turn committed ONLY to the child (and a parent-only
+  // turn that must NOT appear).
+  const hostIdsBefore = new Set(seedHost.ctx.sessions.list().map(session => String(session.id)))
   await execute('/fork')
+  await waitFor('a new Host session appeared', () => {
+    return seedHost.ctx.sessions.list().some(session => !hostIdsBefore.has(String(session.id)))
+  }, 20_000)
+  const childId = seedHost.ctx.sessions.list()
+    .map(session => String(session.id))
+    .find(id => !hostIdsBefore.has(id))
+  assert.ok(childId !== undefined, 'the fork created a child session')
+  assert.notEqual(childId, sessionA, 'the child is a DIFFERENT session')
+  const childHeader = (seedHost.ctx.sessions.get(SessionId(childId!)) as unknown as {
+    header: { readonly parentSession?: string }
+  }).header
+  assert.equal(String(childHeader.parentSession), sessionA,
+    'the child carries the official fork lineage to the parent')
+  assert.ok(bindingOf(childId!) !== undefined, 'the Client retained the adopted child')
   await waitFor('forked child hydrated', () => viewport().includes('alpha answer 3'), 20_000)
   assert.equal(viewport().includes('beta answer 3'), false,
     'the forked child carries only its own inherited prefix')
   assert.equal(viewport().split('\n').filter(line => line.includes('alpha answer 3')).length, 1,
     'the adoption paints the inherited rows exactly once')
+  // The discriminator: a child-only turn must appear, and a parent-only turn
+  // must NOT (a surface stuck on the parent would show the opposite).
+  seedTurns(appendOf(childId!), 90, 90, 'child')
+  await waitFor('the child-only turn painted', () => viewport().includes('child answer 90'), 20_000)
+  seedTurns(appendOf(sessionA), 91, 91, 'parent')
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.equal(viewport().includes('child answer 90'), true,
+    'the presentation belongs to the ADOPTED CHILD (its own turn is live)')
+  assert.equal(viewport().includes('parent answer 91'), false,
+    'a turn committed to the PARENT must not reach the adopted child surface')
 
   // ── /new: a fresh Remote session (the semantic lifecycle create); the
   // surface re-initializes onto the new subject with no rows carried over.
@@ -895,4 +945,38 @@ test('L6 pending: queued -> queue pane, steering -> tail lane, and the echo -> a
   await waitFor('durable user row painted', () => {
     return fixture.vt.getViewport().join('\n').includes('queued echo body')
   }, 20_000)
+})
+
+test('L6: a projection-owned value changed by ANOTHER writer reaches the surface through the official projection channel', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-projection-live'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(
+    SessionId(mainId),
+    { provider: 'smoke', model: 'smoke-model' } as never,
+    { cwd: seedHost.anchorDir },
+  )
+  const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(session, 1, 2, 'live')
+  // The initial model is the OFFICIAL modelSelection projection's value.
+  session.append('model/selection', { provider: 'smoke', model: 'first-model' })
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  const modelOf = (): string | undefined => (app as unknown as {
+    statusStore: { snapshot(): { composition?: { model?: { id?: string } } } }
+  }).statusStore.snapshot().composition?.model?.id
+  await waitFor('the projection model painted', () => modelOf() === 'first-model', 20_000)
+
+  // ANOTHER writer changes it (a Host-side durable selection; the same shape a
+  // second Client's selection lands in). The Session snapshot never carries
+  // projection values, and the Remote event routing for `model/selection` is a
+  // no-op (no live Direct agent), so ONLY the official projection channel can
+  // refresh this surface — no unrelated event is emitted here.
+  session.append('model/selection', { provider: 'smoke', model: 'second-model' })
+  await waitFor('the new model reached the surface', () => modelOf() === 'second-model', 20_000)
+  assert.equal(modelOf(), 'second-model',
+    'the live projection channel refreshed the current-value fact (a stale footer would still say first-model)')
 })

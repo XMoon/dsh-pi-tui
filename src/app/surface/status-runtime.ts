@@ -474,10 +474,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const remoteUsageFacts = displaySubject === undefined && deps.liveAgent() === undefined && deps.remote !== undefined
       ? (() => {
           const status = remoteStatus()
-          if (status?.usage === undefined) return undefined
+          // ALWAYS the override object on the Remote branch, even when a
+          // projection cannot answer: an empty override means "unknown", which
+          // omits the facts. Returning undefined here would silently present
+          // the bounded window's partial fold as a session total.
           return {
-            tokens: status.usage,
-            ...status.context?.contextWindow === undefined ? {} : { contextWindow: status.context.contextWindow },
+            ...status?.usage === undefined ? {} : { tokens: status.usage },
+            ...status?.context?.contextWindow === undefined ? {} : { contextWindow: status.context.contextWindow },
           }
         })()
       : undefined

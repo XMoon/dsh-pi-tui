@@ -33,6 +33,7 @@ import type { PresentationReader } from '../../runtime/presentation-read-port.ts
 import type { SessionReader } from '../../runtime/session-reader-port.ts'
 import type { SubmissionPresentationSource } from '../../submission-presentation.ts'
 import { RemoteSubmissionPresentation } from '../../submission-presentation.ts'
+import { CURRENT_PROJECTION_KEYS } from '../../runtime/remote/session-reader-remote.ts'
 import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
 import { createRemoteLiveIngress, type RemoteLiveIngress } from './live-ingress.ts'
 import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from './runtime.ts'
@@ -123,7 +124,7 @@ export function createRemotePresentationSource(
   return {
     presentationReader: backendRuntime.semantics.presentationReader,
     submissionPresentation: new RemoteSubmissionPresentation(sessions, generation),
-    liveIngress: createRemoteLiveIngress(sessions, generation),
+    liveIngress: createRemoteLiveIngress(sessions, generation, CURRENT_PROJECTION_KEYS),
     sessionFacts: {
       sessionStatus: sessionId => sessionReader.sessionStatus(sessionId),
       plan(sessionId: string) {

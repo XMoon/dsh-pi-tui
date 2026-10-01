@@ -30,6 +30,7 @@ import type {
   PresentationDurableEvent,
 } from '../../runtime/presentation-read-port.ts'
 import type {
+  RemoteConnectionGeneration,
   RemoteConnectionGenerationSource,
 } from '../../runtime/remote/session-reader-remote.ts'
 import type { RemotePresentationEventEntry } from '../../runtime/remote/presentation-read-remote.ts'
@@ -41,6 +42,12 @@ export interface RemoteLiveIngressBinding {
   readonly session: {
     getSnapshot(): { readonly openState: 'cold' | 'loading' | 'open' | 'error' }
     subscribe(listener: () => void): () => void
+    /** The official push-model projection value store. The outward feature
+     *  contract exposes PER-KEY faces only (no any-key channel), so the live
+     *  subscription names the keys it follows. */
+    readonly projections: {
+      faceOf(key: string): { subscribe(listener: () => void): () => void }
+    }
   }
   readonly eventSource: {
     getSnapshot(): { readonly entries: readonly RemotePresentationEventEntry[]; readonly revision: number }
@@ -68,6 +75,12 @@ export interface RemoteLiveIngressSinks {
    *  uSES channel): the pending-input presentation re-joins from the
    *  official sources. */
   readonly onSessionSnapshotChanged: (sessionId: string) => void
+  /** The official PROJECTION store changed (the push channel that carries
+   *  finished whole values: title/goal/todos/model/preset/usage/context...).
+   *  The Session snapshot never carries projection values, so this is the ONE
+   *  live channel through which a current-value change made by the Host or by
+   *  another Client reaches this surface. */
+  readonly onProjectionsChanged: (sessionId: string) => void
 }
 
 /** The installed ingress subscription handle. */
@@ -107,6 +120,9 @@ export interface RemoteLiveIngress {
 export function createRemoteLiveIngress(
   sessions: RemoteLiveIngressSessions,
   generation: RemoteConnectionGenerationSource,
+  /** The current-fact projection keys this ingress follows (the official
+   *  feature contract has per-key faces only). */
+  projectionKeys: readonly string[] = [],
 ): RemoteLiveIngress {
   return {
     subscribe(sessionId, sinks, hydrateRevision) {
@@ -146,10 +162,25 @@ export function createRemoteLiveIngress(
       // no subsequent event can be lost either.
       const missedHydrationEvents = hydrateRevision !== undefined && subscriptionRevision > hydrateRevision
 
-      const isStale = (): boolean =>
-        disposed
-          || !Object.is(capturedGeneration, generation.getSnapshot())
-          || sessions.binding(sessionId) !== binding
+      /** The exact retained binding is the ONLY retirement condition: a
+       *  same-id rollover replaces the binding object, so its subscription
+       *  must detach. */
+      const isBindingReplaced = (): boolean =>
+        disposed || sessions.binding(sessionId) !== binding
+
+      /** Adopt the current Connection generation. A generation ROLLOVER
+       *  (reconnect, network loss) does NOT retire the retained binding — it
+       *  invalidates the OLD generation's async results and must drive the
+       *  authoritative re-hydrate. Detaching here instead would leave the
+       *  Remote surface permanently dead after any reconnect, because nothing
+       *  re-establishes this subscription for an unchanged subject. */
+      let fencedGeneration: RemoteConnectionGeneration | undefined = capturedGeneration
+      const adoptGeneration = (): 'same' | 'replaced' => {
+        const current = generation.getSnapshot()
+        if (Object.is(fencedGeneration, current)) return 'same'
+        fencedGeneration = current
+        return 'replaced'
+      }
 
       /** Partition the CHANGE entries into durable events + live inputs
        *  (same tuple/start rule as the reader). */
@@ -183,12 +214,23 @@ export function createRemoteLiveIngress(
       }
 
       const publish = (): void => {
-        if (isStale()) {
-          // A replaced generation or same-id binding no longer owns this
-          // subscription: detach silently (the new owner's own subscription
-          // or re-hydrate owns the surface from here).
+        if (isBindingReplaced()) {
+          // A same-id binding rollover no longer owns this subscription:
+          // detach silently (the new owner's own subscription or re-hydrate
+          // owns the surface from here).
           dispose()
           return
+        }
+        if (adoptGeneration() === 'replaced') {
+          // The Connection generation changed under this exact binding: the
+          // old generation's window proof is VOID. The new generation re-opens
+          // the session and republishes its AUTHORITATIVE baseline, so forget
+          // the old revision (its numbers belong to the dead generation) and
+          // process the very next publication: a `replace` drives the
+          // authoritative re-hydrate through the normal path, an `append`
+          // routes the new durable entries — never swallowed as a duplicate
+          // revision, and never a premature re-hydrate of the dead window.
+          lastRevision = -1
         }
         const window = binding.eventSource.getSnapshot()
         if (window.revision === lastRevision) return
@@ -249,13 +291,14 @@ export function createRemoteLiveIngress(
         unsubscribe?.()
         unsubscribe = undefined
         unsubscribeSnapshot()
+        unsubscribeProjections()
       }
 
       // The Session snapshot channel: pendingSubmissions/running changes
       // (e.g. an official beginSubmission echo) re-join the pending pane.
       let lastSnapshotChange = 0
       const onSnapshot = (): void => {
-        if (isStale()) {
+        if (isBindingReplaced()) {
           dispose()
           return
         }
@@ -263,6 +306,30 @@ export function createRemoteLiveIngress(
         sinks.onSessionSnapshotChanged(sessionId)
       }
       const unsubscribeSnapshot = binding.session.subscribe(onSnapshot)
+
+      // The official projection faces: the ONLY channel for projection-owned
+      // current values (the Session snapshot never carries them). A change made
+      // by the Host or another Client must reach the status/welcome/presentation
+      // without waiting for an unrelated refresh. One Host frame can update
+      // several keys, so the sink is coalesced into one microtask.
+      let projectionRefreshQueued = false
+      const onProjections = (): void => {
+        if (isBindingReplaced()) {
+          dispose()
+          return
+        }
+        if (projectionRefreshQueued) return
+        projectionRefreshQueued = true
+        queueMicrotask(() => {
+          projectionRefreshQueued = false
+          if (disposed || isBindingReplaced()) return
+          sinks.onProjectionsChanged(sessionId)
+        })
+      }
+      const unsubscribeProjections = ((): (() => void) => {
+        const offs = projectionKeys.map(key => binding.session.projections.faceOf(key).subscribe(onProjections))
+        return () => { for (const off of offs) off() }
+      })()
 
       unsubscribe = binding.eventSource.subscribe(publish)
       // Lost-wakeup fence: publication may have happened between the

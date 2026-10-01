@@ -58,6 +58,21 @@ export interface PresentationCurrentFacts {
   readonly todos?: readonly { readonly content: string; readonly status: 'pending' | 'in_progress' | 'completed' }[] | null
 }
 
+/** Apply the projection-owned current facts to the surface. ONE rule for the
+ *  cold hydrate, the window replacement and the projection store's own change
+ *  channel: an absent field means the projection cannot answer, so the fact is
+ *  OMITTED (never the bounded window's guess); a legal `null` goal / todos
+ *  means "no goal" / "no write yet" and hides the fact the same way. */
+function applyCurrentFacts(
+  facts: PresentationCurrentFacts,
+  status: { setGoalText: (text: string | undefined) => void },
+  app: TuiApp,
+): void {
+  status.setGoalText(facts.goal === undefined || facts.goal === null ? undefined : goalTextOf(facts.goal))
+  app.setSessionTitle(facts.title)
+  app.setTodoSummary(facts.todos ?? [])
+}
+
 /**
  * The committed Remote hydration outcome (M3-4 PR2): the window revision (the
  * live-ingress gap baseline), the proven working fold (the compaction-cache
@@ -155,8 +170,11 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly plan?: (sessionId: string) => boolean | undefined
     /** The official CURRENT-VALUE facts (title/goal/todos/cwd) of the exact
      *  retained session: their source events may precede the bounded window,
-     *  so the projection — never the window — owns them. */
-    readonly facts?: (sessionId: string) => PresentationCurrentFacts | undefined
+     *  so the projection — never the window — owns them. On the Remote branch
+     *  this ALWAYS answers: an empty object means "the projections cannot
+     *  answer right now", and the fact is then OMITTED rather than folded from
+     *  a bounded window (a recent window is not a session's current value). */
+    readonly facts: (sessionId: string) => PresentationCurrentFacts
     /** The ownership generation captured BEFORE the reader await (the
      *  §6.5 fence token; absent when the caller provides no generation). */
     readonly captureGeneration?: () => number
@@ -213,6 +231,11 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
    * deps make this a no-op (the Direct branch owns `initLiveSession`).
    */
   initLiveRemoteSession(sessionId: string): Promise<RemoteHydrationOutcome | undefined>
+  /** Re-apply the OFFICIAL current-value facts (title/goal/todos) of one
+   *  session — the projection store's own change channel. The cold hydrate,
+   *  the window replacement and a live projection update therefore share ONE
+   *  projection-authority rule (and never a bounded-window fold). */
+  applySessionCurrentFacts(sessionId: string): void
   /**
    * Re-hydrate the main transcript from the CURRENT reader window after an
    * older-history extension (Remote `loadOlder`): the append-only fold cannot
@@ -423,40 +446,27 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       eventCount: events.length,
       elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
     })
-    // A fact whose official projection ANSWERED is taken from it (the
-    // window-fold fallback exists only while that projection is unavailable —
-    // e.g. the preset does not mount the unit). The window must never be the
-    // authority for a session-global fact.
-    const goalFactKnown = input.facts !== undefined && 'goal' in input.facts
-    const goalText = goalFactKnown
-      ? (input.facts!.goal === null || input.facts!.goal === undefined
-          ? undefined
-          : goalTextOf(input.facts!.goal))
-      : timedBootstrapScan(deps.diag, 'goal', events.length, () => foldGoal(events))
-    deps.status.setGoalText(goalText)
-    const title = input.facts !== undefined
-      ? input.facts.title
-      : timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events))
     deps.surface.app.setPlanMode(input.planActive)
     deps.surface.app.setWorking(input.working)
     deps.surface.app.setBusy(input.working)
-    deps.surface.app.setSessionTitle(title)
-    // Session-local bootstrap state must not leak across a switch. Fold the
-    // latest todo snapshot once from the same log (an empty log clears it).
-    const todos = input.facts !== undefined && 'todos' in input.facts
-      // The official whole-list snapshot: a legal `null` (no `todo/write`
-      // yet) is an empty list, an array is the current list. Reading the
-      // window here would clear a long session's todos whenever their
-      // `todo/write` preceded the bounded window.
-      ? (input.facts.todos ?? [])
-      : timedBootstrapScan(deps.diag, 'todo', events.length, () => {
+    if (input.facts !== undefined) {
+      // REMOTE: the official projections ARE the current-value authority. An
+      // unavailable one is OMITTED — the bounded window never stands in for a
+      // session-global fact (a recent window is not a session's current title,
+      // goal or standing todo list).
+      applyCurrentFacts(input.facts, deps.status, deps.surface.app)
+    } else {
+      // DIRECT: the COMPLETE log is the fold authority for the same facts.
+      deps.status.setGoalText(timedBootstrapScan(deps.diag, 'goal', events.length, () => foldGoal(events)))
+      deps.surface.app.setSessionTitle(timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events)))
+      deps.surface.app.setTodoSummary(timedBootstrapScan(deps.diag, 'todo', events.length, () => {
         for (let index = events.length - 1; index >= 0; index -= 1) {
           const event = events[index]
           if (event?.type === 'todo/write') return (event.data as { readonly todos: Parameters<TuiApp['setTodoSummary']>[0] }).todos
         }
         return []
-      })
-    deps.surface.app.setTodoSummary(todos)
+      }))
+    }
     // A resumed session may be mid-compaction. Reset the old phase first;
     // then re-arm only the newest live bracket, matching the log fold.
     const resumedCompaction = timedBootstrapScan(deps.diag, 'compaction', events.length, () => compactingFromLog(events))
@@ -615,6 +625,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * grew at the FRONT; the live tail is unchanged), so this path only
    * rebuilds the transcript/stats presentation and repaints.
    */
+  const applySessionCurrentFacts = (sessionId: string): void => {
+    if (deps.remote === undefined) return
+    applyCurrentFacts(deps.remote.facts(sessionId), deps.status, deps.surface.app)
+  }
+
   const rehydrateFromWindow = async (sessionId: string): Promise<void> => {
     if (deps.isCleanedUp()) return
     if (deps.remote === undefined) return
@@ -663,6 +678,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     restoreMainTranscriptAnchor,
     initLiveSession,
     initLiveRemoteSession,
+    applySessionCurrentFacts,
     rehydrateFromWindow,
     resetForGeneration,
   }
