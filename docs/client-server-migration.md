@@ -2103,7 +2103,7 @@ TypeScript restructure. It is structural only:
   facade) and `app/command/artifacts.ts` (`/export` + `/transcript`);
   `app/submission/controller.ts` (the input workflow with its FIFO/ack/
   local-echo state, dispatch, history integration and the writer-section seam)
-  and `app/submission/local-shell.ts` (the `!`/`!!` shell + card lifecycle);
+  and `app/submission/user-shell.ts` (the `!`/`!!` shell + card lifecycle; renamed from local-shell by M3-4 PR3);
   `app/session/**` (ownership/scope/navigation) and `app/direct/**` (Direct
   composition) are unchanged. All extracted owners consume narrow injected
   capabilities and the semantic ports: no owner imports `app/direct/**` /

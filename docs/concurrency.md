@@ -240,7 +240,7 @@ a generic command failure.
   `submitShell`) and, for each, the `WriteOutcome` classification plus the
   draft/queue/card settlement. Since A5b the caller-side WORKFLOW (the submit
   FIFO/ack/local-echo state, the dispatch and the shell card lifecycle) lives in
-  `src/app/submission/controller.ts` + `src/app/submission/local-shell.ts`, and
+  `src/app/submission/controller.ts` + `src/app/submission/user-shell.ts`, and
   the one scope-fenced section helper is
   `SubmissionController.withWriterSection` — ownership moved, the contract did
   not. Every write they perform enters through `SessionRuntime.withWriter`, so
