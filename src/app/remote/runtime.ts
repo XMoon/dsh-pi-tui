@@ -26,6 +26,7 @@ import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remot
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
+import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
 import { createRemoteHostRuntime, mergeCause, type InProcessHostCarrier, type RemoteHostRuntime } from './host-runtime.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ASemantics } from './m3a-semantics.ts'
 
@@ -222,7 +223,15 @@ export async function createRemoteBackendRuntime(
       runReverse()
     }
     return {
-      backend: createRemoteBackend({ ...semantics, config, sessionArchive }),
+      backend: createRemoteBackend({
+        ...semantics,
+        config,
+        sessionArchive,
+        // M3-4 PR3: the Remote Host user-shell adapter (truthful
+        // unavailable; CARRIER_GAP) — served by the backend, so the
+        // composition root holds no static Remote edge.
+        hostUserShell: new RemoteHostUserShellPort(),
+      }),
       semantics,
       dispose,
     }

@@ -61,8 +61,6 @@ import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createUserShell } from './submission/user-shell.ts'
 import { preparePrompt } from '../image/prepared-prompt.ts'
-import { DirectHostUserShellPort, type DirectShellCapability } from '../runtime/direct/host-user-shell-direct.ts'
-import { RemoteHostUserShellPort } from '../runtime/remote/host-user-shell-remote.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
@@ -1643,12 +1641,11 @@ export function applyRunnerWithRuntime(
     // (CARRIER_GAP at rc.2 — zero Client spawn, zero ctx.shell escape).
     // Constructed BEFORE the surface cleanup closure can run; its submission
     // acknowledgement seams are late-bound (the controller is built below).
-    const userShellPort = remoteSources === undefined
-      ? new DirectHostUserShellPort(
-        ctx,
-        () => ctx.get('shell') as unknown as DirectShellCapability | undefined,
-      )
-      : new RemoteHostUserShellPort()
+    // Both Host user-shell adapters are served by the selected BACKEND
+    // (Direct in-process / Remote truthful-unavailable) — the composition
+    // root holds neither a static Remote edge nor direct spawn ownership
+    // (M3-4 PR3 shell amendment; the frozen selection-boundary contract).
+    const userShellPort = backend.hostUserShell
     const localShell = createUserShell<Agent>({
       app: () => app,
       diag,

@@ -35,6 +35,7 @@ import { DirectSessionArchive } from './session-archive-direct.ts'
 import { DirectHostCommandPort } from './host-command-direct.ts'
 import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
+import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
  * the services resolve from the running dsh installation). */
@@ -83,5 +84,12 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectHostCommandPort(deps.ctx, deps.agentFor),
     new DirectPluginManagerPort(deps.ctx),
     new DirectJobObservationPort(deps.ctx, deps.diag),
+    // The Direct Host user-shell adapter (M3-4 PR3): spawn lives behind
+    // adapter ownership; the sandbox policy runs the dsh shell executor and
+    // fails closed when absent.
+    new DirectHostUserShellPort(
+      deps.ctx,
+      () => deps.ctx.get('shell') as unknown as DirectShellCapability | undefined,
+    ),
   )
 }

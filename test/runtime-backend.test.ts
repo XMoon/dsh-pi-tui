@@ -185,7 +185,11 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const jobObservation = {
     open: () => () => {},
   }
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation)
+  const hostUserShell: import('../src/runtime/host-user-shell-port.ts').HostUserShellPort = {
+    availability: { supported: true, policies: ['bypass'] },
+    execute: async () => ({ kind: 'unavailable', reason: { reason: 'policy-unavailable', message: 'stub' } }),
+  }
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
