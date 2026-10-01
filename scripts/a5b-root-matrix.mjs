@@ -148,6 +148,17 @@ const CLASSIFICATION = {
   remoteIngressHandle: BIND, disposeRemoteIngress: DISC, initRemoteLiveSurface: CONN, launchIntentOf: CONN,
   remoteRunningOf: CONN, remoteWorkingFold: BIND, remoteWorkingFoldProven: BIND, remoteHistoryLoadingFor: BIND,
   remoteWorkingFoldFor: BIND,
+  // M3-4 PR3: the Remote live-session facts projection (transport-neutral
+  // {status, session.id} for the controller's liveAgent + the echo install)
+  // and its scope-checked read — branch connectors over the aggregate bundle.
+  remoteLiveSessionFacts: CONN, liveSessionFactsFor: CONN,
+  // M3-4 PR3: the branch-selected Host user-shell adapter (Direct in-process
+  // vs truthful-unavailable Remote) — constructed once, consumed by the
+  // user-shell owner.
+  userShellPort: BIND,
+  // The Remote prepareMessage (PreparedPrompt) — branch-selected at the
+  // submission surface's prepare seam (Direct keeps prepareUserMessage).
+  prepareRemotePrompt: CONN,
   directRuntimeNow: CONN, directAssistantRuntime: CONN,
   // Residual work (A5b-5 / A5b-6): the shrink-only ledger this matrix pins.
   surfaceEvents: SURF, runClipboardCommand: SURF, clipboardEnv: SURF, runCopyCommand: SURF,
@@ -175,6 +186,10 @@ const LIFECYCLE = {
   disposeRemoteIngress: 'per-rollover/abort disposal connector',
   initRemoteLiveSurface: 'per-owner-commit (session-runtime initLiveSession seam)',
   remoteRunningOf: 'live read, per call (official SessionSnapshot.running)',
+  remoteLiveSessionFacts: 'live read, per call (Remote live-session facts projection: current owner id + official running bit)',
+  userShellPort: 'constructed once at startup (branch-selected adapter); read-only thereafter',
+  prepareRemotePrompt: 'per-gesture (the Remote prepare seam); no state',
+  liveSessionFactsFor: 'pure scope-checked read over remoteLiveSessionFacts (echo install fence); no state',
   launchIntentOf: 'pure launch-intent projection (preset id → {agentPreset?}); no state',
   remoteWorkingFold: 'per-refresh holder (async reader-window fold); last-known on failure',
   remoteWorkingFoldProven: 'per-refresh flag: the fold answer came from a COMPLETE window (the running bit cannot override it)',
@@ -215,6 +230,10 @@ const CAPABILITIES = {
   disposeRemoteIngress: 'ingress handle dispose + lifecycle abort listener',
   initRemoteLiveSurface: 'presentation.initLiveRemoteSession + liveIngress.subscribe (session-runtime seam)',
   remoteRunningOf: 'RemoteApplicationSources.sessionFacts.running read',
+  remoteLiveSessionFacts: 'Remote live-session facts projection over the aggregate bundle (current owner id + official running bit); branch connector, no new state.',
+  userShellPort: 'branch-selected HostUserShellPort construction (Direct in-process / Remote unavailable); owner-construction input for the user-shell owner.',
+  prepareRemotePrompt: 'Remote PreparedPrompt preparation through the SAME hostFile.canonicalizeMentions seam Direct uses; branch connector, no Host service lookup.',
+  liveSessionFactsFor: 'pure scope-checked read over remoteLiveSessionFacts; branch connector, no state.',
   launchIntentOf: 'pure function over pendingPreset/launchPreset',
   remoteWorkingFold: 'reader-window fold result holder',
   remoteWorkingFoldProven: 'complete-window provenance flag',
@@ -274,6 +293,10 @@ const SWEEP_NOTES = {
   disposeRemoteIngress: 'ingress handle dispose connector (rollover/abort); lifetime seam.',
   initRemoteLiveSurface: 'Remote cold-hydrate + ingress subscribe connector invoked by the session runtime seam; branch connector.',
   remoteRunningOf: 'official running-bit read connector over the Remote session facts; branch connector.',
+  remoteLiveSessionFacts: 'Remote live-session facts projection: current owner session id + official running bit (no Host service lookup; reads the aggregate bundle only).',
+  userShellPort: 'HostUserShellPort adapter instance (Direct: spawn/dsh-shell behind adapter ownership; Remote: inert unavailable); the ctx.shell lookup lives inside the Direct adapter.',
+  prepareRemotePrompt: 'canonicalization via backend.hostFile (the semantic port) + the DraftImageStore/DraftFileStore snapshot; no Host service lookup.',
+  liveSessionFactsFor: 'scope-checked projection read for the echo install fence; no Host service lookup.',
   remoteWorkingFold: 'last-known Remote working fold refreshed from the reader window; presentation cache slot, not a state machine.',
   remoteWorkingFoldProven: 'provenance flag beside the fold holder; no state machine.',
   remoteWorkingFoldFor: 'generation+session keyed record; a replaced owner never reads the previous fold.',

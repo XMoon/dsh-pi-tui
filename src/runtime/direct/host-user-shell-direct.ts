@@ -189,7 +189,11 @@ class StreamDecoder {
     return chunk
   }
 
-  constructor(private readonly stream: 'stdout' | 'stderr') {}
+  private readonly stream: 'stdout' | 'stderr'
+
+  constructor(stream: 'stdout' | 'stderr') {
+    this.stream = stream
+  }
 }
 
 /** The bypass policy: plain Host-process spawn with shell interpolation. */
