@@ -2942,6 +2942,10 @@ export interface TuiAppOptions {
    * their flat text only (the surface still works without the pipeline).
    */
   imageLoader?: import('./image/loader.ts').ImageLoader
+  /** Headless-test seam (M3-4 PR3 image L6): the runner's live image draft
+   * store, exposed so a mounted test can stage REAL draft bytes through the
+   * production intake surface. Never read by production code paths. */
+  draftImageStoreForTest?: import('./image/draft-store.ts').DraftImageStore
   imageTheme?: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme
   /** Working-indicator frame interval in ms; injectable so tests stay fast. */
   workingIntervalMs?: number
@@ -4119,6 +4123,8 @@ export class TuiApp {
   private readonly editorSeatHolder: EditorSeatHolder
   /** The durable-image loader (plan M8): optional, wired by the runner. */
   private readonly imageLoader: import('./image/loader.ts').ImageLoader | undefined
+  /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
+  readonly draftImageStoreForTest: import('./image/draft-store.ts').DraftImageStore | undefined
   /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
   private readonly imageTheme: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
   /** The busy indicator row directly above the editor border; idle renders nothing. */
@@ -4803,6 +4809,7 @@ export class TuiApp {
     // The host default editor is the adapter source; a plugin editor
     // (single-winner from the editor registry) can replace it.
     this.imageLoader = options.imageLoader
+    this.draftImageStoreForTest = options.draftImageStoreForTest
     this.imageTheme = options.imageTheme
     this.historySearchSource = options.historySearchSource
     // Keep the GETTER: the cwd must be resolved at panel-open time (a

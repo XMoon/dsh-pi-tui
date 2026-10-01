@@ -129,6 +129,13 @@ export async function createRemoteApplicationHostFixture(
       currentSelection: () => ({ provider: 'smoke', model: 'smoke' }),
       saveSelection: async () => {},
     })
+    // The fixture's attachment capability models the REAL admission
+    // contract (dsh-attachment): image prompt parts are PROMOTED to durable
+    // references (content-addressed ids, bytes retained for the authorized
+    // read), text/file parts pass through. PR2's identity stub sufficed only
+    // because no Remote prompt ever carried an image.
+    const admittedImages = new Map<string, { mediaType: string; data: string; name?: string }>()
+    let attachmentSeq = 0
     ctx.provide('attachments', {
       imageLimits: {
         maxImageBytes: 5 * 1024 * 1024,
@@ -138,7 +145,53 @@ export async function createRemoteApplicationHostFixture(
         maxImageDimension: 2000,
         mediaTypes: ['image/png'],
       },
-      admitPromptContent: async (content: unknown) => content,
+      admitPromptContent: async (content: Array<Record<string, unknown>>) => content.map(part => {
+        if (part.type !== 'image') return part
+        attachmentSeq += 1
+        const attachmentId = `img-${attachmentSeq}`
+        const mediaType = String(part.mediaType)
+        const data = String(part.data)
+        const name = typeof part.name === 'string' ? part.name : undefined
+        admittedImages.set(attachmentId, { mediaType, data, ...(name !== undefined ? { name } : {}) })
+        return {
+          type: 'image',
+          attachment: {
+            attachmentId,
+            mediaType,
+            // Byte length of the decoded payload (the wire carried base64).
+            bytes: Buffer.from(data, 'base64').byteLength,
+            width: 1,
+            height: 1,
+            ...(name !== undefined ? { name } : {}),
+          },
+        }
+      }),
+      readAttachment: async (ref: { attachmentId: string }) => {
+        const stored = admittedImages.get(ref.attachmentId)
+        if (stored === undefined) throw new Error(`attachment "${ref.attachmentId}" not found`)
+        return {
+          ref: { attachmentId: ref.attachmentId, mediaType: stored.mediaType },
+          data: new Uint8Array(Buffer.from(stored.data, 'base64')),
+        }
+      },
+      // The official session/attachment RPC reads through readImage (the
+      // session-controller proves the log references the id first, then
+      // reads the durable bytes as base64).
+      readImage: async (ref: { attachmentId: string }) => {
+        const stored = admittedImages.get(ref.attachmentId)
+        if (stored === undefined) throw new Error(`attachment "${ref.attachmentId}" not found`)
+        return {
+          ref: {
+            attachmentId: ref.attachmentId,
+            mediaType: stored.mediaType,
+            bytes: Buffer.from(stored.data, 'base64').byteLength,
+            width: 1,
+            height: 1,
+            ...(stored.name !== undefined ? { name: stored.name } : {}),
+          },
+          data: new Uint8Array(Buffer.from(stored.data, 'base64')),
+        }
+      },
     } as never)
     ctx.provide('webServer', { registerUpgrade: () => () => {} })
     await ctx.plugin(UserQuestionService)
