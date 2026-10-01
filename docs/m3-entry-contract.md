@@ -452,7 +452,7 @@ left implicit merely because it is not a `Backend` property.
 | tool-card presentation | `bootstrap.ts` resolves `ctx.tools.get(name, liveAgent)` and calls Host `ToolDefinition.presentCall/presentResult` | none | Client derives cards from raw durable/transient `tool/call` + `tool/result` fields and persisted metadata/content; Host presenter callbacks never cross the Client contract. TUI/extension renderers stay Client-owned; unknown/custom tools use the existing bounded generic/raw fallback | NEEDS_APPLICATION_SEAM | M3-4 |
 | image draft / prompt preparation | `bootstrap.ts` reads `ctx.attachments.imageLimits`, `ctx.attachments.saveImages`, `ctx.llm.resolveModelInfo` during Direct preparation | none | Client-local draft bytes + safety caps; after a Session exists, validate against the Session `imageLimits` projection when available and serialize official `PromptContentPart {type:'image', mediaType, data, name?}`. Host `session/prompt` owns durable admission and model-modality refusal | NEEDS_APPLICATION_SEAM | M3-4 |
 | durable Session image read | `surface.start(...readImage)` calls Host `ctx.attachments.readImage(ref)` | none | official `session/attachment({sessionId, attachmentId})`, addressed by the exact main/child Session and fenced by binding generation. Recalled images that need re-send bytes use the same authorized read before prompt serialization | NEEDS_APPLICATION_SEAM | M3-4 main / M3-5 child viewer |
-| local `!` / `!!` execution + interrupt | `app/submission/local-shell.ts` currently resolves Host `ctx.shell` for the optional sandboxed path and carries an exact Direct Agent for cancel/currentness | none | bypass/local execution is Client `spawn` in the Client process; currentness = exact Session/binding generation; context-mode result write and turn cancel use semantic `SessionWriter`. rc.2 has no Client-local equivalent of Host `ctx.shell` | NEEDS_APPLICATION_SEAM. On Remote, `localShellSandbox=bypass` remains Client-local; `localShellSandbox=sandbox` is INTENTIONAL_UNSUPPORTED_IN_M3 and **fails closed without executing** — never warn-and-fallback to unsandboxed. No Remote branch may resolve `ctx.shell` or an Agent | M3-4 |
+| local `!` / `!!` execution + interrupt | `app/submission/local-shell.ts` currently resolves Host `ctx.shell` for the optional sandboxed path and carries an exact Direct Agent for cancel/currentness | none | **Shell amendment (M3-4 PR3)**: `!` and `!!` are BOTH Host-side user-shell operations; they differ ONLY in whether the completed result enters Session/model context (`!` submits through `SessionWriter`; `!!` stays presentation-only). `bypass`/`sandbox` are Host execution policies, not locality choices. The gesture/editor/card/presentation stays Client-owned; execution (cwd/PATH/env/shell discovery/process lifetime/exit/cancellation) is Host-owned behind `HostUserShellPort`. Direct executes through the Direct Host adapter (in-process; spawn lives behind adapter ownership); currentness = exact Session/binding generation; the turn cancel uses semantic `SessionWriter`. `!!` means Session/model-EXCLUDED, never sessionless: with no current Session the TUI ensures one first and executes in that Session's Host workspace, persisting the input history under that Session identity | NEEDS_APPLICATION_SEAM. The rc.2 terminal-controller Remote is a retained interactive PTY carrier (screen-stream output, no per-command authoritative exit status, no one-shot cancel, no sandbox variant) and fails the one-shot user-shell carrier qualification, so Remote `!` AND `!!` — BOTH policies — fail closed with a visible error and execute nothing (U11a/U11b stay open). No Remote branch may resolve `ctx.shell`, spawn in the Client process, or hold a Direct Agent | M3-4 |
 | legacy TUI settings migration bootstrap | `bootstrap.ts` calls `migrateLegacySettings()` with Host `profileContext.home`/`$DSH_HOME`, Host SettingsForms and Host `agentPresets.resolve()` before compose/resume | none (and none required) | this is a **Host-local one-shot data migration**, not a Client Remote capability. It remains on the Host side of the bundle and must settle before the first Remote settings mirror/readiness and before any Session compose/resume | RESOLVED_COMPOSITION_CONTRACT — the Client never opens its own `$DSH_HOME/settings.yaml(.imported)` and never resolves a legacy preset locally | M3-1 ordering; consumed by M3-3B readiness |
 | `TaskReader` | `src/task-browser-runtime.ts`, `src/app/surface/runtime.ts:279-305` | `runtime/remote/task-read-remote.ts` (READY) | `projectionsBySession.subagentCatalog` + `IJobs.watchRows`; full descendant tree stays an upstream gap | NEEDS_APPLICATION_SEAM | M3-5 |
 | `SurfaceAuthorityReader` | shadow only today | `runtime/remote/surface-authority-remote.ts` (READY) | `commands/list` + `skills/list` | NEEDS_APPLICATION_SEAM | M3-4 |
@@ -840,7 +840,7 @@ or the parked-owner drain.
 | command runtime `promptAdmission(agent, ...)` | Direct per-Agent prompt/image admission | writer/scope admission + Client-local preflight + official Session write; unsupported attachment class fails before dispatch | submission/command | M3-4 |
 | TUI/extension command callback via `ctx.commands.execute` | normalize/execute Client-owned slash-command callbacks | Client-local execution plane from §3.3; Host commands alone cross `HostCommandPort` | command/application | M3-4 |
 | `statusRuntime.cyclePermission()` → Host `permissionPresets.set(session,next)` | Shift+Tab permission cycling | Client reads authoritative `permissions.currentValue` + catalog order, then calls semantic async `ConfigPort.permissions.applyPermissionPreset`; stale generation cannot apply UI state | status/application | M3-4 |
-| `LocalShell.resolveShell()` → Host `ctx.shell`; exact Agent interrupt | optional sandboxed user shell + cancel/currentness | Client-local spawn for bypass mode; exact binding-generation fence + `SessionWriter.cancel`/prompt for session semantics; Remote sandbox mode fails closed because rc.2 has no Client-local sandbox shell carrier | submission/application | M3-4 |
+| `LocalShell.resolveShell()` → Host `ctx.shell`; exact Agent interrupt | optional sandboxed user shell + cancel/currentness | `HostUserShellPort` with a Direct Host adapter (execution behind adapter ownership) and a truthful-unavailable Remote adapter; exact binding-generation fence + `SessionWriter.cancel`/prompt for session semantics; Remote `!`/`!!` (both policies) fail closed — no qualified one-shot Host user-shell carrier exists at rc.2 | submission/application | M3-4 |
 | `migrateLegacySettings(profileContext.home, SettingsForms, agentPresets.resolve)` | one-shot retired Host-profile settings import before first compose/resume | stays Host-local and completes before Remote settings readiness; no Client `$DSH_HOME`/preset-registry access | startup/composition | M3-1 |
 
 No fake `Agent` wrapper is introduced anywhere, including inside the command runtime.
@@ -877,8 +877,9 @@ in-process wire, M4/M5 change placement only.
 | terminal rendering, editor, overlays, keybindings | ✓ | | none | local |
 | clipboard / OSC 52 | ✓ | | none | local (never backend-determined) |
 | external editor | ✓ | | none | local |
-| local `!` / `!!` shell (`localShellSandbox=bypass`) | ✓ | | none | local `spawn` in the Client process / current Session cwd; context-mode result returns through `SessionWriter` |
-| local `!` / `!!` shell (`localShellSandbox=sandbox`) | Client gesture, Host capability today | current Direct path uses Host `ctx.shell`; rc.2 exposes no Client-local equivalent | **no M3 wire carrier** | INTENTIONAL_UNSUPPORTED_IN_M3 on Remote: fail closed with a visible error and run nothing; never silently fall back to unsandboxed spawn |
+| user `!` / `!!` shell — gesture/editor/card/presentation | ✓ | | none | Client-owned editor mode, shell card, bounded tail/fold/copy presentation |
+| user `!` / `!!` shell — execution (cwd/PATH/env/shell discovery/process/exit/cancel) | | ✓ | `HostUserShellPort` (Direct adapter in-process; **no qualified one-shot Host user-shell Remote carrier at rc.2**) | Direct: Host adapter executes with the Session workspace; `!` result returns through `SessionWriter`, `!!` writes nothing. Remote: BOTH `!` and `!!` and BOTH policies fail closed with a visible error and execute nothing (U11a/U11b); never Client spawn, never Host `ctx.shell` borrowing, never sandbox→bypass downgrade |
+| user `!` / `!!` shell completion facts | completion request/UX | ✓ | Direct: Host compgen behind the Direct adapter; Remote: **no carrier** | Direct keeps shell-aware completion (the process IS the Host); Remote shows no shell-specific suggestions and never reads Client PATH/filesystem for Host shell state |
 | `@file` discovery (session scope) | | ✓ | `fileReferences/list(agentId, query, signal)` | remote Host |
 | `@file` discovery (sessionless/workspace scope) | | | **no rc.2 expression** | fail closed (INTENTIONAL_UNSUPPORTED_IN_M3) |
 | `@file` existence/canonicalization | | ✓ | **no callable rc.2 expression** (the Host canonicalizes internally when promoting prompt file parts) | fail closed; relative mentions keep their literal text |
@@ -901,13 +902,24 @@ in-process wire, M4/M5 change placement only.
 | model-selection *intent* install | | ✓ | `modelSelection` projection | remote Host |
 
 M3 is an in-process wire on one machine, but locality is frozen as if M4 could
-split the process tomorrow. `!`/`!!` in **bypass** mode spawns in the Client/TUI
-process with the Session cwd; the context-mode result returns through the
-semantic Session writer. The explicit **sandbox** preference is different:
-Direct may continue using Host `ctx.shell`, but Remote M3 has no public Client
-carrier and therefore fails closed without running the command. An in-process
-M3 implementation must not “borrow” Host `ctx.shell` just because both sides
-happen to share one process. `/image` and `/attach` local reads, the external
+split the process tomorrow. **Shell amendment (M3-4 PR3)**: `!` and `!!` are
+both Host-side user-shell operations — bypass and sandbox are Host execution
+policies, not locality choices — and they differ only in result routing (`!`
+submits the completed command+output through the semantic Session writer; `!!`
+keeps the card presentation-only with zero Session/model write). `!!` is
+Session/model-EXCLUDED, never sessionless: with no current Session the TUI
+ensures one first and executes in that Session's Host workspace, persisting the
+input history under that Session identity. The rc.2 terminal-controller Remote
+is a retained interactive PTY carrier (screen-stream output, no per-command
+authoritative exit status, no one-shot cancel, no sandbox variant) and therefore
+does not qualify as the one-shot Host user-shell carrier: Remote `!`/`!!` fail
+closed until a public carrier qualifies (U11a/U11b); a Client-side shell under
+a Remote Session would be a critical locality violation, and no implementation
+may “borrow” Host `ctx.shell` just because both sides happen to share one
+process. Shell completion follows the same authority: Direct keeps the
+real-shell compgen bridge behind the Direct Host adapter, while Remote shows no
+shell-specific suggestions rather than completing from Client `process.env.PATH`
+or the Client filesystem. `/image` and `/attach` local reads, the external
 editor, `/export`/`/transcript` file writes (Save Location), and `/open`-style
 working-directory changes. A local `/image` read is only **staging**: before a Session
 exists the TUI can enforce only its own memory/safety cap; after creation/retain,
@@ -1003,7 +1015,7 @@ stay `indeterminate` (`src/runtime/remote/write-failure.ts:131-153`).
 | cross-client concurrency (Web+TUI, reconnect, cold resume, Host crash) | POST_M3_NON_BLOCKING (M8) | DSH `SessionHandle`/`SessionWriteLease` is the writer authority; the full matrix is an M8 deliverable | M8 | M8 proof |
 | exact session approval-policy read/write (`InteractionPort.setApprovalPolicy`, `ConfigPort.permissions.approvalOverrideOf`, `/settings` approval row) | INTENTIONAL_UNSUPPORTED_IN_M3 | rc.2 has no public Client read of the independent `approval/policy` override and no synchronous exact carrier matching `InteractionPort.setApprovalPolicy`; public `permissions` exposes only preset `currentValue` | M3-3B/M3-4 | Remote setter returns `false`, override read returns `undefined` as unavailable, and the Remote approval settings row is hidden/disabled; no `?? 'ask'`, event-log reconstruction or preset-name inference |
 | independent sandbox/approval structured status facts | INTENTIONAL_UNSUPPORTED_IN_M3 | rc.2 does not expose the Host `sandboxPolicy.resolve()` result or approval override as public Session projection values | M3-4 | permission preset remains visible from `permissions.currentValue`; sandbox/approval fields are omitted, never guessed |
-| sandboxed local `!` / `!!` on the Remote backend | INTENTIONAL_UNSUPPORTED_IN_M3 | current Direct implementation uses Host `ctx.shell`; rc.2 has no Client-local sandbox-shell carrier | M3-4 | explicit `localShellSandbox=sandbox` fails closed and executes nothing; bypass mode remains Client-local spawn |
+| user `!` / `!!` shell on the Remote backend (both policies) | INTENTIONAL_UNSUPPORTED_IN_M3 | rc.2's terminal-controller Remote is a retained interactive PTY carrier (screen-stream output, no per-command authoritative exit status, no one-shot cancel, no sandbox variant) — it fails the one-shot Host user-shell carrier qualification (U11a/U11b) | M3-4 | Remote `!` and `!!` BOTH fail closed with a visible error and execute nothing; no Client spawn, no Host `ctx.shell` borrowing, no sandbox→bypass downgrade; Direct executes both modes through the Host-owned adapter |
 | synchronous `TuiSettingsConfig.get()` over async settings Remote | RESOLVED_ADAPTER_CONTRACT | §2.3 freezes listener-before-read, serialized describe, `settings/document-updated` + `connection/reset` invalidation, in-flight invalidation rerun and post-write authoritative refresh | M3-3B | race tests: event-during-read, disconnect-change-reconnect, write/read round trip |
 | Client runtime uses Web module-loader bundles | RESOLVED_PACKAGING_ADAPTATION | exact six-entry shim allowlist and lifecycle are frozen in §2.4.3/§4.2; `/remote` contributions stay native ESM | M3-1 | L5 connect/list/reconnect/dispose + allowed/forbidden bundle-loader tests; no browser fallback reached |
 | Host composition dependency closure | RESOLVED_COMPOSITION_CONTRACT | §2.4.1 includes Host connection → fileUploads → sessionStats/turnOutline → session-controller, settings, forwarded events and session-log-export; existing jobController is reused, not duplicated | M3-1 | L5 real composition (no `fileUploads`/`fileUpload` test doubles) + `sessionStats`/`turnOutline` projection + archive route probes |
@@ -1195,15 +1207,17 @@ Each stage declares its L1–L6 test layer
   refresh/prompt admission); the §3.3 Client command execution plane; whole-log
   `/rewind` over `turnOutline`; Client-derived tool cards; main-Session image
   staging/prompt admission and durable image reads; permission-preset cycling
-  through `ConfigPort.permissions.applyPermissionPreset`; Client-local shell
-  ownership; the Remote no-op replacement for the Direct `sessions.flush`
+  through `ConfigPort.permissions.applyPermissionPreset`; Client-owned shell
+  gesture/card/presentation over Host-owned execution (`HostUserShellPort`);
+  the Remote no-op replacement for the Direct `sessions.flush`
   turn-end hint.
 - **Behavior axis**: the first complete main TUI on the in-process wire. The
   command layer keeps its scope/currentness semantics but has no Direct
   Agent/Session resolver on this branch; no TUI/extension callback is executed
   by Host `ctx.commands`, no tool card calls Host `ctx.tools`, Shift+Tab never
-  calls Host `permissionPresets.set`, and local shell never resolves Host
-  `ctx.shell` on the Remote branch.
+  calls Host `permissionPresets.set`, and the Remote shell path never resolves
+  Host `ctx.shell`, never spawns in the Client process, and never holds a
+  Direct Agent.
 - **Tests**: L6 application composition; transcript/status/presentation parity;
   command catalog/claim parity plus local TUI/extension execution; cold paged
   last-assistant; Remote `SessionStats` parity; catalog-refresh stale fence;
@@ -1211,17 +1225,19 @@ Each stage declares its L1–L6 test layer
   live/replay parity; sessionless image staging → first-create limit recheck →
   Host model/admission refusal; recalled durable-image resend; busy/queue/image
   prompt-admission parity; permission-cycle async write + stale-generation
-  rejection; Remote approval/sandbox status omission; local-shell bypass
-  execution + context submit + cancel and explicit sandbox fail-closed behavior;
+  rejection; Remote approval/sandbox status omission; Direct Host-adapter shell
+  execution + context submit + cancel; Remote `!`/`!!` fail-closed behavior
+  (zero Client spawn, zero Session write) and `!!` zero-Session-write;
   turn-end routing proves the Remote flush hook is a no-op; static/runtime
   assertions that `attachmentForSession`, Host `ctx.commands.execute` for
   Client-owned commands, `ctx.tools.get`, Host `permissionPresets.set`,
-  `ctx.shell`, Direct `ctx.attachments`/`ctx.llm` image admission, and Direct
-  `sessions.flush` are not reachable from the Remote branch.
+  `ctx.shell`, Direct `ctx.attachments`/`ctx.llm` image admission, Direct
+  `sessions.flush`, and Client `node:child_process` shell execution are not
+  reachable from the Remote branch.
 - **Must not change**: Direct default; transition gate/commit order; no fake
   Agent; unsupported standing-skill/generic-file, independent
-  approval/sandbox-status, and Remote sandboxed-local-shell classes stay
-  fail-closed.
+  approval/sandbox-status, and the entire Remote user-shell class (both `!`
+  and `!!`, both policies) stay fail-closed.
 - **Entry**: M3-3B. **Exit**: the main TUI **including slash-command runtime**
   runs on the wire with Direct default intact. **Rollback**: remove the
   selection seam's Remote branch.
@@ -1274,7 +1290,7 @@ Each stage declares its L1–L6 test layer
 [x] all lifecycle/supersession/fatal/HMR reference paths accounted for
 [x] Direct assumptions in presentation/viewer/status/tasks inventoried
 [x] assistant transient-stream replacement identified
-[x] locality matrix complete, including sessionless image staging vs Host image admission, generic-file D4, and Remote local-shell bypass-vs-sandbox fail-closed semantics
+[x] locality matrix complete, including sessionless image staging vs Host image admission, generic-file D4, the Host-owned user-shell execution amendment, and the Remote user-shell fail-closed semantics (both modes)
 [x] extension Client/Host Context ownership decided; Client command callbacks never cross into Host ctx.commands
 [x] generation replacement/reconnect semantics frozen, including settings mirror invalidation
 [x] writer-held recovery stage/behavior frozen (M3-5)
@@ -1338,7 +1354,7 @@ Run at this baseline (documentation-only diff):
 | 23 | What replaces `ctx.jobs` / `ctx.subagents` on the Remote path? | §3 + §11 M3-5 — `RemoteTaskReader`, `RemoteJobObservationPort`, Client projections |
 | 24 | Where do status/command facts come from remotely? | §3 — public Client Session projections/event source plus the §3.2 fact mapping and §3.3 Client command execution plane; permission preset is public, while independent sandbox/approval facts are explicitly omitted rather than inferred; no Direct Agent/Host-callback fallback |
 | 25 | Which secondary surfaces are deferred to M3-5? | §11 M3-5 |
-| 26 | Which commands/actions remain Client-local? | §3.3 + §7 — TUI built-ins/extension callbacks, terminal/editor, bypass-mode local shell, local draft/file reads and Client artifact saves; Host commands still execute through `HostCommandPort`; Remote sandboxed local shell is fail-closed rather than borrowing Host `ctx.shell` |
+| 26 | Which commands/actions remain Client-local? | §3.3 + §7 — TUI built-ins/extension callbacks, terminal/editor, the shell gesture/card/presentation (execution is Host-owned per the shell amendment), local draft/file reads and Client artifact saves; Host commands still execute through `HostCommandPort`; the ENTIRE Remote user-shell class (`!`/`!!`, both policies) is fail-closed rather than borrowing Host `ctx.shell` or spawning Client-side |
 | 27 | Which path/file operations are Host-owned? | §7 |
 | 28 | Where do extension UI callbacks live? | §8 — Client Context |
 | 29 | How do Host extension facts cross without callbacks? | §8 — as serializable public Remote facts |
