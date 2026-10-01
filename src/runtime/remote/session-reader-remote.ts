@@ -148,18 +148,26 @@ function stringProjection(value: unknown): string | undefined {
  *  CURRENT facts (the official feature contract exposes per-key faces only, so
  *  a live subscription must name the keys it follows). ONE list: the ingress's
  *  change channel and these reads stay in step. */
-export const CURRENT_PROJECTION_KEYS = [
+const STATUS_PROJECTION_KEYS = [
+  'modelSelection',
+  'contextPressure',
+  'contextBreakdown',
+  'tokenUsage',
+  'todos',
+  'agentPreset',
   'title',
   'goal',
-  'todos',
-  'modelSelection',
-  'agentPreset',
-  'plan',
-  'tokenUsage',
-  'contextPressure',
-  'sessionStats',
-  'turnOutline',
 ] as const
+
+/** The projection keys the Remote STATUS/WELCOME current facts are read from:
+ *  EXACTLY what `sessionStatus()` reads (`STATUS_PROJECTION_KEYS`, the tuple
+ *  that drives those reads) plus `plan` (read by the plan source). The
+ *  ingress's live refresh follows THIS list, so a key that is read is always
+ *  subscribed and a key that is subscribed is always read — no static-read /
+ *  stale-UI drift. A projection whose change the status does NOT consume
+ *  (e.g. `turnOutline`, `sessionStats`) is deliberately absent: its own
+ *  consumer establishes the subscription it needs. */
+export const CURRENT_STATUS_PROJECTION_KEYS: readonly string[] = [...STATUS_PROJECTION_KEYS, 'plan']
 
 export class RemoteSessionReader implements SessionReader {
   private readonly sessions: RemoteSessionsReadSource
@@ -311,16 +319,11 @@ export class RemoteSessionReader implements SessionReader {
     const binding = this.sessions.binding(sessionId)
     if (binding === undefined) return undefined
     const projections = binding.session.projections
-    return detachedSessionStatus(sessionId, {
-      modelSelection: projections.faceOf('modelSelection').getSnapshot(),
-      contextPressure: projections.faceOf('contextPressure').getSnapshot(),
-      contextBreakdown: projections.faceOf('contextBreakdown').getSnapshot(),
-      tokenUsage: projections.faceOf('tokenUsage').getSnapshot(),
-      todos: projections.faceOf('todos').getSnapshot(),
-      agentPreset: projections.faceOf('agentPreset').getSnapshot(),
-      title: projections.faceOf('title').getSnapshot(),
-      goal: projections.faceOf('goal').getSnapshot(),
-    }, this.cwdOf(sessionId))
+    // The reads are driven by the SAME tuple the live refresh subscribes to:
+    // adding a key here (and to the DTO) cannot leave the live channel behind.
+    const values: Record<string, unknown> = {}
+    for (const key of STATUS_PROJECTION_KEYS) values[key] = projections.faceOf(key).getSnapshot()
+    return detachedSessionStatus(sessionId, values, this.cwdOf(sessionId))
   }
 
   /** The official Client list-row cwd fact for one session (undefined when

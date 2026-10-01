@@ -505,3 +505,32 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
   // The token/cache prefix stays IDENTICAL between the two surfaces.
   assert.ok(footerLine.split(' | ')[0] === detailLine.split(' | ')[0], `shared pi vocabulary:\n${footerLine}\n${detailLine}`)
 })
+
+test('an unavailable token projection renders the performance segment alone (no orphan separator)', async () => {
+  const { formatStatsLine, formatStatsLineCompact } = await import('../src/footer/formatters.ts')
+  const { usageFromStats } = await import('../src/status/derive-usage.ts')
+  const stats = {
+    turns: 12,
+    steps: 38,
+    llmMs: 120_000,
+    firstTokenMsAvg: 2_000,
+    tokensPerSec: 40,
+    cacheHitPct: 91.9,
+    inputTokens: 2_579,
+    outputTokens: 5_507,
+    contextWindow: 1_000_000,
+    cacheReadTokens: 20_000,
+    cacheWriteTokens: 0,
+  }
+  // The Remote branch with an unavailable `tokenUsage`/context: the official
+  // override is present but empty, so the token facts are UNKNOWN (omitted)
+  // while the recent-window performance metrics still come from the fold.
+  const usage = usageFromStats(stats as never, undefined, {})
+  assert.equal(usage.tokens, undefined, 'no owned token facts')
+  const line = formatStatsLine(usage)
+  const compact = formatStatsLineCompact(usage)
+  assert.equal(line.startsWith('| ') || line.startsWith(' | '), false, `no leading separator:\n${line}`)
+  assert.equal(line, 'TTFB 2s · 40 tok/s', `the performance segment alone:\n${line}`)
+  assert.equal(compact.startsWith('· ') || compact.startsWith(' · '), false, `no leading separator (compact):\n${compact}`)
+  assert.equal(compact, 'TTFB 2s · 40t/s', `the performance segment alone (compact):\n${compact}`)
+})
