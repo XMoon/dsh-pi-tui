@@ -75,10 +75,15 @@ export interface HostUserShellExecution {
    */
   result(): Promise<HostUserShellResult>
   /**
-   * THE output authority: every decoded chunk in arrival order, exactly once
-   * per subscriber; the iteration ENDS when the run settles (the adapter
-   * delivers any buffered tail chunks first). The adapter keeps only a
-   * bounded internal buffer for slow subscribers — never an unbounded copy.
+   * THE output authority: every decoded chunk in arrival order, exactly
+   * once, with ZERO silent loss — the iteration ENDS when the run settles
+   * (the adapter delivers any buffered tail chunks first). SINGLE
+   * CONSUMER + UPSTREAM BACKPRESSURE: the adapter pauses the Host output
+   * streams while its buffer is full and resumes as the consumer drains,
+   * so bounded adapter memory never costs authoritative bytes (the
+   * application's bounded tail / disk artifact stays a PRESENTATION
+   * policy, never a transport loss). Taking a second consumer from one
+   * execution is a contract violation.
    */
   output(): AsyncIterable<HostUserShellOutputChunk>
 }

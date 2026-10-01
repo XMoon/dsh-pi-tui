@@ -55,8 +55,11 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
   readonly ownership: { generation(): number }
   /** `SessionRuntime.withWriter`: the scope-bound writer admission. */
   readonly session: { withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> }
-  /** The synchronous live-scope capture (the interrupt admission). */
+  /** The synchronous live-scope capture (throws when no live owner). */
   readonly requireLiveScope: () => LiveSessionScope
+  /** The optional live-scope capture (undefined when no live owner) — the
+   * turn-cancel gate: without an owner the gesture is a committed no-op. */
+  readonly captureLiveScope: () => LiveSessionScope | undefined
   /** The scope-bound writer section (the context-mode shell submit). */
   readonly writerSection: <T>(task: () => Promise<T>) => Promise<T>
   /** The semantic session writer (the interrupt cancel + prompt write). */
@@ -116,13 +119,20 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
   const interrupt = (): void => {
     if (deps.isCleanedUp()) return
     shellController?.abort()
+    // The TURN cancel is scoped: without a live session owner (an idle or
+    // sessionless surface) there is no turn to cancel — the gesture is a
+    // committed no-op (the historical interruptAgent(undefined, …) parity),
+    // never an error.
+    const scope = deps.captureLiveScope()
+    if (scope === undefined) return
     const generation = deps.ownership.generation()
     // The scope-bound writer admission (A3-4): interrupt is NOT a submission
     // write, so its business ownership stays here — only the admission moves
-    // through SessionRuntime.withWriter.
+    // through SessionRuntime.withWriter. ONE capture: the same record fences
+    // the admission and addresses the cancel.
     runOwned('agent interrupt', () => deps.session.withWriter(
-      deps.requireLiveScope(),
-      () => deps.writer.cancel(deps.requireLiveScope().sessionId),
+      scope,
+      () => deps.writer.cancel(scope.sessionId),
     ), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
