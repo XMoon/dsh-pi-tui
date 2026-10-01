@@ -243,7 +243,10 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       // is also TERMINAL for the submit acknowledgement (plan D exit
       // enumeration): the aborted gate suppresses submitResult, so the
       // pending row would otherwise outlive the gesture forever.
-      if (includeInContext && localSignal.aborted) {
+      // The aborted gate is TERMINAL for the ack in BOTH modes: `!!` arms
+      // the same gesture token (the amendment made sessionless `!!` an
+      // ensure-Session gesture), so its Submitting row must settle too.
+      if (localSignal.aborted) {
         shellTerminalAck('shell run aborted')
       }
       if (includeInContext && !localSignal.aborted) submitResult(result)
@@ -268,10 +271,11 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       if (admission.kind === 'unavailable') {
         releaseController()
         // Fail closed: NOTHING executed. The card settles as a failed run
-        // with the port's truthful message; no Session write happens (the
-        // settle gate below sees the same terminal-ack path as any other
-        // failed run).
+        // with the port's truthful message; no Session write happens. This
+        // exit is TERMINAL for the gesture's ack row in BOTH modes (nothing
+        // downstream — no submitResult — will settle it), so it settles here.
         settle(admission.reason.message, 'error')
+        shellTerminalAck('host user-shell unavailable')
         return
       }
       const execution = admission.execution
@@ -375,7 +379,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         // row must end here (idempotent with the settle gate).
         releaseController()
         settle('aborted', 'error')
-        if (includeInContext && !localSignal.aborted) {
+        if (!localSignal.aborted) {
           shellTerminalAck('shell run cancelled')
         }
       },
@@ -387,7 +391,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         // committed path does), so this exit is terminal for the ack row.
         const message = safeErrorMessage(error)
         settle(`failed: ${message}`, 'error')
-        if (includeInContext && !localSignal.aborted) {
+        if (!localSignal.aborted) {
           shellTerminalAck('shell run failed')
         }
       },

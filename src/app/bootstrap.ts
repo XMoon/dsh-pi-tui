@@ -62,6 +62,7 @@ import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createUserShell } from './submission/user-shell.ts'
 import { preparePrompt } from '../image/prepared-prompt.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from '../runtime/direct/host-user-shell-direct.ts'
+import { RemoteHostUserShellPort } from '../runtime/remote/host-user-shell-remote.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
@@ -109,7 +110,13 @@ import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
-import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
+import {
+  requireCreated,
+  requireOpened,
+  type CreateSessionRequest,
+  type SessionHandle,
+  type SessionLifecycle,
+} from '../runtime/session-lifecycle-port.ts'
 import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
@@ -588,6 +595,30 @@ export function applyRunnerWithRuntime(
      * one (exact owner + generation). `captureSubject()` is undefined for a
      * sessionless capture, which must match a still-sessionless slot.
      */
+    /**
+     * The Remote live-session facts projection (M3-4 PR3 §11): the structural
+     * {status, session.id} face every transport-neutral consumer reads. Only
+     * meaningful on the Remote branch (`remoteSources !== undefined`); returns
+     * undefined when no current owner exists.
+     */
+    const remoteLiveSessionFacts = (): { readonly status: string; readonly session: { readonly id: string } } | undefined => {
+      if (remoteSources === undefined) return undefined
+      const sessionId = ownership.currentSessionId()
+      if (sessionId === undefined) return undefined
+      return {
+        status: remoteSources.sessionFacts.running(sessionId) === true ? 'running' : 'idle',
+        session: { id: sessionId },
+      }
+    }
+    /**
+     * The scope-checked projection for an echo install: the session id must
+     * match the scope's own (never "whatever is current"), undefined when the
+     * scope's session has no current owner.
+     */
+    const liveSessionFactsFor = (scope: LiveSessionScope): { readonly status: string; readonly session: { readonly id: string } } | undefined => {
+      const facts = remoteLiveSessionFacts()
+      return facts !== undefined && facts.session.id === scope.sessionId ? facts : undefined
+    }
     const captureMatches = (subject: SessionSubject | undefined): boolean =>
       subject === undefined ? ownership.owner() === undefined : ownership.isSubjectCurrent(subject)
     /**
@@ -1336,6 +1367,7 @@ export function applyRunnerWithRuntime(
         openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),
       },
       backend: {
+        kind: selectedRuntime.kind,
         sessionReader: backend.sessionReader,
         sessionWriter: backend.sessionWriter,
         interaction: backend.interaction,
@@ -1440,6 +1472,15 @@ export function applyRunnerWithRuntime(
           if (runtime === undefined) return Promise.resolve(task())
           return runtime.withPromptAdmission(agent, hasImages, async () => task())
         },
+        // M3-4 PR3 (§10.2): on the Remote branch the Direct-Agent admission
+        // hook is RETIRED — scope/writer admission stays in
+        // SessionRuntime.withWriter, Client preflight stays Client-local, and
+        // Host business admission happens inside the official Session write
+        // path. The hook therefore never resolves a Direct attachment there.
+        ...(remoteSources === undefined ? {} : {
+          promptAdmission: <T>(_agent: unknown, _hasImages: boolean, task: () => Promise<T> | T): Promise<T> =>
+            Promise.resolve(task()) as Promise<T>,
+        }),
       },
       surfaceCatalogContext: ctx as unknown as SurfaceCatalogContext,
       logError: (message) => ctx.logger.error(message),
@@ -1596,14 +1637,18 @@ export function applyRunnerWithRuntime(
     }
     // A5b-4 + shell amendment (M3-4 PR3): the user-shell owner (`!` / `!!` +
     // the shared live-Agent interrupt). Execution is Host-owned behind the
-    // Direct Host adapter (spawn lives behind adapter ownership; the sandbox
-    // policy runs the dsh shell executor and fails closed when absent).
+    // branch-selected Host adapter: Direct runs in-process (spawn behind
+    // adapter ownership; the sandbox policy runs the dsh shell executor and
+    // fails closed when absent); Remote is the truthful-unavailable adapter
+    // (CARRIER_GAP at rc.2 — zero Client spawn, zero ctx.shell escape).
     // Constructed BEFORE the surface cleanup closure can run; its submission
     // acknowledgement seams are late-bound (the controller is built below).
-    const userShellPort = new DirectHostUserShellPort(
-      ctx,
-      () => ctx.get('shell') as unknown as DirectShellCapability | undefined,
-    )
+    const userShellPort = remoteSources === undefined
+      ? new DirectHostUserShellPort(
+        ctx,
+        () => ctx.get('shell') as unknown as DirectShellCapability | undefined,
+      )
+      : new RemoteHostUserShellPort()
     const localShell = createUserShell<Agent>({
       app: () => app,
       diag,
@@ -1813,7 +1858,11 @@ export function applyRunnerWithRuntime(
           // The cordis logger must not block the notice.
         }
       },
-      liveAgent: () => agentNow(),
+      // Transport-neutral live-session facts (M3-4 PR3 §11): the Direct
+      // branch reads the exact Agent; the Remote branch projects the CURRENT
+      // owner's session id + official running bit — the controller consumes
+      // only { session.id, status }, never a Direct Agent identity.
+      liveAgent: () => agentNow() ?? (remoteLiveSessionFacts() as Agent | undefined),
       ownership: {
         generation: () => ownership.generation(),
         captureSubject: () => ownership.captureSubject(),
@@ -2371,7 +2420,14 @@ export function applyRunnerWithRuntime(
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
         markDispatch: (sessionId) => submission.markDispatch(sessionId),
         beginLocalSubmission: ({ requestId, text, scope, generation, ackToken }) => {
-          const agent = command.agentForLiveScope(scope)
+          // M3-4 PR3: the echo's running fact is transport-neutral — the
+          // Remote branch reads the CURRENT owner's session id + official
+          // running bit through the same projection the controller uses;
+          // the exact-Direct-owner resolution stays Direct-only.
+          const agent = remoteSources === undefined
+            ? command.agentForLiveScope(scope)
+            : liveSessionFactsFor(scope)
+          if (agent === undefined) return
           submission.beginLocalSubmission({
             requestId,
             text,

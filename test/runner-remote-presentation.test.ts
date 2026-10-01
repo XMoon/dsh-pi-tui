@@ -95,7 +95,11 @@ class StubStreamingLlmAdapter extends LlmAdapter {
   }
 
   override listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string }>> {
-    return Promise.resolve([{ provider, id: 'smoke-model', name: 'Smoke Model' }])
+    // The model CONTRACT is the shared fixture's: the Host default selection
+    // is `smoke/smoke` (agentDefaultModel below), so the streaming catalog
+    // must expose `smoke` — a divergent id here surfaces as a first-turn
+    // model resolution failure, not a completion list.
+    return Promise.resolve([{ provider, id: 'smoke', name: 'Smoke Model' }])
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -103,9 +107,27 @@ class StubStreamingLlmAdapter extends LlmAdapter {
     // HOLD before the FIRST frame: the Host turn stays OPEN (the agent
     // officially `running`) with no output until the test releases it — a
     // hold after `block-end` would already have let the runtime settle the
-    // step.
+    // step. The held gate honors the CALLER's cancellation (the production
+    // LLM contract): an aborted request wakes with the abort reason instead
+    // of parking the Host teardown's whenIdle() forever.
     const gate = this.gate
-    if (gate !== undefined) await gate
+    if (gate !== undefined) {
+      const signal = options.signal
+      if (signal === undefined) {
+        await gate
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = (): void => {
+            cleanup()
+            reject(signal.reason instanceof Error ? signal.reason : new Error('LLM stream aborted'))
+          }
+          const cleanup = (): void => { signal.removeEventListener('abort', onAbort) }
+          signal.addEventListener('abort', onAbort, { once: true })
+          gate.then(() => { cleanup(); resolve() }, error => { cleanup(); reject(error) })
+        })
+      }
+    }
+    options.signal?.throwIfAborted()
     yield* scriptedTextTurn('remote reply')
   }
 }
@@ -262,7 +284,7 @@ function seedTurn(
       id: `a-${sessionId}-${turn}`,
       role: 'assistant',
       content: [{ type: 'text', text: response }],
-      source: { kind: 'model', provider: 'smoke', model: 'smoke-model' },
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
     },
     stream: [],
     usage: { inputTokens: 10, outputTokens: 5 },
@@ -295,7 +317,7 @@ test('L6: a Remote resumed session hydrates the real transcript and status throu
       message: {
         id: 'a-1', role: 'assistant',
         content: [{ type: 'text', text: 'remote answer one' }],
-        source: { kind: 'model', provider: 'smoke', model: 'smoke-model' },
+        source: { kind: 'model', provider: 'smoke', model: 'smoke' },
       },
       stream: [], usage: { inputTokens: 10, outputTokens: 5 },
     }, { surfaceOp: 'append' })
@@ -342,7 +364,7 @@ test('L6: sessionStatus serves the retained session facts and stays absent for u
   }, { surfaceOp: 'append' })
   session.append('assistant/message', {
     turn: 1, step: 1,
-    message: { id: 'a-s', role: 'assistant', content: [{ type: 'text', text: 'status answer' }], source: { kind: 'model', provider: 'smoke', model: 'smoke-model' } },
+    message: { id: 'a-s', role: 'assistant', content: [{ type: 'text', text: 'status answer' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
     stream: [], usage: { inputTokens: 21, outputTokens: 9 },
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn: 1, step: 1 })
@@ -425,7 +447,7 @@ test('L6: history paging (loadOlder) extends the loaded window without replacing
     }, { surfaceOp: 'append' })
     session.append('assistant/message', {
       turn, step: 1,
-      message: { id: `a-${turn}`, role: 'assistant', content: [{ type: 'text', text: `answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke-model' } },
+      message: { id: `a-${turn}`, role: 'assistant', content: [{ type: 'text', text: `answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
       stream: [], usage: { inputTokens: 1, outputTokens: 1 },
     }, { surfaceOp: 'append' })
     session.append('step/end', { turn, step: 1 })
@@ -487,7 +509,7 @@ test('L6 (SURFACE_REACHABLE): the real boundary gesture extends the loaded offic
     }, { surfaceOp: 'append' })
     session.append('assistant/message', {
       turn, step: 1,
-      message: { id: `a-g${turn}`, role: 'assistant', content: [{ type: 'text', text: `gesture answer ${turn} — history line for turn ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke-model' } },
+      message: { id: `a-g${turn}`, role: 'assistant', content: [{ type: 'text', text: `gesture answer ${turn} — history line for turn ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
       stream: [], usage: { inputTokens: 1, outputTokens: 1 },
     }, { surfaceOp: 'append' })
     session.append('step/end', { turn, step: 1 })
@@ -649,7 +671,7 @@ test('L6: current-value facts whose SOURCE EVENTS precede the bounded window sti
     }, { surfaceOp: 'append' })
     session.append('assistant/message', {
       turn, step: 1,
-      message: { id: `a-${turn}`, role: 'assistant', content: [{ type: 'text', text: `outside answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke-model' } },
+      message: { id: `a-${turn}`, role: 'assistant', content: [{ type: 'text', text: `outside answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
       stream: [], usage: { inputTokens: 3, outputTokens: 2 },
     }, { surfaceOp: 'append' })
     if (turn === 30) {
@@ -725,7 +747,7 @@ function seedTurns(
     }, { surfaceOp: 'append' })
     session.append('assistant/message', {
       turn, step: 1,
-      message: { id: `a-${label}-${turn}`, role: 'assistant', content: [{ type: 'text', text: `${label} answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke-model' } },
+      message: { id: `a-${label}-${turn}`, role: 'assistant', content: [{ type: 'text', text: `${label} answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
       stream: [], usage: { inputTokens: 1, outputTokens: 1 },
     }, { surfaceOp: 'append' })
     session.append('step/end', { turn, step: 1 })

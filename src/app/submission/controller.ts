@@ -752,6 +752,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // throw before this point must not strand the tail (no turn was taken),
     // and no other submission can interleave during the synchronous setup
     // above, so the ordering contract is unchanged.
+    const tag = `${text.slice(0, 14)}:${submitRequestId.slice(0, 8)}`
     const submitTurn = takeSubmitTurn()
     runOwned('submit', () => runReservedSubmit({
       reserve: (t) => {

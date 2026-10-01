@@ -25,6 +25,7 @@
  */
 
 import type { Diag } from '../../diag.ts'
+import type { BackendKind } from '../../runtime/backend.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
@@ -165,6 +166,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
+    readonly kind: BackendKind
     readonly sessionReader: TuiCommandRunner['sessionReader']
     readonly sessionWriter: TuiCommandRunner['sessionWriter']
     readonly interaction: TuiCommandRunner['interaction']
@@ -611,7 +613,16 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             ? requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
             : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' }),
         promptAdmission: (sessionId, line, task) =>
-          deps.direct.promptAdmission(attachmentForSession(sessionId), draftHasImages(line, deps.drafts.images), async () => task()),
+          // M3-4 PR3 (§10.2): the Remote branch RETIRES the Direct-Agent
+          // admission hook — the exact-owner resolution must not even run
+          // (argument evaluation would throw); Host business admission lives
+          // in the official Session write path. The DISCRIMINATOR is the
+          // explicit backend kind, never a capability flag (a future Remote
+          // shell-completion carrier must not silently re-open Direct
+          // attachment admission).
+          deps.backend.kind === 'direct'
+            ? deps.direct.promptAdmission(attachmentForSession(sessionId), draftHasImages(line, deps.drafts.images), async () => task())
+            : Promise.resolve(task()) as never,
       },
     })
     buildRunner(runtime)

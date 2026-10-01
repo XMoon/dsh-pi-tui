@@ -206,7 +206,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         // T1 BEFORE the write call: a synchronously-emitted inbox/turn event
         // (Direct in-process) must never log ahead of dispatch.
         surface.markDispatch(sessionId)
-        const outcome = await surface.prompt(sessionId, message)
+      const outcome = await surface.prompt(sessionId, message)
         if (surface.isDisposed()) return
         if (outcome.kind !== 'committed') {
           if (outcome.kind === 'indeterminate') {
@@ -1131,7 +1131,9 @@ export function executeHostCommandSubmission(
       deps.abortCommandSettlement()
       throw error
     }
-    settled = settled.finally(deps.settleCommandSettlement)
+    settled = settled.then(outcome => {
+      return outcome
+    }).finally(deps.settleCommandSettlement)
     deps.trackSettlementWork(settled)
     return settled
   }, {
