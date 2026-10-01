@@ -17,7 +17,6 @@
     "sessionQuery",
     "sessions",
     "settings",
-    "shell",
     "subagents",
     "tools"
   ],
@@ -133,5 +132,8 @@
   ],
   "transcript.ts": [
     "import:dsh-session"
+  ],
+  "runtime/direct/backend-direct.ts": [
+    "shell"
   ]
 }

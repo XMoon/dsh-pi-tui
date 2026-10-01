@@ -322,7 +322,13 @@ function executeViaShellCapability(shell: DirectShellCapability, request: HostUs
   })()
   // A rejected preparation/execution must still end the bus so a streaming
   // subscriber cannot hang; the rejection itself surfaces through result().
-  void resultPromise.catch(() => bus.end())
+  // The side-channel settlement rides the SAME promise chain the caller
+  // observes (no discarded branch): when the caller awaits result(), the
+  // bus has ended either way; when the caller never awaits, the chained
+  // handler still ran because the chain is attached here.
+  resultPromise.catch(() => bus.end()).catch(() => {
+    // bus.end() cannot reject; this arm exists only to satisfy the chain.
+  })
   return {
     result: () => resultPromise,
     output: () => bus.stream(),

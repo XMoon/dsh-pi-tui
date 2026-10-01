@@ -34,9 +34,13 @@ import type { SessionArchivePort } from '../session-archive-port.ts'
 import type { HostCommandPort } from '../host-command-port.ts'
 import type { PluginManagerPort } from '../plugin-manager-port.ts'
 import type { JobObservationPort } from '../job-observation-port.ts'
+import type { HostUserShellPort } from '../host-user-shell-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
+  /** The truthful-unavailable Host user-shell adapter (M3-4 PR3; the
+   * CARRIER_GAP rc.2 outcome — zero execution, zero Client spawn). */
+  readonly hostUserShell: HostUserShellPort
   readonly subagent: SubagentPort
   readonly sessionReader: SessionReader
   readonly pendingInputReader: PendingInputReader
