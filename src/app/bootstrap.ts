@@ -60,6 +60,7 @@ import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createUserShell } from './submission/user-shell.ts'
+import { preparePrompt } from '../image/prepared-prompt.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from '../runtime/direct/host-user-shell-direct.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
@@ -2331,6 +2332,24 @@ export function applyRunnerWithRuntime(
     // command-owned; the composition root only triggers the wiring step.
     command.attachRuntime()
     /**
+     * The Remote prepareMessage (M3-4 PR3 Step 7): the SAME draft-preparation
+     * authority (canonicalization + strict placeholder expansion) produces the
+     * immutable application-owned PreparedPrompt. The transport fork happens
+     * in the serializer (preflight/serialize over the official Client
+     * contract), never in the draft semantic layer.
+     */
+    const prepareRemotePrompt = async (text: string, requestId: string): Promise<unknown> => {
+      // Mention canonicalization is part of the SHARED preparation authority:
+      // route through the same port seam the Direct pipeline uses.
+      const canonical = await backend.hostFile.canonicalizeMentions(
+        { kind: 'session', sessionId: ownership.currentSessionId() ?? '' },
+        text,
+      )
+      const sessionId = ownership.currentSessionId()
+      if (sessionId === undefined) throw new Error('a Remote submission requires a live session scope')
+      return preparePrompt(sessionId, canonical, { images: draftImages, files: draftFiles }, requestId)
+    }
+    /**
      * Bind the submission runtime (A3-3). Its surface is the runner's narrow
      * hooks; every write it performs enters through `SessionRuntime.withWriter`
      * and the owner-resolved prompt admission, so the writer-first contract and
@@ -2372,7 +2391,14 @@ export function applyRunnerWithRuntime(
           (t) => app.setEditorText(t),
           (m, k) => app.notify(m, k),
         ),
-        prepareMessage: (text, requestId) => submission.prepareMessage(text, requestId),
+        prepareMessage: (text, requestId) => remoteSources === undefined
+          // Direct: the shared preparation authority runs the Host
+          // attachment admission inline (the existing pipeline).
+          ? submission.prepareMessage(text, requestId)
+          // Remote (M3-4 PR3): the SAME preparation authority produces the
+          // immutable application-owned PreparedPrompt; the transport fork
+          // happens inside the serializer (preflight/serialize), never here.
+          : prepareRemotePrompt(text, requestId),
         prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
       },
     })

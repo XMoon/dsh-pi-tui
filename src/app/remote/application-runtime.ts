@@ -52,10 +52,10 @@ export interface RemoteApplicationRuntimeOptions {
   readonly signal?: AbortSignal
   /**
    * The application-owned prompt serializer (the D2.2 writer dependency).
-   * PR1 injects it only in composition tests; the real production serializer
-   * is completed in the M3-4 submission PR.
+   * Optional since M3-4 PR3: absent selects the PRODUCTION serializer; an
+   * explicit injection is a composition-test stub.
    */
-  readonly promptSerializer: RemotePromptSerializer
+  readonly promptSerializer?: RemotePromptSerializer
 }
 
 /** The Remote application runtime: the selected core plus its parts. */
@@ -116,7 +116,8 @@ export async function createRemoteApplicationRuntime(
     backendRuntime = await createRemoteBackendRuntime({
       runtime: wire.client,
       fetch: wire.host.carrier.fetch,
-      promptSerializer: options.promptSerializer,
+      // Absent = the production serializer (see createRemoteBackendRuntime).
+      ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
     })
     // ONE owner registry shared by owners + retirement (never constructed
     // independently — that would create a second owner truth).
