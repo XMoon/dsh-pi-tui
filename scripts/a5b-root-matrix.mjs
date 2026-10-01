@@ -140,6 +140,15 @@ const CLASSIFICATION = {
   // M3-4 PR1: the selected-transport dispose connector (session retirement ->
   // transport disposal; no-op on Direct).
   disposeSelectedTransport: DISC,
+  // M3-4 PR2: the Remote-branch presentation sources (the aggregate's bundle —
+  // branch connectors only, never a second backend bag), the live-ingress
+  // handle slot + its dispose connector, the working-fold holder, and the
+  // loadOlder in-flight latch.
+  remoteSources: BIND,
+  remoteIngressHandle: BIND, disposeRemoteIngress: DISC, initRemoteLiveSurface: CONN, launchIntentOf: CONN,
+  remoteRunningOf: CONN, remoteWorkingFold: BIND, remoteWorkingFoldProven: BIND, remoteHistoryLoading: BIND,
+  remoteWorkingFoldFor: BIND,
+  directRuntimeNow: CONN, directAssistantRuntime: CONN,
   // Residual work (A5b-5 / A5b-6): the shrink-only ledger this matrix pins.
   surfaceEvents: SURF, runClipboardCommand: SURF, clipboardEnv: SURF, runCopyCommand: SURF,
   copyEnv: SURF, openRewindPicker: SURF,
@@ -161,6 +170,18 @@ const LIFECYCLE = {
   openRewindPicker: 'per-gesture action (status/presentation reads)',
   submissionWriterSection: 'per-write: scope-fenced async section',
   agentNow: 'live read, per call (exact Direct attachment)',
+  remoteSources: 'branch-adopted at startup (the selection override); read-only thereafter',
+  remoteIngressHandle: 'per-owner: replaced on every owner commit; disposed on rollover/abort',
+  disposeRemoteIngress: 'per-rollover/abort disposal connector',
+  initRemoteLiveSurface: 'per-owner-commit (session-runtime initLiveSession seam)',
+  remoteRunningOf: 'live read, per call (official SessionSnapshot.running)',
+  launchIntentOf: 'pure launch-intent projection (preset id → {agentPreset?}); no state',
+  remoteWorkingFold: 'per-refresh holder (async reader-window fold); last-known on failure',
+  remoteWorkingFoldProven: 'per-refresh flag: the fold answer came from a COMPLETE window (the running bit cannot override it)',
+  remoteWorkingFoldFor: 'per-owner keyed fold cache (generation+session); replaced on refresh, fenced on commit',
+  remoteHistoryLoading: 'per-gesture latch (the history boundary seam)',
+  directRuntimeNow: 'per-call Direct runtime local (the assistant-stream install guard)',
+  directAssistantRuntime: 'per-call Direct runtime local (the assistant-stream install guard)',
   handleNow: 'live read, per call (exact Direct handle)',
   directAgentOfOwner: 'live read, per call (owner → attachment)',
   isCurrentOwnerAgent: 'live read, per call (currentness check)',
@@ -189,6 +210,18 @@ const CAPABILITIES = {
   compose: 'DirectApplicationRuntime.compose',
   lifecycleAgents: 'Backend.sessionLifecycle create/open through the runner signal',
   createDirectRuntime: 'DirectApplicationRuntime accessor (the seam-constructed instance)',
+  remoteSources: 'RemoteApplicationOverride.presentation (reader/submission-presentation/live-ingress/session-facts) — read-only branch bundle',
+  remoteIngressHandle: 'RemoteLiveIngress.subscribe handle slot (dispose-only)',
+  disposeRemoteIngress: 'ingress handle dispose + lifecycle abort listener',
+  initRemoteLiveSurface: 'presentation.initLiveRemoteSession + liveIngress.subscribe (session-runtime seam)',
+  remoteRunningOf: 'RemoteApplicationSources.sessionFacts.running read',
+  launchIntentOf: 'pure function over pendingPreset/launchPreset',
+  remoteWorkingFold: 'reader-window fold result holder',
+  remoteWorkingFoldProven: 'complete-window provenance flag',
+  remoteWorkingFoldFor: 'owner-keyed cache record {generation, sessionId, fold, proven}',
+  remoteHistoryLoading: 'loadOlder in-flight boolean latch',
+  directRuntimeNow: 'DirectApplicationRuntime local (installAssistantStream guard)',
+  directAssistantRuntime: 'DirectApplicationRuntime local (installAssistantStream guard)',
 }
 // ── A5b-6 zero-assumption sweep verdict (plan §7.6.1 / §7.6.3) ───────────────
 // Every remaining root declaration was re-checked from zero assumptions: the
@@ -236,6 +269,19 @@ const SWEEP_NOTES = {
   draftImages: 'per-TUI draft image store created once and injected; client input buffer, not a §7.6.2 named state category.',
   draftFiles: 'per-TUI draft file store created once and injected; client input buffer, not a §7.6.2 named state category.',
   assistantStreamBaselineFor: 'late-bound assistant-stream baseline getter installed by the Direct runtime; capability slot, not viewer state.',
+  remoteSources: 'M3-4 PR2 Remote-branch presentation bundle (reader/echo/ingress/facts) adopted from the selected aggregate; branch connector, not a second backend bag.',
+  remoteIngressHandle: 'the current Remote eventSource ingress subscription handle; per-owner slot replaced on every commit.',
+  disposeRemoteIngress: 'ingress handle dispose connector (rollover/abort); lifetime seam.',
+  initRemoteLiveSurface: 'Remote cold-hydrate + ingress subscribe connector invoked by the session runtime seam; branch connector.',
+  remoteRunningOf: 'official running-bit read connector over the Remote session facts; branch connector.',
+  remoteWorkingFold: 'last-known Remote working fold refreshed from the reader window; presentation cache slot, not a state machine.',
+  remoteWorkingFoldProven: 'provenance flag beside the fold holder; no state machine.',
+  remoteWorkingFoldFor: 'generation+session keyed record; a replaced owner never reads the previous fold.',
+  remoteHistoryLoading: 'loadOlder in-flight latch for the history-extension seam; coalescing flag.',
+  launchIntentOf: 'pure per-call helper; no state, no Host reads.',
+  directRuntimeNow: 'transitional local for the Direct assistant-stream install; no state.',
+  directAssistantRuntime: 'transitional local for the Direct assistant-stream install; no state.',
+  remoteIngressHandleLifecycle: 'per-owner: replaced on every owner commit, disposed on rollover/abort.',
   startupAgent: 'agentNow() snapshot deciding the resume vs deferred startup surface; startup orchestration.',
   flushTurn: 'turn-persistence hook invoked by the surface routing; Direct/domain persistence seam.',
   // owner-construction-or-bind: the owner factories the composition root binds

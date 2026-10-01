@@ -502,6 +502,13 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
   applyGoalChange(event: Event): void
   /** The session title one `session/title` event implies. */
   sessionTitleOf(event: Event): string | undefined
+  /**
+   * M3-4 PR2: extend the LOADED history by one official older page
+   * (`PresentationReader.loadOlder`) when the active window has more
+   * (bounded reader windows). Returns whether an extension was dispatched;
+   * Direct always returns false (the fold already holds the full log).
+   */
+  extendLoadedHistory(): boolean
   settleLocalSubmitAck(reason: string): void
   markSubmitLatency(sessionId: string | undefined, phase: SubmitLatencyPhase): void
   observeDurableSubmission(rpcId: string): void
@@ -1275,7 +1282,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const live = mounted()
     const anchor = live.captureTranscriptViewportAnchor()
     const controller = activeWindow()
-    if (!controller.moveOlder()) return false
+    // M3-4 PR2: a bounded reader window (Remote) may still have OFFICIAL
+    // older history (`hasMore`). When the virtual window reaches its loaded
+    // floor, ask the routing source's extension seam to load one official
+    // older page; the gesture is consumed and the repaint lands when the
+    // page joins (web-parity `loadEarlier` behavior — never a sync lie).
+    if (!controller.moveOlder()) {
+      return routing().extendLoadedHistory()
+    }
     repaintTarget(activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
     // Preserve the old top edge at the same rendered row in the overlap.
     if (anchor === undefined) live.scrollToBottom({ disableFollow: true })

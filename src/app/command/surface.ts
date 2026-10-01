@@ -505,6 +505,16 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     commandsRegistered = true
     try {
       const installed = registerTuiCommands(runner(), initial)
+      // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
+      // Remote Host composition mounts `/export` itself) fails only ITS own
+      // registration — later commands still installed. The user sees the
+      // exact names, never a generic whole-pass failure.
+      if (installed.registrationFailures.length > 0) {
+        const names = installed.registrationFailures.join('; ')
+        deps.logError(`tui-runner: commands not registered (claimed by the Host composition): ${names}`)
+        deps.diag.warn('command name collisions', { failures: [...installed.registrationFailures] })
+        deps.app().notify(`not registered (claimed elsewhere): ${names}`, 'error')
+      }
       wasAdvertisedClaim = installed.wasAdvertised
       hostClaimOf = installed.hostClaimOf
       isSkillWrapperName = installed.isSkillWrapper

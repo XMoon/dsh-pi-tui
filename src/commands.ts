@@ -1439,6 +1439,9 @@ export function registerTuiCommands(
   runner: TuiCommandRunner,
   initial?: InitialCommandCatalog,
 ): {
+  /** Per-name registration failures (a Host-claimed name degraded loudly;
+   *  later registrations still installed). */
+  registrationFailures: readonly string[]
   wasAdvertised(name: string): boolean
   /** The CURRENT host catalog's view of ONE parsed line (see
    * {@link HostCommandClaim}): `undefined` when the catalog does not RESOLVE
@@ -1475,6 +1478,23 @@ export function registerTuiCommands(
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
+
+  // Per-name registration isolation (M3-4 PR2): a Host-claimed name (e.g.
+  // the Remote Host composition's `/export`) must fail THAT registration
+  // loudly without aborting later registrations (a partial install must
+  // still complete). Each failure is recorded for the caller's notice;
+  // never a broad catch around the whole pass.
+  const registrationFailures: string[] = []
+  const registerOne = (definition: Parameters<typeof commands.register>[0]): (() => void) => {
+    try {
+      return commands.register(definition)
+    } catch (error) {
+      const name = (definition as { name?: unknown }).name
+      const message = error instanceof Error ? error.message : String(error)
+      registrationFailures.push(`/${String(name)}: ${message}`)
+      return () => {}
+    }
+  }
 
   // `commands.execute()` normalizes handler results to the official
   // CommandResult shape. Draft restoration therefore travels through this
@@ -1956,7 +1976,7 @@ export function registerTuiCommands(
     aliasHandlers?: Record<string, (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>>
     aliasDescriptions?: Record<string, string>
   }): void => {
-    commands.register({
+    registerOne({
       name: spec.name,
       description: spec.description,
       ...(spec.input === undefined ? {} : { input: spec.input }),
@@ -1964,7 +1984,7 @@ export function registerTuiCommands(
     })
     for (const alias of spec.aliases ?? []) {
       const handler = spec.aliasHandlers?.[alias] ?? spec.handler
-      commands.register({
+      registerOne({
         name: alias,
         description: spec.aliasDescriptions?.[alias] ?? `${spec.description} (alias of /${spec.name})`,
         ...(spec.input === undefined ? {} : { input: spec.input }),
@@ -1991,7 +2011,7 @@ export function registerTuiCommands(
     handler: exitHandler,
   })
 
-  commands.register({
+  registerOne({
     name: 'settings',
     description: 'Open the TUI settings panel',
     handler: () => {
@@ -2927,7 +2947,7 @@ export function registerTuiCommands(
   // `/display` is the canonical LOCAL + SESSIONLESS display control. It is
   // usable before the first session and every mutation goes through the
   // runner's canonical setter.
-  commands.register({
+  registerOne({
     name: 'display',
     description: 'Set the transcript display preset',
     input: { hint: '[full|focus|compact|status]' },
@@ -2948,7 +2968,7 @@ export function registerTuiCommands(
   })
 
   // `/focus` is the compatibility adapter over the canonical display state.
-  commands.register({
+  registerOne({
     name: 'focus',
     description: 'Toggle Focus display (intermediate activity folds into a live Thought block)',
     input: { hint: '[on|off|toggle|status]' },
@@ -3722,7 +3742,7 @@ export function registerTuiCommands(
       // command) skips the slash command; the catalog picker still lists it.
       if (taken.has(skill.name)) continue
       try {
-        const dispose = commands.register({
+        const dispose = registerOne({
           name: skill.name,
           description: '[skill] ' + skill.description,
           // The handler captures ONLY the skill name; execution re-fetches
@@ -3792,7 +3812,7 @@ export function registerTuiCommands(
       currentSkillReferences = []
       for (const name of names) {
         try {
-          const dispose = commands.register({
+          const dispose = registerOne({
             name,
             description: `[skill: revalidating] ${name}`,
             handler: async (invocation) => {
@@ -3834,7 +3854,7 @@ export function registerTuiCommands(
     return { claimed: true, attachments: descriptor.attachments }
   }
 
-  commands.register({
+  registerOne({
     name: 'skill',
     description: 'Load a skill into the session context',
     input: { hint: '<name>' },
@@ -3916,7 +3936,7 @@ export function registerTuiCommands(
 
 
 
-  commands.register({
+  registerOne({
     name: 'reload',
     description: 'Reload TUI settings and refresh the live command/skill catalog',
     handler: async () => {
@@ -4039,7 +4059,7 @@ export function registerTuiCommands(
   // modelOperationToken (which owns the WRITE): the surface token decides
   // which picker is allowed to hydrate/repaint/close.
   let modelSurfaceToken = 0
-  commands.register({
+  registerOne({
     name: 'model',
     description: 'Switch the model (and reasoning effort) for this session',
     handler: async () => {
@@ -4267,7 +4287,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'new',
     description: 'Start a fresh session in this workspace',
     handler: () => runner.withSessionTransition(async () => {
@@ -4385,7 +4405,7 @@ export function registerTuiCommands(
   // `/yolo` IS a TUI-owned alias: it delegates to the official command line,
   // so the switch takes the exact official path (sandbox + live approval
   // writer + the injected policy-change model message + the preset log).
-  commands.register({
+  registerOne({
     name: 'yolo',
     description: 'Switch to danger-full-access (alias of /permission danger-full-access)',
     handler: async () => {
@@ -4432,7 +4452,7 @@ export function registerTuiCommands(
   // newer pick supersedes an older one's notification/repaint even on the SAME
   // Session generation.
   let presetOperationToken = 0
-  commands.register({
+  registerOne({
     name: 'preset',
     definitionId: TUI_PRESET_COMMAND_DEFINITION_ID,
     description: 'Show or switch the session agent preset',
@@ -4723,7 +4743,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'search',
     description: 'Search persisted sessions for text and switch to a hit',
     input: { hint: '<query>' },
@@ -4815,7 +4835,7 @@ export function registerTuiCommands(
     handler: titleHandler,
   })
 
-  commands.register({
+  registerOne({
     name: 'copy',
     description: 'Copy the last assistant message to the system clipboard (tmux-aware)',
     handler: async () => {
@@ -4951,7 +4971,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'export',
     description: 'Export this session as a full archive (ZIP with descendants and attachments)',
     handler: (invocation) => {
@@ -4966,7 +4986,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'transcript',
     description: 'Export a readable Markdown transcript of this session',
     handler: (invocation) => {
@@ -4980,7 +5000,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'fork',
     description: 'Fork this session at the Host-selected latest completed prefix',
     handler: async () => {
@@ -4999,7 +5019,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'rewind',
     description: 'Fork this conversation from an earlier user turn (the workspace is not reverted)',
     handler: () => {
@@ -5011,7 +5031,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'status',
     description: 'Show session stats and identity',
     handler: async () => {
@@ -5059,7 +5079,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'login',
     description: 'Sign in with a provider or set an API key — deepseek official or an llm-pi-ai provider route',
     input: { hint: '[<route|env-var>]' },
@@ -5195,7 +5215,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'logout',
     description: 'Clear a stored credential — deepseek official or an llm-pi-ai provider route (API key or stored record)',
     input: { hint: '[<route|env-var>]' },
@@ -5267,7 +5287,7 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
+  registerOne({
     name: 'help',
     description: 'Show keybindings and available commands',
     handler: () => {
@@ -5315,7 +5335,7 @@ export function registerTuiCommands(
   // M4: the keybinding command. Bare /keybindings opens the action-first
   // Keyboard Shortcuts Editor; conflicts/reload/reset remain read-only or
   // explicit diagnostics seams and persist only through the settings port.
-  commands.register({
+  registerOne({
     name: 'keybindings',
     description: 'Edit keyboard shortcuts (conflicts / reload / reset)',
     input: { hint: '[conflicts|reload|reset]' },
@@ -5466,6 +5486,9 @@ export function registerTuiCommands(
     refreshCompletions()
   })
   return {
+    /** Per-name registration failures (a Host-claimed name degraded loudly;
+     *  later registrations still installed). */
+    registrationFailures,
     /** The claim test for the dispatch: is /name advertised right now? */
     wasAdvertised,
     /** The host catalog's view of ONE parsed line (see

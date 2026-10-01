@@ -23,6 +23,7 @@ export function detachedSessionStatus(
     sessionId: string
     cwd?: string
     model?: SessionStatusProjection['model']
+    preset?: string
     context?: SessionStatusProjection['context']
     todos?: SessionStatusProjection['todos']
     usage?: SessionStatusProjection['usage']
@@ -30,6 +31,7 @@ export function detachedSessionStatus(
   if (typeof cwd === 'string' && cwd !== '') record.cwd = cwd
   const model = modelSelectionFact(values.modelSelection)
   if (model !== undefined) record.model = model
+  if (typeof values.agentPreset === 'string' && values.agentPreset !== '') record.preset = values.agentPreset
   const pressure = numericRecord(values.contextPressure)
   const breakdownValue = values.contextBreakdown
   const breakdown = typeof breakdownValue === 'object' && breakdownValue !== null

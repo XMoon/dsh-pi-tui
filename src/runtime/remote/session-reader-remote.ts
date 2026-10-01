@@ -300,6 +300,7 @@ export class RemoteSessionReader implements SessionReader {
       contextBreakdown: projections.faceOf('contextBreakdown').getSnapshot(),
       tokenUsage: projections.faceOf('tokenUsage').getSnapshot(),
       todos: projections.faceOf('todos').getSnapshot(),
+      agentPreset: projections.faceOf('agentPreset').getSnapshot(),
     }, this.cwdOf(sessionId))
   }
 
