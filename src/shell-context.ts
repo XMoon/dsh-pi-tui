@@ -1,10 +1,11 @@
 /**
- * `!` shell context submission (kimi parity): a completed local shell run
- * is submitted to the session as an ordinary user message, so the
- * model sees the command AND its output on the next turn. `!!` runs stay
- * purely local — no session write, no model visibility (pi's
- * excluded-from-context semantics). Extracted from the runner so the
- * TOCTOU races are testable headless, exactly like steer.ts:
+ * `!` shell context submission (kimi parity): a completed Host user-shell
+ * run is submitted to the session as an ordinary user message, so the
+ * model sees the command AND its output on the next turn. `!!` results
+ * stay Session/model-excluded — presentation-only, no session write, no
+ * model visibility (pi's excluded-from-context semantics); execution is
+ * still Host-side on both gestures (M3-4 PR3). Extracted from the runner
+ * so the TOCTOU races are testable headless, exactly like steer.ts:
  *
  * - The agent/generation identity is captured BEFORE the awaited write
  *   window.

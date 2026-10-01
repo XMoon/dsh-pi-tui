@@ -6358,7 +6358,7 @@ export class TuiApp {
         return true
       },
       dismissSettledShell: () => {
-        // Dismiss settled local shell cards (the dismiss-settled action —
+        // Dismiss settled user-shell cards (the dismiss-settled action —
         // plan §5.4 quick
         // clear): completed `!`/`!!` runs leave the live view; running
         // cards never do (the process is NOT cancelled — Esc owns that).
@@ -6755,12 +6755,13 @@ export class TuiApp {
   }
 
   /**
-   * The quick-dismiss semantic action for settled local shell cards (plan
+   * The quick-dismiss semantic action for settled user-shell cards (plan
    * §5.4): removes completed `!`/`!!` runs from the live view. A RUNNING
    * card is never dismissed (a live stream survives), the shell process is
    * NOT cancelled (Esc owns that), no session event is deleted, and an
    * already-submitted `!` context payload is untouched — the transcript's
-   * user row is the durable record either way. `!!` stays local-only.
+   * user row is the durable record either way. A settled `!!` card is the
+   * presentation-only record (Session/model-excluded).
    */
   dismissSettledLocalShell(): void {
     this.clearSettledLocalMessages()

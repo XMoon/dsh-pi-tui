@@ -62,7 +62,7 @@ export interface AppActionHost {
   openTasks(): boolean
   /** Open the input-history search panel. */
   openHistorySearch(): boolean
-  /** Dismiss settled local shell cards. */
+  /** Dismiss settled user-shell cards. */
   dismissSettledShell(): boolean
 }
 

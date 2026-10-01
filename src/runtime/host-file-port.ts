@@ -24,10 +24,13 @@
  * (`sessionId` / `cwd`), candidates are path-only DTOs, and NO Node fs
  * object, `Dirent`, `Stats` or live Agent ever appears.
  *
- * NOT in this port (deliberate locality split): the `!`/`!!` local shell,
- * `/image` local file reads, `/export` local output writes, the clipboard,
- * the external editor and plain shell/path completion — those keep their
- * own client-local semantics.
+ * NOT in this port (deliberate domain split): the `!`/`!!` user shell
+ * (Host-owned execution — `HostUserShellPort`, M3-4 PR3), `/image` local
+ * file reads, `/export` local output writes, the clipboard, the external
+ * editor and the shell-line completion bridge — those keep their own
+ * owners; the file/local ones are client-local surfaces, the shell
+ * completion facts are Host-derived (and unavailable under Remote attach,
+ * never silently faked).
  *
  * Wire mapping: the official fileReferences Remote seam
  * (`fileReferences/list(agentId, query, signal)` → path-only candidates,
