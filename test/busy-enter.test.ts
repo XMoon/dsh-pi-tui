@@ -337,7 +337,7 @@ test('/settings shows the local-shell-sandbox row with the persisted value', asy
   // thinking, footer, busy-enter, then sandbox).
   for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
   const view = await t.view()
-  assert.ok(view.includes('Local shell sandbox'), `local-shell-sandbox row missing:\n${view}`)
+  assert.ok(view.includes('User shell sandbox policy'), `local-shell-sandbox row missing:\n${view}`)
   assert.ok(view.includes('sandbox'), `persisted value missing:\n${view}`)
   t.app.stop()
 })

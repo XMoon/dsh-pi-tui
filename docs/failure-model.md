@@ -23,7 +23,7 @@ FACTORY that is invoked SYNCHRONOUSLY before the helper returns:
   consumer: settings writes, theme autodetect, skill refresh.
 - `runOwned(label, () => task, { isCancellation?, onResult, onCancel, onError })`
   — result-consuming main flows: submit/steer dispatch, command execution,
-  local commands, local-shell card settle, the `!` shell-context submit
+  local commands, user-shell card settle, the `!` shell-context submit
   (re-validate → followup; a refused write keeps the card, an unexpected
   error notifies), session switch, question flows, model-picker selection
   writes, external editor.

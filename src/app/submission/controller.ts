@@ -171,7 +171,7 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly extensions: SubmissionExtensionsDeps
   /** The client artifact-save owner. */
   readonly artifacts: { start(name: 'export' | 'transcript', agent: ExactAgent): void }
-  /** The local-shell owner (the run/inspect seam). */
+  /** The user-shell owner (the run/inspect seam). */
   readonly shell: {
     run(text: string, ackToken: number | undefined): void
     interrupt(): void
@@ -349,7 +349,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
       return undefined
     }
-    return 'Attachments cannot be included in a local command.'
+    return 'Attachments cannot be included in a user-shell command.'
   }
 
   /** The encoded images ONE command invocation carries (DSH
@@ -1298,7 +1298,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // intact) back, exactly like a local command.
       if (draftHasAttachments(text, deps.drafts.images, deps.drafts.files)) {
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
-        deps.app().notify('Attachments cannot be included in a local command.', 'error')
+        deps.app().notify('Attachments cannot be included in a user-shell command.', 'error')
         return
       }
       if (shellCommandOf(text) === '') {

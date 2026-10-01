@@ -160,9 +160,9 @@ policy**, never an execution locality.
   `onChange` persists through `tuiSettings.replace({ ...doc, localShellSandbox: value })`
   (same pattern as the `busy-enter` row).
 
-- `runLocalShell` (`src/index.ts`): read the preference once per run and pass
-  it to the Host user-shell execution adapter (`HostUserShellPort`,
-  M3-4 PR3).
+- The user-shell execution path (`src/app/submission/user-shell.ts` reads the
+  preference once per run and hands it to the `HostUserShellPort` /
+  `Backend.hostUserShell`, M3-4 PR3):
   - `bypass` (default): execute through the Direct Host adapter's plain
     spawn path — bounded tail capture, 0600 full-output temp file, abort via
     `localShellController`, per-stream `StringDecoder`.
@@ -180,15 +180,21 @@ default matches every reference implementation.
 
 **Touch points**
 
-- `src/index.ts` — settings schema + base (`localShellSandbox: 'bypass'`),
-  `runLocalShell` backend selection.
+- `src/tui-config.ts` — settings schema + base (`localShellSandbox: 'bypass'`).
+- `src/app/submission/user-shell.ts` — reads the preference per run and passes
+  it to `HostUserShellPort.execute`.
+- `src/runtime/direct/host-user-shell-direct.ts` — the Direct Host adapter:
+  policy selection (`bypass` spawn / `sandbox` via the dsh shell executor),
+  fail-closed when the sandbox policy is unavailable.
 - `src/commands.ts` — the settings row + onChange persistence.
 - `src/commands.ts` `TuiSettingsLike` — extend the document shape.
 
 **Tests**
 
-- Headless: with the preference `bypass`, `runLocalShell` does NOT call an
-  injected fake `ctx.shell` (spawn path used); with `sandbox` it does.
+- Headless: with the preference `bypass`, the run does NOT call an injected
+  fake `ctx.shell` (the Direct Host adapter's spawn path is used); with
+  `sandbox` it does (`test/local-shell-sandbox.test.ts`, pinned at
+  `HostUserShellPort` level after the M3-4 PR3 rename).
 - Settings row renders with `bypass` default; flipping persists through the
   injected settings document.
 - Existing shell tests (bounded output, abort, truncation) stay green — they

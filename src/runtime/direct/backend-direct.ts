@@ -7,7 +7,9 @@
  * served by a runner-local side channel that bypasses the backend vocabulary.
  *
  * This module owns assembly ONLY: no UI, transition, draft, panel or command
- * routing lives here, and it resolves no Host service itself.
+ * routing lives here; every `ctx.*` Host service the adapters need is
+ * resolved lazily INSIDE the assembled adapters themselves (e.g. the Direct
+ * Host user-shell adapter resolves the `shell` capability per call).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/backend-direct
@@ -86,7 +88,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectJobObservationPort(deps.ctx, deps.diag),
     // The Direct Host user-shell adapter (M3-4 PR3): spawn lives behind
     // adapter ownership; the sandbox policy runs the dsh shell executor and
-    // fails closed when absent.
+    // fails closed when absent. The `shell` capability resolver stays here as
+    // the one Direct-only seam this assembly hands the adapter (resolved
+    // lazily per call inside adapter ownership).
     new DirectHostUserShellPort(
       deps.ctx,
       () => deps.ctx.get('shell') as unknown as DirectShellCapability | undefined,

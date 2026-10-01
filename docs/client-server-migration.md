@@ -2103,12 +2103,19 @@ TypeScript restructure. It is structural only:
   facade) and `app/command/artifacts.ts` (`/export` + `/transcript`);
   `app/submission/controller.ts` (the input workflow with its FIFO/ack/
   local-echo state, dispatch, history integration and the writer-section seam)
-  and `app/submission/user-shell.ts` (the `!`/`!!` shell + card lifecycle; renamed from local-shell by M3-4 PR3);
+  and `app/submission/user-shell.ts` (the `!`/`!!` user-shell owner; it
+  consumes the narrow `HostUserShellPort` (`Backend.hostUserShell`) and never
+  owns Client process execution — the Direct Host adapter
+  (`runtime/direct/host-user-shell-direct.ts`, assembled by
+  `runtime/direct/backend-direct.ts`) owns bypass spawn and the `ctx.shell`
+  sandbox policy behind adapter ownership, and the Remote adapter
+  (`runtime/remote/host-user-shell-remote.ts`) reports the truthful
+  unavailable state (CARRIER_GAP));
   `app/session/**` (ownership/scope/navigation) and `app/direct/**` (Direct
   composition) are unchanged. All extracted owners consume narrow injected
   capabilities and the semantic ports: no owner imports `app/direct/**` /
   `runtime/direct/**` (the protocol/DTO packages a few owners use —
-  `dsh-commands` in the submission controller, `dsh-llm` in the local shell and
+  `dsh-commands` in the submission controller, `dsh-llm` in the user shell and
   the type-only `dsh-user-approval/types` in the surface runtime — carry no
   Host-ownership coupling and are not tracked by the boundary gate), and every
   write still enters through

@@ -1088,7 +1088,7 @@ test('the review repro: an older `!` run dying late NEVER clears the newer pendi
 
   mounted.app.setDraft('!sleep 0.4')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  // B immediately: its runLocalShell aborts A's controller.
+  // B immediately: its user-shell run aborts A's controller.
   mounted.app.setDraft('!echo done')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForDelivery(harness.host, 'the newer `!echo` submit')
@@ -3469,7 +3469,7 @@ for (const form of [
     // The strongest signal first: a shell that ran would have created the
     // marker (the placeholder text is passed as shell arguments).
     assert.equal(existsSync(marker), false, 'the shell never ran with the placeholder')
-    assert.match(mounted.app.notifyTextForTest(), /Attachments cannot be included in a local command\./)
+    assert.match(mounted.app.notifyTextForTest(), /Attachments cannot be included in a user-shell command\./)
     assert.equal(harness.host.followedUp.length, 0, 'nothing is posted to the session')
     assert.match(mounted.app.getDraft(), /\[image #1/, 'the draft comes back with its placeholder intact')
   })

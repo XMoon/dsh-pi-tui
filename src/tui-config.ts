@@ -56,7 +56,7 @@ export interface Config {
   /** Busy-Enter delivery for plain Enter while the agent runs: 'queue'
    * (default) or 'steer'. */
   readonly busyEnter: Volatile<string>
-  /** Local-shell sandbox for user-typed `!`/`!!` commands: 'bypass'
+  /** User-shell sandbox policy for user-typed `!`/`!!` commands: 'bypass'
    * (default) runs them outside the dsh sandbox, 'sandbox' routes them
    * through the dsh shell capability's policy. */
   readonly localShellSandbox: Volatile<string>
