@@ -25,6 +25,7 @@ import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
+import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { createRemoteHostRuntime, mergeCause, type InProcessHostCarrier, type RemoteHostRuntime } from './host-runtime.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ASemantics } from './m3a-semantics.ts'
 
@@ -129,8 +130,11 @@ export function remoteConfigRuntimeSourceOf(runtime: RemoteClientRuntime): Remot
 export interface RemoteBackendRuntimeOptions {
   /** The ONE M3-1 Client runtime every adapter shares. */
   readonly runtime: RemoteClientRuntime
-  /** The application-owned prompt serializer (the D2.2 writer dependency). */
-  readonly promptSerializer: RemotePromptSerializer
+  /** The application-owned prompt serializer (the D2.2 writer dependency).
+   * Absent selects the PRODUCTION serializer (M3-4 PR3): the PreparedPrompt
+   * → official PromptContentPart mapping over the same Client sessions face.
+   * Composition tests may still inject an explicit stub. */
+  readonly promptSerializer?: RemotePromptSerializer
   /** The composition-owned fetch the archive adapter addresses. */
   readonly fetch: InProcessHostCarrier['fetch']
 }
@@ -183,7 +187,12 @@ export async function createRemoteBackendRuntime(
   }
   try {
     const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
-      promptSerializer: options.promptSerializer,
+      // The production serializer is the DEFAULT (M3-4 PR3): it consumes the
+      // application PreparedPrompt and reads recalled durable images through
+      // the official binding-scoped attachment read. An explicit injection
+      // (composition tests) still wins.
+      promptSerializer: options.promptSerializer
+        ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions),
     })
     unwind.push(() => semantics.dispose())
     const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
