@@ -230,6 +230,13 @@ function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution 
     // Kill the PROCESS GROUP on POSIX (the wrapper's children included); a
     // bare child.kill() would only reach the shell wrapper and let pipeline
     // children keep running (and hold the streams) after the cancel.
+    //
+    // PLATFORM SCOPE: whole-tree cancellation is POSIX-only. On win32 this
+    // build does NOT claim tree cancellation — child.kill() reaches only the
+    // shell wrapper (grandchildren survive until their own exit), which is an
+    // EXPLICIT unsupported-cancellation limitation: the TUI has no Windows
+    // support contract at all (CI/test matrices are Linux-only), and closing
+    // the gap would need a Job Object / taskkill /T owner of its own.
     const killTree = (signal: NodeJS.Signals = 'SIGTERM'): void => {
       // Drop the host-side pipe readers FIRST: a full pipe keeps the killed
       // writer blocked (it can never drain once the consumer is gone), and a

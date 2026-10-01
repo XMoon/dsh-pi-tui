@@ -577,9 +577,29 @@ test('L6 §27 remote cancel: a real cancel gesture stops the running official tu
   await waitFor('turn cancelled', () => {
     return fixture.aggregate.presentation.sessionFacts.running(mainId) === false
   }, 20_000)
-  // The queued next-turn occurrence SURVIVES the cancel (official Host inbox
-  // keeps it for the next wake) — the durable row may not exist yet, but the
-  // splice must still be present and the message must never be destroyed.
-  assert.equal(spliceOf('queued survives cancel lambda'), true,
-    'the queued occurrence survives the running turn cancel (keepInbox parity)')
+  // AUTHORITATIVE post-cancel evidence 1/2 — the LIVE pending projection:
+  // the official snapshot must still carry the queued occurrence (a durable
+  // splice event alone would remain even if the cancel had destroyed the
+  // live pending item — that would be self-justifying).
+  await waitFor('queued occurrence live after cancel', () => {
+    const pending = fixture.aggregate.selected.backend.pendingInputReader.snapshot(mainId)
+    return pending !== undefined
+      && pending.items.some(item => JSON.stringify(item).includes('queued survives cancel lambda'))
+  }, 15_000)
+  // AUTHORITATIVE post-cancel evidence 2/2 — DELIVERY: release the gate
+  // (the cancelled turn settles) and submit a NEW prompt; the next wake must
+  // drain the PARKED preserved occurrence before/with the new one (the
+  // official parked-queue semantics: preserved work resumes at the next
+  // wake — this proves the item was kept, not stranded).
+  release()
+  await waitFor('cancelled turn settled', () => {
+    return hostUserRows(fixture, mainId).some(row => row.includes('cancel opener kappa'))
+  }, 20_000)
+  submitDraft(fixture, 'wake after cancel mu')
+  await waitFor('preserved occurrence delivered at the wake', () => {
+    return hostUserRows(fixture, mainId).some(row => row.includes('queued survives cancel lambda'))
+  }, 20_000)
+  await waitFor('wake prompt delivered', () => {
+    return hostUserRows(fixture, mainId).some(row => row.includes('wake after cancel mu'))
+  }, 20_000)
 })
