@@ -2869,6 +2869,43 @@ test('a bridge-only client command joins the `/` menu (discoverable without a ho
   assert.equal(row?.description, 'toggle vim mode', 'the menu row carries the contribution description')
 })
 
+test('a sessionless `!!` ensures a Session first and executes in that Session workspace (M3-4 PR3 shell amendment)', async (t) => {
+  // The amendment: `!!` is Session/model-EXCLUDED, never sessionless — with
+  // no current Session the gesture ENSURES one, executes the command in that
+  // Session's workspace, and never writes the result into the Session.
+  const life = testLifecycle(t)
+  const marker = `ss-ensured-${Date.now()}.marker`
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  assert.equal(harness.createdSessionIds.length, 0, 'no session exists before the gesture')
+  mounted.app.setDraft(`!!touch ${marker}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // The session is created by the `!!` gesture itself (the amendment's
+  // ensure-Session rule).
+  for (let round = 0; round < 80 && harness.createdSessionIds.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(harness.createdSessionIds.length, 1,
+    'the sessionless `!!` created its execution Session before running')
+  // The command really executed: the Direct adapter runs in the Session
+  // workspace — the deferred create uses the LAUNCH cwd, which this harness
+  // sets to the temporary DSH_HOME; the marker must appear there (existence
+  // is the discriminator; a never-run command leaves nothing).
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const home = process.env.DSH_HOME ?? process.cwd()
+  const markerPath = path.join(home, marker)
+  await drainUntil(() => fs.existsSync(markerPath), 5000)
+  assert.equal(fs.existsSync(markerPath), true,
+    'the `!!` command executed in the ensured Session workspace (marker file created)')
+  // …and the result NEVER enters the Session (zero followup for `!!`).
+  assert.equal(harness.host.followedUp.filter(entry => JSON.stringify(entry).includes(marker)).length, 0,
+    'the `!!` result is excluded from Session/model context')
+})
+
 test('a client command is session-backed by default: the session resolves BEFORE the handler', async (t) => {
   const calls: string[] = []
   const { harness, mounted } = await bootCommandHarness(t, {
