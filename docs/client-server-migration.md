@@ -3053,9 +3053,13 @@ The facts are also **live**, not once-per-hydrate. The official projection
 store is a push channel, and the official feature contract exposes it as
 per-key faces (`session.projections.faceOf(key).subscribe`) — the Session
 snapshot never carries projection values. The Remote ingress subscribes to the
-keys it presents (`CURRENT_PROJECTION_KEYS`, the list the semantic reader
-reads), coalesced per frame, fenced by the exact retained binding, and on a
-change re-applies the projection-owned facts and refreshes status/welcome. So
+keys the status/welcome facts are read from
+(`CURRENT_STATUS_PROJECTION_KEYS` — EXACTLY what `sessionStatus()` reads plus
+`plan`; the status reads are driven by the same tuple, so a key cannot be read
+without being subscribed, and a projection whose change the status does not
+consume, e.g. `turnOutline`/`sessionStats`, is deliberately absent), coalesced
+per frame, fenced by the exact retained binding, and on a change re-applies the
+projection-owned facts and refreshes status/welcome. So
 a model/preset/title/goal/todos/usage/context change made by the Host or by
 another Client reaches this surface immediately instead of waiting for an
 unrelated refresh (the Remote event routing for `model/selection` is

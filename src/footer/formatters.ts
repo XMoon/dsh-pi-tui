@@ -248,7 +248,10 @@ export function formatStatsLine(usage: UsageStatus): string {
     `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
     `${usage.performance.tokensPerSec} tok/s`,
   ]
-  return `${piParts.join(' ')} | ${ownParts.join(' · ')}`
+  const performance = ownParts.join(' · ')
+  // The separator belongs to the JOIN, never a leading orphan: without owned
+  // token facts the line is the performance segment alone.
+  return piParts.length === 0 ? performance : `${piParts.join(' ')} | ${performance}`
 }
 
 /** The pi-vocabulary stats line, compact pressure form:
@@ -268,7 +271,8 @@ export function formatStatsLineCompact(usage: UsageStatus): string {
     `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
     `${usage.performance.tokensPerSec}t/s`,
   ]
-  return `${piParts.join(' ')} · ${ownParts.join(' · ')}`
+  const performance = ownParts.join(' · ')
+  return piParts.length === 0 ? performance : `${piParts.join(' ')} · ${performance}`
 }
 
 /** The sandbox mode compact codes: `ro`, `ww`, `yolo`. An unknown future

@@ -546,3 +546,18 @@ test('a same-id binding replacement yields a NEW read — the stale projection n
   assert.equal(reader.sessionStatus('s')?.context?.projectedTokens, 222,
     'the read always resolves the CURRENT binding generation')
 })
+
+test('the live status projection list is EXACTLY what the status reads (no static-read/stale-UI drift)', async () => {
+  const { CURRENT_STATUS_PROJECTION_KEYS } = await import('../src/runtime/remote/session-reader-remote.ts')
+  // The status DTO's keys + the plan source. A new status fact MUST update this
+  // list (and vice versa): the ingress subscribes to exactly these keys, so a
+  // key read here but missing there would render statically and never refresh.
+  assert.deepEqual(
+    [...CURRENT_STATUS_PROJECTION_KEYS].sort(),
+    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
+  )
+  // Projections whose change the status does not consume stay OUT: their own
+  // consumer establishes the subscription it needs.
+  assert.equal(CURRENT_STATUS_PROJECTION_KEYS.includes('turnOutline'), false)
+  assert.equal(CURRENT_STATUS_PROJECTION_KEYS.includes('sessionStats'), false)
+})
