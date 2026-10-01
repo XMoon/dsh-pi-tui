@@ -234,7 +234,7 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'app.shell.dismissSettled': {
     id: 'app.shell.dismissSettled',
     defaultKeys: ['alt+k'],
-    description: 'Dismiss settled local shell cards',
+    description: 'Dismiss settled user-shell cards',
     category: 'Panels',
     scope: 'global',
     configurable: true,

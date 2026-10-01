@@ -213,7 +213,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * cwd). `undefined` when a LIVE session's official row carries none —
    * the status presentation then OMITS the cwd fact rather than copying the
    * Client cwd (Host/Client cwd equivalence is forbidden). Never consumed
-   * by execution paths (shell/history keep their own client-local fallback).
+   * by execution paths (the shell/history owners keep their own fallback).
    */
   const sessionCwdFact = (): string | undefined => {
     const agent = deps.liveAgent()

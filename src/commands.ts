@@ -5332,7 +5332,7 @@ export function registerTuiCommands(
 
         { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
         { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
-        { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs locally without recording', currentValue: '' },
+        { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs without recording it in the session', currentValue: '' },
         { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
         ...runner.listScopedCommands()
           .map(command => ({

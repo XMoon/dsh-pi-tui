@@ -25,7 +25,7 @@ fields.
 | Diagnostics | `src/diag.ts` | file/stderr sinks |
 | Model picker | `src/model-picker.ts` | Models/Efforts view state (query, selection, effort cursor), disposed latch |
 | Commands | `src/commands.ts` | command registry, skill disposers (generation-checked) |
-| The runner | `src/index.ts` (`apply`) | everything else: lifecycle controller + cleanup, session generation, callArgs, search state, local shell (`!` submits its command+output to the session via `shell-context.ts`; `!!` stays local), external editor, event firehose |
+| The runner | `src/index.ts` (`apply`) | everything else: lifecycle controller + cleanup, session generation, callArgs, search state, the `!`/`!!` user shell (`!` submits its Host-run command+output to the session via `shell-context.ts`; `!!` stays Session/model-excluded — execution itself is Host-owned on both gestures, M3-4 PR3), external editor, event firehose |
 
 ## Target controllers (extraction order, one responsibility per commit)
 
@@ -44,9 +44,10 @@ fields.
    write-fence wiring, event subscription. Depends on
    `submit-ack.ts` / `submit-latency.ts` (already pure) and the generation
    accessor (already on `TuiCommandRunner`).
-3. **InputDispatcher** — editor submit, shortcuts (Ctrl+S/Alt+↑/Esc), local
-   shell routing (`!` context vs `!!` local lives in `shell-context.ts`,
-   already pure). Depends on `bounded-output.ts` / `shell-words.ts` (already
+3. **InputDispatcher** — editor submit, shortcuts (Ctrl+S/Alt+↑/Esc), the
+   `!`/`!!` user-shell gesture routing (`!` context vs `!!`
+   Session-excluded lives in `shell-context.ts`, already pure). Depends on
+   `bounded-output.ts` / `shell-words.ts` (already
    pure) and `TuiApp`'s event hooks.
 4. **OverlayController** — settings/model/question/approval/search mutual
    exclusion and stacking. `TuiApp` currently owns overlay handles; the
