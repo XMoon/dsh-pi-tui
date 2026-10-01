@@ -24,6 +24,8 @@ export function detachedSessionStatus(
     cwd?: string
     model?: SessionStatusProjection['model']
     preset?: string
+    title?: string
+    goal?: SessionStatusProjection['goal']
     context?: SessionStatusProjection['context']
     todos?: SessionStatusProjection['todos']
     usage?: SessionStatusProjection['usage']
@@ -32,6 +34,16 @@ export function detachedSessionStatus(
   const model = modelSelectionFact(values.modelSelection)
   if (model !== undefined) record.model = model
   if (typeof values.agentPreset === 'string' && values.agentPreset !== '') record.preset = values.agentPreset
+  // The official `title` projection: a non-empty string; its LEGAL null ("no
+  // title yet") and an absent value both read absent (never "").
+  if (typeof values.title === 'string' && values.title !== '') record.title = values.title
+  // The official `goal` projection VIEW: `{goal:{objective,phase}} | null`. The
+  // LEGAL null ("no goal") is preserved; an absent/foreign value reads absent
+  // (unavailable), never `null` — the two dispositions differ.
+  if ('goal' in values) {
+    const goal = goalFact(values.goal)
+    if (goal !== undefined) record.goal = goal
+  }
   const pressure = numericRecord(values.contextPressure)
   const breakdownValue = values.contextBreakdown
   const breakdown = typeof breakdownValue === 'object' && breakdownValue !== null
@@ -66,6 +78,22 @@ export function detachedSessionStatus(
     }
   }
   return record
+}
+
+/** Narrow the official `goal` projection view: `null` (no goal) is a LEGAL
+ *  value and stays distinct from `undefined` (unavailable); the current goal
+ *  is read from `goal.{objective,phase}` with the phase vocabulary validated. */
+function goalFact(value: unknown): SessionStatusProjection['goal'] | undefined {
+  if (value === null) return null
+  if (typeof value !== 'object') return undefined
+  const current = (value as { readonly goal?: unknown }).goal
+  if (typeof current !== 'object' || current === null) return undefined
+  const goal = current as { readonly objective?: unknown; readonly phase?: unknown }
+  if (typeof goal.objective !== 'string' || goal.objective === '') return undefined
+  if (goal.phase !== 'active' && goal.phase !== 'paused' && goal.phase !== 'blocked' && goal.phase !== 'complete') {
+    return undefined
+  }
+  return { objective: goal.objective, phase: goal.phase }
 }
 
 /** Narrow an unknown projection value to its numeric fields (no coercion). */

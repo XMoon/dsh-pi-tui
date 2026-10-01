@@ -3018,16 +3018,59 @@ pre-selected aggregate — no CLI/config/env selector exists).
   runtime seams with `initLiveSession` dispatching to the Remote surface
   init for Remote-owned generations.
 
+### Current-value facts are PROJECTION-owned, never window-folded
+
+The Remote event window is BOUNDED (the official loader returns at most the
+last ~2 turns / >=50 messages), so it must never be treated as session-global
+current-state authority. On the Remote branch every CURRENT-VALUE fact is read
+from its OFFICIAL projection/status source and the window fold is only the
+fallback while that projection is unavailable:
+
+| Fact | Official owner | Window fold on Remote |
+|---|---|---|
+| title | `title` projection | fallback only (the `session/title` event may precede the window) |
+| goal | `goal` projection (its legal `null` = "no goal" is honored) | fallback only |
+| todos | `todos` projection (the standing list of the current turn) | fallback only |
+| token usage / cache rate / context capacity | `tokenUsage` + context projections (lifetime) | never (a partial fold cannot count a lifetime) |
+| cwd | the official session status/list row | never (it is not an event at all) |
+| plan / preset / model | `plan` / `agentPreset` / `modelSelection` projections | never |
+| transcript rows, working/busy, compaction | the official event window | the event window IS the authority |
+
+The goal badge uses ONE shared text rule for both a projection fact and a log
+event (`goalTextOf`), so a projection-backed session never gets a second,
+competing presentation rule. An ABSENT projection field means "unavailable"
+(the fold may stand in); a legal `null` (no goal / no `todo/write` yet) is a
+real answer and is honored. `test/runner-remote-presentation.test.ts` proves
+the divergence case directly: title/goal/lifetime-usage whose source events sit
+OUTSIDE the truncated window (mutation-verified — dropping the projection feed
+loses the title and the lifetime counters).
+
 ### In-stage known boundaries (active M3-4 findings — NOT promoted to Debt)
 
 - **Host command-name collisions (e.g. `/export`)**: the Remote Host
   composition mounts `session-log-export`, which registers a Host `/export`
-  alongside the TUI built-in. Registration is PER-NAME isolated (M3-4 PR2):
-  the colliding name fails loudly with its exact name in the user notice and
-  the diagnostics, later registrations still install, and no broad catch
-  aborts the pass. The command-plane split (Client-local registry vs
+  alongside the TUI built-in. Registration is PER-NAME isolated, and the
+  isolation is NARROW BY CONSTRUCTION (M3-4 PR2): ONLY the official
+  registry's duplicate-name refusal (`command "<name>" is already registered`)
+  is tolerated, so the colliding name fails loudly with its exact name in the
+  user notice and the diagnostics while later registrations install. Every
+  other throw from the registry — an invalid name/description/handler/input,
+  or a Cordis lifecycle failure — still fails fast (exactly as before), so a
+  programming error can never degrade into a silently partial command
+  surface. The command-plane split (Client-local registry vs
   `HostCommandPort`, plan §9.3) is the M3-4 command PR's ownership; M3-4
   closure must prove Remote session export works.
+- **Lifetime turn/step counters on Remote**: the token/cache counters and the
+  route context capacity come from the official `tokenUsage`/context
+  projections (a bounded window cannot count a session's lifetime), while the
+  RECENT-window performance metrics (TTFB / tok/s) and the turn/step counters
+  still come from the bounded window's fold, because they are window-scoped
+  facts. The
+  lifetime `sessionStats` projection and its UI row are the command PR's
+  ownership (plan §9.4).
+- **Per-subject history paging latch**: one Remote `loadOlder` extension is
+  in flight per SUBJECT, not per runner — a page still loading for the
+  previous session cannot swallow the new session's first boundary gesture.
 - **`refreshLiveCatalog` on Remote owners stays a no-op**: catalog-refresh
   currentness over the binding generation is the command PR's ownership; the
   startup prefetch snapshot remains the catalog until then (PR4-owned
@@ -3068,15 +3111,33 @@ locked by `test/remote-working-fold-equivalence.test.ts`:
    answer `false`; `running === true` covers the wake window before
    `turn/start` and mid-turn windows — both are the UI working fact.
 
-### L6 evidence (plan §7.10/§7.11 subset landed)
+### L6 evidence (plan §7.10/§7.11)
 
 `test/runner-remote-presentation.test.ts` — the REAL runner
 (`applyRunnerWithRuntime` + a pre-selected aggregate) over a REAL rc.2 Host
-Context (the shared fixture + TokenMeter/toolTodo projection rows + a
-scripted real `LlmAdapter`) → the official in-process carrier → a real Client:
+Context (the shared fixture + the TokenMeter/toolTodo/session-title/goal
+projection rows + a scripted real `LlmAdapter`) → the official in-process
+carrier → a real Client:
 
 - Remote resume → the official window's transcript rows painted ONCE (no
   duplicate identity, no TUI ledger);
+- CURRENT-VALUE facts whose SOURCE EVENTS precede the truncated window
+  (title, goal, lifetime token usage) still render — the official projections
+  own them; the bounded window is never their authority. Mutation-verified:
+  without the projection feed the title and the lifetime counters disappear;
+- navigation/currentness: switch (`/resume <other>`), same-id rollover
+  (away and back — a NEW binding for the same id), reconnect
+  (`connection.reconnect()` → the follow window is rebuilt) and `/fork`
+  adoption each re-initialize the presentation from the new subject, with the
+  replaced subject's rows retired and the inherited prefix painted exactly
+  once; `/new` re-initializes onto a fresh session;
+- the pending dispositions are proven ONE BY ONE on a session the OFFICIAL
+  Client reports as `running` (a held real turn): a `queue`-mode echo lands in
+  the QUEUE pane (never the tail), a `steer`-mode echo lands in the TAIL user
+  lane with `steering`, a non-user `next-step` inbox occurrence lands as the
+  generic CONTEXT tail row (never the user lane), and the identified prompt's
+  durable admission retires the echo BY IDENTITY while the authoritative row
+  takes its place;
 - REAL Host-side `agent/assistant-stream` frames → the official wire → the
   eventSource transient entries → the live chunk painted through the
   canonical pipeline;
@@ -3128,8 +3189,8 @@ no Remote-specific renderer, display mode, disclosure owner or viewport rule.
 | 7 | Pending context | `inbox` non-user occurrence | TRANSIENT | generic non-user context tail | the context row + waiting-next-step/turn label | Host inbox occurrence | next step/turn, or removal | same | same |
 | 8 | Local echo → authoritative | `requestId` identity | SURFACE_REACHABLE | queue/tail → transcript | exactly one row, never duplicated | the matching durable/queue occurrence | identity handoff (never text equality) | the generation bump drops old echoes | same |
 | 9 | Status: identity / running / working | list/binding `running` + the event-window fold | SURFACE_REACHABLE | footer activity + working row | the working/busy indication | turn-boundary events; a complete window folds, a truncated one reads the official `running` bit | turn end / idle | the fold cache is keyed by owner generation + transport token; a replace invalidates it | reset at commit |
-| 10 | Status: cwd / model / preset | list-row `cwd`; `modelSelection`; `agentPreset` | SURFACE_REACHABLE | footer + welcome card | the session's OWN cwd/model/preset | the ingress snapshot channel | on projection change | an absent fact renders UNKNOWN/empty — never a client or global fallback | same |
-| 11 | Status: plan / goal / todos / usage / context | `plan` / `todos` / `tokenUsage` / `contextPressure` projections + goal events | SURFACE_REACHABLE | footer plan state, goal line, todo dock, stats/context items | the session's own facts | projection/event updates | on change/settle | an absent projection is omitted | reset at commit |
+| 10 | Status: cwd / model / preset | list-row `cwd`; `modelSelection`; `agentPreset` — all FOUR are official projections/status facts on Remote, never a window fold | SURFACE_REACHABLE | footer + welcome card | the session's OWN cwd/model/preset | the ingress snapshot channel | on projection change | an absent fact renders UNKNOWN/empty — never a client or global fallback | same |
+| 11 | Status: plan / goal / todos / usage / context | `plan` / `goal` / `todos` / `tokenUsage` / `contextPressure` projections — the OFFICIAL current values, never the bounded window (its source events may precede it) | SURFACE_REACHABLE | footer plan state, goal line, todo dock, stats/context items | the session's own facts | projection/event updates | on change/settle | an absent projection is omitted | reset at commit |
 | 12 | Access (permission / sandbox / approval) | Host permission/sandbox/approval services | PROJECTION_ONLY on Remote (unavailable) | footer badge / settings rows | Direct unchanged; Remote OMITS the section | — | — | — | omitted on Remote (§6.6) |
 | 13 | Display modes | the ONE `TranscriptFolder` pipeline | SURFACE_REACHABLE | transcript | Full/Compact/Focus semantics identical to Direct | mode switch | — | — | unchanged |
 | 14 | Fullscreen / narrow width | the shared window controller + renderer | SURFACE_REACHABLE | transcript viewport | follow-end/anchor and wrapping unchanged | fullscreen toggle / resize | — | — | unchanged |
@@ -3151,7 +3212,7 @@ no Remote-specific renderer, display mode, disclosure owner or viewport rule.
 | 8 | shared | — | shared | — | — | a failed dispatch retires the echo | identity-only correlation |
 | 9 | the working row in every mode | — | shared | — | Esc/cancel unchanged | a truncated window with no `running` bit reads not-working (fail-safe) | the fold + the official `running` bit; no second working state |
 | 10 | footer items, mode-dependent layout | — | truncation preserves the label | — | — | unknown reads `no model` / empty cwd | official projections; the client cwd is never the session's workspace |
-| 11 | dock/footer | — | shared | — | — | an absent projection is omitted | official projections; the goal text folds the official event |
+| 11 | dock/footer | — | shared | — | — | an absent projection is omitted | official projections; the goal text uses the ONE shared goal-text rule for both the projection fact and a log event |
 | 12 | — | — | — | — | Shift+Tab cycle is a no-op on Remote (no live Agent) | Remote availability is explicit (absent), never a guessed `ask`/mode | §6.6 — an unsupported capability stays unsupported |
 | 13 | these ARE the modes under review | — | — | — | — | — | no Remote-specific display state exists |
 | 14 | — | unchanged | unchanged wrapping/truncation | — | — | — | shared |

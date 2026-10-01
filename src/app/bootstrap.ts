@@ -1119,6 +1119,20 @@ export function applyRunnerWithRuntime(
           captureTransportToken: (sessionId) => remoteSources.sessionFacts.captureTransportToken(sessionId),
           isTransportTokenCurrent: (sessionId, token) =>
             remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
+          // The official CURRENT-VALUE facts a bounded window cannot own. A
+          // field is included ONLY when its projection answered: an absent
+          // field means "unavailable" (the owner falls back to the window
+          // fold), while a legal `null` goal/todos is a real answer.
+          facts: (sessionId) => {
+            const status = remoteSources.sessionFacts.sessionStatus(sessionId)
+            if (status === undefined) return undefined
+            return {
+              ...status.cwd === undefined ? {} : { cwd: status.cwd },
+              ...status.title === undefined ? {} : { title: status.title },
+              ...'goal' in status ? { goal: status.goal } : {},
+              ...status.todos === undefined ? {} : { todos: status.todos },
+            }
+          },
         },
       }),
     })
@@ -1137,9 +1151,10 @@ export function applyRunnerWithRuntime(
      *  validates owner generation+session AND the token: a switch/new/fork
      *  or a same-owner Connection/binding rollover voids the entry. */
     let remoteWorkingFoldFor: { generation: number; sessionId: string; transportToken: unknown; fold: boolean; proven: boolean } | undefined
-    /** Whether one Remote `loadOlder` extension is in flight (the history
-     *  boundary seam coalesces repeated gestures into one official page). */
-    let remoteHistoryLoading = false
+    /** The session id one Remote `loadOlder` extension is in flight for (the
+     *  history boundary seam coalesces repeated gestures for the SAME subject
+     *  into one official page; another subject pages independently). */
+    let remoteHistoryLoadingFor: string | undefined
     const disposeRemoteIngress = (): void => {
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
@@ -2178,8 +2193,11 @@ export function applyRunnerWithRuntime(
         if (remoteSources === undefined) return false
         const sessionId = ownership.currentSessionId()
         if (sessionId === undefined || cleanedUp) return false
-        if (remoteHistoryLoading) return true
-        remoteHistoryLoading = true
+        // The in-flight latch is SUBJECT-scoped: a page still loading for the
+        // PREVIOUS session must not swallow the new session's first PageUp
+        // (each subject owns its own official paging operation).
+        if (remoteHistoryLoadingFor === sessionId) return true
+        remoteHistoryLoadingFor = sessionId
         runOwned('remote loadOlder', async () => {
           try {
             const before = await remoteSources.presentationReader.read(sessionId)
@@ -2189,7 +2207,7 @@ export function applyRunnerWithRuntime(
             if (ownership.currentSessionId() !== sessionId || cleanedUp) return
             await presentation.rehydrateFromWindow(sessionId)
           } finally {
-            remoteHistoryLoading = false
+            if (remoteHistoryLoadingFor === sessionId) remoteHistoryLoadingFor = undefined
           }
         }, { diag, sessionId: () => sessionId })
         return true

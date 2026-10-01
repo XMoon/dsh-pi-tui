@@ -468,7 +468,24 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         }
       : { plan: { effective: false } }
     const workspace = deriveWorkspaceStatus(displayCwd)
-    const usage = usageFromStats(displaySubject?.stats.snapshot() ?? stats, displaySubject === undefined ? contextTokens : undefined)
+    // The Remote branch's event window is BOUNDED: its fold cannot count the
+    // session's lifetime tokens, so the official `tokenUsage` projection (and
+    // the route's context capacity) own them there. Direct keeps the fold.
+    const remoteUsageFacts = displaySubject === undefined && deps.liveAgent() === undefined && deps.remote !== undefined
+      ? (() => {
+          const status = remoteStatus()
+          if (status?.usage === undefined) return undefined
+          return {
+            tokens: status.usage,
+            ...status.context?.contextWindow === undefined ? {} : { contextWindow: status.context.contextWindow },
+          }
+        })()
+      : undefined
+    const usage = usageFromStats(
+      displaySubject?.stats.snapshot() ?? stats,
+      displaySubject === undefined ? contextTokens : undefined,
+      remoteUsageFacts,
+    )
     const host = deriveHostStatus()
     const patch: {
       composition?: typeof composition

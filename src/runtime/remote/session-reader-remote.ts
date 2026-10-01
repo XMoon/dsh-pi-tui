@@ -301,6 +301,8 @@ export class RemoteSessionReader implements SessionReader {
       tokenUsage: projections.faceOf('tokenUsage').getSnapshot(),
       todos: projections.faceOf('todos').getSnapshot(),
       agentPreset: projections.faceOf('agentPreset').getSnapshot(),
+      title: projections.faceOf('title').getSnapshot(),
+      goal: projections.faceOf('goal').getSnapshot(),
     }, this.cwdOf(sessionId))
   }
 

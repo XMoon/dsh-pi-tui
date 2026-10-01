@@ -21,11 +21,22 @@ export function foldGoal(events: readonly { readonly type: string; readonly data
       readonly goal: { readonly phase: string; readonly objective: string }
     }
     if (data.operation === 'clear') return undefined
-    const goal = data.goal
-    if (goal.phase === 'complete') return undefined
-    const mark = goal.phase === 'active' ? '●' : goal.phase === 'paused' ? '‖' : '◌'
-    const objective = goal.objective.length > 24 ? `${goal.objective.slice(0, 24)}…` : goal.objective
-    return `goal ${mark} ${objective}`
+    return goalTextOf(data.goal)
   }
   return undefined
+}
+
+/**
+ * The ONE goal badge text for one goal FACT — the official projection's
+ * current goal and a log `goal/change` payload render IDENTICALLY (a
+ * projection-backed session must not get a second, competing presentation
+ * rule). A completed goal hides the badge.
+ * @param goal - the fact's `{phase, objective}`.
+ * @returns e.g. `goal ● fix the build`, or undefined.
+ */
+export function goalTextOf(goal: { readonly phase: string; readonly objective: string }): string | undefined {
+  if (goal.phase === 'complete') return undefined
+  const mark = goal.phase === 'active' ? '●' : goal.phase === 'paused' ? '‖' : '◌'
+  const objective = goal.objective.length > 24 ? `${goal.objective.slice(0, 24)}…` : goal.objective
+  return `goal ${mark} ${objective}`
 }

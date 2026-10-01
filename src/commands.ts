@@ -1479,18 +1479,23 @@ export function registerTuiCommands(
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
 
-  // Per-name registration isolation (M3-4 PR2): a Host-claimed name (e.g.
-  // the Remote Host composition's `/export`) must fail THAT registration
-  // loudly without aborting later registrations (a partial install must
-  // still complete). Each failure is recorded for the caller's notice;
-  // never a broad catch around the whole pass.
+  // Per-name registration isolation (M3-4 PR2), NARROW BY CONSTRUCTION: only
+  // the official registry's duplicate-name refusal is tolerated (a Host-owned
+  // name such as the Remote Host composition's `/export`), so the remaining
+  // built-ins still install. Every OTHER throw from the official registry —
+  // an invalid name/description/handler/input, or a Cordis lifecycle failure —
+  // is a programming error and fails fast exactly as before (a best-effort
+  // whole pass would silently leave a partial command surface).
   const registrationFailures: string[] = []
   const registerOne = (definition: Parameters<typeof commands.register>[0]): (() => void) => {
     try {
       return commands.register(definition)
     } catch (error) {
-      const name = (definition as { name?: unknown }).name
       const message = error instanceof Error ? error.message : String(error)
+      // The rc.2 NamedEntries refusal (scoped variants included). Nothing else
+      // is a name collision, so nothing else is isolated here.
+      if (!/^command "[^"]+" is already registered/.test(message)) throw error
+      const name = (definition as { name?: unknown }).name
       registrationFailures.push(`/${String(name)}: ${message}`)
       return () => {}
     }
@@ -3742,7 +3747,7 @@ export function registerTuiCommands(
       // command) skips the slash command; the catalog picker still lists it.
       if (taken.has(skill.name)) continue
       try {
-        const dispose = registerOne({
+        const dispose = commands.register({
           name: skill.name,
           description: '[skill] ' + skill.description,
           // The handler captures ONLY the skill name; execution re-fetches
@@ -3812,7 +3817,7 @@ export function registerTuiCommands(
       currentSkillReferences = []
       for (const name of names) {
         try {
-          const dispose = registerOne({
+          const dispose = commands.register({
             name,
             description: `[skill: revalidating] ${name}`,
             handler: async (invocation) => {

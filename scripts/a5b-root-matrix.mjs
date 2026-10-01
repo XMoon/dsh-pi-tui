@@ -146,7 +146,7 @@ const CLASSIFICATION = {
   // loadOlder in-flight latch.
   remoteSources: BIND,
   remoteIngressHandle: BIND, disposeRemoteIngress: DISC, initRemoteLiveSurface: CONN, launchIntentOf: CONN,
-  remoteRunningOf: CONN, remoteWorkingFold: BIND, remoteWorkingFoldProven: BIND, remoteHistoryLoading: BIND,
+  remoteRunningOf: CONN, remoteWorkingFold: BIND, remoteWorkingFoldProven: BIND, remoteHistoryLoadingFor: BIND,
   remoteWorkingFoldFor: BIND,
   directRuntimeNow: CONN, directAssistantRuntime: CONN,
   // Residual work (A5b-5 / A5b-6): the shrink-only ledger this matrix pins.
@@ -179,7 +179,7 @@ const LIFECYCLE = {
   remoteWorkingFold: 'per-refresh holder (async reader-window fold); last-known on failure',
   remoteWorkingFoldProven: 'per-refresh flag: the fold answer came from a COMPLETE window (the running bit cannot override it)',
   remoteWorkingFoldFor: 'per-owner keyed fold cache (generation+session); replaced on refresh, fenced on commit',
-  remoteHistoryLoading: 'per-gesture latch (the history boundary seam)',
+  remoteHistoryLoadingFor: 'per-gesture latch (the history boundary seam, scoped per subject)',
   directRuntimeNow: 'per-call Direct runtime local (the assistant-stream install guard)',
   directAssistantRuntime: 'per-call Direct runtime local (the assistant-stream install guard)',
   handleNow: 'live read, per call (exact Direct handle)',
@@ -219,7 +219,7 @@ const CAPABILITIES = {
   remoteWorkingFold: 'reader-window fold result holder',
   remoteWorkingFoldProven: 'complete-window provenance flag',
   remoteWorkingFoldFor: 'owner-keyed cache record {generation, sessionId, fold, proven}',
-  remoteHistoryLoading: 'loadOlder in-flight boolean latch',
+  remoteHistoryLoadingFor: 'loadOlder in-flight subject latch',
   directRuntimeNow: 'DirectApplicationRuntime local (installAssistantStream guard)',
   directAssistantRuntime: 'DirectApplicationRuntime local (installAssistantStream guard)',
 }
@@ -277,7 +277,7 @@ const SWEEP_NOTES = {
   remoteWorkingFold: 'last-known Remote working fold refreshed from the reader window; presentation cache slot, not a state machine.',
   remoteWorkingFoldProven: 'provenance flag beside the fold holder; no state machine.',
   remoteWorkingFoldFor: 'generation+session keyed record; a replaced owner never reads the previous fold.',
-  remoteHistoryLoading: 'loadOlder in-flight latch for the history-extension seam; coalescing flag.',
+  remoteHistoryLoadingFor: 'loadOlder in-flight latch for the history-extension seam; coalescing flag scoped to one subject.',
   launchIntentOf: 'pure per-call helper; no state, no Host reads.',
   directRuntimeNow: 'transitional local for the Direct assistant-stream install; no state.',
   directAssistantRuntime: 'transitional local for the Direct assistant-stream install; no state.',
