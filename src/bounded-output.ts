@@ -1,5 +1,5 @@
 /**
- * Bounded accumulation of local-shell output: the UI card only ever holds
+ * Bounded accumulation of user-shell output: the UI card only ever holds
  * the TAIL of the stream (byte- and line-capped), so a runaway `yes` or
  * `find /` cannot grow memory without bound — including a stream that never
  * emits a newline (the unterminated tail is capped and UTF-8-safe too).

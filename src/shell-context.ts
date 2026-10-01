@@ -151,11 +151,12 @@ export function shellCommandOf(text: string): string {
 }
 
 /**
- * The local-shell sandbox preference for user-typed `!`/`!!` commands:
- * 'sandbox' routes them through the dsh shell capability's policy,
- * anything else (including an absent settings document) is 'bypass' — the
- * pi/kimi default that runs the user's own commands outside the sandbox
- * (the sandbox guards the model's autonomous commands, not the user's).
+ * The user-shell sandbox policy preference for user-typed `!`/`!!`
+ * commands: 'sandbox' routes them through the dsh shell capability's
+ * policy, anything else (including an absent settings document) is
+ * 'bypass' — the pi/kimi default that runs the user's own commands
+ * outside the sandbox (the sandbox guards the model's autonomous
+ * commands, not the user's).
  * @param settings - the TUI settings document's fields, when present.
  */
 export function localShellSandboxPreferenceOf(settings: { localShellSandbox?: string } | undefined): 'bypass' | 'sandbox' {

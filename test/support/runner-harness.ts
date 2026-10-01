@@ -133,7 +133,7 @@ export interface RunnerHarness {
   readonly subagents?: unknown
   /** An optional jobs registry service (the Task Center's jobs half). */
   jobs?: unknown
-  /** An optional shell executor service (the sandbox-opt-in local-shell
+  /** An optional shell executor service (the sandbox-policy user-shell
    * path; absent models "sandbox unavailable in this composition"). */
   shell?: unknown
   /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /

@@ -69,7 +69,7 @@ export type AppKeybindingId =
   | 'app.todo.toggle'
   | 'app.tasks.open'
   | 'app.history.search'
-  // Local shell
+  // User shell
   | 'app.shell.dismissSettled'
   // Session / Model (reserved for later unification; no default keys)
   | 'app.session.open'

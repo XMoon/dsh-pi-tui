@@ -2271,8 +2271,8 @@ export function registerTuiCommands(
           },
           {
             id: 'local-shell-sandbox',
-            label: 'Local shell sandbox',
-            description: '! / !! commands run outside the dsh sandbox (bypass, default) or under the sandbox policy',
+            label: 'User shell sandbox policy',
+            description: '! / !! execute in the Host environment outside the dsh sandbox (bypass, default) or under the sandbox policy',
             currentValue: settingsDoc?.localShellSandbox ?? 'bypass',
             values: ['bypass', 'sandbox'],
           },
@@ -2704,7 +2704,7 @@ export function registerTuiCommands(
             if (value === 'bypass' || value === 'sandbox') {
               const settings = tuiSettings
               if (settings !== undefined) {
-                detach('settings local shell sandbox write', () => serializeTuiSettingsMutation(
+                detach('settings user-shell sandbox policy write', () => serializeTuiSettingsMutation(
                    settings,
                    () => settings.replace(withUserFooterCustomItems({ ...settings.get(), localShellSandbox: value }, runner.config)),
                  ), { notify: true })
