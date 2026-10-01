@@ -47,9 +47,13 @@ import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from
  * The official CURRENT-VALUE facts of a session (M3-4 PR2) that a bounded
  * event window cannot own, because their source event may precede the window:
  * the title, the goal, the todo list and the workspace cwd. Each field is
- * present only when its official projection ANSWERED — an absent field means
- * "unavailable" and falls back to the window fold, while a legal `null`
- * (no goal / no todo write yet) is a real answer and must be honored.
+ * present only when its official projection ANSWERED, and this object is
+ * supplied on the Remote branch ALWAYS (an empty one means "the projections
+ * cannot answer right now"): an absent field is therefore OMITTED — the
+ * bounded window NEVER stands in for it (a recent window is not a session's
+ * current value). A legal `null` (no goal / no todo write yet) hides the fact
+ * the same way. Only the DIRECT branch folds these facts from its COMPLETE log
+ * (there the object is absent altogether).
  */
 export interface PresentationCurrentFacts {
   readonly cwd?: string
