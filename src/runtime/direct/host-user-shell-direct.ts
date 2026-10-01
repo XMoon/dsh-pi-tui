@@ -110,7 +110,8 @@ export class DirectHostUserShellPort implements HostUserShellPort {
  */
 const OUTPUT_BUFFER_CHUNKS = 256
 
-class OutputBus {
+/** Exported for the backpressure contract tests (pause/resume proof). */
+export class OutputBus {
   private readonly buffer: HostUserShellOutputChunk[] = []
   private waiters: Array<() => void> = []
   private ended = false

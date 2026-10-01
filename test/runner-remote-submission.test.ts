@@ -36,7 +36,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../src/index.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -296,15 +298,13 @@ test('L6 §37 image: known staged bytes → PromptContentPart → Host durable a
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
-  // A minimal valid 1x1 PNG whose exact bytes are the known discriminator.
-  const pngBytes = new Uint8Array([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-    0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
-    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
-    0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-  ])
+  // A REAL 1x1 PNG (sharp-generated; the store's admission strictly
+  // verifies format/CRC) whose exact bytes are the known discriminator.
+  const require = createRequire(import.meta.url)
+  const storeDir = dirname(require.resolve('@deepseek-ai/dsh-attachment-local/package.json'))
+  const sharpPath = require.resolve('sharp', { paths: [storeDir] })
+  const sharp = require(sharpPath) as { (input: unknown): { png(): { toBuffer(): Promise<Buffer> } } }
+  const pngBytes = new Uint8Array(await sharp({ create: { width: 1, height: 1, channels: 3, background: '#c0ffee' } }).png().toBuffer())
   // Stage through the PRODUCTION intake API (the same DraftImageStore.add +
   // placeholder form /image's client-local staging produces); the /image
   // COMMAND surface itself is PR4's Remote command-plane ownership — the
@@ -586,6 +586,23 @@ test('L6 §27 remote cancel: a real cancel gesture stops the running official tu
     return pending !== undefined
       && pending.items.some(item => JSON.stringify(item).includes('queued survives cancel lambda'))
   }, 15_000)
+  // COUNTERFACTUAL (keepInbox): a broad cancel would destroy the queued
+  // occurrence as a discarded/canceled removal — the durable history must
+  // contain NO such removal for this rpcId's occurrence (the rc.2 inbox
+  // contract: discard = a deletion splice with outcome=canceled + an
+  // agent/inbox/discarded event; none of that may exist post-cancel).
+  {
+    const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    const history = session.snapshotEvents()
+    assert.equal(history.some(event => event.type === 'agent/inbox/discarded'), false,
+      'no inbox discard event may exist (the cancel preserved the queue)')
+    const canceledRemovals = history.filter(event => event.type === 'agent/inbox/spliced'
+      && JSON.stringify(event.data).includes('canceled'))
+    assert.equal(canceledRemovals.length, 0,
+      'no outcome=canceled removal splice may exist (keepInbox parity)')
+  }
   // AUTHORITATIVE post-cancel evidence 2/2 — DELIVERY: release the gate
   // (the cancelled turn settles) and submit a NEW prompt; the next wake must
   // drain the PARKED preserved occurrence before/with the new one (the
