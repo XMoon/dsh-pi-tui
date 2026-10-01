@@ -416,7 +416,7 @@ SPLIT:
   `!` result handoff into Session (SessionWriter)
 ```
 
-The application owner (`src/app/submission/local-shell.ts`, renamed by the
+The application owner (`src/app/submission/user-shell.ts` (renamed by the
 PR3 refactor) consumes the narrow `HostUserShellPort` semantic port; it never
 owns Client process execution. The Direct adapter is the in-process Host
 (bypass spawn and the `ctx.shell` sandbox policy live behind adapter

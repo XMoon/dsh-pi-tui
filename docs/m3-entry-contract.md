@@ -521,6 +521,19 @@ moving a UI callback across the process boundary.
 | TUI skill wrapper | Client-local command surface; live skill metadata from §2.2 | Client Context validates/claims the advertised skill name, then converges the Remote execution to the official literal `/name [instructions]` user gesture; Host `dsh-tool-skill` pre-step resolves the current definition and injects the body. The Remote branch never calls Client `skills/read` because rc.2 exposes none |
 | Extension command contribution | Client extension registry | the contribution callback executes in the Client Context that owns it |
 
+**PR4 prerequisite discovered during PR3 (concrete evidence):** the current
+Remote submission path resolves the live owner as a transport-neutral
+structural projection (`{status, session:{id}}`), and a TUI-owned sessionless
+command (observed with `/image`) still reaches
+`ctx.commands.execute(projectedAgent, …)` — the dsh-commands execution
+contract assumes a real Direct Agent (`agent.session.append.bind(...)` crashes
+on the projection). Two workarounds were tried and rejected: bypassing
+`service.execute` to call the global-layer handler directly (duplicates
+command-plane ownership), and passing `agent: undefined` (downstream
+subscribers still assume Agent identity). PR4 must implement the §3.3
+Client-owned execution registry split — the structural projection must never
+be enriched into a fake DSH Agent.
+
 M3-4 therefore extracts the existing TUI command handlers from the Host command
 service into one Client-local execution registry/normalizer. It may reuse the
 current parser/result vocabulary, but **no handler function, component or callback
