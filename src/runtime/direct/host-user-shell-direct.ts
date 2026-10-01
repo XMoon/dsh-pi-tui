@@ -100,45 +100,55 @@ export class DirectHostUserShellPort implements HostUserShellPort {
 }
 
 /**
- * One live output fan-out with a BOUNDED slow-subscriber backlog: chunks are
- * handed to the process readers as they arrive and retained only up to
- * `maxBacklogChunks` for a lagging subscriber — a runaway `yes` cannot grow
- * an unbounded adapter-side copy (the caller's bounded tail/disk capture is
- * the presentation policy; this bus is transport, not storage). A subscriber
- * that falls beyond the backlog receives a loss marker and continues from
- * the live head (only the result()-driven settlement path relies on the
- * caller's own drain; a lossy subscriber must treat its capture as partial).
+ * The single-consumer output queue with UPSTREAM BACKPRESSURE: the buffer
+ * holds at most OUTPUT_BUFFER_CHUNKS chunks; when it is full the producer
+ * (the child's stream readers) is PAUSED via the supplied pause/resume
+ * hooks, and it resumes once the consumer drains below the watermark —
+ * bounded adapter memory with ZERO silent loss (the Host process itself
+ * blocks in its full pipe, which is the OS's own backpressure). Exactly one
+ * stream() consumer is supported (the port contract); a second call throws.
  */
-const OUTPUT_BACKLOG_CHUNKS = 64
+const OUTPUT_BUFFER_CHUNKS = 256
 
 class OutputBus {
-  private backlog: HostUserShellOutputChunk[] = []
+  private readonly buffer: HostUserShellOutputChunk[] = []
   private waiters: Array<() => void> = []
   private ended = false
+  private consumerTaken = false
+
+  constructor(
+    private readonly pauseProducer: () => void,
+    private readonly resumeProducer: () => void,
+  ) {}
 
   push(chunk: HostUserShellOutputChunk): void {
     if (this.ended) return
-    if (this.backlog.length >= OUTPUT_BACKLOG_CHUNKS) {
-      this.backlog.splice(0, this.backlog.length - OUTPUT_BACKLOG_CHUNKS + 1)
-    }
-    this.backlog.push(chunk)
-    const waiters = this.waiters
-    this.waiters = []
-    for (const wake of waiters) wake()
+    this.buffer.push(chunk)
+    if (this.buffer.length >= OUTPUT_BUFFER_CHUNKS) this.pauseProducer()
+    this.wake()
   }
 
   end(): void {
+    if (this.ended) return
     this.ended = true
+    this.resumeProducer()
+    this.wake()
+  }
+
+  private wake(): void {
     const waiters = this.waiters
     this.waiters = []
     for (const wake of waiters) wake()
   }
 
-  /** Async iteration over the chunks in arrival order; ends at settle. */
+  /** The one consumer's iteration: FIFO chunks, zero loss, ends at settle. */
   async *stream(): AsyncIterable<HostUserShellOutputChunk> {
+    if (this.consumerTaken) throw new Error('HostUserShellPort output() is single-consumer')
+    this.consumerTaken = true
     while (true) {
-      if (this.backlog.length > 0) {
-        const chunk = this.backlog.shift()!
+      if (this.buffer.length > 0) {
+        const chunk = this.buffer.shift()!
+        if (this.buffer.length < OUTPUT_BUFFER_CHUNKS / 2) this.resumeProducer()
         yield chunk
         continue
       }
@@ -180,7 +190,19 @@ class StreamDecoder {
 
 /** The bypass policy: plain Host-process spawn with shell interpolation. */
 function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution {
-  const bus = new OutputBus()
+  // The pause/resume pair wired to the child's readable streams once they
+  // exist (before that, pausing is a no-op): the OS pipe blocks the child
+  // while both streams are paused, which is the upstream backpressure.
+  let childRef: ReturnType<typeof spawn> | undefined
+  const pause = (): void => {
+    childRef?.stdout?.pause()
+    childRef?.stderr?.pause()
+  }
+  const resume = (): void => {
+    childRef?.stdout?.resume()
+    childRef?.stderr?.resume()
+  }
+  const bus = new OutputBus(pause, resume)
   const resultPromise = new Promise<HostUserShellResult>((resolve, reject) => {
     let child: ReturnType<typeof spawn>
     try {
@@ -196,6 +218,7 @@ function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution 
       reject(error instanceof Error ? error : new Error(safeErrorMessage(error)))
       return
     }
+    childRef = child
     const stdout = new StreamDecoder('stdout')
     const stderr = new StreamDecoder('stderr')
     const onAbort = (): void => { child.kill() }
@@ -230,7 +253,8 @@ function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution 
  *  as one settled stdout/stderr pair (no live stream; the executor's contract
  *  resolves only at settle). */
 function executeViaShellCapability(shell: DirectShellCapability, request: HostUserShellRequest): HostUserShellExecution {
-  const bus = new OutputBus()
+  // The executor's output arrives settled (no live stream to pause).
+  const bus = new OutputBus(() => {}, () => {})
   const resultPromise = (async (): Promise<HostUserShellResult> => {
     // A synchronous resolve throw is a preparation failure: nothing executed.
     const spec = shell.resolve({ command: request.command, workdir: request.cwd, signal: request.signal })

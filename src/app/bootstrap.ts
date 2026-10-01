@@ -1657,6 +1657,7 @@ export function applyRunnerWithRuntime(
       ownership: { generation: () => ownership.generation() },
       session: { withWriter: (scope, task) => sessionRuntime.withWriter(scope, task) },
       requireLiveScope,
+      captureLiveScope: () => sessionScope.captureLive(),
       writerSection: (task) => submission.withWriterSection(task),
       writer: backend.sessionWriter,
       status: { sessionCwd: () => status.sessionCwd() },

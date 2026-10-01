@@ -43,12 +43,12 @@ test('output() is the authority: every chunk arrives exactly once and the stream
   assert.equal('output' in result, false)
 })
 
-test('a high-output command does not grow an unbounded adapter copy (bounded backlog)', async () => {
+test('a high-output command delivers ZERO silent loss with bounded adapter memory (upstream backpressure)', async () => {
   const port = new DirectHostUserShellPort()
-  // ~400k lines x ~10 bytes = ~4MB streamed; the adapter backlog stays
-  // bounded, and the SUBSCRIBER (this test) consumes eagerly so the whole
-  // stream must still arrive — proving nothing was silently dropped for an
-  // EAGER consumer while the adapter held only a bounded window.
+  // ~400k lines x ~11 bytes ≈ 4.4MB streamed through a 256-chunk adapter
+  // buffer: the child blocks in its pipe whenever the buffer fills (the OS's
+  // own backpressure), so a DELIBERATELY SLOW consumer — sleeping every
+  // 20k lines — still observes every single line with no gaps.
   const admission = await port.execute(request({ command: 'yes 0123456789 | head -n 400000' }))
   assert.ok(admission.kind === 'executing')
   let lines = 0
@@ -56,11 +56,25 @@ test('a high-output command does not grow an unbounded adapter copy (bounded bac
   for await (const chunk of admission.execution.output()) {
     bytes += chunk.bytes
     lines += chunk.text.split('\n').length - 1
+    if (lines % 20_000 === 0) await new Promise(resolve => setTimeout(resolve, 1))
   }
   const result = await admission.execution.result()
   assert.deepEqual(result.exit, { kind: 'exit', code: 0 })
-  assert.equal(lines, 400_000, `every line reached the eager consumer (got ${lines})`)
+  assert.equal(lines, 400_000, `every line reached the slow consumer with zero transport loss (got ${lines})`)
   assert.ok(bytes > 3_000_000, `the run really was high-output (got ${bytes} bytes)`)
+})
+
+test('output() is single-consumer: a second consumer is a contract violation', async () => {
+  const port = new DirectHostUserShellPort()
+  const admission = await port.execute(request({ command: 'printf hi' }))
+  assert.ok(admission.kind === 'executing')
+  const first = admission.execution.output()[Symbol.asyncIterator]()
+  await first.next()
+  await assert.rejects(
+    () => admission.execution.output()[Symbol.asyncIterator]().next(),
+    /single-consumer/,
+  )
+  await first.return?.()
 })
 
 test('a settle read joins the drain: result() resolving first never cuts off a lagging delivery', async () => {
