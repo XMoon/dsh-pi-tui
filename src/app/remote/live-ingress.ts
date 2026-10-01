@@ -11,9 +11,13 @@
  *
  * ```text
  * durable and transient remain separate inputs;
- * a stale publication (replaced generation or replaced same-id binding)
- *   never repaints the new Session;
- * reconnect replacement rehydrates from the authoritative new window;
+ * a replaced same-id BINDING retires the handle: a stale publication from it
+ *   never repaints the new owner's Session;
+ * a Connection GENERATION rollover does NOT retire the handle — the retained
+ *   binding is unchanged, so the handle ADOPTS the new generation, forgets the
+ *   dead generation's revision fence, and lets the next authoritative
+ *   publication continue (a `replace` rehydrates the new window, an `append`
+ *   routes the new entries). Detaching here would leave the surface dead;
  * no second assistant-stream tracker exists beside this ingress.
  * ```
  *
@@ -114,8 +118,10 @@ export interface RemoteLiveIngress {
 
 /**
  * Create the ingress factory. The factory holds no subscription state until
- * `subscribe` runs; each handle owns exactly one eventSource subscription
- * and detaches on binding/generation replacement or explicit dispose.
+ * `subscribe` runs; each handle owns exactly one eventSource subscription plus
+ * the current-fact projection faces, and detaches on an exact BINDING
+ * replacement or an explicit dispose — never on a Connection generation
+ * rollover, which it adopts (see the module contract above).
  */
 export function createRemoteLiveIngress(
   sessions: RemoteLiveIngressSessions,
