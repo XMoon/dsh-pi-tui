@@ -698,10 +698,15 @@ export function applyRunnerWithRuntime(
         },
         refreshLiveCatalog: (owner) => {
           const agent = directAgentOfOwner(owner)
-          // M3-2 staging note: the Remote catalog refresh (the coordinator's
-          // binding-generation target) is the M3-4 command PR's ownership;
-          // the startup prefetch snapshot stays the catalog until then.
-          if (agent === undefined) return Promise.resolve()
+          // PR4 §2.2: the Remote branch refreshes the catalog through the
+          // command source keyed by the committed session id (the coordinator
+          // target wraps it; no Direct Agent exists to resolve).
+          if (agent === undefined) {
+            const sessionId = selectedRuntime.owners.sessionId(owner)
+            return sessionId === undefined
+              ? Promise.resolve()
+              : command.refreshLiveCatalogById(sessionId)
+          }
           return command.refreshLiveCatalog(agent)
         },
         reportSwitch: (from, to) => {
@@ -1355,6 +1360,18 @@ export function applyRunnerWithRuntime(
       // (RemoteSurfaceAuthorityReader + HostCommandPort own its reads).
       commandsRegistry: () => remoteSources === undefined ? ctx.get('commands') : undefined,
       clientCommands: createClientCommandRegistry(parseCommand),
+      // PR4 §2.1/§2.2: the Remote branch's command authority read + the
+      // official Session facts the command runtime consumes (running,
+      // routing). Absent on Direct (the direct seams own that branch).
+      ...(remoteSources === undefined ? {} : {
+        remoteCommandSource: {
+          read: (sessionId, signal) => remoteSources.commandSource.read(sessionId, signal),
+        },
+        remoteFacts: {
+          running: (sessionId) => remoteSources.sessionFacts.running(sessionId),
+          sessionStatus: (sessionId) => remoteSources.sessionFacts.sessionStatus(sessionId),
+        },
+      }),
       catalog: backend.catalog,
       toCatalogAgent: (agent) => agent,
       presets: {

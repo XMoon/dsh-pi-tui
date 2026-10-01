@@ -36,6 +36,7 @@ import { RemoteSubmissionPresentation } from '../../submission-presentation.ts'
 import { CURRENT_STATUS_PROJECTION_KEYS } from '../../runtime/remote/session-reader-remote.ts'
 import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
 import { createRemoteLiveIngress, type RemoteLiveIngress } from './live-ingress.ts'
+import { createRemoteCommandSource, type RemoteCommandSource } from './command-source.ts'
 import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from './runtime.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
 
@@ -47,6 +48,9 @@ import type { RemoteApplicationSources } from '../application-runtime.ts'
 export interface RemoteApplicationSource extends RemoteApplicationSources {
   /** The ONE shared presentation reader (identity: the M3-3A adapter). */
   readonly presentationReader: PresentationReader
+  /** The branch-specific command authority read (PR4 §D1): Host command +
+   *  human-skill metadata behind one generation-fenced snapshot. */
+  readonly commandSource: RemoteCommandSource
   /** The official pending-submissions optimistic echo source. */
   readonly submissionPresentation: SubmissionPresentationSource
   /** Subscribe the CURRENT binding's eventSource into the surface pipeline. */
@@ -123,6 +127,16 @@ export function createRemotePresentationSource(
   const planSource = sessions as RemotePlanBindingSource
   return {
     presentationReader: backendRuntime.semantics.presentationReader,
+    // PR4 §D1: the branch-specific command authority read, assembled from the
+    // SAME wire faces (the generated commands/skills namespaces + the ONE
+    // Connection generation) — never a second graph.
+    commandSource: createRemoteCommandSource({
+      // The generated namespaces (commands/skills) exist because the Client
+      // runtime mounted their /remote contributions; the structural source
+      // face is the same one remote-official-contract.test.ts proves.
+      authority: wire.client.remote,
+      generation,
+    }),
     submissionPresentation: new RemoteSubmissionPresentation(sessions, generation),
     liveIngress: createRemoteLiveIngress(sessions, generation, CURRENT_STATUS_PROJECTION_KEYS),
     sessionFacts: {

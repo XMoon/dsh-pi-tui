@@ -453,17 +453,15 @@ test('L6: a Remote submit after /resume targets the replacement current Session,
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-preset'
   const host = await mountHost(life, presetId)
-  const agentA = await host.harness.create(SessionId('pr3-stale-a'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  await host.harness.create(SessionId('pr3-stale-a'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   await host.harness.create(SessionId('pr3-stale-b'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: 'pr3-stale-a', host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
-  // Switch A -> B through the REAL seam /resume uses (the official command
-  // plane on the Host context), then submit through the mounted surface.
-  const execute = (line: string): Promise<unknown> =>
-    (host.ctx.commands as unknown as {
-      execute(agent: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<unknown>
-    }).execute(agentA, line, [], new AbortController().signal)
-  await execute('/resume pr3-stale-b')
+  // PR4 §1.2: switch A -> B through the seam a REAL user drives — a /resume
+  // submit through the mounted surface (the Client command registry executes
+  // the TUI built-in; the Host commands service carries no TUI callback on
+  // the Remote branch).
+  submitDraft(fixture, '/resume pr3-stale-b')
   await waitFor('switched to B', () => {
     return fixture.vt.getViewport().join('').includes('pr3-stale-b')
       || (fixture.aggregate.presentation as unknown as { sessionFacts: { sessionStatus(id: string): unknown } }).sessionFacts.sessionStatus('pr3-stale-b') !== undefined

@@ -33,7 +33,12 @@
  * @module @xmoon76/dsh-pi-tui/skill-catalog-refresh
  */
 
-import type { Agent } from '@deepseek-ai/dsh-agent'
+// M3-4 PR4 §2.3: the refresh target is the OPAQUE catalog-read target the
+// caller pins (a Direct Agent on the Direct branch; the Remote branch reads
+// through its own command source keyed by the session id). Keeping it
+// structural here lets the coordinator stay branch-neutral without widening
+// to a Host type.
+export type CatalogReadTarget = object
 import type { Diag } from './diag.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { HumanSkillCatalog } from './skill-catalog.ts'
@@ -55,7 +60,9 @@ export interface CatalogRefreshRequest {
   readonly source: CatalogRefreshSource
   readonly target: CatalogRefreshTarget
   /** The live agent to read (agent target). */
-  readonly agent?: Agent
+  /** The opaque live read target (Direct: the exact Agent; Remote supplies
+   *  the command-source target object). */
+  readonly agent?: CatalogReadTarget
 }
 
 /** The settled outcome of one refresh request. */
@@ -75,7 +82,7 @@ export interface StandingSkillRead {
 /** The surface hooks the coordinator drives (wired by the runner). */
 export interface CatalogRefreshHooks {
   /** Read one live agent's effective catalog (agent target). */
-  readAgent(agent: Agent, signal: AbortSignal): Promise<SurfaceCatalogSnapshot>
+  readAgent(agent: CatalogReadTarget, signal: AbortSignal): Promise<SurfaceCatalogSnapshot>
   /** Read the standing skill catalog of one preset (preset target): the
    * adapter's capability-gated cold read, never an Agent probe. */
   readStanding(presetId: string | undefined, signal: AbortSignal): Promise<StandingSkillRead>
