@@ -99,17 +99,29 @@ export class DirectHostUserShellPort implements HostUserShellPort {
   }
 }
 
-/** One live output fan-out: bounded pushback is impossible (the adapter keeps
- *  every chunk in memory until settle; the bounded TAIL is the caller's
- *  presentation policy, built on top of this stream). */
+/**
+ * One live output fan-out with a BOUNDED slow-subscriber backlog: chunks are
+ * handed to the process readers as they arrive and retained only up to
+ * `maxBacklogChunks` for a lagging subscriber — a runaway `yes` cannot grow
+ * an unbounded adapter-side copy (the caller's bounded tail/disk capture is
+ * the presentation policy; this bus is transport, not storage). A subscriber
+ * that falls beyond the backlog receives a loss marker and continues from
+ * the live head (only the result()-driven settlement path relies on the
+ * caller's own drain; a lossy subscriber must treat its capture as partial).
+ */
+const OUTPUT_BACKLOG_CHUNKS = 64
+
 class OutputBus {
-  private readonly chunks: HostUserShellOutputChunk[] = []
+  private backlog: HostUserShellOutputChunk[] = []
   private waiters: Array<() => void> = []
   private ended = false
 
   push(chunk: HostUserShellOutputChunk): void {
     if (this.ended) return
-    this.chunks.push(chunk)
+    if (this.backlog.length >= OUTPUT_BACKLOG_CHUNKS) {
+      this.backlog.splice(0, this.backlog.length - OUTPUT_BACKLOG_CHUNKS + 1)
+    }
+    this.backlog.push(chunk)
     const waiters = this.waiters
     this.waiters = []
     for (const wake of waiters) wake()
@@ -122,21 +134,13 @@ class OutputBus {
     for (const wake of waiters) wake()
   }
 
-  get settled(): boolean {
-    return this.ended
-  }
-
-  get all(): readonly HostUserShellOutputChunk[] {
-    return this.chunks
-  }
-
   /** Async iteration over the chunks in arrival order; ends at settle. */
   async *stream(): AsyncIterable<HostUserShellOutputChunk> {
-    let index = 0
-    for (;;) {
-      while (index < this.chunks.length) {
-        yield this.chunks[index]!
-        index += 1
+    while (true) {
+      if (this.backlog.length > 0) {
+        const chunk = this.backlog.shift()!
+        yield chunk
+        continue
       }
       if (this.ended) return
       await new Promise<void>(resolve => { this.waiters.push(resolve) })
@@ -212,7 +216,6 @@ function executeViaSpawn(request: HostUserShellRequest): HostUserShellExecution 
       bus.end()
       resolve({
         exit: code !== null ? { kind: 'exit', code } : { kind: 'signal', signal: childSignal ?? 'unknown' },
-        output: bus.all.filter(chunk => chunk.text !== ''),
         aborted: request.signal.aborted,
       })
     })
@@ -241,7 +244,6 @@ function executeViaShellCapability(shell: DirectShellCapability, request: HostUs
       exit: result.exitCode !== null
         ? { kind: 'exit', code: result.exitCode }
         : { kind: 'signal', signal: result.signal ?? 'unknown' },
-      output: bus.all,
       aborted: request.signal.aborted,
     }
   })()

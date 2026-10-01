@@ -28,12 +28,11 @@ import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, 
 import type { Diag } from '../../diag.ts'
 import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { interruptAgent, type InterruptAgentLike } from '../../interrupt.ts'
+import type { InterruptAgentLike } from '../../interrupt.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
 import type { HostUserShellPort } from '../../runtime/host-user-shell-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf } from '../../shell-context.ts'
-import { sessionUnchanged } from '../../steer.ts'
 import { submitShell } from '../submission/runtime.ts'
 import type { LiveSessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'
@@ -87,10 +86,11 @@ export interface UserShellOwner {
   dispose(): void
 }
 
-/** Format the settled Host run for the card: the bounded tail plus the
- * authoritative exit marker, shared by the streamed and settled paths. */
-function formatSettledOutput(output: readonly { readonly text: string }[], exit: string): string {
-  const text = output.map(chunk => chunk.text).join('').trim()
+/** Format the settled Host run for the card: the drained bounded tail plus
+ * the authoritative exit marker (the bounded tail is authoritative at settle
+ * time — the drain was joined before this runs). */
+function formatSettledOutput(bounded: { readonly tail: string }, exit: string): string {
+  const text = bounded.tail.trim()
   return text === '' ? exit : `${text}\n[${exit}]`
 }
 
@@ -101,28 +101,33 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
   // Abort handle for the currently running Host user-shell run.
   let shellController: AbortController | undefined
 
-  /** Stop the captured live Agent through the SessionWriter seam. The
-   * operation barrier keeps the async outcome inside the same session
-   * ownership window as other TUI writes. The Agent turn cancel and the
-   * Host shell process cancel are DISTINCT semantic operations: this one
-   * is the turn cancel only (the process cancel is the controller above). */
-  const interruptLiveAgent = (): void => {
+  /**
+   * The Esc/cancel-activity gesture. Two DISTINCT semantic operations
+   * (M3-4 PR3 §23/§27):
+   *
+   * 1. the Host user-shell PROCESS cancel — the branch-local abort
+   *    controller, forwarded to the Host process by the adapter;
+   * 2. the Session TURN cancel — the semantic `SessionWriter.cancel` under
+   *    the live-scope writer admission, addressed by the CURRENT session
+   *    id (never by a Direct Agent object, so the Remote branch cancels
+   *    through the official Session cancel; §27 "remove Direct-Agent-only
+   *    current Session cancellation").
+   */
+  const interrupt = (): void => {
     if (deps.isCleanedUp()) return
     shellController?.abort()
-    const agent = deps.liveAgent()
-    if (agent === undefined) return
     const generation = deps.ownership.generation()
     // The scope-bound writer admission (A3-4): interrupt is NOT a submission
     // write, so its business ownership stays here — only the admission moves
     // through SessionRuntime.withWriter.
     runOwned('agent interrupt', () => deps.session.withWriter(
       deps.requireLiveScope(),
-      () => interruptAgent(agent, deps.writer),
+      () => deps.writer.cancel(deps.requireLiveScope().sessionId),
     ), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
       onResult: (outcome) => {
-        if (deps.isCleanedUp() || !sessionUnchanged({ agent, generation }, deps.liveAgent(), deps.ownership.generation())) return
+        if (deps.isCleanedUp() || deps.ownership.generation() !== generation) return
         if (outcome.kind === 'committed' || outcome.kind === 'cancelled') return
         const message = outcome.kind === 'rejected'
           ? outcome.error.message
@@ -134,7 +139,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         deps.app().notify(message, 'error')
       },
       onError: (error) => {
-        if (deps.isCleanedUp() || !sessionUnchanged({ agent, generation }, deps.liveAgent(), deps.ownership.generation())) return
+        if (deps.isCleanedUp() || deps.ownership.generation() !== generation) return
         deps.app().notify(safeErrorMessage(error), 'error')
       },
     })
@@ -315,8 +320,12 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       }
       // Live output: each chunk feeds the bounded tail AND the full-output
       // capture; the adapter owns the stream, this owner owns the
-      // presentation policy only.
-      void (async () => {
+      // presentation policy only. The DRAIN IS JOINED (§31 quiescence):
+      // `output()` is the single output authority — the card settles only
+      // after the stream has fully ended, so the bounded tail/disk capture is
+      // authoritative at settle time and a lagging delivery cannot be cut
+      // off by an early `result()` resolution.
+      const drained = (async (): Promise<void> => {
         for await (const chunk of execution.output()) {
           if (deps.isCleanedUp()) return
           bounded.append(chunk.text, chunk.bytes)
@@ -325,6 +334,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         }
       })()
       const result = await execution.result()
+      await drained
       releaseController()
       clearTailTimer()
       if (deps.isCleanedUp()) {
@@ -368,7 +378,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       full.dispose()
       shellTempFiles.delete(fullPath)
       const exit = result.exit.kind === 'exit' ? `exit ${result.exit.code}` : `signal ${result.exit.signal}`
-      settle(formatSettledOutput(result.output, exit), result.exit.kind === 'exit' && result.exit.code === 0 ? 'ok' : 'error')
+      settle(formatSettledOutput(bounded, exit), result.exit.kind === 'exit' && result.exit.code === 0 ? 'ok' : 'error')
     }, {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
@@ -412,7 +422,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
 
   return {
     run: runUserShell,
-    interrupt: interruptLiveAgent,
+    interrupt,
     dispose,
   }
 }

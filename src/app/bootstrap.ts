@@ -1909,6 +1909,11 @@ export function applyRunnerWithRuntime(
       // official `SessionSnapshot.pendingSubmissions` (the ONE optimistic
       // identity there); Direct keeps its ledger (no second TUI identity).
       ...(remoteSources === undefined ? {} : { submissionPresentation: remoteSources.submissionPresentation }),
+      // M3-4 PR3 (§12): steer shares the plain prompt's per-transport
+      // preparation authority — the Remote branch produces the SAME
+      // PreparedPrompt (a Direct UserMessage would be refused by the
+      // production Remote serializer's preflight).
+      ...(remoteSources === undefined ? {} : { prepareTransport: (text: string, requestId: string) => prepareRemotePrompt(text, requestId) }),
       drafts: {
         get images() { return draftImages },
         get files() { return draftFiles },
