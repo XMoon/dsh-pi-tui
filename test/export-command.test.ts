@@ -175,6 +175,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
+    hostShellCompletion: true,
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     requestExit: () => {},
     cwd: '/ws',

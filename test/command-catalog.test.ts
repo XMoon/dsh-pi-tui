@@ -120,6 +120,7 @@ function stubRunner(
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort((sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
+    hostShellCompletion: true,
     interaction: {
       questions: {
         onRequest: () => true,

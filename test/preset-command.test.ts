@@ -261,6 +261,7 @@ function stubRunner(options: {
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
     commandRegistry: options.ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
     interaction: {
       questions: {
         onRequest: () => true,

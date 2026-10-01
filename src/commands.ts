@@ -564,6 +564,12 @@ export interface TuiCommandRunner {
    * send-time canonicalization against the HOST filesystem — never the
    * client's fs assumption. */
   readonly hostFile: HostFilePort
+  /** Whether Host-shell completion facts are reachable on this backend
+   * (shell amendment M3-4 PR3): true on Direct (the process IS the Host, so
+   * the compgen bridge reads Host state); false on Remote — no shell carrier
+   * means NO shell-specific suggestions, never Client PATH/filesystem
+   * guesses. Absent defaults to false (no shell completion). */
+  readonly hostShellCompletion: boolean
   /** The minimal commands registry for the TUI's OWN registrations
    * (migration M1.11) — a runner assembly dependency, not a Host
    * capability. */
@@ -1854,6 +1860,10 @@ export function registerTuiCommands(
       // provider completes plain-text `/name` tokens from this detached
       // list, never from the command registry.
       currentSkillReferences,
+      // Shell amendment (M3-4 PR3): Host shell completion facts exist only
+      // on Direct; Remote must show no shell-specific suggestions at any
+      // position (command or path).
+      runner.hostShellCompletion,
     )
   }
   /** The saved probed scoped overrides (see installSurfaceSnapshot). */

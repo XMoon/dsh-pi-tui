@@ -65,7 +65,7 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   // A5b-3: command authority/registration/catalog.
   // A5b-4: submission/input + local shell.
   { rel: 'src/app/submission/controller.ts', role: 'owner' },
-  { rel: 'src/app/submission/local-shell.ts', role: 'owner' },
+  { rel: 'src/app/submission/user-shell.ts', role: 'owner' },
   // A5b-5: TuiApp application events + client-local platform actions.
   { rel: 'src/app/surface/application-events.ts', role: 'owner' },
   { rel: 'src/app/surface/client-actions.ts', role: 'owner' },

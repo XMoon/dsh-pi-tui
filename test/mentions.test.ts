@@ -137,7 +137,7 @@ test('the session scope completes @ mentions through the OFFICIAL Host service o
   // grammar-stripped official form — including the quoted case.
   const queries: string[] = []
   const official = officialSeam(root, queries)
-  const provider = new MentionProvider([], root, official, undefined, () => ({ kind: 'session', sessionId: 'session-live' }))
+  const provider = new MentionProvider([], root, official, undefined, () => ({ kind: 'session', sessionId: 'session-live' }), undefined, undefined, [], true)
   // Prefix match on the basename (cursor at the end of '@file').
   const file = await provider.getSuggestions(['look at @file'], 0, 13, { signal: abort })
   assert.ok(file !== null, `@file must suggest:\n${JSON.stringify(file)}`)
@@ -212,7 +212,7 @@ test('Host-ordered candidates pass through UNFILTERED and UNREORDERED (no second
 test('the provider completes the QUOTED @ form through the port (quoted values)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam())
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
   const result = await provider.getSuggestions(['@"my'], 0, 4, { signal: abort })
   assert.ok(result !== null, `@"my must suggest:\n${JSON.stringify(result)}`)
   assert.equal(result.prefix, '@"my')
@@ -222,7 +222,7 @@ test('the provider completes the QUOTED @ form through the port (quoted values)'
 test('the provider completes a CJK-glued @ mention (the findFileMentions grammar)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam())
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
   const result = await provider.getSuggestions(['看看@file'], 0, 7, { signal: abort })
   assert.ok(result !== null, `看看@file must suggest:\n${JSON.stringify(result)}`)
   assert.equal(result.prefix, '@file')
@@ -232,7 +232,7 @@ test('the provider completes a CJK-glued @ mention (the findFileMentions grammar
 test('the fallback quotes mention values that contain spaces', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam())
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
   // A space-free query matching a file whose NAME has a space must produce a
   // quoted value (`@"my file.txt"`) so the submitted mention stays one token.
   const result = await provider.getSuggestions(['@my'], 0, 3, { signal: abort })
@@ -285,7 +285,7 @@ test('a late port result is dropped when the request was aborted; a port rejecti
     resolveReference: async () => ({ kind: 'missing' }),
     canonicalizeMentions: async (_scope, text) => text,
   }
-  const provider = new MentionProvider([], root, seam)
+  const provider = new MentionProvider([], root, seam, undefined, undefined, undefined, undefined, [], true)
   const pending = provider.getSuggestions(['@file'], 0, 5, { signal: controller.signal })
   controller.abort() // the request is cancelled while discovery is in flight
   release!()
@@ -295,7 +295,7 @@ test('a late port result is dropped when the request was aborted; a port rejecti
     resolveReference: async () => ({ kind: 'missing' }),
     canonicalizeMentions: async (_scope, text) => text,
   }
-  const resilient = new MentionProvider([], root, throwing)
+  const resilient = new MentionProvider([], root, throwing, undefined, undefined, undefined, undefined, [], true)
   assert.equal(
     await resilient.getSuggestions(['@file'], 0, 5, { signal: abort }),
     null,
@@ -495,7 +495,7 @@ test('the provider lets Tab file-complete an explicit PATH argument only (plan �
   // THE PROOF (plan §2.1): the HOST's own file branch stays closed for
   // every ordinary position — a forced request never produces a host file
   // dropdown there.
-  const probe = new MentionProvider([{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }], root, fallbackSeam())
+  const probe = new MentionProvider([{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
   return Promise.all([
     probe.getSuggestions(['/help foo'], 0, 9, { signal: abort, force: true }),
     probe.getSuggestions(['see /tmp/'], 0, 9, { signal: abort, force: true }),
@@ -696,7 +696,7 @@ test('the completion scope is resolved at SUGGESTION time, so a session switch n
   const provider = new MentionProvider([], root, seam, undefined, () =>
     liveAgent === undefined
       ? { kind: 'workspace', cwd: root }
-      : { kind: 'session', sessionId: liveAgent.session.id })
+      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], true)
   await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
   assert.deepEqual(scopes[0], { kind: 'session', sessionId: 'session-a' }, 'the first suggestion resolves session A')
   // The session switch: the SAME provider instance is queried again (no
@@ -732,7 +732,7 @@ test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-ses
   const provider = new MentionProvider([], root, seam, undefined, () =>
     liveAgent === undefined
       ? { kind: 'workspace', cwd: root }
-      : { kind: 'session', sessionId: liveAgent.session.id })
+      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], true)
   const pending = provider.getSuggestions(['@file'], 0, 5, { signal: abort })
   // The switch lands while the discovery is in flight (no abort).
   liveAgent = { session: { id: 'session-b' } }
@@ -828,7 +828,7 @@ test('inline skill completion stays closed in shell mode (shell/path logic uncha
 test('inline skill accept applies the reference and never submits', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null)
   const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
@@ -851,7 +851,7 @@ test('a scope switch fences the open inline dropdown (no stale accept)', async (
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   let scope: import('../src/mentions.ts').MentionScope = { kind: 'workspace', cwd: root }
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, () => scope, undefined, undefined, SKILLS)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, () => scope, undefined, undefined, SKILLS, true)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null)
   // The session/workspace generation changes while the dropdown is open.
@@ -864,7 +864,7 @@ test('a scope switch fences the open inline dropdown (no stale accept)', async (
 test('a changed draft fences the open inline dropdown (no stale accept)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null)
   // The user typed more after the dropdown opened: the strict snapshot
@@ -877,7 +877,7 @@ test('a changed draft fences the open inline dropdown (no stale accept)', async 
 test('an inline no-match clears the previous snapshot (no stale accept after null)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null, `请用 /el must suggest:\n${JSON.stringify(result)}`)
   // A later request at an inline seat with NO matching candidates returns

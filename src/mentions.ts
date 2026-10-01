@@ -312,6 +312,12 @@ export class MentionProvider implements AutocompleteProvider {
    * a command advertisement (the per-skill command wrappers keep their own
    * completion/claim path). */
   private readonly skillReferences: readonly HumanSkillSummary[]
+  /** Whether Host-shell completion facts are reachable (shell amendment
+   * M3-4 PR3): true on Direct (the compgen bridge reads the Host process's
+   * own state); false on Remote — the compgen/path bridge then stays SILENT
+   * (no Client `process.env.PATH`, no Client filesystem guessing for Host
+   * shell state). */
+  private readonly hostShellCompletion: boolean
   /** The REQUEST SNAPSHOT (plan §9.2): the exact document lines + cursor
    * + mode + SCOPE of the most recent getSuggestions call that produced a
    * suggestion list. Strict file/extension results may apply ONLY when the
@@ -350,6 +356,7 @@ export class MentionProvider implements AutocompleteProvider {
     localFdPath: string | null | undefined = undefined,
     localCwd: string | (() => string) = workDir,
     skillReferences: readonly HumanSkillSummary[] = [],
+    hostShellCompletion: boolean = true,
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
@@ -357,6 +364,7 @@ export class MentionProvider implements AutocompleteProvider {
     this.scopeOf = typeof scope === 'function' ? scope : () => scope
     this.localCwdOf = typeof localCwd === 'function' ? localCwd : () => localCwd
     this.skillReferences = skillReferences
+    this.hostShellCompletion = hostShellCompletion
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
     this.pathArgumentCommands = FILE_ARGUMENT_COMMANDS
     // `/attach` and `/image` discovery source: the CLIENT's own filesystem.
@@ -437,7 +445,9 @@ export class MentionProvider implements AutocompleteProvider {
     // competes with file completion.
     const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
     const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
-    const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    const shellContext = this.hostShellCompletion
+      ? shellCompletionContext(shellLine.line, shellLine.cursorCol)
+      : undefined
     if (shellContext !== undefined) {
       const suggestions = await suggestShellCompletion(shellContext, this.workDir, options)
       if (suggestions !== null) {
@@ -495,8 +505,17 @@ export class MentionProvider implements AutocompleteProvider {
     // completion): the fork's own completion stays authoritative — command
     // names AND path positions. This is NOT the plan's ordinary-position
     // domain.
+    //
+    // SHELL AMENDMENT (M3-4 PR3): the WHOLE shell completion decision is
+    // Host-facts-gated, not just the compgen bridge. `inner` is the fork's
+    // fd-backed path provider over the CLIENT filesystem, so a shell line on
+    // a backend without Host shell facts (Remote) must show NO suggestions
+    // at any position — command OR path. Letting the path branch fall
+    // through would leak Client filesystem state as if it were the Host
+    // workspace.
     const literalShellLine = textBeforeCursor.trimStart().startsWith('!')
     if (semantic !== null || literalShellLine) {
+      if (!this.hostShellCompletion) return null
       try {
         const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
         return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, result, false)
@@ -883,6 +902,10 @@ export class MentionProvider implements AutocompleteProvider {
     // `/usr/lo` reads as a PATH, never a bare slash command — the
     // pre-plan shell-mode parity the plan keeps as a non-goal).
     if (semantic !== null || textBeforeCursor.trimStart().startsWith('!')) {
+      // Shell amendment (M3-4 PR3): without Host shell facts (Remote) a
+      // shell line triggers NOTHING — the request itself would fall through
+      // to the Client-filesystem path provider.
+      if (!this.hostShellCompletion) return false
       if (semantic !== null) {
         const virtualLines = lines.map((line, index) => index === cursorLine ? semantic.line : line)
         return this.inner.shouldTriggerFileCompletion?.(virtualLines, cursorLine, semantic.cursorCol) ?? true
