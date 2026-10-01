@@ -25,7 +25,7 @@ const surfaceSource = readFileSync(new URL('../src/app/surface/runtime.ts', impo
 // moved into the submission owners, so the currentness locks below read the
 // OWNER modules explicitly (never a glob).
 const submissionControllerSource = readFileSync(new URL('../src/app/submission/controller.ts', import.meta.url), 'utf8')
-const localShellSource = readFileSync(new URL('../src/app/submission/local-shell.ts', import.meta.url), 'utf8')
+const localShellSource = readFileSync(new URL('../src/app/submission/user-shell.ts', import.meta.url), 'utf8')
 
 test('the runner keeps NO local ownership authority (A2-2 cutover)', () => {
   assert.ok(!/\blet liveAgent\b/.test(indexSource), 'no local liveAgent declaration')

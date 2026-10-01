@@ -1750,14 +1750,14 @@
       "lines": "1595-1612",
       "refs": 4,
       "hostDependency": true,
-      "head": "const localShell = createLocalShell<Agent>({",
+      "head": "const localShell = createUserShell<Agent>({",
       "tests": [],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
       "capabilities": "Host/Direct-touching composition seam",
       "lifecycle": "n/a (category documents ownership)",
       "sweep": "verified@a5b6",
-      "sweepNote": "createLocalShell<Agent>(...) — the A5b-4b local-shell owner; reads the controller through late-bound withWriterSection.",
+      "sweepNote": "createUserShell<Agent>(...) — the A5b-4b user-shell owner; reads the controller through late-bound withWriterSection.",
       "callers": [
         "disposeSurface",
         "submission"

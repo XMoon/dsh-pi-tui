@@ -206,6 +206,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; li
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
     commandRegistry: ctx.get('commands') as never,
     cwd: '/ws',
     sessionCwd: () => '/ws',

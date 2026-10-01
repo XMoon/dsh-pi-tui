@@ -171,6 +171,9 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     readonly catalog: TuiCommandRunner['catalog']
     readonly config: TuiCommandRunner['config']
     readonly hostFile: TuiCommandRunner['hostFile']
+    /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
+     * reachable on the selected backend (Direct true / Remote false). */
+    readonly hostShellCompletion: boolean
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {
@@ -677,6 +680,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The Host-file port (migration M1.10): `@`-mention discovery and
       // send-time canonicalization against the Host filesystem.
       hostFile: deps.backend.hostFile,
+      hostShellCompletion: deps.backend.hostShellCompletion,
       // The minimal commands registry for the TUI's OWN registrations
       // (migration M1.11) — the runner assembly dependency, never a Host
       // capability exposed to command handlers.

@@ -59,7 +59,8 @@ import { createClientActions } from './surface/client-actions.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
-import { createLocalShell, type LocalShellCapability } from './submission/local-shell.ts'
+import { createUserShell } from './submission/user-shell.ts'
+import { DirectHostUserShellPort, type DirectShellCapability } from '../runtime/direct/host-user-shell-direct.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
@@ -1340,6 +1341,10 @@ export function applyRunnerWithRuntime(
         catalog: backend.catalog,
         config: backend.config,
         hostFile: backend.hostFile,
+        // Shell amendment (M3-4 PR3): Host-shell completion facts exist only
+        // where the TUI process IS the Host (Direct). Remote has no qualified
+        // shell carrier, so it must show no shell-specific suggestions.
+        hostShellCompletion: selectedRuntime.kind === 'direct',
       },
       session: {
         ensureSession: () => sessionRuntime.ensureSession(),
@@ -1588,11 +1593,17 @@ export function applyRunnerWithRuntime(
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
-    // A5b-4: the local shell owner (`!` / `!!` + the shared live-Agent
-    // interrupt). Constructed BEFORE the surface cleanup closure can run; its
-    // submission acknowledgement seams are late-bound (the controller is
-    // built below).
-    const localShell = createLocalShell<Agent>({
+    // A5b-4 + shell amendment (M3-4 PR3): the user-shell owner (`!` / `!!` +
+    // the shared live-Agent interrupt). Execution is Host-owned behind the
+    // Direct Host adapter (spawn lives behind adapter ownership; the sandbox
+    // policy runs the dsh shell executor and fails closed when absent).
+    // Constructed BEFORE the surface cleanup closure can run; its submission
+    // acknowledgement seams are late-bound (the controller is built below).
+    const userShellPort = new DirectHostUserShellPort(
+      ctx,
+      () => ctx.get('shell') as unknown as DirectShellCapability | undefined,
+    )
+    const localShell = createUserShell<Agent>({
       app: () => app,
       diag,
       isCleanedUp: () => cleanedUp,
@@ -1604,7 +1615,7 @@ export function applyRunnerWithRuntime(
       writer: backend.sessionWriter,
       status: { sessionCwd: () => status.sessionCwd() },
       tuiSettings,
-      resolveShell: () => ctx.get('shell') as unknown as LocalShellCapability | undefined,
+      shell: userShellPort,
       submission: {
         settleAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),
         markDispatch: (sessionId) => submission.markDispatch(sessionId),

@@ -125,6 +125,20 @@ test('MentionProvider still completes paths on ! lines (path positions reach the
   assert.ok(suggestions.items.some(item => item.value.includes('deep-nested.ts')), `deep-nested.ts missing from ${JSON.stringify(suggestions.items.slice(0, 5))}`)
 })
 
+test('a backend without Host shell facts (Remote) shows NO shell suggestions at any position — not even the path fallback (shell amendment M3-4 PR3)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // hostShellCompletion=false models the Remote backend: no compgen AND no
+  // fd-backed Client-filesystem path completion may answer a shell line.
+  const provider = new MentionProvider([], root, new DirectHostFilePort(() => undefined, null), undefined, undefined, undefined, undefined, [], false)
+  const commandSeat = await provider.getSuggestions(['!gi'], 0, 3, { signal: abort, force: true })
+  assert.equal(commandSeat, null, 'command-name completion must stay silent without Host shell facts')
+  const pathSeat = await provider.getSuggestions(['!cat src/de'], 0, 11, { signal: abort, force: true })
+  assert.equal(pathSeat, null, 'path completion must NOT fall through to the Client filesystem provider')
+  const trigger = provider.shouldTriggerFileCompletion(['!cat src/de'], 0, 11)
+  assert.equal(trigger, false, 'the Tab trigger must not even open a file-completion request on a shell line')
+})
+
 test('MentionProvider applies a shell item as a plain word replacement', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)

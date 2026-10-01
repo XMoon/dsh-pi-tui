@@ -1276,14 +1276,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const persistHistory = (sessionId: string | undefined): void => {
       deps.history.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
     }
-    // `!` runs the command and submits the completed command+output to
-    // the session (kimi parity); `!!` runs purely locally with no session
-    // write (pi's excluded-from-context escape hatch). A local `!!` needs
-    // no session at all; the contextual `!` creates the session first
-    // (the FIRST user message is the deferred trigger).
+    // `!` runs the command on the Host and submits the completed
+    // command+output to the session (kimi parity); `!!` runs on the Host
+    // with the SAME execution locality but zero Session/model write (pi's
+    // excluded-from-context escape hatch). `!!` is Session-EXCLUDED, never
+    // sessionless (shell amendment M3-4 PR3): with no current Session the
+    // gesture ensures one first and executes in that Session's Host
+    // workspace, persisting the history row under that Session identity.
     if (text.startsWith('!')) {
-      // A local shell line is a UI control with NO attachment delivery path
-      // (`runLocalShell` neither admits nor consumes drafts): a staged
+      // A user-shell line is a UI control with NO attachment delivery path
+      // (the shell owner neither admits nor consumes drafts): a staged
       // attachment must never become shell arguments, and the success path
       // must never consume it. Refuse and hand the draft (placeholder
       // intact) back, exactly like a local command.
@@ -1292,53 +1294,46 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.app().notify('Attachments cannot be included in a local command.', 'error')
         return
       }
-      if (text.startsWith('!!')) {
-        // `!!` runs purely locally with NO session write (pi's
-        // excluded-from-context escape hatch) — the row is sessionless
-        // (Current directory / All directories, never Current session).
+      if (shellCommandOf(text) === '') {
+        // A bare `!`/`!!` (no command) is a no-op — sessionless.
         persistHistory(undefined)
-        deps.shell.run(text, undefined)
-      } else if (shellCommandOf(text) !== '') {
-        // Local submit acknowledgement (plan D), armed AT THE GESTURE —
-        // BEFORE ensureSession: a deferred/slow session create is part
-        // of the no-feedback window this row exists to cover. The
-        // runLocalShell-side accept was moved here so the T0 baseline
-        // is never rebased by the shell wiring. The TOKEN rides into
-        // the shell flow: its terminal exits settle only while THIS
-        // gesture is still the newest one.
-        const shellAckToken = acceptLocalSubmitAck()
-        // An owned workflow: the session creation failure restores the
-        // draft (failSubmission) — runOwned (AGENTS.md), never a bare
-        // void. The history row is written AFTER the session exists
-        // (the deferred-start gate), so a `!` line that creates the
-        // session carries its id.
-        runOwned('contextual shell', () => deps.session.ensureSession().then(() => {
-          persistHistory(deps.liveAgent()?.session.id)
-          deps.shell.run(text, shellAckToken)
-        }), {
-          diag: deps.diag,
-          sessionId: () => deps.liveAgent()?.session.id,
-          onError: (error) => {
-            // The session create failed: nothing will be written — the
-            // ack row armed at the gesture is TERMINAL here (plan D).
-            settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
-            failSubmission(text)(error)
-          },
-          onCancel: () => {
-            if (deps.isCleanedUp()) return
-            // NOT wrapped in runReservedSubmit: nothing restores the
-            // draft here, so a cancelled ensureSession would silently
-            // lose the submitted text — merge it back first (no error
-            // notice: a cancellation is not a failure), then end the
-            // ack row terminally.
-            deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
-            settleLocalSubmitAck('contextual shell cancelled', { token: shellAckToken, terminal: true })
-          },
-        })
-      } else {
-        // A bare `!` (no command) is a no-op — sessionless.
-        persistHistory(undefined)
+        return
       }
+      // Local submit acknowledgement (plan D), armed AT THE GESTURE —
+      // BEFORE ensureSession: a deferred/slow session create is part
+      // of the no-feedback window this row exists to cover. The TOKEN
+      // rides into the shell flow: its terminal exits settle only while
+      // THIS gesture is still the newest one. Both modes arm it: a
+      // sessionless `!!` also creates its execution Session now.
+      const shellAckToken = acceptLocalSubmitAck()
+      // An owned workflow: the session creation failure restores the draft
+      // (failSubmission) — runOwned (AGENTS.md), never a bare void. The
+      // history row is written AFTER the session exists (the
+      // deferred-start gate), so a `!`/`!!` line that creates the session
+      // carries its id.
+      runOwned('user shell', () => deps.session.ensureSession().then(() => {
+        persistHistory(deps.liveAgent()?.session.id)
+        deps.shell.run(text, shellAckToken)
+      }), {
+        diag: deps.diag,
+        sessionId: () => deps.liveAgent()?.session.id,
+        onError: (error) => {
+          // The session create failed: nothing will be written — the
+          // ack row armed at the gesture is TERMINAL here (plan D).
+          settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
+          failSubmission(text)(error)
+        },
+        onCancel: () => {
+          if (deps.isCleanedUp()) return
+          // NOT wrapped in runReservedSubmit: nothing restores the draft
+          // here, so a cancelled ensureSession would silently lose the
+          // submitted text — merge it back first (no error notice: a
+          // cancellation is not a failure), then end the ack row
+          // terminally.
+          deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+          settleLocalSubmitAck('user shell cancelled', { token: shellAckToken, terminal: true })
+        },
+      })
       return
     }
     // A sessionless slash command runs locally BEFORE any session exists:

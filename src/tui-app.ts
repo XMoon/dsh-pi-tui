@@ -18102,6 +18102,7 @@ export class TuiApp {
       | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
      localCwd: string | (() => string) = cwd,
     skillReferences: readonly import('./skill-catalog.ts').HumanSkillSummary[] = [],
+    hostShellCompletion: boolean = true,
   ): void {
     const base = new MentionProvider(
       [...commands],
@@ -18112,6 +18113,7 @@ export class TuiApp {
       undefined,
       localCwd,
       skillReferences,
+      hostShellCompletion,
     )
     this.installedCommandCompletions = [...commands]
     if (extensionSuggest === undefined) {

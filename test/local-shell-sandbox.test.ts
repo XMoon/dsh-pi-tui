@@ -314,12 +314,16 @@ test('a synchronous resolve() throw settles the card like a failed run', async (
   assert.equal(shell.executeCount(), 0, 'a refused resolve must never reach execute')
 })
 
-test('the sandbox preference without a composition shell capability notifies and falls back to the local spawn', async (t) => {
+test('the sandbox preference without a composition shell capability fails closed and executes nothing (shell amendment)', async (t) => {
   const mounted = await mountSandboxRunner(t, undefined)
   mounted.submit('!echo fallback-ok')
-  await waitForView(mounted, 'fallback-ok', 'the local spawn fallback card')
-  assert.ok(mounted.notices.some(notice => notice.includes('sandbox unavailable')),
-    `the downgrade must be surfaced, not silent:\n${mounted.notices.join('\n')}`)
+  const view = await waitForView(mounted, 'sandbox policy is unavailable', 'the fail-closed card')
+  // CARRIER/POLICY fail-closed (M3-4 PR3): the run must NOT degrade to the
+  // bypass spawn — the card carries the unavailable message and NEVER the
+  // command's own output or an exit marker. (The command name itself appears
+  // in the echoed `$ command` header; that is the card's args, not output.)
+  assert.ok(!view.includes('exit 0'), `an unavailable sandbox policy must not execute the command:\n${view}`)
+  assert.ok(!view.includes('exit 1'), `an unavailable sandbox policy must not execute the command:\n${view}`)
 })
 
 test('the default bypass preference never touches the composition shell capability', async (t) => {

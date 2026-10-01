@@ -119,6 +119,7 @@ function harness(sessionReader: SessionReader): Harness {
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',

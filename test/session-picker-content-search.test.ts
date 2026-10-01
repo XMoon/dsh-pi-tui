@@ -167,6 +167,7 @@ function harness(options: {
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',

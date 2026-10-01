@@ -106,6 +106,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
     interaction: {
       questions: {
         onRequest: () => true,

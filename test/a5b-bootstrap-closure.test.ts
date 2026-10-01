@@ -528,8 +528,8 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     ],
   ],
   [
-    'src/app/submission/local-shell.ts',
-    ['localShellController', 'interruptLiveAgent', 'shellTempFiles', 'runLocalShell'],
+    'src/app/submission/user-shell.ts',
+    ['shellController', 'interruptLiveAgent', 'shellTempFiles', 'runUserShell'],
   ],
   [
     'src/app/surface/application-events.ts',
@@ -567,7 +567,7 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
   ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
   ['src/app/submission/controller.ts', 'createSubmissionController', 'createSubmissionController<Agent>('],
-  ['src/app/submission/local-shell.ts', 'createLocalShell', 'createLocalShell<Agent>('],
+  ['src/app/submission/user-shell.ts', 'createUserShell', 'createUserShell<Agent>('],
   ['src/app/surface/application-events.ts', 'createApplicationEvents', 'createApplicationEvents('],
   ['src/app/surface/client-actions.ts', 'createClientActions', 'createClientActions('],
 ]
@@ -602,7 +602,7 @@ const OWNER_FACTORY_NAMES: readonly string[] = [
   'createSessionPresentation',
   'createViewerRuntime',
   'createSubmissionController',
-  'createLocalShell',
+  'createUserShell',
   'createApplicationEvents',
   'createClientActions',
 ]
