@@ -15,27 +15,30 @@
  * - the official in-process Client/Gateway path over the real carrier
  * - M3 additive Host rows mount/unwind with the composed runtime
  *
- * TEST STAND-INS / SUBSTITUTIONS (beyond the serializer)
- * - prompt serializer (unsupported test double): PR1 does not own production
- *   submission serialization — the plan-sanctioned SEMANTIC substitution
- *   (the only PR1-specific one; the readiness stand-ins below are
- *   fixture-level).
- * - `StubLlmAdapter` (`smoke` route, no streamed turn): the M3-1 L5 fixture
- *   shape. Precision note: the adapter IS registered on the required Host
- *   `llm` service and the composed `RemoteModelCatalog` holds
- *   `runtime.remote.llm` — it is part of the composed graph; what keeps the
- *   proofs valid is that nothing these suites exercise (composition,
- *   readiness, disposal, failure unwind) ever INVOKES it (no model turn
- *   runs).
- * - hand-provided `agentDefaultModel` + `attachments` + `webServer`:
- *   the minimal service values the composition's readiness requires
- *   (identical to the M3-1 L5 fixture); they carry no Remote-wire state and
- *   are not read through the Client connection.
- * These stand-ins do not weaken the PR1 proofs (composition identity,
- * disposal ordering, failure unwind) because the proofs never traverse the
- * substituted paths — not because the substitutes are absent from the
- * composed graph.
+ * TEST STAND-INS / SUBSTITUTIONS
+ * - `agentDefaultModel` + `webServer`: the minimal readiness values the
+ *   composition requires (identical to the M3-1 L5 fixture); they carry no
+ *   Remote-wire state.
+ * - the LLM adapter (`StubLlmAdapter` by default; PR3 suites inject a real
+ *   scripted streaming adapter): a scripted endpoint stand-in — the Host
+ *   emits REAL agent events, the wire forwards them, only the model itself
+ *   is synthetic.
+ * - the prompt serializer ONLY for suites that still pass PR1's unsupported
+ *   test double (the PR3 submission suites compose the PRODUCTION
+ *   serializer instead).
  *
+ * REAL PRODUCTION CAPABILITIES (exercised, not substituted)
+ * - attachments: the frozen-rc.2 `LocalAttachmentStore`
+ *   (`@deepseek-ai/dsh-attachment-local`, devDependency) mounted at the
+ *   workRoot — real admission/normalization, real content-addressed
+ *   durable objects, real readImage. The PR3 Image L6 traverses this REAL
+ *   path end to end (staged bytes → PromptContentPart → durable
+ *   attachment → official readAttachment → byte equality).
+ *
+ * The PR1 composition proofs (identity, disposal ordering, failure unwind)
+ * remain valid because they never traverse the stand-in paths; the PR3
+ * suites that DO traverse submission/image paths run against the production
+ * capabilities above.
  * @module @xmoon76/dsh-pi-tui/support/remote-application-fixture
  */
 

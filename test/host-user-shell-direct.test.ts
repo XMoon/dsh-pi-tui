@@ -171,27 +171,38 @@ test('an abandoned consumer does not deadlock teardown: the run still settles af
 test('the bus really pauses and resumes the producer at its watermark (explicit backpressure proof)', async () => {
   const { OutputBus } = await import('../src/runtime/direct/host-user-shell-direct.ts')
   let paused = 0
-  let resumed = 0
-  const bus = new OutputBus(() => { paused += 1 }, () => { resumed += 1 })
-  // Fill past the watermark with NO consumer: pause must fire.
+  let drained = 0
+  const resumedAt: number[] = []
+  const bus = new OutputBus(() => { paused += 1 }, () => { resumedAt.push(drained) })
+  // Fill past the watermark with NO consumer: pause must fire, resume must
+  // NOT have fired yet (a resume here would mean the pause was vacuous).
   for (let i = 0; i < 300; i++) bus.push({ text: `c${i}\n`, bytes: 4, stream: 'stdout' })
   assert.ok(paused >= 1, `the producer was paused when the buffer filled (pauses=${paused})`)
-  // A consumer drains below the watermark: resume must fire (once, not per chunk).
-  // ONE consumer drains to settle (single-consumer contract); the resume
-  // checkpoint is observed INSIDE the same iteration.
+  assert.equal(resumedAt.length, 0, 'the producer has not resumed before any consumer drain')
+  // Consume EXACTLY the 300 buffered chunks via the raw iterator — no
+  // natural EOF needed — so the low-watermark resume can be proven BEFORE
+  // end() runs (end() itself unconditionally resumes the producer, which
+  // would otherwise pollute the evidence: a test passing only on end()'s
+  // resume proves nothing about the watermark).
+  const iterator = bus.stream()[Symbol.asyncIterator]()
   const seen: string[] = []
-  let resumedBy = -1
-  for await (const chunk of bus.stream()) {
-    seen.push(chunk.text)
-    if (resumed < 1 && resumedBy === -1) resumedBy = -2 // sentinel while waiting
-    if (resumed >= 1 && resumedBy < 0) resumedBy = seen.length
+  for (let i = 0; i < 300; i++) {
+    const next = await iterator.next()
+    assert.equal(next.done, false, `chunk ${i} arrives`)
+    seen.push(next.value.text)
+    drained += 1
   }
-  assert.ok(paused >= 1, `the producer was paused when the buffer filled (pauses=${paused})`)
-  assert.ok(resumed >= 1, `the producer resumed after draining below the watermark (resumes=${resumed})`)
-  assert.ok(resumedBy > 0 && resumedBy < 300, `the resume happened mid-drain, not at settle (resumedBy=${resumedBy})`)
-  // FIFO integrity: every pushed chunk arrives exactly once, in order.
+  // THE watermark proof, measured strictly before settle: the producer
+  // resumed MID-DRAIN (drained > 0 and < 300). Counterfactuals: removing the
+  // low-watermark resume (or keeping only end()'s) leaves resumedAt empty
+  // here and this assertion FAILS.
+  assert.ok(resumedAt.some(at => at > 0 && at < 300),
+    `the producer resumed during the low-watermark drain (resumedAt=${JSON.stringify(resumedAt)})`)
+  // FIFO integrity: all 300 buffered chunks, exactly once, in order.
   assert.equal(seen.length, 300, 'all chunks delivered, none dropped')
   assert.equal(seen[0], 'c0\n')
   assert.equal(seen[299], 'c299\n')
+  // Only NOW settle the stream: end() + one more next() terminates.
   bus.end()
+  assert.equal((await iterator.next()).done, true, 'the stream ends at settle')
 })
