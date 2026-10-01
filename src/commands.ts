@@ -124,6 +124,7 @@ import {
   type LoginTarget,
 } from './authorization.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './skill-catalog-refresh.ts'
+import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
 import {
   commandSummaryOf,
   listGlobalCommands,
@@ -572,8 +573,18 @@ export interface TuiCommandRunner {
   readonly hostShellCompletion: boolean
   /** The minimal commands registry for the TUI's OWN registrations
    * (migration M1.11) — a runner assembly dependency, not a Host
-   * capability. */
+   * capability. On the Remote branch (PR4 §D2) this is `undefined` and the
+   * TUI's OWN definitions register into {@link clientCommands} instead;
+   * Direct keeps the Host registration so the in-process dispatch surface
+   * (busy-Enter, sessionless execution) is unchanged. */
   readonly commandRegistry: CommandRegistryLike | undefined
+  /** The Client-owned command registry (M3-4 PR4 §D2): every TUI built-in
+   *  and dynamic skill-wrapper definition registers here FIRST. On Direct
+   *  the same definitions additionally register into the Host commands
+   *  service (compatibility: the in-process dispatch stays identical); on
+   *  Remote ONLY this registry holds them — the Host service never receives
+   *  a TUI callback. */
+  readonly clientCommands: ClientCommandRegistry
   /** The ONE exit orchestration (latch → surface cleanup → resume hint →
    * appExit; the Direct owned-session retirement runs inside the appExit
    * disposal) — shared by Ctrl+C/Ctrl+D, /exit and /quit. Command handlers
@@ -1478,12 +1489,18 @@ export function registerTuiCommands(
   const cwd = runner.cwd
   const signal = runner.signal
   const commands = runner.commandRegistry
+  const clientCommands = runner.clientCommands
   const recordExtensionError = runner.recordExtensionError
   const clearExtensionError = runner.clearExtensionError
   const captureExtensionHealthRef = runner.captureExtensionHealthRef
-  // The commands service is part of the base layer; its absence means the
-  // TUI commands cannot be registered at all — the caller surfaces this.
-  if (commands === undefined) throw new Error('commands service unavailable')
+  // M3-4 PR4 (§D2): every TUI-owned definition registers into the CLIENT
+  // registry unconditionally — that is the Remote branch's ONLY registration
+  // (the Host commands service must never receive a TUI callback there). On
+  // Direct the Host registration additionally happens below (the compatibility
+  // adapter: the in-process dispatch surface — busy-Enter, sessionless
+  // execution, `commands/change` refresh — is unchanged). The client registry
+  // is a runner assembly dependency; its absence is a composition error.
+  if (clientCommands === undefined) throw new Error('client command registry unavailable')
 
   // Per-name registration isolation (M3-4 PR2), NARROW BY CONSTRUCTION: only
   // the official registry's duplicate-name refusal is tolerated (a Host-owned
@@ -1493,17 +1510,31 @@ export function registerTuiCommands(
   // is a programming error and fails fast exactly as before (a best-effort
   // whole pass would silently leave a partial command surface).
   const registrationFailures: string[] = []
-  const registerOne = (definition: Parameters<typeof commands.register>[0]): (() => void) => {
+  const registerOne = (definition: Parameters<typeof clientCommands.register>[0]): (() => void) => {
+    // The CLIENT registration is unconditional (PR4 §D2): the definition is
+    // owned here on BOTH branches. A same-name overwrite inside the Client
+    // registry is this surface's OWN replace semantics (skill wrappers
+    // dispose before re-registering), so it is never a "collision".
+    const disposeClient = clientCommands.register(definition)
+    if (commands === undefined) return disposeClient
     try {
-      return commands.register(definition)
+      const disposeHost = commands.register(definition)
+      return () => {
+        disposeHost()
+        disposeClient()
+      }
     } catch (error) {
+      // A Host-side duplicate-name refusal degrades ONLY the Host
+      // registration (a Host-owned name such as the Remote Host composition's
+      // `/export`): the Client registration stays live — on Remote that IS
+      // the execution surface — and the name is reported. Every OTHER throw
+      // from the official registry is a programming error and fails fast
+      // exactly as before.
       const message = error instanceof Error ? error.message : String(error)
-      // The rc.2 NamedEntries refusal (scoped variants included). Nothing else
-      // is a name collision, so nothing else is isolated here.
       if (!/^command "[^"]+" is already registered/.test(message)) throw error
       const name = (definition as { name?: unknown }).name
       registrationFailures.push(`/${String(name)}: ${message}`)
-      return () => {}
+      return disposeClient
     }
   }
 
@@ -1875,8 +1906,18 @@ export function registerTuiCommands(
    */
   const mergeGlobalAndSavedScoped = (): readonly SurfaceCommandSummary[] => {
     const byName = new Map<string, SurfaceCommandSummary>()
-    for (const descriptor of listGlobalCommands(commands)) {
-      byName.set(descriptor.name, commandSummaryOf(descriptor))
+    // The global baseline is branch-aware (PR4 §D2): Direct reads the Host
+    // registry's global layer (TUI built-ins flow in through the compatibility
+    // registration); Remote builds it from the CLIENT registry's own
+    // descriptors — the Host commands service is metadata-only there and its
+    // in-process `list` must never be consulted for the TUI's registrations.
+    if (commands !== undefined) {
+      for (const descriptor of listGlobalCommands(commands)) {
+        byName.set(descriptor.name, commandSummaryOf(descriptor))
+      }
+    }
+    for (const definition of clientCommands.list()) {
+      byName.set(definition.name, commandSummaryOf(definition))
     }
     for (const scoped of savedScopedCommands) byName.set(scoped.name, scoped)
     return [...byName.values()]
@@ -1939,10 +1980,21 @@ export function registerTuiCommands(
   }
   const refreshCompletions = (): void => {
     // The sessionless view keeps the saved scoped overrides (the standing
-    // snapshot's scoped commands); a live session reads its own scoped view.
-    installCompletionsContained(runner.currentSessionId === undefined
-      ? mergeGlobalAndSavedScoped()
-      : runner.listScopedCommands())
+    // snapshot's scoped commands); a live session reads its own scoped view
+    // — MERGED with the Client registry's own descriptors on every branch
+    // (PR4 §D2): the Client registrations are visible even where the scoped
+    // view's Host source does not carry them (Remote).
+    if (runner.currentSessionId === undefined) {
+      installCompletionsContained(mergeGlobalAndSavedScoped())
+      return
+    }
+    const scoped = runner.listScopedCommands()
+    const byName = new Map<string, SurfaceCommandSummary>()
+    for (const entry of scoped) byName.set(entry.name, entry)
+    for (const definition of clientCommands.list()) {
+      byName.set(definition.name, commandSummaryOf(definition))
+    }
+    installCompletionsContained([...byName.values()])
   }
   // ── registry-change coalescing ─────────────────────────────────────────
   // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
@@ -3552,27 +3604,36 @@ export function registerTuiCommands(
   ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
     const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
     skillSignal.throwIfAborted()
-    // The scope-bound catalog facade validates the captured owner BEFORE the
-    // dispatch and again after the read settles — the scope is never downgraded
-    // to a bare session id handed to a current-owner resolver.
-    let resolved: SkillDefinitionResult
-    try {
-      resolved = await runner.resolveScopedSkill(scope, name)
-    } catch (error) {
-      if (error instanceof SupersededReadError) {
+    // PR4 §1.6 (D4) — the REMOTE literal-gesture path: the Client NEVER loads
+    // a skill body there (no `skills/read` exists on the wire), so the whole
+    // definition resolution is skipped. The wrapper's OWN live presence in
+    // the human catalog (isSkillWrapperName) is the claim the caller already
+    // validated; the Host's dsh-tool-skill pre-step owns body resolution,
+    // isUserInvocable re-check and injection at gesture time.
+    const remoteLiteralGesture = runner.commandRegistry === undefined
+    let resolved: SkillDefinitionResult | undefined
+    if (!remoteLiteralGesture) {
+      // The scope-bound catalog facade validates the captured owner BEFORE the
+      // dispatch and again after the read settles — the scope is never downgraded
+      // to a bare session id handed to a current-owner resolver.
+      try {
+        resolved = await runner.resolveScopedSkill(scope, name)
+      } catch (error) {
+        if (error instanceof SupersededReadError) {
+          return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+        }
+        throw error
+      }
+      skillSignal.throwIfAborted()
+      if (!runner.isSessionScopeCurrent(scope)) {
         return { kind: 'error', text: 'the session changed while loading the skill — try again' }
       }
-      throw error
+      if (resolved!.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
+      if (resolved!.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
+      if (resolved!.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
+      const skill = resolved!.skill
+      if (!isUserInvocableSkill(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
     }
-    skillSignal.throwIfAborted()
-    if (!runner.isSessionScopeCurrent(scope)) {
-      return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-    }
-    if (resolved.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
-    if (resolved.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
-    if (resolved.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
-    const skill = resolved.skill
-    if (!isUserInvocableSkill(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
     // Web parity (the dsh-tool-skill pre-step boundary): a user-explicit
     // skill invocation is a PLAIN user message whose leading `/name` line
     // the host recognizes — the user's own words (including any `/name args`
@@ -3581,7 +3642,12 @@ export function registerTuiCommands(
     // Arguments are never carved out and never dropped: the bug this fixes
     // was the wrapper discarding `rawInput` and injecting a hand-rolled body
     // card that swallowed the user's request.
-    const line = args.trim() === '' ? '/' + skill.name : '/' + skill.name + ' ' + args.trimStart()
+    const line = remoteLiteralGesture || resolved === undefined || resolved.kind !== 'found'
+      ? (args.trim() === '' ? '/' + name : '/' + name + ' ' + args.trimStart())
+      : (() => {
+        const skill = resolved.skill
+        return args.trim() === '' ? '/' + skill.name : '/' + skill.name + ' ' + args.trimStart()
+      })()
     // The skill invocation is an AGENT-FACING prompt: build its message
     // through the shared prepared-input pipeline so an image-bearing
     // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
@@ -3604,8 +3670,12 @@ export function registerTuiCommands(
     // When the Host skill pre-step is absent, deliver the original invocation
     // and its rendered body as two ordered single prompts. This preserves the
     // original-line-before-body ordering without bypassing the semantic writer.
-    const fallbackBody = !hostLoadsSkillBody
+    // Remote (the literal-gesture branch) never builds a fallback body: there
+    // is no Client-side definition to render, and its composition invariant
+    // already answers hostLoadsSkillBody=true.
+    const fallbackBody = !hostLoadsSkillBody && !remoteLiteralGesture && resolved !== undefined && resolved.kind === 'found'
       ? (() => {
+        const skill = resolved.skill
         const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
         const resourceBase = readResourceBase(skill.resourceBase)
         return createUserMessage({
@@ -3757,7 +3827,7 @@ export function registerTuiCommands(
       // command) skips the slash command; the catalog picker still lists it.
       if (taken.has(skill.name)) continue
       try {
-        const dispose = commands.register({
+        const dispose = registerOne({
           name: skill.name,
           description: '[skill] ' + skill.description,
           // The handler captures ONLY the skill name; execution re-fetches
@@ -3827,7 +3897,7 @@ export function registerTuiCommands(
       currentSkillReferences = []
       for (const name of names) {
         try {
-          const dispose = commands.register({
+          const dispose = registerOne({
             name,
             description: `[skill: revalidating] ${name}`,
             handler: async (invocation) => {
@@ -5492,14 +5562,18 @@ export function registerTuiCommands(
   // fire the same event; the merge rules keep them from recursing. The
   // listener is registered AFTER the TUI's built-in commands (whose
   // registrations need no coalescing — the snapshot/wrapper bulk commits
-  // use withCommandCommit instead).
-  ctx.on('commands/change', () => {
-    if (commandCommitDepth > 0) {
-      commandCommitDirty = true
-      return
-    }
-    refreshCompletions()
-  })
+  // use withCommandCommit instead). Direct-only: the Host event exists only
+  // where the in-process commands service does (Remote has no such event
+  // seam; its catalog refresh boundaries own freshness instead).
+  if (commands !== undefined) {
+    ctx.on('commands/change', () => {
+      if (commandCommitDepth > 0) {
+        commandCommitDirty = true
+        return
+      }
+      refreshCompletions()
+    })
+  }
   return {
     /** Per-name registration failures (a Host-claimed name degraded loudly;
      *  later registrations still installed). */

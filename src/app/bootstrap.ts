@@ -116,6 +116,8 @@ import {
   type SessionLifecycle,
 } from '../runtime/session-lifecycle-port.ts'
 import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { dangerCommand } from '../command-policy.ts'
@@ -1347,7 +1349,12 @@ export function applyRunnerWithRuntime(
         run: <T>(task: () => Promise<T> | T): Promise<T> =>
           ownership.gate.run(() => ownership.barrier.runTransition(async () => task())),
       },
-      commandsRegistry: () => ctx.get('commands'),
+      // PR4 §1.2: the Host-registry dependency is RETIRED on the Remote
+      // branch — the TUI's OWN definitions register into the Client command
+      // registry there; the Host `ctx.commands` stays metadata-only
+      // (RemoteSurfaceAuthorityReader + HostCommandPort own its reads).
+      commandsRegistry: () => remoteSources === undefined ? ctx.get('commands') : undefined,
+      clientCommands: createClientCommandRegistry(parseCommand),
       catalog: backend.catalog,
       toCatalogAgent: (agent) => agent,
       presets: {
@@ -1884,6 +1891,7 @@ export function applyRunnerWithRuntime(
         deferQueueRecall: (recall) => submissionRuntime.deferQueueRecall(recall),
       },
       command,
+      backendKind: selectedRuntime.kind,
       commandPlane: {
         available: () => ctx.get('commands') !== undefined,
         execute: (agent, line, attachments, commandSignal) => {

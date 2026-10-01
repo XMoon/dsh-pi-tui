@@ -13,6 +13,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
@@ -409,6 +411,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
         signal: new AbortController().signal,
         diag: { warn: () => {}, error: () => {}, info: () => {} },
         commandRegistry: ctx.get('commands'),
+    clientCommands: createClientCommandRegistry(parseCommand),
         recordExtensionError: () => {},
         clearExtensionError: () => {},
         captureExtensionHealthRef: () => {},

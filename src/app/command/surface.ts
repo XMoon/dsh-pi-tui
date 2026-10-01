@@ -35,6 +35,7 @@ import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from '../../skill-catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
+import type { ClientCommandRegistry } from './client-command-registry.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
 import { copyToClipboard } from '../../clipboard.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../display-preset.ts'
@@ -132,6 +133,11 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The command registry lookup (the Host commands service), or undefined. */
   readonly commandsRegistry: () => CommandRegistryLike | undefined
+  /** The Client-owned command registry (M3-4 PR4 §D2): the TUI's OWN
+   *  definitions register here on BOTH branches; on Remote this is their
+   *  ONLY registration surface (the Host commands service never receives a
+   *  TUI callback). */
+  readonly clientCommands: ClientCommandRegistry
   /** The narrow Direct seams the command runtime binding needs. These stay in
    *  the composition root: they read the in-process Host session log and the
    *  Host command registry. */
@@ -282,6 +288,9 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   catalogRefreshAvailable(): boolean
   /** Whether one submission is a TUI-owned skill invocation. */
   isSkillInvocation(parsed: { name: string } | undefined, text: string): boolean
+  /** The Client-owned command registry (PR4 §1.3): the submission route's
+   *  TUI_BUILTIN execution owner on the Remote branch. */
+  readonly clientCommands: ClientCommandRegistry
   /** The exact Direct attachment of a fenced live scope. */
   agentForLiveScope(scope: SessionScope): ExactAgent
   /** The exact Direct attachment of an already-fenced live session id. */
@@ -505,8 +514,6 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
 
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
-    const commands = deps.commandsRegistry()
-    if (commands === undefined) return
     commandsRegistered = true
     try {
       const installed = registerTuiCommands(runner(), initial)
@@ -694,8 +701,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       hostShellCompletion: deps.backend.hostShellCompletion,
       // The minimal commands registry for the TUI's OWN registrations
       // (migration M1.11) — the runner assembly dependency, never a Host
-      // capability exposed to command handlers.
+      // capability exposed to command handlers. Direct-only on PR4: the
+      // Remote branch registers nothing into the Host service.
       commandRegistry: deps.commandsRegistry(),
+      // The Client-owned registry (PR4 §D2): the TUI's OWN execution surface
+      // on Remote; the shared definition owner on both branches.
+      clientCommands: deps.clientCommands,
       cwd: deps.clientCwd,
       imageStore: deps.drafts.images,
       fileStore: deps.drafts.files,
@@ -843,6 +854,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,
+    clientCommands: deps.clientCommands,
     agentForLiveScope,
     attachmentForSession,
     disposeCatalog,

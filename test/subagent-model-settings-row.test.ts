@@ -8,6 +8,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { TuiApp } from '../src/tui-app.ts'
@@ -208,6 +210,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; li
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: {} as never,
