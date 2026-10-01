@@ -76,7 +76,7 @@ function scriptedHooks(script: {
   const hooks: CatalogRefreshHooks = {
     readAgent: async (agent, signal) => {
       if (script.read !== undefined) {
-        const result = script.read(agent, signal)
+        const result = script.read(agent as never, signal)
         return result instanceof Promise ? abortAware(result, signal) : result
       }
       throw new Error('unexpected read')

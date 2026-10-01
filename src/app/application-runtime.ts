@@ -74,12 +74,23 @@ export interface RemoteApplicationSelection {
 }
 
 /**
- * The Remote branch's application presentation sources (M3-4 PR2),
+ * The Remote branch's application presentation sources (M3-4 PR2/PR4),
  * declared STRUCTURALLY here so the composition root (`app/bootstrap.ts`)
  * consumes the bundle without any static `app/remote/**` edge — the real
  * bundle is assembled inside `app/remote/presentation-source.ts` from the
  * ONE aggregate and satisfies these shapes by construction.
  */
+/**
+ * The Remote branch's branch-specific command authority read (PR4 §D1):
+ * Host command + human-skill metadata behind one generation-fenced
+ * snapshot, declared STRUCTURALLY so the composition root stays
+ * transport-clean. The real bundle is assembled inside
+ * .
+ */
+export interface RemoteCommandSourceFace {
+  read(sessionId: string, signal?: AbortSignal): Promise<import('../runtime/surface-authority-port.ts').SurfaceAuthoritySnapshot | undefined>
+}
+
 export interface RemoteApplicationSources {
   /** The ONE shared presentation reader (the M3-3A Remote adapter). */
   readonly presentationReader: PresentationReader
@@ -89,6 +100,8 @@ export interface RemoteApplicationSources {
   readonly liveIngress: RemoteLiveIngressFactory
   /** The official Session-scoped facts (sessionStatus/plan/running). */
   readonly sessionFacts: RemoteSessionFactsSource
+  /** The branch-specific command authority read (PR4). */
+  readonly commandSource: RemoteCommandSourceFace
 }
 
 /** The neutral live-ingress factory face (see `app/remote/live-ingress.ts`

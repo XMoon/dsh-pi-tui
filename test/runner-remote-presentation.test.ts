@@ -761,7 +761,7 @@ test('L6 navigation: switch, same-id rollover and reconnect re-init the presenta
   const sessionB = 'm3-4-pr2-nav-b'
   const hostPreset = 'm3-4-pr2-preset'
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
-  const agentA = await seedHost.harness.create(SessionId(sessionA), undefined, { cwd: seedHost.anchorDir })
+  await seedHost.harness.create(SessionId(sessionA), undefined, { cwd: seedHost.anchorDir })
   await seedHost.harness.create(SessionId(sessionB), undefined, { cwd: seedHost.anchorDir })
   const appendOf = (id: string) => seedHost.ctx.sessions.get(SessionId(id)) as unknown as {
     append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
@@ -778,10 +778,15 @@ test('L6 navigation: switch, same-id rollover and reconnect re-init the presenta
   const bindingAFirst = bindingOf(sessionA)
   assert.ok(bindingAFirst !== undefined, 'A is retained while it is the current subject')
 
-  const execute = (line: string): Promise<unknown> =>
-    (seedHost.ctx.commands as unknown as {
-      execute(agent: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<unknown>
-    }).execute(agentA, line, [], new AbortController().signal)
+  // PR4 §1.2: the TUI no longer registers its callbacks into the Host
+  // commands service on the Remote branch, so /resume and /fork are driven
+  // the way a real user drives them — a submit gesture through the MOUNTED
+  // surface (the Client command registry executes the TUI built-in).
+  const execute = (line: string): void => {
+    const mounted = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+    mounted.setDraft(line)
+    mounted.submitDraft()
+  }
 
   // ── SWITCH A -> B: the same transition seam /resume uses.
   await execute(`/resume ${sessionB}`)

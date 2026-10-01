@@ -365,7 +365,7 @@ test('a stale catalog refresh cannot install commands into a newer session', asy
   const installed = registerTuiCommands(stubRunner(ctx, app, state))
   // A coordinator over the real surface hooks: the post-mount refresh owner.
   const coordinator = new CatalogRefreshCoordinator({
-    readAgent: (agent, signal) => readSurfaceCatalog(agent, signal, ctx as unknown as SurfaceCatalogContext),
+    readAgent: (agent, signal) => readSurfaceCatalog(agent as never, signal, ctx as unknown as SurfaceCatalogContext),
     readStanding: async () => { throw new Error('not used') },
     installSnapshot: installed.installSnapshot,
     enterCatalogTransition: installed.enterTransition,
@@ -894,7 +894,7 @@ test('a failing skill catalog refresh degrades to a detached issue, never an unh
     const state = { agent: fakeAgent('session-a'), generation: 1 }
     const installed = registerTuiCommands(stubRunner(ctx, app, state, diag))
     const coordinator = new CatalogRefreshCoordinator({
-      readAgent: (agent, signal) => readSurfaceCatalog(agent, signal, ctx as unknown as SurfaceCatalogContext),
+      readAgent: (agent, signal) => readSurfaceCatalog(agent as never, signal, ctx as unknown as SurfaceCatalogContext),
       readStanding: async () => { throw new Error('not used') },
       installSnapshot: installed.installSnapshot,
       enterCatalogTransition: installed.enterTransition,
