@@ -285,7 +285,7 @@ in Stage D.
 | M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no physical session lock in Remote mode — DSH writer ownership stays Host-side |
 | M3 | Experimental in-process wire: separate Host/Client Cordis contexts, DSH Connection over the Semantic Port, no TCP | Wire parity on the transcript parity suite; Host composition stays experimental |
 | M4 | Local Host process / IPC split; crash semantics (TUI↔Host, Ctrl+C/D, SIGTERM, HMR, parent/child death) | IPC integration lane green; ordinary local mode: TUI owns ephemeral Host lifecycle |
-| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; user-entered `!`/`!!` bypass mode remains Client-local, while `localShellSandbox=sandbox` stays unsupported until a real Client-side sandbox carrier exists; remote external editor unsupported | Security review; fail-closed locality checks |
+| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; the user shell (`!`/`!!`, both policies) must execute in the Host execution environment — until a qualified one-shot Host user-shell carrier is released, Remote `!`/`!!` stay fail-closed (U11a/U11b); remote external editor unsupported | Security review; fail-closed locality checks |
 | M6 | Production dual stack: `--backend wire-local` opt-in, direct default; extension CI matrix (direct × wire-local) | One stable observation cycle; no perceptible regression |
 | M7 | Default flip to wire-local; `--backend direct` rollback kept for ≥ 1 release | Rollback verified on the release train |
 | M8 | Direct ownership retirement (the SessionHandle `direct` escape — live Agent/AgentHandle; the physical lock stack is already removed legacy) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
@@ -1011,37 +1011,78 @@ Therefore M3 freezes the split:
 Approval/question interactive waterfalls remain fully separate and continue to
 use the official forwarded events.
 
-### Local `!` / `!!` shell under a wire backend
+### User `!` / `!!` shell under a wire backend (shell authority amendment, M3-4 PR3)
 
-The user shell gesture is Client-local, but the current Direct implementation has
-two execution branches:
+`!` and `!!` are both **Host-side user-shell operations**. Their difference is
+NOT execution locality — it is whether the completed result enters
+Session/model context:
 
 ```text
-localShellSandbox=bypass
-  -> Client/TUI spawn(command, cwd=session cwd)
+!   -> Host executes; Client presents; the completed result is submitted
+      to Session/model through the semantic SessionWriter
 
-localShellSandbox=sandbox
-  -> Host ctx.shell.resolve/execute(...)
+!!  -> Host executes; Client presents; the completed result is excluded
+      from Session/model (presentation-only, zero Session write)
+
+bypass / sandbox -> Host-side execution policies (never locality choices)
 ```
 
-Only the first branch is placement-safe for M3→M4. The Host `ctx.shell`
-capability is not a Client-local wire service and must not be borrowed merely
-because M3 happens to run both Contexts in one process.
+`!!` is therefore Session/model-EXCLUDED, never sessionless: with no current
+Session the TUI ensures one first, executes in that Session's Host workspace,
+and persists the input history under that Session identity. The
+persisted/editor protocol keeps the `!` / `!!` syntax and the internal
+`shell-local` enum may survive temporarily, but "local" there means
+Session/model-excluded presentation mode — NEVER Client-machine execution.
+
+The Client owns the gesture, editor mode, shell card, bounded tail/fold/copy
+presentation, and the cancellation REQUEST. The Host owns cwd/workspace,
+PATH/environment, shell discovery, the process/PTY, execution, exit status,
+and process cancellation, all behind the narrow `HostUserShellPort`; the
+application layer never sees `ctx.shell`, a `child_process.ChildProcess`, or a
+PTY screen parser.
+
+Carrier qualification at the frozen rc.2 target: the
+`dsh-api-terminal-controller` Remote is a real Host user-terminal carrier, but
+it is a **retained interactive PTY** — screen-stream output, no deterministic
+per-command start, no authoritative per-command exit status, no one-shot
+cancel, and no sandbox variant. Sentinel/screen parsing is not an
+authoritative one-shot contract, so the qualification concludes
+**CARRIER_GAP** (U11a: Host-side user-shell Remote carrier, primarily the
+bypass policy; U11b: Host-side sandboxed user-shell Remote parity; plus the
+linked Host-shell completion parity obligation). M3-4 PR3 owns the Host
+user-shell application semantics and the carrier qualification record; M3-6
+verifies locality/reconnect/shutdown and does not decide execution locality for
+the first time.
 
 Remote M3 contract:
 
-- bypass mode remains a Client-local spawn;
+- Remote/attach user shell MUST execute in the Host execution environment. A
+  Client-side shell under a Remote Session is a **critical locality
+  violation**;
+- until a qualified one-shot Host user-shell carrier is released, Remote `!`
+  AND `!!` — both policies — fail closed with a visible error and execute
+  nothing: zero Client spawn, zero Host `ctx.shell` escape, zero fake success
+  card, zero Session write (U11a/U11b stay open);
+- the Host `ctx.shell` capability is not a Client-local wire service and must
+  not be borrowed merely because M3 happens to run both Contexts in one
+  process;
 - context-mode `!` sends the completed text back through the semantic
-  `SessionWriter`, while `!!` remains presentation-only;
+  `SessionWriter` once a qualified carrier exists; `!!` remains
+  presentation-only;
 - currentness/cancel uses exact Session/binding generation plus
-  `SessionWriter.cancel(sessionId)`, never an exact Agent object;
-- explicit `localShellSandbox=sandbox` is
-  **INTENTIONAL_UNSUPPORTED_IN_M3**: show a visible error and execute nothing.
-  In particular, do not keep the Direct behavior that warns and silently falls
-  back to unsandboxed spawn when the requested sandbox capability is absent.
+  `SessionWriter.cancel(sessionId)`, never an exact Agent object. Cancelling
+  the Host shell process and cancelling the Agent turn stay two distinct
+  semantic operations;
+- a sandbox policy the composition cannot serve fails closed with a visible
+  error — never a warn-and-fallback to unsandboxed execution (this also
+  applies to the Direct branch);
+- shell completion follows the same authority: Direct keeps the real-shell
+  compgen bridge behind the Direct Host adapter (the process IS the Host);
+  Remote shows no shell-specific suggestions and never reads Client
+  `process.env.PATH` or the Client filesystem for Host shell state.
 
-A future true Client-local sandbox can remove this limitation without changing
-ownership.
+A future qualified Host-side user-shell carrier can remove the Remote
+limitation without changing ownership (U11a/U11b).
 
 ### Legacy TUI settings migration stays on the Host side
 
@@ -1983,8 +2024,9 @@ backend selection/loading; Remote main-surface owner install; the
 recovery; Remote submission-presentation composition; Client-owned TUI/extension
 command execution; tool-card presentation without Host presenter callbacks;
 whole-log `/rewind` over `turnOutline`; image prompt/read wiring; permission
-preset/access convergence; Client-local-shell ownership + sandbox fail-closed
-behavior; Host-local legacy-settings-migration readiness ordering; Remote
+preset/access convergence; Host-owned user-shell semantics behind
+`HostUserShellPort` (Direct adapter) with the Remote class fail-closed;
+Host-local legacy-settings-migration readiness ordering; Remote
 Task/Presentation production consumption; Remote Plugin Manager panel wiring;
 Remote Job viewer wiring.
 
@@ -2660,7 +2702,7 @@ invalidation behavior) are stage acceptance tests, not missing Pre-M3 coverage.
 | DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: after the Host-local legacy-settings migration prerequisite settles, M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see `docs/m3-entry-contract.md` §2.4, §4.4, §11 M3-1) |
 | Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/m3-entry-contract.md` §8) |
 | Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
-| Shell execution on the wrong machine | Critical | Locality hard rule: Remote `!`/`!!` **bypass** mode executes only in the Client/TUI process; an explicitly requested sandboxed local shell has no rc.2 Client carrier and fails closed. The Remote branch never borrows Host `ctx.shell` merely because M3 is in-process |
+| Shell execution on the wrong machine | Critical | Locality hard rule (shell amendment, M3-4 PR3): `!`/`!!` — both policies — are Host-side user-shell operations. The rc.2 terminal-controller Remote is a retained interactive PTY carrier and fails the one-shot qualification, so Remote `!`/`!!` fail closed entirely (U11a/U11b); a Client-side shell under a Remote Session is a critical locality violation, and the Remote branch never borrows Host `ctx.shell` merely because M3 is in-process |
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
 | Credentials exposure beyond loopback | Critical | Attach limited to localhost/SSH until real auth |
 | Dual-stack semantic drift | Medium | Shared backend contract test matrix |

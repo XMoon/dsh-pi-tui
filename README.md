@@ -221,13 +221,13 @@ Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导
 ! git status
 ```
 
-执行本地命令，并把输出提交到当前 Session。
+在宿主（Host）环境执行命令，并把输出提交到当前 Session。
 
 ```text
 !! git status
 ```
 
-只在本地执行，输出不会进入模型上下文。
+同样在宿主环境执行，但输出不进入模型上下文（仅卡片展示）。
 
 `!` / `!!` 是独立的编辑器模式，而不是普通文本前缀。进入 Shell 模式后 Prompt 和补全行为会同步切换。
 
@@ -255,7 +255,7 @@ product-model  官方署名 + Assisted-By: <provider>/<model>
 
 边界说明：
 
-- `!` / `!!` 本地 Shell 和你自己终端里的手动提交完全不受影响；
+- `!` / `!!` 用户 Shell 和你自己终端里的手动提交完全不受影响；
 - 不安装任何 `prepare-commit-msg` 钩子，不修改已有钩子；
 - **使用 `minimal` preset 时不生效**：该 preset 的 persona 是完整 system prompt
   （`complete: true`），会替换掉其它全部 section；既有的 TUI 指引（Progress updates、
@@ -349,8 +349,8 @@ TUI 使用 DSH 提供的模型和设置服务。
 | `Ctrl+V`      | 粘贴图片                   |
 | `Tab`         | 补全斜杠命令与文件路径           |
 | `@`           | 文件补全                   |
-| `!`           | 进入 Shell 模式            |
-| `!!`          | 进入 Local-only Shell 模式 |
+| `!`           | 进入 Shell 模式（结果进 Session） |
+| `!!`          | 进入 Session 排除的 Shell 模式     |
 
 完整按键和命令以 TUI 中的 `/help` 为准。表中的快捷键是默认值;用户自定义后,以 `/help` 和 `/keybindings` 显示的生效键位为准。
 
