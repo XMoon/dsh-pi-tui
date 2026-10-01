@@ -117,10 +117,13 @@ export class OutputBus {
   private ended = false
   private consumerTaken = false
 
-  constructor(
-    private readonly pauseProducer: () => void,
-    private readonly resumeProducer: () => void,
-  ) {}
+  private readonly pauseProducer: () => void
+  private readonly resumeProducer: () => void
+
+  constructor(pauseProducer: () => void, resumeProducer: () => void) {
+    this.pauseProducer = pauseProducer
+    this.resumeProducer = resumeProducer
+  }
 
   push(chunk: HostUserShellOutputChunk): void {
     if (this.ended) return

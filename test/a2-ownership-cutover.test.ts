@@ -243,10 +243,14 @@ test('the admission fences use the ownership subject; only the param-agent fence
     2,
     'the two owner-token callbacks must resolve the captured token through the subject compare',
   )
+  // M3-4 PR3: the user-shell interrupt dropped the exact-Agent compare for
+  // the semantic SessionWriter.cancel under a live-scope admission (§27), so
+  // NO legacy sessionUnchanged fence may remain anywhere (the interrupt
+  // fences are generation-fenced now).
   const legacyFences = (indexSource.match(/sessionUnchanged\(/g) ?? []).length
     + (localShellSource.match(/sessionUnchanged\(/g) ?? []).length
-  assert.equal(legacyFences, 2,
-    'only the two param-agent interrupt fences may keep the exact-Agent sessionUnchanged compare')
+  assert.equal(legacyFences, 0,
+    'no exact-Agent sessionUnchanged fence remains: the user-shell interrupt is generation-fenced (M3-4 PR3)')
 })
 
 test('a coordinator-level retirement failure never masquerades as a backend phase', () => {
