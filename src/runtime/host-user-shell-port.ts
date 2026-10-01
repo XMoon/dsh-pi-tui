@@ -38,11 +38,13 @@ export type HostUserShellExit =
   | { readonly kind: 'exit'; readonly code: number }
   | { readonly kind: 'signal'; readonly signal: string }
 
-/** The final settled result of one Host user-shell run. */
+/** The final settled result of one Host user-shell run. OUTPUT AUTHORITY:
+ * `output()` is the one authority for the run's bytes — `result()` carries
+ * ONLY the exit/settlement facts. The application must drain `output()`
+ * (which ends at settle) before treating its own bounded capture as
+ * complete; the adapter retains no unbounded copy of the stream. */
 export interface HostUserShellResult {
   readonly exit: HostUserShellExit
-  /** Full combined output in arrival order (empty-string chunks removed). */
-  readonly output: readonly HostUserShellOutputChunk[]
   /** Whether the run was ended by the caller's abort rather than its own
    * exit. An aborted run is a settled run; its partial output is real. */
   readonly aborted: boolean
@@ -65,12 +67,18 @@ export interface HostUserShellUnavailable {
  * a missing shell) — the caller then knows nothing executed.
  */
 export interface HostUserShellExecution {
-  /** The authoritative settled result; resolves exactly once. */
+  /**
+   * The authoritative settled exit/settlement facts; resolves exactly once.
+   * Resolving does NOT imply the caller drained `output()` — the two settle
+   * independently; `output()` ends at run settle and the application joins
+   * the drain before using its own capture.
+   */
   result(): Promise<HostUserShellResult>
   /**
-   * Live output in arrival order, shared by every subscriber; a slow
-   * subscriber only lags, it never starves the run. Empty until the first
-   * output; the final chunk is also included in `result().output`.
+   * THE output authority: every decoded chunk in arrival order, exactly once
+   * per subscriber; the iteration ENDS when the run settles (the adapter
+   * delivers any buffered tail chunks first). The adapter keeps only a
+   * bounded internal buffer for slow subscribers — never an unbounded copy.
    */
   output(): AsyncIterable<HostUserShellOutputChunk>
 }

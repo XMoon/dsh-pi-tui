@@ -4,7 +4,9 @@
  * SHARED draft-preparation authority, consumed by both transports.
  *
  * The fork happens at the adapter/admission layer, never at the draft
- * semantic preparation layer:
+ * semantic preparation layer (Direct keeps its existing prepareUserMessage
+ * pipeline today — only the Remote transport consumes PreparedPrompt at this
+ * cut; Direct convergence onto the same snapshot is a later step):
  *
  * ```text
  * DraftImageStore / DraftFileStore

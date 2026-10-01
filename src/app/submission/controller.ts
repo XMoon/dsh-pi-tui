@@ -189,6 +189,12 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly tuiSettings: { get(): TuiSettingsDoc } | undefined
   /** The exact owner-subject currentness fence. */
   readonly captureMatches: (subject: SessionSubject | undefined) => boolean
+  /** The transport-forked prepare seam (M3-4 PR3 §10/§12): absent keeps the
+   * Direct prepareUserMessage pipeline; a Remote selection injects the SAME
+   * PreparedPrompt path the plain-prompt flow uses, so steer and prompt share
+   * one preparation authority per transport (never a Direct UserMessage into
+   * the Remote serializer). */
+  readonly prepareTransport?: (text: string, requestId: string) => Promise<unknown>
   /** The owner-resolved per-Agent prompt admission window. */
   readonly direct: {
     withPromptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T>): Promise<T>
@@ -1165,7 +1171,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       ensureSession: () => deps.session.ensureSession(),
       withPromptAdmission: (agent, hasImages, task) =>
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),
-      prepareMessage: (value, requestId) => prepareUserMessage(value, deps.drafts.images, submitDeps, { requestId }),
+      prepareMessage: (value, requestId) => prepareMessage(value, requestId),
       markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
       restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
       notifySubmissionFailure: (error) => notifySubmissionFailure(error),
@@ -1629,7 +1635,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const abortLocalShell = (): void => deps.shell.interrupt()
   /** Prepare one outgoing message through the shared image/draft pipeline. */
   const prepareMessage = (text: string, requestId: string): Promise<unknown> =>
-    prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId })
+    deps.prepareTransport !== undefined
+      ? deps.prepareTransport(text, requestId)
+      : prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId })
 
   return {
     submit,
