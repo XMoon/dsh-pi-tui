@@ -663,6 +663,9 @@ const tokenUsageItem: FooterItemDefinition = {
   defaultFormat: 'io',
   render(snapshot: StatusSnapshot, ref, density) {
     const tokens = snapshot.usage.tokens
+    // No owned token facts (an unavailable projection) -> the item omits
+    // itself rather than printing a zero or a partial fold.
+    if (tokens === undefined) return null
     if (ref.format === 'pi') {
       // The pi style keeps the cumulative input/output pair under width
       // pressure and drops only the cache detail (`↑114M ↓54k`); the

@@ -318,7 +318,9 @@ function defaultRow1Right(snap: StatusSnapshot): RefItem[] {
  * override (the drop order: cache-hit → latency → speed/turns-steps →
  * usage). */
 function defaultRow2Left(snap: StatusSnapshot): RefItem[] {
-  const t = snap.usage.tokens
+  // The token facts are optional (an unavailable projection omits them); this
+  // compat fixture always seeds them.
+  const t = snap.usage.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   const p = snap.usage.performance
   const items: RefItem[] = [{
     text: toneText(`↑${fmt(t.input)} ↓${fmt(t.output)}`

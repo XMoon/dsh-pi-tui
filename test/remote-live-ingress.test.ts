@@ -23,6 +23,8 @@ function sourceWith(initial: WindowState): {
   binding: RemoteLiveIngressBinding
   publish(next: WindowState): void
   publishSnapshot(): void
+  publishProjection(key: string): void
+  projectionKeyCount(): number
   replaceBinding(withBinding: RemoteLiveIngressBinding | undefined): void
   getBinding(): RemoteLiveIngressBinding | undefined
 } {
@@ -33,6 +35,14 @@ function sourceWith(initial: WindowState): {
       subscribe: (listener: () => void) => {
         snapshotListeners.add(listener)
         return () => { snapshotListeners.delete(listener) }
+      },
+      projections: {
+        faceOf: (key: string) => ({
+          subscribe: (listener: () => void) => {
+            projectionListeners.get(key)?.add(listener) ?? projectionListeners.set(key, new Set([listener]))
+            return () => { projectionListeners.get(key)?.delete(listener) }
+          },
+        }),
       },
     },
     eventSource: {
@@ -45,6 +55,7 @@ function sourceWith(initial: WindowState): {
   }
   const listeners = new Set<() => void>()
   const snapshotListeners = new Set<() => void>()
+  const projectionListeners = new Map<string, Set<() => void>>()
   return {
     sessions: { binding: () => current },
     binding: current,
@@ -55,6 +66,10 @@ function sourceWith(initial: WindowState): {
     publishSnapshot() {
       for (const listener of snapshotListeners) listener()
     },
+    publishProjection(key) {
+      for (const listener of projectionListeners.get(key) ?? []) listener()
+    },
+    projectionKeyCount: () => projectionListeners.size,
     replaceBinding(withBinding) { current = withBinding },
     getBinding: () => current,
   }
@@ -65,6 +80,7 @@ interface SinkLog {
   live: Array<{ kind: string }>
   replaced: string[]
   snapshots?: string[]
+  projections?: string[]
 }
 
 function transientEntry(attemptId: string, turn: number, step: number, index: number, text: string) {
@@ -89,6 +105,7 @@ function sinksOf(log: SinkLog): RemoteLiveIngressSinks {
     onLiveInput: input => { log.live.push(input as { kind: string }) },
     onWindowReplaced: id => { log.replaced.push(id) },
     onSessionSnapshotChanged: id => { log.snapshots?.push(id) },
+    onProjectionsChanged: id => { log.projections?.push(id) },
   }
 }
 
@@ -127,7 +144,7 @@ test('append change routes durable events and synthesizes one start per attempt 
   handle.dispose()
 })
 
-test('a generation replacement detaches the subscription silently (no repaint of the new owner)', () => {
+test('a Connection generation rollover drives the authoritative re-hydrate for the SAME binding', () => {
   const log = { durable: [], live: [], replaced: [] }
   const source = sourceWith({ entries: [], revision: 1, hasMore: false })
   const generation = generationSource()
@@ -135,9 +152,24 @@ test('a generation replacement detaches the subscription silently (no repaint of
   const handle = ingress.subscribe('s', sinksOf(log))
   assert.ok(handle !== undefined)
   generation.replace()
+  // The rollover must NOT dead-lock the subscription: the dead generation's
+  // revision numbers are forgotten, so the very next publication is processed
+  // instead of being swallowed as a duplicate revision.
   source.publish({ entries: [], revision: 2, hasMore: false, change: { kind: 'append', entries: [{ type: 'event', event: { type: 'user/message', seq: 6, time: 1, data: {} } }] } })
-  assert.deepEqual(log.durable, [], 'a stale publication never routes into the surface')
-  assert.deepEqual(log.replaced, [], 'and never triggers a replacement re-hydrate either')
+  assert.deepEqual(log.durable, [{ type: 'user/message' }],
+    'the new generation routes live again (a swallowed publication was the dead-surface defect)')
+  assert.deepEqual(log.replaced, [], 'an append needs no re-hydrate')
+  // The new generation's authoritative baseline REPLACE drives the re-hydrate.
+  source.publish({ entries: [], revision: 3, hasMore: false, change: { kind: 'replace', entries: [] } })
+  assert.deepEqual(log.replaced, ['s'],
+    'the new baseline replaces the dead window and re-hydrates the presentation')
+  source.publish({ entries: [], revision: 4, hasMore: false, change: { kind: 'append', entries: [{ type: 'event', event: { type: 'user/message', seq: 5, time: 1, data: {} } }] } })
+  assert.deepEqual(log.durable, [{ type: 'user/message' }, { type: 'user/message' }],
+    'the adopted generation routes its own publications')
+  source.publish({ entries: [], revision: 4, hasMore: false, change: { kind: 'append', entries: [{ type: 'event', event: { type: 'user/message', seq: 5, time: 1, data: {} } }] } })
+  assert.deepEqual(log.durable, [{ type: 'user/message' }, { type: 'user/message' }],
+    'the SAME revision is never routed twice (no replay regression)')
+  handle.dispose()
 })
 
 test('a same-id binding replacement detaches the subscription (exact binding identity)', () => {
@@ -332,4 +364,33 @@ test('the compaction cache SEED uses the hydrate outcome token, never a fresh ca
     'the seed must NOT re-capture the transport identity at seed time')
   assert.ok(seed.includes('generation: initGeneration') && seed.includes('sessionId,'),
     'the owner fence travels with the seed')
+})
+
+test('a projection change reaches the sink through the per-key faces, coalesced, and a stale generation detaches', async () => {
+  const source = sourceWith({ entries: [], revision: 1, hasMore: false })
+  const generation = generationSource()
+  const ingress = createRemoteLiveIngress(source.sessions, generation, ['title', 'tokenUsage'])
+  const log: SinkLog = { durable: [], live: [], replaced: [], projections: [] }
+  const handle = ingress.subscribe('s', sinksOf(log))
+  assert.ok(handle !== undefined)
+  assert.equal(source.projectionKeyCount(), 2,
+    'the ingress follows exactly the current-fact keys it was given (per-key faces)')
+  // ONE Host frame updating both keys must coalesce into ONE refresh.
+  source.publishProjection('title')
+  source.publishProjection('tokenUsage')
+  await Promise.resolve()
+  assert.deepEqual(log.projections, ['s'], 'coalesced into one projection refresh')
+  // A later frame refreshes again.
+  source.publishProjection('title')
+  await Promise.resolve()
+  assert.deepEqual(log.projections, ['s', 's'])
+  // A Connection generation rollover does NOT retire the retained binding: the
+  // projection faces read LIVE store values, so the rollover re-hydrates (the
+  // window channel) while these value notifications keep flowing.
+  generation.replace()
+  source.publishProjection('title')
+  await Promise.resolve()
+  assert.deepEqual(log.projections, ['s', 's', 's'],
+    'a value channel reads live state: a rollover neither detaches it nor leaks a stale value')
+  handle.dispose()
 })

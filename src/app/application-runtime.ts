@@ -102,6 +102,9 @@ export interface RemoteLiveIngressFactory {
       onLiveInput: (input: import('../runtime/assistant-stream-port.ts').AssistantLiveInput) => void
       onWindowReplaced: (sessionId: string) => void
       onSessionSnapshotChanged: (sessionId: string) => void
+      /** The official PROJECTION store changed: the only channel carrying
+       *  projection-owned current values (the Session snapshot never does). */
+      onProjectionsChanged: (sessionId: string) => void
     },
     /** The cold-hydration snapshot revision: a higher subscription-time
      *  revision means events landed in the hydrate→subscribe gap and the

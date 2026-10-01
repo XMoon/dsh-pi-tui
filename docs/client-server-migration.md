@@ -3028,22 +3028,66 @@ fallback while that projection is unavailable:
 
 | Fact | Official owner | Window fold on Remote |
 |---|---|---|
-| title | `title` projection | fallback only (the `session/title` event may precede the window) |
-| goal | `goal` projection (its legal `null` = "no goal" is honored) | fallback only |
-| todos | `todos` projection (the standing list of the current turn) | fallback only |
-| token usage / cache rate / context capacity | `tokenUsage` + context projections (lifetime) | never (a partial fold cannot count a lifetime) |
-| cwd | the official session status/list row | never (it is not an event at all) |
-| plan / preset / model | `plan` / `agentPreset` / `modelSelection` projections | never |
-| transcript rows, working/busy, compaction | the official event window | the event window IS the authority |
+| title | `title` projection | NEVER: an unavailable projection OMITS the title |
+| goal | `goal` projection (its legal `null` = "no goal" is honored) | NEVER |
+| todos | `todos` projection (the standing list of the current turn) | NEVER |
+| token usage / cache rate / context capacity | `tokenUsage` + context projections (lifetime) | NEVER (a partial fold cannot count a lifetime) |
+| cwd | the official session status/list row | NEVER (it is not an event at all) |
+| plan / preset / model | `plan` / `agentPreset` / `modelSelection` projections | NEVER |
+| transcript rows, working/busy, compaction, the recent-window performance metrics (TTFB / tok/s) | the official event window | the event window IS the authority (these facts ARE window-scoped) |
 
-The goal badge uses ONE shared text rule for both a projection fact and a log
-event (`goalTextOf`), so a projection-backed session never gets a second,
-competing presentation rule. An ABSENT projection field means "unavailable"
-(the fold may stand in); a legal `null` (no goal / no `todo/write` yet) is a
-real answer and is honored. `test/runner-remote-presentation.test.ts` proves
-the divergence case directly: title/goal/lifetime-usage whose source events sit
-OUTSIDE the truncated window (mutation-verified — dropping the projection feed
-loses the title and the lifetime counters).
+The rule is UNIFORM: on the Remote branch an unavailable projection yields
+**unknown**, and unknown OMITS the fact — the bounded window never stands in
+for a session-global value (a recent window is not a session's current title,
+goal or standing todo list, and a lifetime billed sum is not the current
+context occupancy). `UsageStatus.tokens` is therefore optional and the usage
+section omits it (the footer formatters drop the token segment) when the
+official counters cannot answer; the occupancy numerator is the official
+context measurement only. `null` (no goal / no `todo/write` yet) and an absent
+field both hide the fact, so the two dispositions are indistinguishable in the
+UI by construction. The DIRECT branch is unchanged: there, the COMPLETE log is
+the fold authority for these same facts. The goal badge uses ONE shared text
+rule for a projection fact and a log event (`goalTextOf`).
+
+The facts are also **live**, not once-per-hydrate. The official projection
+store is a push channel, and the official feature contract exposes it as
+per-key faces (`session.projections.faceOf(key).subscribe`) — the Session
+snapshot never carries projection values. The Remote ingress subscribes to the
+keys it presents (`CURRENT_PROJECTION_KEYS`, the list the semantic reader
+reads), coalesced per frame, fenced by the exact retained binding, and on a
+change re-applies the projection-owned facts and refreshes status/welcome. So
+a model/preset/title/goal/todos/usage/context change made by the Host or by
+another Client reaches this surface immediately instead of waiting for an
+unrelated refresh (the Remote event routing for `model/selection` is
+deliberately a no-op — no live Direct agent — so the projection channel is the
+ONLY path).
+
+`test/runner-remote-presentation.test.ts` proves the divergence cases directly:
+title/goal/lifetime-usage whose source events sit OUTSIDE the truncated window
+(mutation-verified — dropping the projection feed loses the title and the
+lifetime counters), and a `modelSelection` value changed AFTER the surface
+settled (mutation-verified — with an empty key list the footer keeps the old
+model).
+
+### Connection generation rollover (a defect this evidence found and closed)
+
+Strengthening the reconnect evidence exposed a REAL production defect: the
+live ingress retired itself whenever the Connection generation OBJECT changed,
+so a reconnect (network loss, recovery) left the Remote surface permanently
+dead for an unchanged subject — nothing re-establishes that subscription. The
+contract is now explicit:
+
+* the exact retained **binding object** is the ONLY retirement condition (a
+  same-id rollover replaces it);
+* a **generation rollover** does not retire the binding: the ingress ADOPTS
+  the new generation and forgets the dead generation's window revision, so the
+  next publication drives the authoritative re-hydrate through the normal
+  `replace` path (or routes the new durable entries). It must never be
+  swallowed as a duplicate revision, and it must never re-hydrate the DEAD
+  window;
+* the projection/snapshot value channels fence on the binding only: their
+  values are live reads of the current store, so a rollover neither detaches
+  them nor lets a stale value through.
 
 ### In-stage known boundaries (active M3-4 findings — NOT promoted to Debt)
 
@@ -3125,12 +3169,27 @@ carrier → a real Client:
   (title, goal, lifetime token usage) still render — the official projections
   own them; the bounded window is never their authority. Mutation-verified:
   without the projection feed the title and the lifetime counters disappear;
-- navigation/currentness: switch (`/resume <other>`), same-id rollover
-  (away and back — a NEW binding for the same id), reconnect
-  (`connection.reconnect()` → the follow window is rebuilt) and `/fork`
-  adoption each re-initialize the presentation from the new subject, with the
-  replaced subject's rows retired and the inherited prefix painted exactly
-  once; `/new` re-initializes onto a fresh session;
+- navigation/currentness, each with POST-operation evidence that cannot be
+  satisfied by keeping the old surface:
+  - switch (`/resume <other>`): the new subject's rows paint and the replaced
+    subject's rows retire;
+  - same-id rollover (away and back): the official binding object captured
+    while the id was current is asserted `notStrictEqual` the one retained
+    after the rollover — the replaced exact binding the fences key on;
+  - reconnect (`connection.reconnect()`): a durable turn AND a
+    `modelSelection` value are committed synchronously after the previous
+    Connection generation is aborted, so only the NEW generation's
+    authoritative baseline (durable window + projection values) can put them
+    on screen — the aborted generation is asserted not to have delivered them;
+  - `/fork`: the child is identified from the Host session list, asserted to be
+    a DIFFERENT id carrying the official `parentSession` lineage and to be
+    retained by the Client, and discriminated by a CHILD-ONLY turn appearing
+    while a PARENT-ONLY turn never does (a surface stuck on the parent shows
+    the opposite);
+  - `/new` re-initializes onto a fresh session with no rows carried over;
+- a projection-owned value changed by another writer AFTER the surface settled
+  (`modelSelection`) reaches the status through the official projection faces
+  (mutation-verified);
 - the pending dispositions are proven ONE BY ONE on a session the OFFICIAL
   Client reports as `running` (a held real turn): a `queue`-mode echo lands in
   the QUEUE pane (never the tail), a `steer`-mode echo lands in the TAIL user

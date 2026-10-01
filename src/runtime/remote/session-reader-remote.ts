@@ -144,6 +144,23 @@ function stringProjection(value: unknown): string | undefined {
  * existing TUI semantic read contract. A generation is required so a lost
  * Connection never becomes an authoritative empty list.
  */
+/** The projection keys whose values this adapter presents as a session's
+ *  CURRENT facts (the official feature contract exposes per-key faces only, so
+ *  a live subscription must name the keys it follows). ONE list: the ingress's
+ *  change channel and these reads stay in step. */
+export const CURRENT_PROJECTION_KEYS = [
+  'title',
+  'goal',
+  'todos',
+  'modelSelection',
+  'agentPreset',
+  'plan',
+  'tokenUsage',
+  'contextPressure',
+  'sessionStats',
+  'turnOutline',
+] as const
+
 export class RemoteSessionReader implements SessionReader {
   private readonly sessions: RemoteSessionsReadSource
   private readonly generation: RemoteConnectionGenerationSource

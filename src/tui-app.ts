@@ -12765,7 +12765,10 @@ export class TuiApp {
           // usageFromStats) supplies the child's tokens while viewing.
           ...footer.usage === undefined
             ? { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, performance: { llmMs: 0, firstTokenMs: 0, tokensPerSec: 0 } }
-            : { tokens: footer.usage.tokens, performance: footer.usage.performance },
+            : {
+                tokens: footer.usage.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                performance: footer.usage.performance,
+              },
           ...footer.usage?.cacheHitPct !== undefined ? { cacheHitPct: footer.usage.cacheHitPct } : {},
           ...footer.usage?.context !== undefined ? { context: footer.usage.context } : {},
           turns: footer.turns,

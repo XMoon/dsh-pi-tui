@@ -1125,7 +1125,10 @@ export function applyRunnerWithRuntime(
           // fold), while a legal `null` goal/todos is a real answer.
           facts: (sessionId) => {
             const status = remoteSources.sessionFacts.sessionStatus(sessionId)
-            if (status === undefined) return undefined
+            // TOTAL: an unretained/unanswered session yields an EMPTY fact set,
+            // and the owner then OMITS those facts instead of folding them from
+            // the bounded window (a recent window is not a current value).
+            if (status === undefined) return {}
             return {
               ...status.cwd === undefined ? {} : { cwd: status.cwd },
               ...status.title === undefined ? {} : { title: status.title },
@@ -1223,6 +1226,18 @@ export function applyRunnerWithRuntime(
           // sources — the same refresh the Direct event routing performs.
           if (id !== ownership.currentSessionId() || cleanedUp) return
           surface.refreshPendingInput()
+        },
+        onProjectionsChanged: (id) => {
+          // The official projection faces carry current values the Session
+          // snapshot NEVER does (the Session snapshot has no projection
+          // values): a model/preset/title/goal/todos/usage/context change made
+          // by the Host or another Client must reach this surface now, not at
+          // the next unrelated refresh. Re-apply the projection-owned facts and
+          // refresh the status/welcome from the official sources.
+          if (id !== ownership.currentSessionId() || cleanedUp) return
+          presentation.applySessionCurrentFacts(id)
+          status.refresh()
+          status.updateWelcomeCard()
         },
         onWindowReplaced: (id) => {
           // Reconnect/gap repair: the official new window is authoritative —

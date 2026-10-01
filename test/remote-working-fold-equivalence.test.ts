@@ -166,6 +166,9 @@ function harness(): Harness {
       isStillCurrent: () => current,
       captureTransportToken: () => { captures.push(transportToken); return transportToken },
       isTransportTokenCurrent: () => Object.is(transportToken, liveTransportToken),
+      // The projection-owned current facts: this suite exercises the
+      // working/busy fold, so the official answer is "nothing".
+      facts: () => ({}),
     },
   })
   return {
