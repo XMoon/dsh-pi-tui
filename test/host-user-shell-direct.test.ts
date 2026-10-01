@@ -167,3 +167,31 @@ test('an abandoned consumer does not deadlock teardown: the run still settles af
   assert.equal(result.aborted, true)
   assert.ok(elapsed < 1_000, `the aborted run settles without a consumer (took ${elapsed}ms)`)
 })
+
+test('the bus really pauses and resumes the producer at its watermark (explicit backpressure proof)', async () => {
+  const { OutputBus } = await import('../src/runtime/direct/host-user-shell-direct.ts')
+  let paused = 0
+  let resumed = 0
+  const bus = new OutputBus(() => { paused += 1 }, () => { resumed += 1 })
+  // Fill past the watermark with NO consumer: pause must fire.
+  for (let i = 0; i < 300; i++) bus.push({ text: `c${i}\n`, bytes: 4, stream: 'stdout' })
+  assert.ok(paused >= 1, `the producer was paused when the buffer filled (pauses=${paused})`)
+  // A consumer drains below the watermark: resume must fire (once, not per chunk).
+  // ONE consumer drains to settle (single-consumer contract); the resume
+  // checkpoint is observed INSIDE the same iteration.
+  const seen: string[] = []
+  let resumedBy = -1
+  for await (const chunk of bus.stream()) {
+    seen.push(chunk.text)
+    if (resumed < 1 && resumedBy === -1) resumedBy = -2 // sentinel while waiting
+    if (resumed >= 1 && resumedBy < 0) resumedBy = seen.length
+  }
+  assert.ok(paused >= 1, `the producer was paused when the buffer filled (pauses=${paused})`)
+  assert.ok(resumed >= 1, `the producer resumed after draining below the watermark (resumes=${resumed})`)
+  assert.ok(resumedBy > 0 && resumedBy < 300, `the resume happened mid-drain, not at settle (resumedBy=${resumedBy})`)
+  // FIFO integrity: every pushed chunk arrives exactly once, in order.
+  assert.equal(seen.length, 300, 'all chunks delivered, none dropped')
+  assert.equal(seen[0], 'c0\n')
+  assert.equal(seen[299], 'c299\n')
+  bus.end()
+})

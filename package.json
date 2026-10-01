@@ -144,6 +144,7 @@
     "@deepseek-ai/dsh-api-settings-controller": "0.2.0-rc.2",
     "@deepseek-ai/dsh-app-boot": "0.2.0-rc.2",
     "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-attachment-local": "0.2.0-rc.2",
     "@deepseek-ai/dsh-authorization": "0.2.0-rc.2",
     "@deepseek-ai/dsh-brand": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-connection": "0.2.0-rc.2",
