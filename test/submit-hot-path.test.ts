@@ -1229,6 +1229,8 @@ async function bootCommandHarness(
 ): Promise<{
   harness: ReturnType<typeof makeHarness>
   mounted: { dispose: () => Promise<void>; app: TuiApp }
+  /** The harness's Cordis context (durable session-event emission). */
+  context: Context
   /** Register a contribution AFTER the mount (a late/HMR plugin). */
   registerContribution(contribution: {
     id: string
@@ -1418,6 +1420,7 @@ async function bootCommandHarness(
   return {
     harness,
     mounted,
+    context,
     registerContribution,
     imageSaves,
     fileSaves,
@@ -2650,6 +2653,92 @@ test('a name the host catalog resolves with an UNCLAIMED line never runs the col
   const steered = harness.host.steered[0] as { content: readonly { type: string; text?: string }[] }
   assert.deepEqual(steered.content.map(block => block.text), ['/compact extra'],
     'the MODEL receives the raw line')
+})
+
+test('§D3 immediate echo (review F11): an argued line of a host-resolved name echoes BEFORE the FIFO turn it waits behind', async (t) => {
+  // The submit-time echo gate must consume the SAME §D3 line authority as
+  // the delivery/attachment/dispatch gates: a HOST-RESOLVED name is never a
+  // TUI-local line — `/export foo` (execute-kind Host /export resolves the
+  // name; the catalog does not claim THIS argued line) is an ORDINARY
+  // submission, so its local echo installs SYNCHRONOUSLY, before the FIFO
+  // turn. Without the unified gate the line vanished until an earlier
+  // blocked submission released the turn (external round-4 finding).
+  const { harness, mounted, context } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    hostCommands: ['export'],
+  })
+  // Hold submission A's HOST-command execution open so the shared FIFO turn
+  // stays taken while `/export foo` is accepted.
+  let releaseSlow: (() => void) | undefined
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  const originalExecute = (harness.commands as {
+    execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+  }).execute.bind(harness.commands)
+  ;(harness.commands as { execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown> }).execute
+    = async (agent, line, attachments) => {
+      if (line.trim() === '/slowcmd') {
+        await slowGate
+        return { commandId: CommandId('cmd-slow'), result: { kind: 'success' } }
+      }
+      return originalExecute(agent, line, attachments)
+    }
+  ;(harness.commands as {
+    register(def: { name: string; handler: () => unknown }): () => void
+  }).register({ name: 'slowcmd', handler: () => ({ kind: 'success' }) })
+
+  // A: a host command still executing (it holds the FIFO turn).
+  mounted.app.setDraft('/slowcmd')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // B: an argued line of a host-resolved execute-kind name, accepted while
+  // A is still blocked.
+  mounted.app.setDraft('/export foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+
+  // BEFORE the FIFO turn: the local echo is already installed (the install
+  // is synchronous — this is the exact gap the finding describes).
+  const pending = mounted.app.pendingInputForTest()
+  assert.ok(pending.queued.some(row => row.local === true && String(row.text).includes('/export foo')),
+    `the argued host-resolved line must echo before the FIFO turn: ${JSON.stringify(pending.queued)}`)
+  assert.equal(harness.host.steered.length + harness.host.followedUp.length, 0,
+    'B must still be waiting behind A (nothing was delivered yet)')
+
+  // The exclusions keep their original semantics against the SAME live
+  // catalog: the bare CLAIMED token `/export` is a Host command (no local
+  // echo), and a TUI built-in (`/status`) stays excluded as before.
+  mounted.app.setDraft('/export')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  mounted.app.setDraft('/status')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  const after = mounted.app.pendingInputForTest()
+  assert.ok(!after.queued.some(row => row.local === true && String(row.text).includes('/export') && !String(row.text).includes('foo')),
+    'the claimed bare /export is a Host command, never an ordinary echo')
+  assert.ok(!after.queued.some(row => row.local === true && String(row.text).includes('/status')),
+    'a TUI built-in stays excluded from the ordinary-prompt echo')
+
+  // Release: B is an ordinary submission — it reaches the agent exactly
+  // once as the raw line, and the local echo retires with its authoritative
+  // occurrence (never duplicated).
+  releaseSlow?.()
+  assert.equal(await drainUntil(() =>
+    harness.host.followedUp.some(message => JSON.stringify(message).includes('/export foo')), 5_000), true,
+    'the ordinary line must reach the agent once A releases')
+  const bMessage = harness.host.followedUp.find(message => JSON.stringify(message).includes('/export foo'))
+  const bRequest = ((bMessage as { source?: { rpcId?: string } }).source ?? {}).rpcId
+  assert.ok(bRequest !== undefined, 'the delivered line carries its correlation identity')
+  // The durable occurrence retires the local echo (the Direct correlation
+  // contract — never a duplicated row).
+  context.emit('session/event', harness.session as never, event('user/message', {
+    id: MessageId('d3-echo-b-durable'),
+    role: 'user',
+    content: [{ type: 'text', text: '/export foo' }],
+    source: { kind: 'user', rpcId: bRequest as never },
+  }, 961) as never)
+  assert.equal(await drainUntil(() => {
+    const settled = mounted.app.pendingInputForTest()
+    return !settled.queued.some(row => row.local === true && String(row.text).includes('/export foo'))
+  }, 5_000), true,
+    'the local echo retired with its authoritative occurrence')
 })
 
 test('an unclaimed line of a host-resolved name keeps its attachment: ordinary multimodal submission', async (t) => {
