@@ -376,6 +376,10 @@ export class DirectSessionReader implements SessionReader {
         'agentPreset',
         'title',
         'goal',
+        // PR4 §6.1: the committed permission value on the SAME shared
+        // semantic (Direct reads the identical projection the Remote
+        // binding carries).
+        'permissions',
       ])?.values
       if (values === undefined) return undefined
       return detachedSessionStatus(sessionId, values, agent.session.header.cwd)

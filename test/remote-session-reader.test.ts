@@ -554,7 +554,11 @@ test('the live status projection list is EXACTLY what the status reads (no stati
   // key read here but missing there would render statically and never refresh.
   assert.deepEqual(
     [...CURRENT_STATUS_PROJECTION_KEYS].sort(),
-    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
+    // 'permissions' joined in M3-4 PR4 §6.1: the footer/status preset row is
+    // projection-authoritative, and a successful permission write is
+    // COMMITTED by the pushed projection — the live channel must carry it or
+    // the row would render statically after a cycle.
+    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
   )
   // Projections whose change the status does not consume stay OUT: their own
   // consumer establishes the subscription it needs.

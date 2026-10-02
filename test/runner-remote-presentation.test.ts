@@ -621,7 +621,7 @@ async function waitForApp(fixture: RemoteRunnerFixture): Promise<{
   throw new Error('the mounted TuiApp never exposed pendingInputForTest')
 }
 
-test('L6 §6.6: the Remote branch OMITS the Host-derived access section (no sandbox fact is painted)', async (t) => {
+test('L6 §6.6: the Remote branch OMITS the Host-derived access section when the permission projection carries no value (no sandbox fact is painted)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-access'
   const hostPreset = 'm3-4-pr2-preset'

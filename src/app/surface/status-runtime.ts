@@ -22,6 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/status-runtime
  */
 
+import { safeErrorMessage } from '../../error-boundary.ts'
 import { bundleVersion, dshVersion, versionDisplay } from '../../dsh-version.ts'
 import { gitBranch } from '../../git-branch.ts'
 import type { ModelSelectionValue } from '../../model-selection.ts'
@@ -113,6 +114,25 @@ export interface StatusRuntimeDeps {
   readonly viewer: { readonly read: () => { readonly cwd: string; readonly stats: StatsFolder } | undefined }
   /** The resolved CLIENT working directory (a composition prerequisite). */
   readonly clientCwd: string
+  /**
+   * The permission-cycle authority (M3-4 PR4 §6.2/§6.3): the current value
+   * is the SESSION STATUS PROJECTION's permission field (projection-
+   * authoritative); the options come from the ConfigPort preset catalog;
+   * the write goes through ConfigPort.permissions.applyPermissionPreset.
+   * Absent = the cycle capability is unavailable on this composition.
+   */
+  readonly permissionCycle?: {
+    /** The captured live scope (the ownership fence for the write). */
+    captureLiveScope(): import('../session/scope.ts').LiveSessionScope | undefined
+    isScopeCurrent(scope: import('../session/scope.ts').LiveSessionScope): boolean
+    /** The projection-authoritative current permission of the CURRENT
+     *  session (absent = unavailable — never guessed). */
+    currentPermission(): string | undefined
+    /** The advertised preset names, in cycle order. */
+    presetNames(): readonly string[]
+    /** The semantic write (ConfigPort → the official Host command path). */
+    apply(sessionId: string, presetId: string, signal?: AbortSignal): Promise<{ readonly kind: 'applied' } | { readonly kind: 'unavailable'; readonly cause: 'commands' | 'permission' }>
+  }
 }
 
 /** The status owner as the rest of the application consumes it. */
@@ -125,9 +145,17 @@ export interface StatusRuntime {
   refreshTerminalTitle(): void
   /** The cheap footer/status refresh (never measures context). */
   refresh(): void
-  /** Cycle the live session's permission preset (Shift+Tab / the semantic
-   *  `cycle-permission` action) and refresh the footer. A no-op without a live
-   *  agent or a composed preset table. */
+  /**
+   * Cycle the live session's permission preset (Shift+Tab / the semantic
+   *  `cycle-permission` action). M3-4 PR4 §6.3: an OWNED async operation —
+   *  capture the scope, read the projection-authoritative current value,
+   *  read the ConfigPort catalog, compute next, write through
+   *  ConfigPort.permissions.applyPermissionPreset; after the await a stale
+   *  owner repaints NOTHING for the replacement session, an unavailable
+   *  outcome surfaces truthfully, and an applied outcome does NOT install
+   *  the next value locally (the pushed `permissions` projection repaints
+   *  the footer). No automatic retry after an ambiguous outcome.
+   */
   cyclePermission(): void
   /** Mark the cached context measurement dirty (model-visible events only). */
   markContextDirty(): void
@@ -450,8 +478,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // (e.g. `sandboxPolicy.resolve(undefined)` answers without a session).
     // The projection-driven Remote replacement (`permissions.currentValue` +
     // the preset catalog) is the command/action PR's ownership.
-    const access = displaySubject === undefined && deps.remote === undefined
-      ? deriveAccessStatus(
+    // PR4 §6.4: the Remote branch renders the permission preset FROM THE
+    // PROJECTION ONLY and omits the approval override + the sandbox mode
+    // (no public rc.2 carrier — §6.6's truthful-unavailable rows). Direct
+    // keeps the in-process service derivation.
+    let access: ReturnType<typeof deriveAccessStatus> | {}
+    if (displaySubject !== undefined) {
+      access = {}
+    } else if (deps.remote === undefined) {
+      access = deriveAccessStatus(
           {
             permissionPresets: permission,
             sandboxPolicy: deps.host().sandboxPolicy,
@@ -459,7 +494,19 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           },
           deps.liveAgent()?.session,
         )
-      : {}
+    } else {
+      // §6.4: the preset row comes from the projection ONLY. When the
+      // projection cannot answer — the session status itself is unavailable,
+      // or the permissions projection has not carried a value yet (a
+      // binding-baseline window) — the section KEEPS its last value instead
+      // of flapping to empty: an unavailable projection is not "no
+      // permission" (§6.6's truthful-unavailable rule, applied to the row).
+      const status = remoteStatus()
+      const currentPreset = status?.permission
+      access = currentPreset === undefined
+        ? (current.access ?? {}) as typeof access
+        : { permissionPreset: { id: currentPreset, label: currentPreset, matched: true } }
+    }
     const collaboration = displaySubject === undefined
       ? {
           plan: deps.remote !== undefined && deps.liveAgent() === undefined
@@ -492,7 +539,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const host = deriveHostStatus()
     const patch: {
       composition?: typeof composition
-      access?: typeof access
+      access?: ReturnType<typeof deriveAccessStatus> | {}
       collaboration?: typeof collaboration
       workspace?: typeof workspace
       usage?: typeof usage
@@ -545,6 +592,50 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * the dim info style) and an immediate footer refresh.
    */
   const cyclePermission = (): void => {
+    // §6.3: the cycle is an owned async operation over the PR4 authority
+    // bundle when the composition provides it; the Direct-only legacy path
+    // (the in-process service pair) remains for compositions without the
+    // bundle (never on the Remote branch, whose ConfigPort is the only
+    // write carrier).
+    if (deps.permissionCycle !== undefined) {
+      const authority = deps.permissionCycle
+      // SYNC admission: the scope must be current BEFORE any read/write.
+      const scope = authority.captureLiveScope()
+      if (scope === undefined) return
+      const names = authority.presetNames()
+      if (names.length === 0) return
+      const current = authority.currentPermission()
+      const index = current === undefined ? -1 : names.indexOf(current)
+      const next = names[(index + 1) % names.length] ?? names[0]
+      if (next === undefined || next === current) return
+      void authority.apply(scope.sessionId, next).then(outcome => {
+        if (deps.isCleanedUp()) return
+        // A stale owner repaints NOTHING for the replacement session
+        // (§15.6): the write may have committed on the OLD session.
+        if (!authority.isScopeCurrent(scope)) return
+        if (outcome.kind === 'unavailable') {
+          deps.surface.app.notify(outcome.cause === 'commands'
+            ? 'permission switch unavailable (commands service)'
+            : 'permission switch unavailable (presets not composed)', 'error')
+          return
+        }
+        // APPLIED: do NOT install next as committed locally — the pushed
+        // permissions projection repaints the footer (§D7). The notice is
+        // the gesture's own feedback, never a committed-value claim.
+        deps.surface.app.notify(next === 'danger-full-access'
+          ? `⚠ ${next} — no approvals`
+          : `permission: ${next}`,
+        next === 'danger-full-access' ? 'error' : 'info')
+      }, error => {
+        if (deps.isCleanedUp()) return
+        if (!authority.isScopeCurrent(scope)) return
+        // A rejected apply is reported truthfully; never retried
+        // automatically (§6.3 — an ambiguous dispatch must not duplicate).
+        deps.surface.app.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
+      })
+      return
+    }
+    // Direct-only legacy path (no PR4 bundle on this composition).
     const agent = deps.liveAgent()
     if (agent === undefined) return
     const permission = deps.host().permissionPresets

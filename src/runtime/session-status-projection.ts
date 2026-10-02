@@ -25,6 +25,7 @@ export function detachedSessionStatus(
     model?: SessionStatusProjection['model']
     preset?: string
     title?: string
+    permission?: string
     goal?: SessionStatusProjection['goal']
     context?: SessionStatusProjection['context']
     todos?: SessionStatusProjection['todos']
@@ -37,6 +38,14 @@ export function detachedSessionStatus(
   // The official `title` projection: a non-empty string; its LEGAL null ("no
   // title yet") and an absent value both read absent (never "").
   if (typeof values.title === 'string' && values.title !== '') record.title = values.title
+  // The official `permissions` projection VIEW: `{ currentValue }`. Only a
+  // well-formed non-empty string crosses (§6.1 — projection-authoritative,
+  // never guessed).
+  const permissionValue = values.permissions
+  if (typeof permissionValue === 'object' && permissionValue !== null) {
+    const current = (permissionValue as { readonly currentValue?: unknown }).currentValue
+    if (typeof current === 'string' && current !== '') record.permission = current
+  }
   // The official `goal` projection VIEW: `{goal:{objective,phase}} | null`. The
   // LEGAL null ("no goal") is preserved; an absent/foreign value reads absent
   // (unavailable), never `null` — the two dispositions differ.

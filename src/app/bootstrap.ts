@@ -378,7 +378,16 @@ export function applyRunnerWithRuntime(
     // race the DSH agent-loop owner disposer.
     const ownership = createSessionOwnershipCore({
       isSurfaceDisposed: () => cleanedUp,
-      resetForGeneration: () => presentation.resetForGeneration(),
+      resetForGeneration: () => {
+        presentation.resetForGeneration()
+        // M3-4 PR4 §6.4: a session-generation bump RETIRES the old
+        // subject's status sections (the session-lifecycle owner's
+        // explicit reset — the ONLY writer that may clear them). The new
+        // owner's projections re-derive access/composition/collaboration
+        // from their own authorities, so the old permission preset can
+        // never survive an identity change.
+        surface.resetSubjectStatus()
+      },
     })
     // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
     // capture of `{ owner subject, generation, sessionId }`, so no consumer can
@@ -1585,6 +1594,22 @@ export function applyRunnerWithRuntime(
       surface,
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
+      // PR4 §6.2/§6.3: the permission-cycle authority — the projection's
+      // committed value, the ConfigPort catalog, and the ConfigPort write.
+      // Provided on BOTH branches (the semantic is shared); a composition
+      // without a live preset catalog degrades to a no-op cycle.
+      permissionCycle: {
+        captureLiveScope: () => sessionScope.captureLive(),
+        isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        currentPermission: () => {
+          const sessionId = ownership.currentSessionId()
+          if (sessionId === undefined) return undefined
+          return backend.sessionReader.sessionStatus(sessionId)?.permission
+        },
+        presetNames: () => [...backend.config.permissions.presetNames()],
+        apply: (sessionId, presetId, signal) =>
+          backend.config.permissions.applyPermissionPreset(sessionId, presetId, signal),
+      },
       generation: () => ownership.generation(),
       currentSessionId: () => ownership.currentSessionId(),
       measureContext: (sessionId) => backend.sessionReader.measureContext(sessionId),

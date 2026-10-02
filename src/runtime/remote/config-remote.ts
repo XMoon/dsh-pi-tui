@@ -287,7 +287,14 @@ function piAiProvidersOf(section: unknown): Record<string, { apiKeyEnv?: string 
 interface RemoteConfigSnapshot {
   readonly generation: RemoteConnectionGeneration
   readonly invalidation: number
-  readonly namespaces: ReadonlyMap<string, RemoteSettingsNamespaceView>
+  /** The committed SETTINGS namespaces, or undefined when the settings slice
+   *  has NEVER produced an authoritative read (an absent/failing settings
+   *  service). The aux domains below commit independently, so one missing
+   *  service cannot zero the whole config surface (M3-4 PR4 §6.2). */
+  readonly namespaces: ReadonlyMap<string, RemoteSettingsNamespaceView> | undefined
+  /** This snapshot's settings-slice failure, or undefined when current. A
+   *  failure keeps the LAST-KNOWN namespaces readable but non-current. */
+  readonly settingsFailure: unknown
   readonly providers: readonly ProviderCatalogEntry[] | undefined
   readonly permissionPresetNames: readonly string[]
   readonly permissionDefaultPreset: string | undefined
@@ -428,10 +435,18 @@ class RemoteConfigMirror {
     // present its own built-in defaults as "last known Host values" (§9.1);
     // for the config consumer the truthful state is "nothing to show".
     if (snapshot === undefined) return 'unavailable'
+    // The settings slice never produced an authoritative read (an absent or
+    // always-failing settings service): there are no settings values to show,
+    // so reporting `stale` would let a consumer present its own built-in
+    // defaults as "last known Host values" (§9.1).
+    if (snapshot.namespaces === undefined) return 'unavailable'
     // A generation change or an invalidation both make the last commit
     // non-current; the last-known value stays readable but not authoritative.
     if (!Object.is(snapshot.generation, generation)) return 'stale'
     if (snapshot.invalidation !== this.invalidation) return 'stale'
+    // M3-4 PR4 §6.2: this snapshot's settings slice failed — last-known
+    // settings values remain readable, never authoritative.
+    if (snapshot.settingsFailure !== undefined) return 'stale'
     return 'ready'
   }
 
@@ -442,7 +457,7 @@ class RemoteConfigMirror {
 
   /** One namespace's descriptor from the last-known snapshot. */
   namespace(ns: string): RemoteSettingsNamespaceView | undefined {
-    return this.snapshot?.namespaces.get(ns)
+    return this.snapshot?.namespaces?.get(ns)
   }
 
   providers(): readonly ProviderCatalogEntry[] | undefined {
@@ -533,26 +548,41 @@ class RemoteConfigMirror {
       // read's result non-authoritative; it must never commit — re-read.
       if (this.disposed) return
       if (!Object.is(generation, this.generation.getSnapshot()) || invalidation !== this.invalidation) continue
-      if (!settingsResult.ok) {
-        throw new Error(`settings.describe failed: ${remoteFailureMessage(settingsResult.error)}`)
-      }
-      if (!Array.isArray(settingsResult.value.namespaces)) {
-        throw new Error('settings.describe returned an unusable namespace list')
-      }
-      const namespaces = new Map<string, RemoteSettingsNamespaceView>()
-      for (const view of settingsResult.value.namespaces) {
-        if (typeof view?.ns !== 'string') continue
-        namespaces.set(view.ns, {
-          ns: view.ns,
-          ...view.value === undefined ? {} : { value: detachedValue(view.value) },
-          ...view.user === undefined ? {} : { user: detachedValue(view.user) },
-          ...view.revision === undefined ? {} : { revision: view.revision },
-        })
+      // M3-4 PR4 §6.2 (provider isolation): the settings slice and the aux
+      // domains commit INDEPENDENTLY. A failed/absent settings read keeps the
+      // last-known namespaces (marked non-current) and still commits the
+      // permission catalog / provider directory / preset roster — one absent
+      // service must not zero the whole config surface (the permission cycle
+      // reads that catalog). The settings failure is still REPORTED below, so
+      // callers keep the §9.1 contract: a write refuses with the real reason.
+      const settingsUsable = settingsResult.ok && Array.isArray(settingsResult.value.namespaces)
+      const settingsFailure = settingsUsable
+        ? undefined
+        : settingsResult.ok
+          ? new Error('settings.describe returned an unusable namespace list')
+          : new Error(`settings.describe failed: ${remoteFailureMessage(settingsResult.error)}`)
+      let namespaces: ReadonlyMap<string, RemoteSettingsNamespaceView> | undefined
+      if (settingsResult.ok && Array.isArray(settingsResult.value.namespaces)) {
+        const committed = new Map<string, RemoteSettingsNamespaceView>()
+        for (const view of settingsResult.value.namespaces) {
+          if (typeof view?.ns !== 'string') continue
+          committed.set(view.ns, {
+            ns: view.ns,
+            ...view.value === undefined ? {} : { value: detachedValue(view.value) },
+            ...view.user === undefined ? {} : { user: detachedValue(view.user) },
+            ...view.revision === undefined ? {} : { revision: view.revision },
+          })
+        }
+        namespaces = committed
+      } else {
+        // §9.1: the last-known values stay readable but never "current".
+        namespaces = this.snapshot?.namespaces
       }
       this.snapshot = {
         generation,
         invalidation,
         namespaces,
+        settingsFailure,
         providers: providersResult.ok && Array.isArray(providersResult.value)
           ? providersResult.value.map(copyProviderEntry)
           : undefined,
@@ -566,6 +596,10 @@ class RemoteConfigMirror {
           ? presetsResult.value.presets.find(preset => preset.isDefault === true)?.id
           : undefined,
       }
+      // Report AFTER the commit: the aux domains are already authoritative
+      // for their own consumers, while a settings caller still sees the
+      // failure (the §9.1 write refusal keeps the real reason).
+      if (settingsFailure !== undefined) throw settingsFailure
       return
     }
     throw new SupersededReadError('the settings mirror describe was repeatedly superseded by invalidation')
@@ -590,6 +624,11 @@ class RemoteConfigMirror {
         // fails IMMEDIATELY with an explicit reason — never a silent no-op and
         // never an optimistic local success (the pre-flight refresh above
         // already had its chance).
+        // §6.2: a degraded SETTINGS slice names the real settings failure
+        // (this write IS a settings write).
+        if (snapshot?.settingsFailure instanceof Error) {
+          throw new Error(`settings.describe failed: ${snapshot.settingsFailure.message}`)
+        }
         throw new Error(this.generation.getSnapshot() === undefined
           ? 'the Remote configuration is unavailable on this connection; the change was not saved'
           : snapshot === undefined
@@ -600,7 +639,11 @@ class RemoteConfigMirror {
       // returning earlier would let a stale mirror report success for a
       // document it computed from superseded values (§8.1/§9.1).
       if (ops.length === 0) return
-      const descriptor = snapshot.namespaces.get(ns)
+      // A current mirror always carries committed settings namespaces (a
+      // missing slice reads `unavailable`, which the fence above refused):
+      // an absent namespace here is a real deployment fact, not a degraded
+      // read.
+      const descriptor = snapshot.namespaces?.get(ns)
       if (descriptor === undefined) {
         throw new Error(`settings namespace "${ns}" is not available in this deployment`)
       }

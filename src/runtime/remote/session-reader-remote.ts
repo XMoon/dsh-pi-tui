@@ -157,6 +157,11 @@ const STATUS_PROJECTION_KEYS = [
   'agentPreset',
   'title',
   'goal',
+  // M3-4 PR4 §6.1: the committed permission value rides the SAME live
+  // channel — a successful permission write is committed by the pushed
+  // projection (the footer's preset row repaints from it, never an
+  // optimistic local install).
+  'permissions',
 ] as const
 
 /** The projection keys the Remote STATUS/WELCOME current facts are read from:
