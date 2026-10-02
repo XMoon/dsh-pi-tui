@@ -117,9 +117,6 @@
   "sessions.ts": [
     "import:dsh-session"
   ],
-  "skill-catalog-refresh.ts": [
-    "import:dsh-agent"
-  ],
   "skill-catalog.ts": [
     "agentPresets",
     "skills"

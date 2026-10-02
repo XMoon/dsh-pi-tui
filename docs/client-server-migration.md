@@ -3144,34 +3144,33 @@ contract is now explicit:
 
 ### In-stage known boundaries (active M3-4 findings — NOT promoted to Debt)
 
-- **Host command-name collisions (e.g. `/export`)**: the Remote Host
-  composition mounts `session-log-export`, which registers a Host `/export`
-  alongside the TUI built-in. Registration is PER-NAME isolated, and the
-  isolation is NARROW BY CONSTRUCTION (M3-4 PR2): ONLY the official
-  registry's duplicate-name refusal (`command "<name>" is already registered`)
-  is tolerated, so the colliding name fails loudly with its exact name in the
-  user notice and the diagnostics while later registrations install. Every
-  other throw from the registry — an invalid name/description/handler/input,
-  or a Cordis lifecycle failure — still fails fast (exactly as before), so a
-  programming error can never degrade into a silently partial command
-  surface. The command-plane split (Client-local registry vs
-  `HostCommandPort`, plan §9.3) is the M3-4 command PR's ownership; M3-4
-  closure must prove Remote session export works.
-- **Lifetime turn/step counters on Remote**: the token/cache counters and the
-  route context capacity come from the official `tokenUsage`/context
-  projections (a bounded window cannot count a session's lifetime), while the
-  RECENT-window performance metrics (TTFB / tok/s) and the turn/step counters
-  still come from the bounded window's fold, because they are window-scoped
-  facts. The
-  lifetime `sessionStats` projection and its UI row are the command PR's
-  ownership (plan §9.4).
+- **Host command-name collisions (e.g. `/export`)** — CLOSED by M3-4 PR4
+  (see the PR4 section). The TUI no longer registers its definitions into the
+  Host registry on the Remote branch (they live in the Client registry), so a
+  Host-owned name such as `session-log-export`'s `/export` can no longer
+  collide with a TUI built-in: the Host descriptor keeps the claim, the TUI
+  built-ins execute Client-side, and a same-named Client CONTRIBUTION is
+  refused in favour of the Host claim (`runner-remote-command-plane` L6). The
+  PR2 per-name registration isolation stays for the Direct branch, where the
+  compatibility registration into the Host registry may still meet a
+  Host-owned name.
+- **Lifetime turn/step counters on Remote** — CLOSED by M3-4 PR4 (plan
+  §3.3/§12.4): the lifetime `turns/steps/llmMs` now come from the official
+  `sessionStats` projection, the token/cache totals from `tokenUsage` and the
+  route context capacity from the context projections, while the RECENT TTFT /
+  tok-s figures stay derived from the exact binding's bounded window through
+  the SHARED fold (paging `loadOlder` only while the recent-sample window may
+  be incomplete). See `app/remote/session-facts-compose.ts`.
 - **Per-subject history paging latch**: one Remote `loadOlder` extension is
   in flight per SUBJECT, not per runner — a page still loading for the
   previous session cannot swallow the new session's first boundary gesture.
-- **`refreshLiveCatalog` on Remote owners stays a no-op**: catalog-refresh
-  currentness over the binding generation is the command PR's ownership; the
-  startup prefetch snapshot remains the catalog until then (PR4-owned
-  unavailable behavior, not a completed Remote catalog).
+- **`refreshLiveCatalog` on Remote owners** — CLOSED by M3-4 PR4 (plan
+  §2.2): the Remote branch refreshes through the command source (generation-
+  fenced `commands/list` + `skills/list` metadata, composed per provider), and
+  a RESUMED Remote session installs its Host catalog at startup (there is no
+  Direct agent to prefetch). The DISPLAY list may carry Client entries, while
+  the CLAIM set is the union of the Host-authoritative catalog and the
+  surface's own registrations.
 - **Launch-preset on Remote**: the requested preset is ALWAYS forwarded to
   the official `session.create({agentPreset})` — the Host is the single
   authority (an unknown/broken preset is refused at create time). The roster
@@ -3347,7 +3346,133 @@ matrix, the docs lane, and the updated deprecated-reader allowance (the
 Remote `currentWorkingFromLog` folds the official window; the Direct
 allowance text tracks the branch-guarded line) are all green.
 
-## M3-4 status (IN PROGRESS — PR1 landed)
+## M3-4 PR4 — Command / Action / Rewind / Tool / Permission (COMPLETE)
+
+Plan: `temp/m3/dsh-pi-tui-m3-4-pr4-command-action-rewind-tool-permission-plan-v1-20261002.md`.
+Direct remains the production default; the Remote path is reachable only
+through the internal selection seam, and PR4 makes the main
+slash-command/action plane run over the selected Remote main Session.
+
+### What landed
+
+- **Client command execution plane (§1/§D2–§D4)**:
+  `app/command/client-command-registry.ts` is the Client-owned execution
+  registry. Every TUI definition registers there FIRST; on Direct the same
+  definition additionally registers into the Host registry (the compatibility
+  adapter that keeps the in-process dispatch surface unchanged), on Remote it
+  does not. The submission controller classifies the route explicitly: a REAL
+  Direct Agent (the `inbox`-bearing in-process object) keeps the in-process
+  executor; the Remote structural projection executes through the Client
+  registry, so `ctx.commands.execute(projectedAgent)` is unreachable.
+  `runLocalCommand` prefers the extension bridge, then the Client registry,
+  then (Direct only) the Host handler fallback. Remote skill wrappers are
+  literal gestures: no Client body load exists, the original `/name args` line
+  travels verbatim, and the Host `dsh-tool-skill` pre-step owns definition
+  resolution, the user-invocability re-check and body injection.
+- **Remote command authority (§2/§D1)**: `app/remote/command-source.ts`
+  (metadata-only authority reader over the ONE shared Connection generation,
+  never moved into the Backend) plus a commands-only, generation-fenced
+  `readCommands`. The catalog coordinator's target is branch-opaque; the
+  Remote branch composes the command provider and the skill capability
+  INDEPENDENTLY (per-provider issues + last-good merge), so an absent skill
+  registry cannot zero the Host command catalog. A RESUMED Remote session
+  installs its Host catalog at startup through the command source. The claim
+  set is the UNION of the Host-authoritative catalog and this surface's own
+  registrations — a Client-only completion re-synthesis can never erase a Host
+  claim that a same-named contribution would then shadow (§D3).
+- **Runtime facts (§3/§D5/§12.4)**: `currentSessionStats` /
+  `lastAssistantText` are owned ASYNC operations (the Direct seams stay
+  synchronous internally behind the shared async contract). The Remote branch
+  composes lifetime `turns/steps/llmMs` from the official `sessionStats`
+  projection, token/cache totals from `tokenUsage` and the context capacity
+  from the context projections; the recent TTFT / tok-s figures come from the
+  exact binding's bounded window via the SHARED fold, paging `loadOlder` only
+  while the recent-sample window may be missing the latest steps.
+  `lastAssistantText` scans newest-first and pages until the newest durable
+  assistant message is inside the window. Every await re-checks the §6.5
+  transport identity; a superseded operation settles `undefined` and never
+  retargets a replacement binding.
+- **Rewind (§4/§D6/§18.4)**: the shared picker owner reads
+  `SessionReader.turnOutline` on BOTH branches and excludes the first outline
+  entry (no predecessor boundary to fork at). Selection captures identity →
+  `loadThrough(seq)` through the OFFICIAL jump loop → transport re-check →
+  the exact material is derived from the loaded durable events (the full
+  editor text — never the outline's bounded preview — the non-text marker and
+  the predecessor `turn/end`) → the existing `SessionRuntime.forkSession`
+  dispatch. The Direct-only compatibility fold lives INSIDE
+  `DirectSessionReader.turnOutline`: a present projection wins, an
+  authoritative `[]` stays empty (never the fold), and a throwing read stays
+  unknown; the Remote adapter is projection-only.
+- **Tool cards (§5/§D8)**: `tool-presentation-client.ts` derives diff and
+  terminal cards from the raw call arguments and returns `undefined` for
+  everything else, so the EXISTING Client derivations (read envelopes, result
+  text lines, compact summaries, static fallbacks) stay authoritative; the
+  settled-result half is deliberately undefined-returning. Bootstrap mounts it
+  on the Remote branch while Direct keeps the Host presenter compatibility: no
+  `ctx.tools.get`, no `presentCall`/`presentResult` and no callback crosses
+  the wire on the Remote path.
+- **Permission (§6/§D7)**: the status projection gained the official
+  `permissions.currentValue` fact (both readers' consistent cut), and the
+  Remote live channel carries the key so a committed write repaints from the
+  PUSHED projection. `cyclePermission` is an owned async operation over a PR4
+  authority bundle (projection current → ConfigPort catalog → ConfigPort
+  `applyPermissionPreset`): a stale owner after the await notifies/repaints
+  NOTHING for the replacement session, an unavailable outcome is truthful, a
+  rejection is never retried, and an applied cycle installs NOTHING locally.
+  The Remote access section renders the preset from the projection only and
+  keeps omitting the approval/sandbox facts (§6.6). `RemoteConfigPort`
+  isolates its providers: a failed/absent settings read keeps the last-known
+  namespaces (non-current) while the permission catalog, provider directory
+  and preset roster still commit; `describe()` still REPORTS the settings
+  failure (the §9.1 write refusal keeps the real reason) and readiness answers
+  `unavailable` (never read) / `stale` (failed or superseded) / `ready`.
+- **Status ownership**: the legacy `setStatus` writer is a PARTIAL
+  compatibility writer for `access` — it owns `permissionPreset` ONLY while a
+  legacy Direct value exists and never writes (therefore never clears) a
+  projection-owned fact. Clearing a retired subject's sections is the session
+  lifecycle owner's explicit reset (`surface.resetSubjectStatus`, wired into
+  the generation-bump hook), so a session switch cannot leak the old preset
+  into the new subject while its projection is pending.
+
+### Evidence
+
+- L1/L2/L3 owners and adapters: `client-command-registry`,
+  `tool-presentation-client`, `rewind-outline-authority`,
+  `permission-cycle`, `status-ownership`, `remote-command-source`,
+  `remote-session-facts-compose`, and the
+  `remote-session-reader` projection-list parity lock.
+- L6 Remote composition (the REAL runner over the real rc.2 Host + the
+  official Client/Gateway path): `runner-remote-command-plane` (TUI built-in
+  and extension callbacks with ZERO Host `command/run` rows, a Host command
+  executing EXACTLY once, the Host claim winning a collision, a sessionless
+  built-in creating no Session, and `/copy` reaching an out-of-window message
+  asserted on the decoded OSC 52 payload), `runner-remote-rewind`
+  (out-of-window turn via `turnOutline` → `loadThrough` → exact fork + full
+  editor text), `runner-remote-permission` (projection current → cycle →
+  pushed projection repaint), `runner-remote-presentation` (a known edit card
+  AND an unknown tool's bounded generic fallback, both from raw durable facts).
+- Machine-checkable guards: `test/m3-4-pr4-guards.test.ts` (§18.1–§18.4 plus
+  the structural §7.5 negative locks) and `scripts/client-boundary-gate.mjs`
+  (green at 28 files: the `skill-catalog-refresh.ts` `import:dsh-agent`
+  baseline entry was REMOVED by the §2.3 branch-opaque target relocation).
+
+### Boundaries (intentional, still open)
+
+- **Remote sessionless STANDING skill refresh stays unavailable** (no
+  sessionless wire catalog exists): the coordinator reports
+  `{kind: 'failed', error}` truthfully and keeps the last-good skill field; no
+  hidden Session and no Client filesystem scan were invented.
+- **Remote skill catalog hot invalidation stays unsupported** (rc.2 publishes
+  no forwarded `skills/change`): freshness is re-read at binding/session
+  entry, explicit `/reload` and `connection/reset` (§Skill catalog
+  invalidation under rc.2, above).
+- **The agent-preset (`--preset` / `/preset`) RESUME write remains skipped on
+  Remote**: PR4 covers PERMISSION presets only; the agent-preset write path is
+  not part of this PR and stays owned by the preset lifecycle work.
+- **Remote `!` / `!!` remain fail-closed** (M3-4 PR3 shell authority
+  amendment, unchanged by PR4).
+
+## M3-4 status (IN PROGRESS — PR1–PR4 landed)
 
 M3-4 composes the main TUI application over the Remote Backend. The stage is
 a PR train; each PR closes its own slice with closure evidence.
