@@ -3726,23 +3726,32 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   fences are therefore qualified at the unit layer (the command-runtime
   scope-fence suite; the settlement stale/current pair) plus the mounted
   pre-dispatch stale-capture L6 (PR3 §12, Connection-generation driven) and
-  the mounted teardown quiescence below. The SAME FIFO constraint applies
-  to the picker fences (a `/preset` roster read or a `/model` directory
-  read pending across a session switch): those reads live inside their
-  command handlers, which hold the submit turn, so no later submit can
-  interleave — their subject fences stay qualified by the existing Direct
-  unit suites (`preset-command`: the S1→S2 subject fence and the
-  roster-drift never-opens case; `model-picker`/`commands.ts` fence tests)
-  over the shared `commands.ts` code path.
+  the mounted teardown quiescence below. The SAME narrow FIFO constraint
+  applies to a `/preset` roster read pending across a switch (that await
+  lives INSIDE its command handler, which holds the submit turn); its
+  subject fence stays qualified by the existing Direct unit suites
+  (`preset-command`: the S1→S2 subject fence and the roster-drift
+  never-opens case) over the shared `commands.ts` path. The `/model`
+  directory read is NOT FIFO-bound (a detached owned workflow — the handler
+  returns immediately), and its pending-across-replacement race IS
+  mounted-qualified (`runner-remote-model-preset`: the parked official
+  directory read never paints the old subject current onto the replacement
+  surface).
 - **Selected-runtime teardown proof** (plan §3.9): with a pending main-path
-  READ (a parked `/status` stats read) and, separately, a pending WRITE (a
-  parked serializer) across the teardown, the runner fiber disposal settles
-  the pending work inside the retirement drain, disposes the selected
-  transport EXACTLY ONCE after the retirement, and no durable row lands and
-  no repaint happens after the disposal (`runner-remote-races` §3.9a/§3.9b
-  L6). The pending read and write cannot be parked SIMULTANEOUSLY in one
-  mounted runner — the second submission queues behind the first's FIFO
-  turn — so the two pending classes are proven as separate mounted cases.
+  READ (a parked `/status` stats read, released only after the teardown's
+  surface disposal has run — inside the retirement drain window) and,
+  separately, a pending WRITE (a parked serializer, same window), the
+  runner fiber disposal settles the pending work invisibly: the transport
+  disposer runs EXACTLY ONCE, AFTER the retirement drain, the released
+  pending read produces ZERO terminal writes on the disposed surface, and
+  no durable row lands after the disposal (`runner-remote-races`
+  §3.9a/§3.9b L6). The pending read and write cannot be parked
+  SIMULTANEOUSLY in one mounted runner — the second submission queues
+  behind the first's FIFO turn — so the two pending classes are proven as
+  separate mounted cases. The surface→retirement→transport ORDER itself is
+  additionally owned by the PR1 disposer-ordering evidence (adapters before
+  Client before Host; retirement settled before the awaited transport
+  disposal) accepted in PR1.
 - **PR4 Client self-claim regression closure** (the PR5 command-routing
   supplement, `temp/m3/pr5-command-fix.md`): the submission gates no longer
   derive Host-NAME authority from the effective line claim (whose union
@@ -3809,9 +3818,10 @@ row, with its disposition:
 | Remote known tool card live + replay | DONE_WITH_EVIDENCE | PR4 L6 §7.4-10/11 (live + durable replay) |
 | Remote unknown tool generic fallback | DONE_WITH_EVIDENCE | PR4 L6 (bounded generic fallback renders name + raw args) |
 | Remote permission preset cycle | DONE_WITH_EVIDENCE | PR4 L6 (projection-authoritative cycle) |
-| Remote local shell bypass | DONE_WITH_EVIDENCE | PR3 L6 (bypass `!` positive; the frozen carrier gap is the fail-closed row below) |
+| Remote local shell bypass | SUPERSEDED_BY_FAIL_CLOSED_POLICY | the original positive was retired by the Host-user-shell authority decision: Remote `!`/`!!` fail closed with zero spawn/zero write (`runner-remote-submission` §37 CARRIER_GAP L6); no Remote positive exists or is claimed |
 | Remote image prompt | DONE_WITH_EVIDENCE | PR3 L6 §37 (staged bytes → PromptContentPart → durable attachment) |
-| Remote durable image read/resend | DONE_WITH_EVIDENCE | PR3 L6 (official readAttachment byte equality; resend via durable blocks) |
+| Remote durable image read | DONE_WITH_EVIDENCE | PR3 L6 (`runner-remote-submission` §37: staged bytes → durable attachment → official readAttachment byte equality) |
+| Remote durable image resend (a second submission citing a recalled durable image) | PARTIAL — unit-only evidence, mounted gap escalated | `remote-prompt-serializer` unit: a recalled durable image serializes its AUTHORIZED bytes through the official attachment read (never cites the Host-private ref); a mounted second-submission resend L6 was not produced in M3-4 and is escalated to the plan owner with this matrix |
 | Remote Session export through the selected backend | DONE_WITH_EVIDENCE | PR4 L6 (Host `/export` claim + SessionArchivePort authority) |
 
 Original M3-4 overall plan §14 (required negative / fail-closed evidence) —
@@ -3833,6 +3843,11 @@ every row:
 | Permission cycle → never Host permissionPresets.set | DONE_WITH_EVIDENCE | §18.3 guard + `permission-cycle` negative lock |
 | Turn-end Remote path → never Host sessions.flush | DONE_WITH_EVIDENCE | PR3 turn-end settlement (official flush contract; no TUI-side sessions.flush anywhere in `runtime/remote`) |
 
-M3-4 = DONE. The next stage is M3-5 (secondary surfaces), not another
-generic M3-4 PR: no automatic "PR6" is created for historical unchecked
-checklist items.
+M3-4 closure state: every §13/§14 row above carries its disposition; the
+two rows marked PARTIAL/SUPERSEDED_BY_FAIL_CLOSED_POLICY record precisely
+what is evidenced and what is not. The durable-image-resend mounted gap and
+the reviewer-narrowed FIFO-bound mounted scenarios (see the qualification
+note) are escalated to the plan owner for an explicit acceptance decision
+before the stage line flips to DONE. The next stage remains M3-5
+(secondary surfaces); no automatic "PR6" is created for historical
+unchecked checklist items.

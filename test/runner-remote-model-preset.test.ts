@@ -37,7 +37,8 @@ interface HostFixture {
 
 interface RunnerFixture {
   readonly host: HostFixture
-  readonly vt: { getViewport(): string[] }
+  readonly aggregate: { wire: { client: unknown } }
+  readonly vt: { getViewport(): string[]; sendInput(data: string): void }
   runnerApp(): unknown
   readonly override: {
     readonly presentation: {
@@ -269,12 +270,10 @@ test('L6 PR5 §3.3: an official selectModel write owns the REOPENED picker curre
   const hostPreset = 'm3-4-pr2-preset'
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
   await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
-  const append = sessionAppender(seedHost.ctx, mainId)
-  seedCompletedTurn(append, 1, 'reopen probe', 'reopen answer')
-  append('model/selection', { provider: 'smoke', model: 'smoke' })
+  seedCompletedTurn(sessionAppender(seedHost.ctx, mainId), 1, 'reopen probe', 'reopen answer')
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost }) as unknown as RunnerFixture
-  await waitFor('session facts retained', () =>
-    fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.model !== undefined, 15_000)
+  await waitFor('the retained session is served', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainId) !== undefined, 15_000)
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   const rows = (): { alt?: string; smoke?: string } => {
     const lines = fixture.vt.getViewport().join('\n').split('\n').map(strip)
@@ -289,20 +288,29 @@ test('L6 PR5 §3.3: an official selectModel write owns the REOPENED picker curre
   }
   await openPicker()
   assert.ok(rows().smoke !== undefined && /current/.test(rows().smoke!),
-    'the first open marks the projection value (smoke) current')
-  // Close the picker (the same closer the command layer's `close` seam
-  // holds): reopen is driven by a second /model after the write. The
-  // structural access mirrors this suite's other mounted-surface probes
-  // (statusStore, footerRenderRowsForTest).
-  const app = fixture.runnerApp() as unknown as { closeModelPicker?: () => void }
-  app.closeModelPicker?.()
-  await new Promise(resolve => setTimeout(resolve, 200))
-  // ANOTHER writer commits the official selection: the durable
-  // model/selection event the projection channel pushes.
-  append('model/selection', { provider: 'smoke', model: 'smoke-alt' })
-  await waitFor('the projection advanced', () =>
-    fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.model?.model === 'smoke-alt', 15_000)
+    'the first open marks the effective value (the smoke default — no session selection yet) current')
+  // THE REAL OFFICIAL WRITE: the generated Client session face's
+  // selectModel — the same official `session/selectModel` wire verb the
+  // semantic `ModelCatalog.selectSessionModel` maps onto (the TUI's own
+  // apply path). Assert the SETTLED result first, then the projection.
+  const sessionFace = (fixture.aggregate.wire.client as unknown as {
+    remote: { session: { selectModel(request: { sessionId: string; provider: string; model: string }): Promise<{ ok: boolean; value?: { selected: unknown } }> } }
+  }).remote.session
+  const settled = await sessionFace.selectModel({ sessionId: mainId, provider: 'smoke', model: 'smoke-alt' })
+  assert.equal(settled.ok, true, 'the official selectModel write settled successfully')
+  await waitFor('the official projection carries the committed selection', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.model?.model === 'smoke-alt', 20_000)
+  const selectionEvents = sessionEvents(seedHost.ctx, mainId).filter(event => event.type === 'model/selection')
+  assert.equal(selectionEvents.length, 1,
+    'exactly one durable model/selection row (the official write, never a test append)')
+  // REOPEN: the committed projection owns the current marker. Close the
+  // first panel first (the closer the command layer holds) so the reopen
+  // mounts a FRESH picker rather than re-reading the still-open panel.
+  const closer = fixture.runnerApp() as unknown as { closeModelPicker?: () => void }
+  closer.closeModelPicker?.()
+  await new Promise(resolve => setTimeout(resolve, 250))
   await openPicker()
+  await new Promise(resolve => setTimeout(resolve, 300))
   assert.ok(rows().alt !== undefined && /current/.test(rows().alt!),
     'the REOPENED picker marks the committed projection value (smoke-alt) current')
   assert.ok(rows().smoke !== undefined && !/current/.test(rows().smoke!),
@@ -349,4 +357,58 @@ test('L6 PR5 §3.4: a /preset SWITCH on a blank Remote session commits through t
   assert.equal(selectedRows.length, 1, 'exactly one official selection row (never retried)')
 })
 
-
+test('L6 PR5 §3.3: a /model directory read pending across a session replacement never paints the old subject current', async (t) => {
+  const life = testLifecycleOf(t)
+  const mainA = 'm3-4-pr5-model-fence-a'
+  const mainB = 'm3-4-pr5-model-fence-b'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(SessionId(mainA), undefined, { cwd: seedHost.anchorDir })
+  const appendA = sessionAppender(seedHost.ctx, mainA)
+  seedCompletedTurn(appendA, 1, 'model fence probe', 'model fence answer')
+  appendA('model/selection', { provider: 'smoke', model: 'smoke' })
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainA, host: seedHost }) as unknown as RunnerFixture
+  await seedHost.harness.create(SessionId(mainB), undefined, { cwd: seedHost.anchorDir })
+  sessionAppender(seedHost.ctx, mainB)('model/selection', { provider: 'smoke', model: 'smoke-alt' })
+  await waitFor('A facts retained', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainA)?.model?.model === 'smoke', 15_000)
+  // Park the OFFICIAL directory read at the LLM adapter seam (the Host's
+  // buildModelCatalog awaits the adapter's listModels): the picker's owned
+  // background workflow is a DETACHED read — the /model handler already
+  // returned, so the submit FIFO stays free for the /resume switch.
+  const adapter = (seedHost.ctx.llm as unknown as {
+    registeredAdapters?: Map<string, { listModels(provider: string): Promise<unknown> }>
+  })
+  void adapter
+  const llmService = seedHost.ctx.llm as unknown as {
+    listModels(provider: string): Promise<unknown>
+  }
+  const originalListModels = llmService.listModels.bind(llmService)
+  let catalogParked = false
+  let releaseCatalog: (() => void) | undefined
+  llmService.listModels = (provider: string): Promise<unknown> => {
+    if (catalogParked) return originalListModels(provider)
+    catalogParked = true
+    return new Promise(resolve => {
+      releaseCatalog = () => { void originalListModels(provider).then(resolve, () => resolve([])) }
+    })
+  }
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  submit(fixture.runnerApp(), '/model')
+  await waitFor('the parked directory read began', () => catalogParked, 10_000)
+  // Replace the visible subject while the directory read is pending.
+  submit(fixture.runnerApp(), `/resume ${mainB}`)
+  await waitFor('the visible owner became B', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainB)?.model?.model === 'smoke-alt', 15_000)
+  // Release the OLD subject's directory read: its owner fence must close
+  // the stale loading panel — the OLD subject's current (smoke) must never
+  // be painted onto B's surface.
+  releaseCatalog?.()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  const lines = fixture.vt.getViewport().join('\n').split('\n').map(strip)
+  const smokeRow = lines.find(line => line.includes('Smoke Model') && /current/.test(line))
+  assert.equal(smokeRow === undefined, true,
+    'the stale directory read never painted the OLD subject current (smoke) onto the replacement surface')
+  assert.equal(fixture.override.presentation.sessionFacts.sessionStatus(mainB)?.model?.model, 'smoke-alt',
+    'B keeps its own projection value')
+})

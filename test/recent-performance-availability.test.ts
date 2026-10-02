@@ -41,11 +41,15 @@ function validSampleTurn(turn: number, seqBase: number) {
 
 interface Harness {
   setWindow(events: Array<Record<string, unknown>>, hasMore: boolean): void
+  /** Force every fence stale (the old subject's reads all drop). */
   setCurrent(current: boolean): boolean
+  /** Publish a REPLACEMENT owner: bumps the generation so old captured
+   *  fences read stale while NEW hydrates (captured after the bump) commit. */
+  bumpOwner(): void
   /** Park the NEXT reader resolution until release (the stale window).
    *  The snapshot it eventually returns is the one SET at park time (the
    *  reader captures its payload before parking — a later setWindow must
-   *  not leak into a read that already began). */
+   *  not leak into a read that already begun). */
   parkNextRead(): { release(): void }
   available(): boolean | undefined
   coldHydrate(): Promise<void>
@@ -57,6 +61,11 @@ interface Harness {
 function harness(): Harness {
   let window: PresentationReadSnapshot | undefined
   let current = true
+  // A GENERATION-SCOPED fence (the production §6.5 shape): a hydrate
+  // captures the generation at admission and stays admissible only while
+  // the generation is unchanged — a REPLACEMENT owner bumps it, so the
+  // replacement's own hydrate commits while the OLD read settles as stale.
+  let generation = 0
   let parkedResolve: (() => void) | undefined
   let parkedArmed: Promise<void> | undefined
   const app = {
@@ -107,7 +116,13 @@ function harness(): Harness {
       read,
       running: () => false,
       plan: () => false,
-      isStillCurrent: () => current,
+      // The PRODUCTION §6.5 fence shape: each hydrate captures the
+      // generation at admission; the fence answers false once the live
+      // generation moved past the captured one (a replacement owner) —
+      // AND the global `current` switch still forces staleness for the
+      // old-subject reads.
+      isStillCurrent: (_sessionId: string, captured: number) => current && captured === generation,
+      captureGeneration: () => generation,
       facts: () => ({}),
     },
   })
@@ -125,6 +140,7 @@ function harness(): Harness {
       })
     },
     setCurrent: value => { current = value; return current },
+    bumpOwner: () => { generation += 1 },
     parkNextRead: () => {
       const gate = { release: () => { parkedResolve?.() } }
       parkedResolve = undefined
@@ -137,7 +153,10 @@ function harness(): Harness {
     available: () => presentation.mainRecentPerformanceAvailable(),
     coldHydrate: () => presentation.initLiveRemoteSession('s').then(() => undefined),
     rehydrate: () => presentation.rehydrateFromWindow('s'),
-    resetForGeneration: () => presentation.resetForGeneration(),
+    resetForGeneration: () => {
+      generation += 1
+      presentation.resetForGeneration()
+    },
   }
 }
 
@@ -210,26 +229,29 @@ test('PR5 loadOlder: reaching the history start with fewer samples than the limi
 
 test('PR5 §3.2 stale hydrate: a superseded rehydrate cannot flip the replacement subject\'s bit (true counterfactual)', async () => {
   const h = harness()
-  // Subject A cold-hydrates with a TRUNCATED window that proves NOTHING
-  // (one sample, hasMore=true): its bit is false.
+  // Subject A cold-hydrates a TRUNCATED window that proves NOTHING (one
+  // sample, hasMore=true): its committed bit is false.
   h.setWindow(validSampleTurn(1, 0), true)
   await h.coldHydrate()
   assert.equal(h.available(), false)
-  // A rehydrate for A starts and parks mid-read; its snapshot is the
-  // window SET AT PARK TIME — a history-start window whose commit would
-  // write `true`.
+  // A rehydrate for A begins and parks mid-read; its captured snapshot is
+  // the window SET AT PARK TIME — a history-start window whose commit
+  // would write `true`.
   const gate = h.parkNextRead()
   h.setWindow([], false)
   const stale = h.rehydrate()
-  // The owner is REPLACED while the old read is pending; the replacement
-  // subject then cold-hydrates ITS OWN still-unproven window (false).
-  h.setCurrent(false)
+  // The owner is REPLACED (the generation bump retires A's captured
+  // fences; A's pending rehydrate will settle as stale), and the
+  // replacement subject cold-hydrates ITS OWN still-unproven window —
+  // captured AFTER the bump, so THIS hydrate genuinely commits.
+  h.bumpOwner()
   h.setWindow(validSampleTurn(1, 0), true)
   await h.coldHydrate()
-  assert.equal(h.available(), false, 'the replacement subject\'s own hydrate committed false')
-  // Release the stale read: its §6.5 fences drop it — the bit stays the
-  // replacement's own `false`. A stale commit (the history-start window)
-  // would write `true` here, which is exactly the counterfactual this
+  assert.equal(h.available(), false,
+    'the replacement subject\'s own hydrate COMMITTED false (a post-bump capture passes its fence)')
+  // Release the stale read: its §6.5 generation fence drops it — the
+  // replacement's committed `false` survives. The parked snapshot
+  // (history start) would write `true`: exactly the counterfactual this
   // test must be able to catch.
   gate.release()
   await stale
