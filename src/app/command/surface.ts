@@ -159,6 +159,11 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     lastAssistantText: CommandRuntimeSurface['lastAssistantText']
     promptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T> | T): Promise<T>
   }
+  /** The TRANSPORT-AWARE prepared-prompt builder (PR4 review round): on Remote
+   *  the session writer's serializer requires the PreparedPrompt the ordinary
+   *  submission path builds — a raw UserMessage fails its preflight. Wired to
+   *  the SAME builder; absent on Direct (the UserMessage stays authoritative). */
+  readonly prepareTransportMessage?: (text: string, requestId: string) => Promise<unknown>
   /** The semantic catalog capability (skills/change + standing read). */
   readonly catalog: CommandCatalogCapability
   /** Map one exact Agent onto the semantic catalog port's agent field. The
@@ -535,7 +540,21 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     if (!source.isTransportTokenCurrent(sessionId, admissionToken)) {
       throw new SupersededReadError('the connection changed during the catalog refresh')
     }
-    if (commandsResult.status === 'rejected') throw commandsResult.reason
+    if (commandsResult.status === 'rejected') {
+      const reason = commandsResult.reason
+      if (reason instanceof SupersededReadError) throw reason
+      // §2.2 provider isolation: a FAILED commands provider degrades to an
+      // issues entry — the coordinator's mergePartial keeps the last-good
+      // HOST commands (an empty replace would erase the claim set) while the
+      // successful skills provider still updates its own field. Only a
+      // transport supersession (above) fails the whole read.
+      return Object.freeze({
+        commands: Object.freeze([]),
+        scopedCommands: Object.freeze([]),
+        skills: Object.freeze([]),
+        issues: Object.freeze([Object.freeze({ provider: 'commands' as const, message: safeErrorMessage(reason) })]),
+      })
+    }
     if (commandsResult.value === undefined) {
       throw new SupersededReadError('the connection changed during the catalog refresh')
     }
@@ -694,6 +713,23 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // docs/surface-catalog.md).
         readStanding: (presetId, readSignal) =>
           deps.catalog.skills.standing(presetId, deps.clientCwd, readSignal),
+        // §2.2/§16 final-install fence: the Remote target's admission
+        // transport identity (captured ONCE at refresh admission, only ever
+        // COMPARED before installSnapshot — a same-id binding rollover in
+        // the settle→install gap must not commit the retired read; review
+        // round 2's final-gap finding). The Direct agent-scoped target has
+        // no transport identity here — its reader owns the checks.
+        ...(deps.remoteCommandSource === undefined ? {} : {
+          captureTargetIdentity: () => {
+            const sessionId = deps.ownership.currentSessionId()
+            return sessionId === undefined ? undefined : deps.remoteCommandSource!.captureTransportToken(sessionId)
+          },
+          isTargetCurrent: (identity: unknown) => {
+            const sessionId = deps.ownership.currentSessionId()
+            return sessionId !== undefined
+              && deps.remoteCommandSource!.isTransportTokenCurrent(sessionId, identity)
+          },
+        }),
         installSnapshot: (next) => installed.installSnapshot(next),
         enterCatalogTransition: () => installed.enterTransition(),
       }, deps.signal, deps.diag)
@@ -897,6 +933,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The shared prepared-input pipeline (skills build their message
       // through this — review finding 4).
       prepareDraftMessage: (text) => prepareUserMessage(text, deps.drafts.images, deps.submission.prepareDeps()),
+      // PR4 review round: the Remote branch's skill-gesture delivery must use
+      // the transport-aware preparation (PreparedPrompt), exactly like an
+      // ordinary prompt; absent on Direct.
+      ...(deps.prepareTransportMessage === undefined ? {} : {
+        prepareTransportMessage: (text: string, requestId: string) => deps.prepareTransportMessage!(text, requestId),
+      }),
       // M5: the extension registries (commands/themes/settings/autocomplete/
       // keybindings), when the extension service is mounted. The /settings
       // and /theme pickers read them; undefined degrades to the host-only

@@ -1436,6 +1436,12 @@ export function applyRunnerWithRuntime(
       // registry there; the Host `ctx.commands` stays metadata-only
       // (RemoteSurfaceAuthorityReader + HostCommandPort own its reads).
       commandsRegistry: () => remoteSources === undefined ? ctx.get('commands') : undefined,
+      // PR4 review round: the SAME transport-aware prompt preparation the
+      // ordinary submission uses (Remote needs the serializer's
+      // PreparedPrompt; the skill-gesture delivery rides it).
+      ...(remoteSources === undefined ? {} : {
+        prepareTransportMessage: (text: string, requestId: string) => prepareRemotePrompt(text, requestId),
+      }),
       clientCommands: createClientCommandRegistry(parseCommand),
       // PR4 §2.1/§2.2: the Remote branch's command authority read + the
       // official Session facts the command runtime consumes (running,

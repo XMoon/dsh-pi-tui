@@ -197,71 +197,13 @@ interface RecentTtftSample {
  * TTFT/TPS as if they were complete.
  */
 export function hasEnoughRecentPerformanceSamples(events: readonly SessionEvent[]): boolean {
-  const admitted = recentPerformanceWindowOf(events).admittedCounts()
+  // The COMPLETE fold (never a simplified copy — duplicate-message replace/
+  // removeThroughput, attempt/retry handling, and the completed-turn fence
+  // all change which samples the window retains; review round 2 caught the
+  // drifted copy admitting a burst-invalidated window as complete).
+  const admitted = foldSessionStats(events).recent.admittedCounts()
   return admitted.ttft >= RECENT_PERFORMANCE_SAMPLE_LIMIT
     && admitted.throughput >= RECENT_PERFORMANCE_CANDIDATE_LIMIT
-}
-
-/** Fold one bounded window and expose its recent-performance sample
- *  windows (the retained-sample counts are the page-stop contract). */
-function recentPerformanceWindowOf(events: readonly SessionEvent[]): RecentPerformanceWindow {
-  const perStep = new Map<string, StepTiming>()
-  const settledPerStep = new Map<string, StepTiming>()
-  const endedSteps = new Set<string>()
-  const recent = new RecentPerformanceWindow()
-  const usage = new StepUsageAccumulator()
-  const stats: SessionStats = { ...EMPTY }
-  let settledTurn: number | undefined
-  const enterSettledTurn = (turn: number): void => {
-    settledTurn = advanceTimingTurn(perStep, settledPerStep, endedSteps, settledTurn, turn)
-  }
-  for (const event of events) {
-    if (isReplacementSurfaceEvent(event)) continue
-    const kind = event.type as string
-    if (event.type === 'turn/start') {
-      enterSettledTurn(event.data.turn)
-    } else if (event.type === 'step/start') {
-      enterSettledTurn(event.data.turn)
-      const key = stepKey(event.data.turn, event.data.step)
-      if (settledTurn !== event.data.turn || endedSteps.has(key) || perStep.has(key)) continue
-      perStep.set(key, { start: event.time })
-    } else if (event.type === 'step/end') {
-      enterSettledTurn(event.data.turn)
-      const key = stepKey(event.data.turn, event.data.step)
-      const timing = settledTurn === event.data.turn ? perStep.get(key) : undefined
-      if (timing?.settled === true) settledPerStep.set(key, timing)
-      if (settledTurn === event.data.turn) perStep.delete(key)
-    } else if (event.type === 'turn/end') {
-      enterSettledTurn(event.data.turn)
-      if (settledTurn === event.data.turn) {
-        perStep.clear()
-        settledPerStep.clear()
-        endedSteps.clear()
-      }
-    } else if (event.type === 'assistant/message') {
-      enterSettledTurn(event.data.turn)
-      const key = stepKey(event.data.turn, event.data.step)
-      const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
-      const tokenRange = tokenTimeRangeFromAssistantStream(event.data.stream)
-      const timing = settledTurn === event.data.turn
-        ? perStep.get(key) ?? settledPerStep.get(key)
-        : undefined
-      if (timing !== undefined) {
-        if (timing.firstDelta === undefined && tokenRange !== undefined) timing.firstDelta = tokenRange.first
-        if (tokenRange !== undefined) {
-          timing.decodeFirstDelta = tokenRange.first
-          timing.decodeLastDelta = tokenRange.last
-        }
-        if (timing.settled !== true) {
-          timing.completed = event.time
-          if (messageUsage !== undefined) timing.usage = messageUsage
-          settleStep(stats, key, timing, recent, routeKeyOf(event.data.message))
-          timing.settled = true
-        }
-      }
-    }
-  }
-  return recent
 }
 class RecentPerformanceWindow {
   /** The route (provider + model) the current window belongs to. */
@@ -410,6 +352,19 @@ export function recentPerformanceOf(events: readonly SessionEvent[]): Pick<Sessi
  * @returns aggregated statistics.
  */
 export function computeStats(events: readonly SessionEvent[]): SessionStats {
+  return foldSessionStats(events).stats
+}
+
+/** The complete fold's private result: the stats plus the LIVE
+ *  recent-performance window the derive drew from (the §3.4 page-stop
+ *  contract reads its retained-sample counts — the SAME fold, never a
+ *  second simplified copy whose semantics could drift). */
+interface SessionFold {
+  readonly stats: SessionStats
+  readonly recent: RecentPerformanceWindow
+}
+
+function foldSessionStats(events: readonly SessionEvent[]): SessionFold {
   const stats: SessionStats = { ...EMPTY }
   const perStep = new Map<string, StepTiming>()
   // Keep settled samples only until their turn closes, so a late duplicate
@@ -615,7 +570,7 @@ export function computeStats(events: readonly SessionEvent[]): SessionStats {
   stats.cacheWriteTokens = totals.cacheWriteTokens
   const billedInput = stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
   if (billedInput > 0) stats.cacheHitPct = (stats.cacheReadTokens * 100) / billedInput
-  return stats
+  return { stats, recent }
 }
 
 /** Write the recent window's derived metrics onto the stats (the ONE

@@ -29,7 +29,7 @@ import { runReservedSubmit } from '../../image/submit-flow.ts'
 import type { DraftImageStore } from '../../image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments, prepareUserMessage, type PrepareInputDeps } from '../../image/submit.ts'
 import { expandImagePlaceholders } from '../../image/placeholder.ts'
-import { commandIsLocalForAttachments, isBareCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
+import { commandIsLocalForAttachments, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
@@ -694,6 +694,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // occurrence. They keep their existing command feedback.
     const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
       || (submitView?.claimed !== true
+        // §D3 line authority: a HOST-RESOLVED name is not a TUI-local line
+        // even when the catalog does not claim THIS argued line — `/export
+        // foo` is an ordinary submission and gets its immediate echo like
+        // every prompt (review round 2, external finding).
+        && deps.command.hostClaimOf(parsedAtSubmit) === undefined
         && !LOCAL_COMMANDS.has(parsedAtSubmit.name)
         && deps.command.isSkillWrapperName(parsedAtSubmit.name) !== true)
     // Install the echo NOW for a known ordinary prompt on an existing
@@ -1438,6 +1443,20 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
     }
     const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
+    // The §D3 line authority, derived ONCE and shared by every gate below
+    // (delivery, echo, the attachment refusal): a HOST-RESOLVED name —
+    // claimed or merely resolved — is never a TUI-local line, so an argued
+    // `/export foo` of an execute-kind Host command follows the ORDINARY
+    // prompt policy everywhere (busy queue/steer, multimodal attachments),
+    // matching the dispatch's commandPlaneOwnsLine order.
+    const tuiLocalLine = parsed === undefined
+      ? false
+      : isLocalCommandLine(
+        parsed.name,
+        deps.command.isSkillWrapperName,
+        isBareCommandLine(parsed) ? (name => deps.extensions.isLocal(name, LOCAL_COMMANDS)) : undefined,
+        deps.command.hostClaimOf(parsed),
+      )
     // The submission's effective delivery mode — resolved ONCE, here at
     // the boundary (web ComposerSubmissionPolicy parity, DSH
     // 0.1.6): an idle agent queues, plain Enter takes the
@@ -1449,7 +1468,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // their own busy semantics (Host commands, client commands) ignore it.
     const delivery: SubmitDelivery = request === 'explicit-queue'
       ? 'queue'
-      : resolveSubmitDelivery(parsed, deps.liveAgent()?.status === 'running', request, deps.tuiSettings?.get().busyEnter)
+      : resolveSubmitDelivery(parsed, deps.liveAgent()?.status === 'running', request, deps.tuiSettings?.get().busyEnter, tuiLocalLine)
     // NAMESPACE ORDER (DSH client command contribution parity):
     //   1. host command claim (the closed host catalog always wins);
     //   2. client command contribution (client-owned behavior);

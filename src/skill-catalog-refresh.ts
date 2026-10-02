@@ -87,6 +87,15 @@ export interface CatalogRefreshHooks {
   /** Read the standing skill catalog of one preset (preset target): the
    * adapter's capability-gated cold read, never an Agent probe. */
   readStanding(presetId: string | undefined, signal: AbortSignal): Promise<StandingSkillRead>
+  /** Whether the READ TARGET's transport/ownership identity is still live
+   *  (the §2.2/§16 final atomic-install fence): `captureTargetIdentity` is
+   *  taken at admission and `isTargetCurrent(identity)` is re-checked
+   *  immediately before installSnapshot, so a same-id binding rollover in
+   *  the gap between the providers' settle and the synchronous install
+   *  cannot commit the retired read. Absent = there is no transport
+   *  identity to fence (the Direct agent-scoped read owns its checks). */
+  captureTargetIdentity?(): unknown
+  isTargetCurrent?(identity: unknown): boolean
   /** One synchronous commit: replace wrappers + merge completions + claims. */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
   /** Target change: clear scoped previews, turn old skill wrappers into
@@ -153,13 +162,25 @@ export class CatalogRefreshCoordinator {
       // mid-flight. It is INSIDE the try so a throwing transition hook
       // still settles as a `failed` outcome — refresh() never rejects.
       if (targetChanged) this.hooks.enterCatalogTransition()
+      // §2.2/§16 admission capture: the target's transport identity is taken
+      // ONCE here (before any read) and only ever COMPARED later.
+      const targetIdentity = this.hooks.captureTargetIdentity?.()
       const committed = request.target.kind === 'agent'
         ? { snapshot: await this.hooks.readAgent(request.agent!, signal) }
         : await this.readStandingSnapshot(request.target.presetId, signal)
-      // Latest-only commit: the lifecycle signal, the epoch and the target
-      // owner must all still hold.
+      // Latest-only commit: the lifecycle signal, the epoch, the target
+      // owner AND (§2.2/§16) the read target's ADMISSION transport identity
+      // must all still hold — a same-id binding rollover in the gap between
+      // the providers' settle and this synchronous install must not commit
+      // the retired read (review round 2's final-gap finding).
       if (signal.aborted || epoch !== this.epoch) {
         this.diag.debug('catalog refresh superseded', { epoch, source: request.source })
+        return { kind: 'superseded' }
+      }
+      if (targetIdentity !== undefined
+        && this.hooks.isTargetCurrent !== undefined
+        && !this.hooks.isTargetCurrent(targetIdentity)) {
+        this.diag.debug('catalog refresh superseded (target transport)', { epoch, source: request.source })
         return { kind: 'superseded' }
       }
       const merged = targetChanged ? committed.snapshot : this.mergePartial(committed.snapshot)
