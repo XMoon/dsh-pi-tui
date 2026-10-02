@@ -3919,12 +3919,16 @@ export function registerTuiCommands(
       // mergePartial already retained it in `snapshot.skills`).
       if (!skillsFailed) currentSkillReferences = snapshot.skills
       savedScopedCommands = snapshot.scopedCommands
-      // PR4 §D3: THIS snapshot IS the Host authority — its command rows are
-      // the claim source. The display list may add Client entries; the
-      // claims must not be rebuilt from a client-merged list (the Direct
-      // merge happens to include the live Host global layer, the Remote one
-      // does not).
-      installCompletionsContained(mergeGlobalAndSavedScoped(), { claimsFrom: snapshot.commands })
+      // PR4 §D3: the claim source is branch-dependent. On DIRECT the merge
+      // below reads the LIVE Host global layer (TUI registrations + every
+      // in-process Host command), which IS the authority. On REMOTE that
+      // merge is a Client-only view (no Host global layer exists there), so
+      // the claims come from THIS snapshot's command rows instead — a
+      // Client-only re-synthesis must never erase a Host claim.
+      installCompletionsContained(
+        mergeGlobalAndSavedScoped(),
+        commands === undefined ? { claimsFrom: snapshot.commands } : {},
+      )
     })
   }
   /**

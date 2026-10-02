@@ -3581,6 +3581,14 @@ export class TuiApp {
    * render path. Disposed with the surface so a long-lived EXTERNAL store
    * never retains a dead TuiApp's listener. */
   private statusStoreUnsubscribe: (() => void) | undefined
+  /**
+   * The last `permissionPreset` value THIS legacy status writer installed
+   * (M3-4 PR4 §6.4). The writer owns what it wrote: a later absent legacy
+   * permission clears that value, while a value the SEMANTIC owner
+   * (the status projection) installed is never touched — the legacy field is
+   * not the permission authority on the Remote branch.
+   */
+  private legacyPermissionValue: string | undefined
   /** The builtin/footer item registry (M1): the composer's catalog. */
   private readonly footerItemRegistry: FooterItemRegistry
   /** User-owned custom definitions. The active composer reads this source;
@@ -17129,6 +17137,19 @@ export class TuiApp {
           label: this.status.permission,
           matched: this.status.permission !== 'custom',
         }
+        this.legacyPermissionValue = this.status.permission
+      } else if (
+        // OWNERSHIP rule (M3-4 PR4 §6.4): the legacy writer clears only the
+        // value IT installed (the store still carries exactly that id). A
+        // value the semantic owner (the permissions projection) installed is
+        // left untouched — the Remote branch has no legacy permission source
+        // and must never clear a projection-owned fact. Clearing a RETIRED
+        // subject's sections stays the session-lifecycle owner's reset.
+        this.legacyPermissionValue !== undefined
+        && current.access.permissionPreset?.id === this.legacyPermissionValue
+      ) {
+        accessPatch.permissionPreset = undefined
+        this.legacyPermissionValue = undefined
       }
       const access: AccessStatus = { ...current.access, ...accessPatch }
       const workspace: WorkspaceStatus = {

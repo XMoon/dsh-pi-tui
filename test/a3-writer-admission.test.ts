@@ -216,12 +216,20 @@ test('the queue-recall state and the plain-submit write body live in app/submiss
   assert.equal(index.includes('pendingQueueRecalls.push'), false,
     'the settle body must live in app/submission')
   // The plain-prompt write orchestration (prepare → semantic write → consume)
-  // is gone from the runner: the two write sites delegate to the submission
+  // is gone from the runner: the write sites delegate to the submission
   // runtime through `submitPrompt`. A5b-4 moved the sites into the submission
-  // controller owner, so the lock follows the authority there.
+  // controller owner, so the lock follows the authority there. M3-4 PR4 §1.3
+  // collapsed the former TWO sites into ONE: the command-dispatch window is
+  // now always open (Direct through the in-process executor, Remote through
+  // the Client registry + HostCommandPort), so the post-window "no commands
+  // service" fallthrough became unreachable and was deleted; the single
+  // remaining delegation is the command-submission fallback the runtime
+  // drives for an agent-facing line.
   const controller = readFileSync(new URL('../src/app/submission/controller.ts', import.meta.url), 'utf8')
-  assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 2,
-    'the command-fallback and direct prompt sites must delegate to the submission runtime')
+  assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 1,
+    'the agent-facing write must delegate to the submission runtime through submitPrompt')
+  assert.ok(controller.includes('submitPrompt: (submission) => deps.submissionRuntime.submitPrompt(submission)'),
+    'the delegation is the command-submission fallback hook (never a second write path)')
 })
 
 // ── A3-4: the submission-domain writer sections (moved sites) ──────────────
