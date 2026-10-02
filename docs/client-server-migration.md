@@ -3743,10 +3743,11 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   event probes (the mounted TuiApp's own `stop` and the selected transport
   disposer): the surface stop is observed BEFORE the release, the
   transport has NOT disposed inside the drain window, the released pending
-  work settles with ZERO terminal writes on the disposed surface, the
+  READ produces ZERO terminal writes on the disposed surface, the
   transport disposer then runs EXACTLY ONCE after the surface stop, and no
   durable row lands after the disposal (`runner-remote-races`
-  §3.9a/§3.9b L6). The pending read and write cannot be parked
+  §3.9a/§3.9b L6; the write case shares the observed boundary,
+  exactly-once and quiescence assertions). The pending read and write cannot be parked
   SIMULTANEOUSLY in one mounted runner — the second submission queues
   behind the first's FIFO turn — so the two pending classes are proven as
   separate mounted cases. The surface→retirement→transport ORDER itself is

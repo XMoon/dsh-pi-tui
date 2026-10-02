@@ -407,14 +407,14 @@ test('L6 PR5 §3.3: a /model directory read pending across a session replacement
   submit(fixture.runnerApp(), '/model')
   await waitFor('the parked directory read began', () => catalogParked, 10_000)
   // Replace the visible subject while the directory read is parked. The
-  // switch is proven by B-ONLY transcript content (the hydrated marker), not
-  // by a retained projection.
+  // switch is proven by A-ONLY transcript content RETIRING from the
+  // rendered surface (a discriminating observable), not by a retained
+  // projection alone.
   submit(fixture.runnerApp(), `/resume ${mainB}`)
   // Visible-owner proof: B is retained AND the A-only transcript content
   // has RETIRED from the rendered surface (the replacement hydrate paints
-  // B's window in place of A's). The B marker itself may sit outside the
-  // initial viewport depending on window timing, so the RETIREMENT of A's
-  // unique content is the discriminating observable.
+  // B's window in place of A's) — the assertion predicate is A's marker
+  // being ABSENT, the retirement side of the switch.
   await waitFor('B facts retained', () =>
     fixture.override.presentation.sessionFacts.sessionStatus(mainB)?.model?.model === 'smoke-alt', 15_000)
   await waitFor('the visible owner became B (A-only transcript content retired)', () =>
