@@ -137,6 +137,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
       questions: {
         onRequest: () => true,

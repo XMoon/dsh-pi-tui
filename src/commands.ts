@@ -582,20 +582,18 @@ export interface TuiCommandRunner {
    * (busy-Enter, sessionless execution) is unchanged. */
   readonly commandRegistry: CommandRegistryLike | undefined
   /** Whether the readable-transcript artifact is renderable on this backend
-   * (M3-4 PR4 round 5): `true` on Direct — the Markdown renderer reads the
-   * whole in-process Session event history; `false` on the wire backend,
-   * where no transport-neutral whole-history seam exists yet. This is a
-   * business CAPABILITY, deliberately NOT derived from
-   * {@link commandRegistry}: that field is the Direct Host-registry
-   * compatibility mirror whose retirement is owned by M8, and a business
-   * decision must never hang off a compatibility implementation.
+   * (M3-4 PR5): `true` on Direct — the Markdown renderer reads the whole
+   * in-process Session event history; `false` on the wire backend, where no
+   * transport-neutral whole-history seam exists yet. This is a business
+   * CAPABILITY, deliberately NOT derived from {@link commandRegistry}: that
+   * field is the Direct Host-registry compatibility mirror whose retirement
+   * is owned by M8, and a business decision must never hang off a
+   * compatibility implementation.
    *
-   * The DECLARED default of an unspecified field is `true` (the historical
-   * Direct behavior): the handler refuses only on an EXPLICIT `false`, so
-   * a composition that has not declared the capability keeps the
-   * pre-existing semantics. The Remote composition root passes `false`
-   * explicitly. */
-  readonly transcriptExportAvailable?: boolean
+   * REQUIRED: every runner assembly declares it explicitly (the production
+   * composition and every typed test stub); the handler refuses unless the
+   * declared value is exactly `true`. */
+  readonly transcriptExportAvailable: boolean
   /** The Client-owned command registry (M3-4 PR4 §D2): every TUI built-in
    *  and dynamic skill-wrapper definition registers here FIRST. On Direct
    *  the same definitions additionally register into the Host commands
@@ -5198,11 +5196,12 @@ export function registerTuiCommands(
       // no transport-neutral seam exists yet — the Remote post-success
       // artifact save would resolve the projected agent and crash inside
       // `renderTranscriptMarkdown` after the command already reported
-      // success. Refuse ONLY on an explicit `false` (an unspecified
-      // capability keeps the historical Direct default of available).
+      // success. The capability is REQUIRED on every assembly, so refusing
+      // on `!== true` is the explicit business rule, not an optional
+      // compatibility default.
       // `/export` stays available on both backends (it renders from
       // `SessionArchivePort`, not the Session).
-      if (runner.transcriptExportAvailable === false) {
+      if (runner.transcriptExportAvailable !== true) {
         const text = 'transcript export is unavailable on this backend'
         app.notify(text, 'error')
         return { kind: 'error', text }

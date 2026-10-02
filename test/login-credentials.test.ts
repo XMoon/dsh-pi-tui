@@ -135,6 +135,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
       questions: {
         onRequest: () => true,

@@ -124,6 +124,7 @@ function stubRunner(
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort((sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
       questions: {
         onRequest: () => true,
