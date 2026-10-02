@@ -22,6 +22,8 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/status-runtime
  */
 
+import { runOwned } from '../../detached.ts'
+import type { Diag } from '../../diag.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { bundleVersion, dshVersion, versionDisplay } from '../../dsh-version.ts'
 import { gitBranch } from '../../git-branch.ts'
@@ -112,6 +114,9 @@ export interface StatusRuntimeDeps {
   readonly presentation: { readonly mainStats: () => StatsFolder }
   /** The viewer owner (the display subject while a child is viewed). */
   readonly viewer: { readonly read: () => { readonly cwd: string; readonly stats: StatsFolder } | undefined }
+  /** The diagnostics channel for OWNED async operations (the permission
+   *  cycle's runOwned settlement; see docs/failure-model.md). */
+  readonly diag: Diag
   /** The resolved CLIENT working directory (a composition prerequisite). */
   readonly clientCwd: string
   /**
@@ -608,7 +613,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       const index = current === undefined ? -1 : names.indexOf(current)
       const next = names[(index + 1) % names.length] ?? names[0]
       if (next === undefined || next === current) return
-      void authority.apply(scope.sessionId, next).then(outcome => {
+      // The gesture is an OWNED async operation (docs/failure-model.md): one
+      // runOwned settlement, never a bare discard. Every terminal branch
+      // re-checks the owner identity after the await.
+      runOwned('permission cycle', async () => {
+        const outcome = await authority.apply(scope.sessionId, next)
         if (deps.isCleanedUp()) return
         // A stale owner repaints NOTHING for the replacement session
         // (§15.6): the write may have committed on the OLD session.
@@ -626,12 +635,16 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           ? `⚠ ${next} — no approvals`
           : `permission: ${next}`,
         next === 'danger-full-access' ? 'error' : 'info')
-      }, error => {
-        if (deps.isCleanedUp()) return
-        if (!authority.isScopeCurrent(scope)) return
-        // A rejected apply is reported truthfully; never retried
+      }, {
+        diag: deps.diag,
+        sessionId: () => scope.sessionId,
+        // A rejected apply is reported truthfully and never retried
         // automatically (§6.3 — an ambiguous dispatch must not duplicate).
-        deps.surface.app.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
+        onError: (error) => {
+          if (deps.isCleanedUp()) return
+          if (!authority.isScopeCurrent(scope)) return
+          deps.surface.app.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
+        },
       })
       return
     }

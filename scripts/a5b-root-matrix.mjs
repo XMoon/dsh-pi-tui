@@ -160,6 +160,15 @@ const CLASSIFICATION = {
   // submission surface's prepare seam (Direct keeps prepareUserMessage).
   prepareRemotePrompt: CONN,
   directRuntimeNow: CONN, directAssistantRuntime: CONN,
+  // M3-4 PR4: the branch-shared rewind/presentation-facts connectors and the
+  // per-branch read helpers. The Direct presentation reader is constructed
+  // once at startup (the full-coverage adapter the loadThrough seam uses);
+  // every other row is a narrow per-call connector over an already-owned
+  // authority (the presentation reader / the exact attachment / the official
+  // sessionStats projection / the §6.5 transport fence).
+  presentationLoadThrough: CONN, directSessionStats: CONN, directLastAssistantText: CONN,
+  sessionStatsProjectionOf: CONN, remoteTransportFenceOf: CONN,
+  directPresentationReader: BIND,
   // Residual work (A5b-5 / A5b-6): the shrink-only ledger this matrix pins.
   surfaceEvents: SURF, runClipboardCommand: SURF, clipboardEnv: SURF, runCopyCommand: SURF,
   copyEnv: SURF, openRewindPicker: SURF,
@@ -203,6 +212,13 @@ const LIFECYCLE = {
   captureMatches: 'live read, per call (ownership subject fence)',
   requireLiveScope: 'per-write admission seam (scope capture or throw)',
   viewedQueueAgent: 'late-bound slot: written by the viewer owner, read by the Direct runtime',
+  // M3-4 PR4 (see the classification note above).
+  presentationLoadThrough: 'per-selection read (the official loadThrough jump); no state',
+  directSessionStats: 'per-read Direct whole-log fold; no state',
+  directLastAssistantText: 'per-read Direct eventAt walk; no state',
+  sessionStatsProjectionOf: 'live read, per call (official sessionStats projection off the retained binding)',
+  remoteTransportFenceOf: 'per-operation fence capture (Connection generation + exact binding); no state',
+  directPresentationReader: 'constructed once at startup (Direct full-coverage reader); read-only thereafter',
   createDirectRuntime: 'lazy accessor, per call (throws when the Direct branch never constructed)',
   compose: 'process-lifetime: created once at startup (Direct compose wrapper)',
   lifecycleAgents: 'process-lifetime: immutable create/open bridge bound to the runner signal',
@@ -250,6 +266,16 @@ const CAPABILITIES = {
 // audit reproducible: `--check` guards every verdict.
 const SWEEP_VERDICT = 'verified@a5b6'
 const SWEEP_NOTES = {
+  // M3-4 PR4: the rewind/presentation-facts connectors and the per-branch read
+  // helpers. Each row is a NARROW connector over an authority another owner
+  // already established — no new Host lookup, no new mutable truth.
+  presentationLoadThrough: 'The branch-shared loadThrough read: Direct maps it to the full-coverage DirectPresentationReader, Remote to the official loadPaging adapter off the retained binding. It forwards the exact session id + seq and returns the loaded window; it owns no state.',
+  directSessionStats: 'The Direct whole-log stats fold over the exact fenced attachment (the async facade shape shared with the Remote composition). Read-only, per call.',
+  directLastAssistantText: 'The Direct last-assistant read: a bounded backwards eventAt walk over the exact fenced attachment. Read-only, per call.',
+  sessionStatsProjectionOf: 'A live per-call read of the official sessionStats projection off the exact retained binding (Remote lifetime turns/steps/llmMs). No cached copy.',
+  remoteTransportFenceOf: 'The §6.5 transport-identity fence capture (Connection generation + exact binding object) the Remote stats/last-assistant compositions re-check after every await. Pure read of the aggregate fact.',
+  directPresentationReader: 'The ONE Direct presentation reader constructed at startup over the attachment map + the assistant-stream baseline (the same sources the parity shadow consumes). Read-only thereafter; never a second fold.',
+
   // host-service-resolution: ctx.get(...) required to construct owners / wire
   // the surface (plan §7.6.4).
   agents: 'ctx.get(agents) Host registry resolved for the Direct owner registry/attachment reads; owner-construction input (plan §7.6.4).',

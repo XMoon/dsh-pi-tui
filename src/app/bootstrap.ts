@@ -1593,6 +1593,7 @@ export function applyRunnerWithRuntime(
     // viewer owner is late-bound (it is constructed after the presentation).
     const status = createStatusRuntime({
       surface,
+      diag,
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
       // PR4 §6.2/§6.3: the permission-cycle authority — the projection's

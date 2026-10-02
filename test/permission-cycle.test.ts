@@ -57,6 +57,9 @@ function harness(options: {
   let scopeCurrent = true
   const ctx = new Context()
   const deps = {
+    // runOwned's mandatory diagnostics channel (the cycle is an OWNED
+    // operation since PR4 §6.3).
+    diag: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} },
     surface: {
       app: {
         notify: (message: string, kind: 'info' | 'error') => { notices.push({ message, kind }) },
@@ -152,7 +155,8 @@ test('§6.3 an unavailable outcome surfaces truthfully (never a retry)', async (
 test('§6.3 a rejected apply reports the failure without retrying', async () => {
   const h = harness({ current: 'workspace-write', outcome: { kind: 'throw', error: new Error('wire exploded') } })
   h.runtime.cyclePermission()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // The owned settlement defers through runOwned's promise chain.
+  await new Promise(resolve => setTimeout(resolve, 60))
   assert.equal(h.applied.length, 1, 'exactly one dispatch — no automatic retry')
   assert.match(h.notices[0]?.message ?? '', /wire exploded/)
 })
