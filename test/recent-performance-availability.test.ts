@@ -42,18 +42,23 @@ function validSampleTurn(turn: number, seqBase: number) {
 interface Harness {
   setWindow(events: Array<Record<string, unknown>>, hasMore: boolean): void
   setCurrent(current: boolean): boolean
-  /** Park the NEXT reader resolution until release (the stale window). */
-  parkNextRead(): { released: Promise<void>; release(): void }
+  /** Park the NEXT reader resolution until release (the stale window).
+   *  The snapshot it eventually returns is the one SET at park time (the
+   *  reader captures its payload before parking — a later setWindow must
+   *  not leak into a read that already began). */
+  parkNextRead(): { release(): void }
   available(): boolean | undefined
   coldHydrate(): Promise<void>
   rehydrate(): Promise<void>
+  /** The synchronous generation-bump reset (the A2 seam). */
+  resetForGeneration(): void
 }
 
 function harness(): Harness {
   let window: PresentationReadSnapshot | undefined
   let current = true
-  let parked: (() => void) | undefined
   let parkedResolve: (() => void) | undefined
+  let parkedArmed: Promise<void> | undefined
   const app = {
     setBusy: () => {}, setWorking: () => {}, setPlanMode: () => {},
     setSessionTitle: () => {}, setTodoSummary: () => {}, clearLocalMessages: () => {},
@@ -68,10 +73,16 @@ function harness(): Harness {
   }
   const diag: Diag = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} } as unknown as Diag
   const read = async (): Promise<PresentationReadSnapshot | undefined> => {
-    if (parked !== undefined) {
-      await new Promise<void>(resolve => { parkedResolve = resolve })
+    // Capture the payload THIS read observes BEFORE any parking delay: a
+    // read that began must settle against the window it read, never a
+    // later mutable replacement.
+    const observed = window
+    const armed = parkedArmed
+    if (armed !== undefined) {
+      parkedArmed = undefined
+      await armed
     }
-    return window
+    return observed
   }
   const presentation = createSessionPresentation<SessionPresentationEvent>({
     surface: surface as never,
@@ -115,14 +126,18 @@ function harness(): Harness {
     },
     setCurrent: value => { current = value; return current },
     parkNextRead: () => {
-      const released = new Promise<void>(resolve => { parkedResolve = resolve })
-      const gate = { released, release: () => { parked = undefined; parkedResolve?.() } }
-      parked = () => {}
+      const gate = { release: () => { parkedResolve?.() } }
+      parkedResolve = undefined
+      // Arm the park for the NEXT read: the read captures its payload, then
+      // waits on this gate.
+      const arm = new Promise<void>(resolve => { parkedResolve = resolve })
+      parkedArmed = arm
       return gate
     },
     available: () => presentation.mainRecentPerformanceAvailable(),
     coldHydrate: () => presentation.initLiveRemoteSession('s').then(() => undefined),
     rehydrate: () => presentation.rehydrateFromWindow('s'),
+    resetForGeneration: () => presentation.resetForGeneration(),
   }
 }
 
@@ -193,9 +208,38 @@ test('PR5 loadOlder: reaching the history start with fewer samples than the limi
   assert.equal(h.available(), true)
 })
 
-test('PR5 §3.2 stale hydrate: a superseded rehydrate cannot flip the replacement subject\'s bit', async () => {
+test('PR5 §3.2 stale hydrate: a superseded rehydrate cannot flip the replacement subject\'s bit (true counterfactual)', async () => {
   const h = harness()
-  // Subject A cold-hydrates with a PROVEN window (enough samples).
+  // Subject A cold-hydrates with a TRUNCATED window that proves NOTHING
+  // (one sample, hasMore=true): its bit is false.
+  h.setWindow(validSampleTurn(1, 0), true)
+  await h.coldHydrate()
+  assert.equal(h.available(), false)
+  // A rehydrate for A starts and parks mid-read; its snapshot is the
+  // window SET AT PARK TIME — a history-start window whose commit would
+  // write `true`.
+  const gate = h.parkNextRead()
+  h.setWindow([], false)
+  const stale = h.rehydrate()
+  // The owner is REPLACED while the old read is pending; the replacement
+  // subject then cold-hydrates ITS OWN still-unproven window (false).
+  h.setCurrent(false)
+  h.setWindow(validSampleTurn(1, 0), true)
+  await h.coldHydrate()
+  assert.equal(h.available(), false, 'the replacement subject\'s own hydrate committed false')
+  // Release the stale read: its §6.5 fences drop it — the bit stays the
+  // replacement's own `false`. A stale commit (the history-start window)
+  // would write `true` here, which is exactly the counterfactual this
+  // test must be able to catch.
+  gate.release()
+  await stale
+  assert.equal(h.available(), false,
+    'the stale rehydrate never flipped the replacement subject\'s bit (a stale commit would read true)')
+})
+
+test('PR5 §3.2 generation reset: the availability bit returns to false before the replacement hydrates', async () => {
+  const h = harness()
+  // Subject A hydrates a PROVEN window (enough retained samples).
   const proven: Array<Record<string, unknown>> = []
   let seq = 0
   for (let turn = 1; turn <= RECENT_PERFORMANCE_SAMPLE_LIMIT * 2; turn += 1) {
@@ -205,16 +249,14 @@ test('PR5 §3.2 stale hydrate: a superseded rehydrate cannot flip the replacemen
   h.setWindow(proven, true)
   await h.coldHydrate()
   assert.equal(h.available(), true)
-  // A rehydrate starts and parks mid-read; the owner is REPLACED while the
-  // old read is pending. The stale window (history start) would flip the
-  // bit — but it never commits.
-  const gate = h.parkNextRead()
-  h.setWindow([], false)
-  const stale = h.rehydrate()
-  h.setCurrent(false)
-  gate.release()
-  await stale
-  // The replacement subject's bit keeps the value its OWN committed window
-  // proved — the stale hydrate never touched it.
+  // The generation bump resets the presentation synchronously — BEFORE the
+  // new owner is published — so the hydrate-pending window reads `false`
+  // (the old subject's `true` must not leak).
+  h.resetForGeneration()
+  assert.equal(h.available(), false,
+    'the bit is false in the hydrate-pending window after the generation reset')
+  // The replacement subject's own hydrate then re-proves it.
+  h.setWindow(proven, true)
+  await h.coldHydrate()
   assert.equal(h.available(), true)
 })

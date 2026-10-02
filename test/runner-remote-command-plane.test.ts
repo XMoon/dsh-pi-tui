@@ -110,6 +110,8 @@ async function mountRunner(
     readonly seed?: (append: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => void) => void
     /** A test-provided LLM adapter (e.g. one that can hold a turn RUNNING). */
     readonly llmAdapter?: StubStreamingLlmAdapter
+    /** A test-provided appExit observer (the PR5 /exit-/quit parity test). */
+    readonly appExit?: (code: number) => void
   } = {},
 ): Promise<Fixture> {
   const presetId = options.presetId ?? 'm3-4-pr4-cmd-preset'
@@ -197,7 +199,7 @@ async function mountRunner(
     else process.env.DSH_HOME = previousHome
   })
 
-  runnerCtx.provide('appExit', (code: number) => { void code })
+  runnerCtx.provide('appExit', (code: number) => { (options.appExit ?? ((c: number) => { void c }))(code) })
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
@@ -790,3 +792,27 @@ test('L6 PR5 negative controls: agent-facing and Host-owned lines keep their del
   assert.equal(hostRuns, 1, 'the Host command executed exactly once')
   release()
 })
+
+test('L6 PR5: /exit and /quit request the exit with NO session creation (sessionless alias parity)', async (t) => {
+  const life = testLifecycle(t)
+  const exits: number[] = []
+  const fixture = await mountRunner(life, { appExit: code => { exits.push(code) } })
+  const countSessions = (): number =>
+    (fixture.host.ctx.sessions as unknown as { list(): unknown[] }).list().length
+  assert.equal(countSessions(), 0, 'the runner started sessionless')
+  submit(fixture, '/quit')
+  await waitFor('/quit requested the exit', () => exits.length === 1, 15_000)
+  assert.equal(countSessions(), 0, '/quit exits without creating a session')
+})
+
+test('L6 PR5: /exit (the canonical alias) behaves identically sessionless', async (t) => {
+  const life = testLifecycle(t)
+  const exits: number[] = []
+  const fixture = await mountRunner(life, { appExit: code => { exits.push(code) } })
+  const countSessions = (): number =>
+    (fixture.host.ctx.sessions as unknown as { list(): unknown[] }).list().length
+  submit(fixture, '/exit')
+  await waitFor('/exit requested the exit', () => exits.length === 1, 15_000)
+  assert.equal(countSessions(), 0, '/exit exits without creating a session (alias parity with /quit)')
+})
+

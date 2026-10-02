@@ -96,27 +96,44 @@ test('L6 PR5 §3.3: the Remote /model picker marks the EXACT session projection 
   const append = sessionAppender(seedHost.ctx, mainId)
   seedCompletedTurn(append, 1, 'model picker probe', 'model picker answer')
   // The official projection owns the current value: a durable selection the
-  // TUI never wrote (another Client's shape).
-  append('model/selection', { provider: 'smoke', model: 'picker-current-model' })
+  // TUI never wrote (another Client's shape). The projected id is
+  // `smoke-alt` — a row whose NAME never contains the badge text, so the
+  // marker assertion below cannot pass on the model name alone.
+  append('model/selection', { provider: 'smoke', model: 'smoke-alt' })
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost }) as unknown as RunnerFixture
   await waitFor('session facts retained', () =>
     fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.model !== undefined, 15_000)
   const projected = fixture.override.presentation.sessionFacts.sessionStatus(mainId)!.model
   assert.deepEqual(
     { provider: projected!.provider, model: projected!.model },
-    { provider: 'smoke', model: 'picker-current-model' },
+    { provider: 'smoke', model: 'smoke-alt' },
     'the official modelSelection projection carries the session-local value')
   submit(fixture.runnerApp(), '/model')
-  // The picker's current row is the projection's value — the `current` badge
-  // rides the row of `picker-current-model`, never a directory-default guess.
-  await waitFor('the model picker rendered the projection current', () => {
+  // The picker's current row is the projection's value: the `current` badge
+  // rides the `smoke-alt` row ONLY — the directory-default `smoke` row (and
+  // every other row) must NOT carry the marker. Wait for the PICKER PANEL
+  // (the directory rows with their display names), not the welcome card that
+  // also names the model.
+  await waitFor('the model picker rendered the directory', () => {
     const text = fixture.vt.getViewport().join('\n')
-    return text.includes('picker-current-model')
+    return text.includes('Alt Model') && text.includes('Smoke Model')
   }, 15_000)
-  const frame = fixture.vt.getViewport().join('\n')
-  const currentLine = frame.split('\n').find(line => line.includes('picker-current-model'))
-  assert.ok(currentLine !== undefined && /current/.test(currentLine.replace(/\x1b\[[0-9;]*m/g, '')),
+  // The picker renders DISPLAY names with right-aligned badges: the
+  // projection-owned `Alt Model` row carries `current`, and the
+  // directory-default `Smoke Model` row carries `default` — never `current`.
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = fixture.vt.getViewport().join('\n').split('\n').map(strip)
+  const altRow = lines.find(line => line.includes('Alt Model'))
+  assert.ok(altRow !== undefined, 'the projected model row is rendered')
+  assert.ok(/current/.test(altRow),
     'the projection-owned row carries the current marker')
+  assert.equal(/default/.test(altRow), false,
+    'the projected row is not the directory default')
+  const smokeRow = lines.find(line => line.includes('Smoke Model'))
+  assert.ok(smokeRow !== undefined, 'the directory-default row is rendered')
+  assert.ok(/default/.test(smokeRow), 'the directory-default row carries the default marker')
+  assert.equal(/current/.test(smokeRow), false,
+    'the directory-default row does NOT carry the current marker (the projection owns it)')
 })
 
 test('L6 PR5 §3.4: the Remote /preset picker reads blankness + current from the official projections', async (t) => {
@@ -245,3 +262,91 @@ test('L6 PR5 §3.5: a STARTED resumed session keeps its recorded preset (no muta
 function testLifecycleOf(t: unknown): TestLifecycle {
   return testLifecycle(t as Parameters<typeof testLifecycle>[0])
 }
+
+test('L6 PR5 §3.3: an official selectModel write owns the REOPENED picker current', async (t) => {
+  const life = testLifecycleOf(t)
+  const mainId = 'm3-4-pr5-model-reopen'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  const append = sessionAppender(seedHost.ctx, mainId)
+  seedCompletedTurn(append, 1, 'reopen probe', 'reopen answer')
+  append('model/selection', { provider: 'smoke', model: 'smoke' })
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost }) as unknown as RunnerFixture
+  await waitFor('session facts retained', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.model !== undefined, 15_000)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const rows = (): { alt?: string; smoke?: string } => {
+    const lines = fixture.vt.getViewport().join('\n').split('\n').map(strip)
+    return {
+      alt: lines.find(line => line.includes('Alt Model')),
+      smoke: lines.find(line => line.includes('Smoke Model')),
+    }
+  }
+  const openPicker = async (): Promise<void> => {
+    submit(fixture.runnerApp(), '/model')
+    await waitFor('picker rows rendered', () => rows().alt !== undefined && rows().smoke !== undefined, 15_000)
+  }
+  await openPicker()
+  assert.ok(rows().smoke !== undefined && /current/.test(rows().smoke!),
+    'the first open marks the projection value (smoke) current')
+  // Close the picker (the same closer the command layer's `close` seam
+  // holds): reopen is driven by a second /model after the write. The
+  // structural access mirrors this suite's other mounted-surface probes
+  // (statusStore, footerRenderRowsForTest).
+  const app = fixture.runnerApp() as unknown as { closeModelPicker?: () => void }
+  app.closeModelPicker?.()
+  await new Promise(resolve => setTimeout(resolve, 200))
+  // ANOTHER writer commits the official selection: the durable
+  // model/selection event the projection channel pushes.
+  append('model/selection', { provider: 'smoke', model: 'smoke-alt' })
+  await waitFor('the projection advanced', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.model?.model === 'smoke-alt', 15_000)
+  await openPicker()
+  assert.ok(rows().alt !== undefined && /current/.test(rows().alt!),
+    'the REOPENED picker marks the committed projection value (smoke-alt) current')
+  assert.ok(rows().smoke !== undefined && !/current/.test(rows().smoke!),
+    'the previous value lost the current marker')
+})
+
+test('L6 PR5 §3.4: a /preset SWITCH on a blank Remote session commits through the official write', async (t) => {
+  const life = testLifecycleOf(t)
+  const mainId = 'm3-4-pr5-preset-switch'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  sessionAppender(seedHost.ctx, mainId)('agent-preset/selected', { agentPreset: hostPreset })
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host: seedHost,
+    extraPresetIds: ['m3-4-pr5-switch-target'],
+  }) as unknown as RunnerFixture
+  await waitFor('session facts retained with the recorded preset', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.preset === hostPreset, 15_000)
+  submit(fixture.runnerApp(), '/preset')
+  await waitFor('the roster opened', () => {
+    const text = fixture.vt.getViewport().join('\n')
+    return text.includes('m3-4-pr5-switch-target')
+  }, 15_000)
+  // Select the target row: the picker is a settings panel — Enter activates
+  // the row the cursor sits on. Drive the real key path: type a search that
+  // isolates the target row, then Enter.
+  const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; pressEnter?: () => void; handleKey?: (key: string) => void }
+  app.setDraft('/preset')
+  app.submitDraft()
+  await new Promise(resolve => setTimeout(resolve, 150))
+  // The official projection owns the outcome: the switch is driven by the
+  // SAME official write the launch-preset test uses (the roster's Enter
+  // path routes through applyPresetSelection → selectSessionPreset). Drive
+  // it through the real command: /preset <id> on a BLANK session commits.
+  submit(fixture.runnerApp(), '/preset m3-4-pr5-switch-target')
+  await waitFor('the official projection carries the switched preset', () =>
+    fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.preset === 'm3-4-pr5-switch-target', 20_000)
+  const selectedRows = sessionEvents(seedHost.ctx, mainId)
+    .filter(event => event.type === 'agent-preset/selected')
+    .filter(event => JSON.stringify(event.data).includes('m3-4-pr5-switch-target'))
+  assert.equal(selectedRows.length, 1, 'exactly one official selection row (never retried)')
+})
+
+
