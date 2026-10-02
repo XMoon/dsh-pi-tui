@@ -452,3 +452,131 @@ test('L6 §7.4-6 sessionless standing skill: the Remote refresh reports EXPLICIT
   assert.equal(fixture.host.ctx.sessions.list().length, before,
     'the Remote standing refresh creates NO hidden Session')
 })
+
+test('L6 truthful-unavailable (review round 4): Remote /transcript refuses EXPLICITLY and never starts the artifact save', async (t) => {
+  // The Markdown renderer reads the whole Session event history
+  // (`snapshotEvents`) — no transport-neutral seam exists yet, so the
+  // Remote post-success artifact save would resolve the projected agent and
+  // crash inside `renderTranscriptMarkdown` AFTER the command already
+  // reported success. The contract: the handler refuses with a shown error,
+  // the notice renders, Save Location NEVER opens (zero artifact-save
+  // workflows started), and the Host executor is never entered.
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-transcript-unavailable'
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    seed: (append) => {
+      // One completed turn so the session is a real conversation subject
+      // (the save path could otherwise be refused for emptiness).
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-transcript', role: 'user', content: [{ type: 'text', text: 'transcript prompt' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('assistant/message', {
+        turn: 1, step: 1,
+        message: { id: 'a-transcript', role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  // The save prompt is CLIENT-local UI: patch the production prototype so
+  // the test observes the REAL workflow's entry (never a test-owned seam).
+  let savePrompts = 0
+  const originalAsk = TuiApp.prototype.askSaveLocation
+  TuiApp.prototype.askSaveLocation = async function patchedAsk() {
+    savePrompts += 1
+    return { kind: 'cancelled' }
+  }
+  life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
+  await settle(120)
+  submit(fixture, '/transcript')
+  await waitFor('the truthful-unavailable notice rendered', () =>
+    fixture.vt.getViewport().join('').includes('transcript export is unavailable on this backend'), 15_000)
+  await settle(150)
+  assert.equal(savePrompts, 0,
+    'a refused /transcript must never open Save Location (zero artifact-save workflows)')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the Remote /transcript refusal never reaches the Host command executor')
+})
+
+test('L6 §7.4-14 stale catalog: refresh A → same-id binding replacement → the old snapshot cannot commit', async (t) => {
+  // The F2a install fence over the MOUNTED composition: the /reload catalog
+  // refresh for A reads the Host catalog (a Host command `stale-cmd` is
+  // visible at read time), the binding is REPLACED while the read is held
+  // (switch B → back to A: the same id, a NEW binding object), and the
+  // `stale-cmd` registration is DISPOSED before the release — so the stale
+  // snapshot's content is wrong for EVERY later state: a correct refresh
+  // can never see it again. If the stale snapshot committed, the completion
+  // rows would offer `stale-cmd`; they must not, and the replacement
+  // surface must never carry the retired name.
+  const life = testLifecycle(t)
+  const sessionA = 'm3-4-pr4-catalog-stale-a'
+  const sessionB = 'm3-4-pr4-catalog-stale-b'
+  const fixture = await mountRunner(life, { resumeSessionId: sessionA })
+
+  // The Host command whose name only the STALE snapshot carries.
+  const commands = fixture.host.ctx.commands as {
+    register(def: { name: string; description: string; handler: () => { kind: 'success' } }): () => void
+  }
+  const disposeStale = commands.register({
+    name: 'stale-cmd',
+    description: 'the stale catalog entry',
+    handler: () => ({ kind: 'success' }),
+  })
+
+  // GATE the REAL commands provider read the refresh consumes.
+  let releaseRead: (() => void) | undefined
+  const readGate = new Promise<void>(resolve => { releaseRead = resolve })
+  const commandSource = fixture.aggregate.presentation.commandSource as {
+    readCommands(sessionId: string, signal?: AbortSignal): Promise<readonly { name: string }[] | undefined>
+  }
+  const originalReadCommands = commandSource.readCommands.bind(commandSource)
+  let gatedReads = 0
+  commandSource.readCommands = async (sessionId, signal) => {
+    gatedReads += 1
+    if (gatedReads === 1) await readGate
+    return originalReadCommands(sessionId, signal)
+  }
+
+  // The refresh gesture on A: the FIRST catalog read now holds.
+  submit(fixture, '/reload')
+  await waitFor('the gated catalog read started', () => gatedReads >= 1, 10_000)
+
+  // SAME-ID BINDING REPLACEMENT: A → B → A (the same id, a NEW binding
+  // object — the identity the fences key on).
+  submit(fixture, `/resume ${sessionB}`)
+  await settle(400)
+  submit(fixture, `/resume ${sessionA}`)
+  await settle(400)
+
+  // The stale content becomes permanently wrong: the Host registration is
+  // disposed while the read still holds its snapshot.
+  disposeStale()
+  releaseRead?.()
+
+  // The stale snapshot must NOT commit: the completion rows never offer the
+  // retired name (a committed stale install would), and a settled later
+  // refresh — over the CURRENT catalog, which no longer has the command —
+  // cannot produce it either. Wait past several refresh cycles for safety.
+  await settle(800)
+  const rows = (fixture.app() as unknown as {
+    commandCompletionsForTest(): readonly { name: string }[]
+  }).commandCompletionsForTest()
+  assert.equal(rows.some(row => row.name === 'stale-cmd'), false,
+    `the stale snapshot never commits (the retired Host command must not appear): ${JSON.stringify(rows.map(row => row.name))}`)
+  // The CURRENT subject's own refresh (a real /reload after the release)
+  // reads the LIVE catalog — the command is disposed, so the name stays
+  // absent there too, proving the absence is the catalog's truth rather
+  // than a test-side suppression.
+  submit(fixture, '/reload')
+  await waitFor('the post-release refresh read the live catalog', () => gatedReads >= 2, 15_000)
+  await settle(800)
+  const rowsAfter = (fixture.app() as unknown as {
+    commandCompletionsForTest(): readonly { name: string }[]
+  }).commandCompletionsForTest()
+  assert.equal(rowsAfter.some(row => row.name === 'stale-cmd'), false,
+    'the post-release refresh (the current catalog, command disposed) keeps the retired name absent')
+})
