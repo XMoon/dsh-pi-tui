@@ -86,6 +86,8 @@ export interface RemoteSessionFacts {
   captureTransportToken(sessionId: string): unknown
   /** Whether the captured transport token still matches the live identity. */
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** The official whole-log `sessionStats` projection value (PR4 §3.3). */
+  sessionStatsProjection(sessionId: string): unknown
 }
 
 /** The structural binding face the projection/running reads borrow. */
@@ -160,6 +162,12 @@ export function createRemotePresentationSource(
         generation: generation.getSnapshot(),
         binding: sessions.binding(sessionId as never) as object | undefined,
       }),
+      sessionStatsProjection(sessionId: string): unknown {
+        if (generation.getSnapshot() === undefined) return undefined
+        const binding = planSource.binding(sessionId)
+        if (binding === undefined) return undefined
+        return binding.session.projections.faceOf('sessionStats').getSnapshot()
+      },
       isTransportTokenCurrent(sessionId: string, token: unknown): boolean {
         const captured = token as { generation?: unknown; binding?: unknown } | undefined
         if (captured === undefined || typeof captured !== 'object') return false

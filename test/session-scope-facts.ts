@@ -61,8 +61,8 @@ export interface SessionScopeFacts {
     readonly cwd: string
   }
   currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
-  currentSessionStats(scope: LiveSessionScope): SessionStats | undefined
-  lastAssistantText(scope: LiveSessionScope): string | undefined
+  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
+  lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   refreshSessionCatalog(scope: SessionScope, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
   refreshStandingCatalog(presetId: string | undefined, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
   applyPermissionPreset(
@@ -181,8 +181,8 @@ export function sessionScopeFacts(
       agentForLiveScope(scope)
       return undefined
     },
-    currentSessionStats: (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
-    lastAssistantText: (scope) => {
+    currentSessionStats: async (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
+    lastAssistantText: async (scope) => {
       const session = agentForLiveScope(scope).session
       for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
         const event = session.eventAt(SessionSeq(seq))

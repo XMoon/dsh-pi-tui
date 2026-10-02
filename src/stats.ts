@@ -302,6 +302,22 @@ function advanceTimingTurn(
 }
 
 /**
+ * The bounded recent-performance helper (M3-4 PR4 §3.4): derive ONLY the
+ * recent-window figures (firstTokenMsAvg / tokensPerSec) from a bounded
+ * event window — the SAME fold, window and `RECENT_PERFORMANCE_SAMPLE_LIMIT`
+ * authority as the whole-log stats, so a Remote bounded-window composition
+ * and a Direct whole-log fold can never drift apart. No lifetime totals are
+ * derived here: a bounded window must not count session-lifetime figures.
+ * @param events - the bounded window's events (the exact binding's current
+ *  durable window, oldest-first).
+ * @returns the recent-window performance figures.
+ */
+export function recentPerformanceOf(events: readonly SessionEvent[]): Pick<SessionStats, 'firstTokenMsAvg' | 'tokensPerSec'> {
+  const derived = computeStats(events)
+  return { firstTokenMsAvg: derived.firstTokenMsAvg, tokensPerSec: derived.tokensPerSec }
+}
+
+/**
  * Fold the session log into performance statistics.
  * @param events - the session log.
  * @returns aggregated statistics.
