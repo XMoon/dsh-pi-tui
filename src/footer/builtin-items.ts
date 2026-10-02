@@ -706,21 +706,38 @@ const performanceItem: FooterItemDefinition = {
   defaultFormat: 'full',
   render(snapshot: StatusSnapshot, ref, density) {
     const performance = snapshot.usage.performance
+    // PR5 truthfulness (plan §3.2): an ABSENT metric is unproven evidence
+    // (a bounded Remote window) — the format that needs it renders nothing
+    // instead of a numeric `0s`/`0 tok/s` stand-in. The composite form
+    // renders whichever parts ARE authoritative; neither → nothing.
     if (ref.format === 'speed') {
+      if (performance.tokensPerSec === undefined) return null
       const text = density === 'compact'
         ? formatPerformanceSpeedCompact(performance.tokensPerSec)
         : formatPerformanceSpeed(performance.tokensPerSec)
       return { spans: [{ text, tone: 'textMuted' }] }
     }
     if (ref.format === 'latency') {
+      if (performance.firstTokenMs === undefined) return null
       const text = density === 'compact'
         ? formatPerformanceLatencyCompact(performance.firstTokenMs)
         : formatPerformanceLatency(performance.firstTokenMs)
       return { spans: [{ text, tone: 'textMuted' }] }
     }
-    const text = density === 'compact'
-      ? formatPerformanceCompact(performance.firstTokenMs, performance.tokensPerSec)
-      : formatPerformanceFull(performance.firstTokenMs, performance.tokensPerSec)
+    const latency = performance.firstTokenMs
+    const speed = performance.tokensPerSec
+    if (latency === undefined && speed === undefined) return null
+    const text = latency !== undefined && speed !== undefined
+      ? (density === 'compact'
+        ? formatPerformanceCompact(latency, speed)
+        : formatPerformanceFull(latency, speed))
+      : latency !== undefined
+        ? (density === 'compact'
+          ? formatPerformanceLatencyCompact(latency)
+          : formatPerformanceLatency(latency))
+        : (density === 'compact'
+          ? formatPerformanceSpeedCompact(speed!)
+          : formatPerformanceSpeed(speed!))
     return { spans: [{ text, tone: 'textMuted' }] }
   },
 }

@@ -148,11 +148,20 @@ export interface UsageStatus {
    * `firstTokenMs` = the RECENT (last 5) average time-to-first-token,
    * `tokensPerSec` = the RECENT (last 5) observable decode throughput
    * (Σ output / Σ (first token → assistant/message) over steps whose final
-   * attempt delivered token deltas at two distinct timestamps). */
+   * attempt delivered token deltas at two distinct timestamps).
+   *
+   * PR5 truthfulness (M3-4 PR5 §3.2): `firstTokenMs`/`tokensPerSec` are
+   * ABSENT when the presentation owner cannot prove the recent-sample
+   * evidence authoritative — a bounded Remote window that has neither
+   * reached the history start nor retained enough valid samples must not
+   * paint a numeric `TTFB 0s · 0 tok/s` as if it were measured. Numeric
+   * zero stays a legitimate measured value (a complete history with zero
+   * valid samples). `llmMs` is lifetime data and always numeric.
+   * Availability is NEVER inferred from the numeric values. */
   readonly performance: {
     readonly llmMs: number
-    readonly firstTokenMs: number
-    readonly tokensPerSec: number
+    readonly firstTokenMs?: number
+    readonly tokensPerSec?: number
   }
   readonly turns: number
   readonly steps: number

@@ -115,7 +115,14 @@ export interface StatusRuntimeDeps {
    */
   readonly remote?: StatusRemoteFacts
   /** The live-session presentation owner (the legacy stats facts). */
-  readonly presentation: { readonly mainStats: () => StatsFolder }
+  readonly presentation: {
+    readonly mainStats: () => StatsFolder
+    /** PR5 (plan §3.2): whether the main fold's RECENT-performance figures
+     *  are authoritative (Direct full log, or a proven Remote window). When
+     *  `false` the usage section OMITS the two recent metrics — never a
+     *  numeric `0s · 0 tok/s` stand-in for unknown evidence. */
+    readonly mainRecentPerformanceAvailable?: () => boolean
+  }
   /** The viewer owner (the display subject while a child is viewed). */
   readonly viewer: { readonly read: () => { readonly cwd: string; readonly stats: StatsFolder } | undefined }
   /** The diagnostics channel for OWNED async operations (the permission
@@ -555,6 +562,12 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       displaySubject?.stats.snapshot() ?? stats,
       displaySubject === undefined ? contextTokens : undefined,
       remoteUsageFacts,
+      // PR5 (plan §3.2): an unproven recent window omits the recent metrics.
+      // A viewer CHILD keeps the numeric figures (its own fold is its whole
+      // subject; the availability authority is the MAIN presentation's).
+      displaySubject === undefined && deps.presentation.mainRecentPerformanceAvailable?.() === false
+        ? { recentPerformanceAvailable: false }
+        : undefined,
     )
     const host = deriveHostStatus()
     const patch: {
@@ -583,7 +596,12 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       goal: goalText,
       turns: stats.turns,
       steps: stats.steps,
-      statsLine: formatStats(stats),
+      // PR5 (plan §3.2): the legacy line shares the availability rule with
+      // the structured usage section (the main-subject branch only — a
+      // viewer child's own fold stays numeric).
+      statsLine: formatStats(stats, displaySubject === undefined
+        ? deps.presentation.mainRecentPerformanceAvailable?.() ?? true
+        : true),
       // EXPLICITLY clear the permission when the service/agent is
       // unavailable: the legacy merge keeps the old value otherwise,
       // and syncExtensionState would publish a STALE permission to the

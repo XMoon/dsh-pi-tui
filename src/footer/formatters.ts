@@ -244,14 +244,20 @@ export function formatStatsLine(usage: UsageStatus): string {
         tokens.cacheWrite > 0 ? `W${formatTokens(tokens.cacheWrite)}` : '',
         tokens.cacheRead > 0 || tokens.cacheWrite > 0 ? `CH${(usage.cacheHitPct ?? 0).toFixed(1)}%` : '',
       ].filter(part => part !== '')
+  // PR5 truthfulness: an unavailable recent metric is OMITTED — a bounded
+  // window that cannot prove its samples must not paint `TTFB 0s · 0 tok/s`
+  // as a stand-in for unknown (plan §3.2). Only the authoritative parts
+  // render; neither present → no performance tail at all.
   const ownParts = [
-    `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
-    `${usage.performance.tokensPerSec} tok/s`,
-  ]
+    usage.performance.firstTokenMs === undefined ? '' : `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
+    usage.performance.tokensPerSec === undefined ? '' : `${usage.performance.tokensPerSec} tok/s`,
+  ].filter(part => part !== '')
   const performance = ownParts.join(' · ')
   // The separator belongs to the JOIN, never a leading orphan: without owned
-  // token facts the line is the performance segment alone.
-  return piParts.length === 0 ? performance : `${piParts.join(' ')} | ${performance}`
+  // token facts the line is the performance segment alone (which may itself
+  // be empty when no recent metric is authoritative).
+  if (piParts.length === 0) return performance
+  return performance === '' ? piParts.join(' ') : `${piParts.join(' ')} | ${performance}`
 }
 
 /** The pi-vocabulary stats line, compact pressure form:
@@ -267,12 +273,15 @@ export function formatStatsLineCompact(usage: UsageStatus): string {
         `↑${formatTokens(tokens.input)}`,
         `↓${formatTokens(tokens.output)}`,
       ]
+  // Same PR5 truthfulness rule as the full line: unavailable recent metrics
+  // are omitted, never a zero stand-in.
   const ownParts = [
-    `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
-    `${usage.performance.tokensPerSec}t/s`,
-  ]
+    usage.performance.firstTokenMs === undefined ? '' : `TTFB ${formatSeconds(usage.performance.firstTokenMs)}`,
+    usage.performance.tokensPerSec === undefined ? '' : `${usage.performance.tokensPerSec}t/s`,
+  ].filter(part => part !== '')
   const performance = ownParts.join(' · ')
-  return piParts.length === 0 ? performance : `${piParts.join(' ')} · ${performance}`
+  if (piParts.length === 0) return performance
+  return performance === '' ? piParts.join(' · ') : `${piParts.join(' ')} · ${performance}`
 }
 
 /** The sandbox mode compact codes: `ro`, `ww`, `yolo`. An unknown future

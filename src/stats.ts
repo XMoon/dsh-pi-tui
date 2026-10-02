@@ -1042,10 +1042,18 @@ function formatDuration(ms: number): string {
  * Context pressure and the turn/step counters live in the FOOTER (the
  * default layout renders them on its stats row), so they are not repeated
  * here.
+ * PR5 truthfulness (plan §3.2): `recentPerformanceAvailable === false`
+ * (a bounded Remote window that proved neither its samples nor the history
+ * start) OMITS the two recent terms — `LLM ...` (lifetime) stays — never a
+ * `TTFB 0s · 0 tok/s` stand-in for unknown. Availability is a caller-owned
+ * presentation fact; it is never inferred from the numeric values.
  * @param stats - the folded statistics.
+ * @param recentPerformanceAvailable - whether the recent-window figures
+ *  are authoritative (defaults to `true`: the fold's own complete-log
+ *  semantics).
  * @returns the display line.
  */
-export function formatStats(stats: SessionStats): string {
+export function formatStats(stats: SessionStats, recentPerformanceAvailable = true): string {
   const piParts = [
     `↑${formatTokens(stats.inputTokens)}`,
     `↓${formatTokens(stats.outputTokens)}`,
@@ -1055,8 +1063,12 @@ export function formatStats(stats: SessionStats): string {
   ].filter(part => part !== '')
   const ownParts = [
     `LLM ${formatDuration(stats.llmMs)}`,
-    `TTFB ${formatSeconds(stats.firstTokenMsAvg)}`,
-    `${stats.tokensPerSec} tok/s`,
+    ...(recentPerformanceAvailable
+      ? [
+          `TTFB ${formatSeconds(stats.firstTokenMsAvg)}`,
+          `${stats.tokensPerSec} tok/s`,
+        ]
+      : []),
   ]
   return `${piParts.join(' ')} | ${ownParts.join(' · ')}`
 }
