@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
-import { commandIsLocalForAttachments, commandRejectsImages, isLocalCommandLine, LOCAL_COMMANDS, normalizeSkillInvocation, SESSIONLESS_COMMANDS } from '../src/index.ts'
+import { commandIsLocalForAttachments, commandRejectsImages, isLocalCommandLine, LOCAL_COMMANDS, normalizeSkillInvocation, resolveSubmitDelivery, SESSIONLESS_COMMANDS } from '../src/index.ts'
 import type { HostCommandClaim } from '../src/commands.ts'
 
 function storeWithImage(): DraftImageStore {
@@ -156,8 +156,10 @@ test('a HOST claim outranks a same-named client contribution in the attachment g
   assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy prod ${image.placeholder}`, store, colliding), false,
     'a host-claimed line is never a local command (the host route owns it)')
   const core = commandIsLocalForAttachments({ name: 'help', rawInput: '' }, undefined, undefined, hostCatalog({ help: { leadingInput: true } }))
-  assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), true,
-    'a TUI-owned local command stays local even if a registry claim exists for it')
+  assert.equal(core, false,
+    '§D3 line authority (review round 2): a host-RESOLVED name is never TUI-local — even a LOCAL_COMMANDS member defers to the host route when the catalog claims its line')
+  assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), false,
+    'the host descriptor owns the attachment policy of its own claimed line')
 })
 
 test('a client contribution claims the BARE token only: an argued line keeps its attachments', () => {
@@ -198,4 +200,60 @@ test('the host claim is LINE-level: an execute-kind command does not claim its a
   // dispatch, which distinguishes the claimed bare line from the rest.
   assert.equal(commandRejectsImages({ name: 'compact', rawInput: ' extra' }, `/compact extra ${image.placeholder}`, store, arguedCompact), false,
     'the argued execute-kind line keeps its image')
+})
+
+test('§D3 line authority: a HOST-RESOLVED name is never TUI-local (argued /export foo keeps attachments + ordinary-prompt semantics)', () => {
+  // The frozen rc.2 Host /export (dsh-session-log-export) is execute-kind
+  // (no leadingInput): its BARE token is a Host invocation, its ARGUED line
+  // is an ordinary submission. The TUI also owns a Client /export built-in —
+  // the host view must outrank the LOCAL_COMMANDS term in BOTH cases
+  // (review round 2, external finding: the three sibling gates used to
+  // disagree with the dispatch's precedence fix).
+  assert.equal(isLocalCommandLine('export', undefined, undefined, { claimed: true, attachments: false }), false,
+    'a CLAIMED host line is a host command, never TUI-local')
+  assert.equal(isLocalCommandLine('export', undefined, undefined, { claimed: false }), false,
+    'a RESOLVED-but-unclaimed argued line is an ordinary submission, never TUI-local (attachments allowed)')
+  assert.equal(isLocalCommandLine('export', undefined, undefined, undefined), true,
+    'with the host catalog not resolving the name at all, the TUI built-in stays local')
+  // The attachment gate rides the same order end-to-end.
+  const hostClaim = (parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined =>
+    parsed.name === 'export'
+      ? ((parsed.rawInput?.trim() ?? '') === ''
+        ? { claimed: true, attachments: false }
+        : { claimed: false })
+      : undefined
+  assert.equal(commandIsLocalForAttachments({ name: 'export', rawInput: 'foo' }, undefined, undefined, hostClaim), false,
+    'an argued /export foo line keeps its attachments (ordinary multimodal submission)')
+  assert.equal(commandIsLocalForAttachments({ name: 'export', rawInput: '' }, undefined, undefined, hostClaim), false,
+    'the bare /export Host invocation is a HOST line — the TUI-local attachment refusal never applies (the host admission owns its policy)')
+})
+
+
+test('§D3 Direct parity matrix (review round 2 external gate): the TUI-built-in observable behavior is unchanged when no Host name collides', () => {
+  // The Direct matrix the external review froze: with the authoritative Host
+  // catalog NOT resolving a TUI built-in name, every observable classification
+  // keeps its pre-precedence behavior — only a REAL host-resolved name changes
+  // routing (the collision case above).
+  const noHost = (): undefined => undefined
+  // /settings bare: still an immediately-executed TUI local command.
+  assert.equal(isLocalCommandLine('settings', undefined, undefined, noHost()), true)
+  // /help while running: still the queue placeholder (a local command never
+  // steers), NOT the ordinary queue/steer policy.
+  assert.equal(resolveSubmitDelivery({ name: 'help', rawInput: '' }, true, 'enter', 'steer', isLocalCommandLine('help', undefined, undefined, noHost())), 'queue')
+  // /export with NO external Host claim: the TUI built-in path (local).
+  assert.equal(isLocalCommandLine('export', undefined, undefined, noHost()), true)
+  // An argued line of a NO-collision TUI built-in: execute-kind built-ins keep
+  // their ordinary-prompt busy policy only where the builtin itself declares
+  // it; the local set stays local (the LOCAL_COMMANDS term rules unresolved
+  // names exactly as before).
+  assert.equal(resolveSubmitDelivery({ name: 'export', rawInput: 'foo' }, true, 'enter', 'steer', isLocalCommandLine('export', undefined, undefined, noHost())), 'queue')
+  // A genuinely ordinary prompt line still follows the composer policy: the
+  // accelerated CHORD takes the busyEnter preference's OPPOSITE (web parity)
+  // — chord + steer-preference queues, chord + queue-preference steers. The
+  // point: a host-resolved argued line participates in that policy instead of
+  // the local-command queue placeholder.
+  assert.equal(resolveSubmitDelivery({ name: 'export', rawInput: 'foo' }, true, 'accelerated', 'steer', false), 'queue',
+    'chord takes the preference opposite — ordinary busy policy, not the local placeholder')
+  assert.equal(resolveSubmitDelivery({ name: 'export', rawInput: 'foo' }, true, 'accelerated', 'queue', false), 'steer',
+    'the steer side of the ordinary busy policy is reachable for a host-resolved argued line')
 })

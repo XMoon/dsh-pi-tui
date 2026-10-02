@@ -1151,7 +1151,7 @@ test('L6 §7.4-10/11 LIVE: a mounted Remote surface renders the tool call as it 
 
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
   const app = await waitForApp(fixture)
-  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
   const eventsOf = (): Array<{ type: string; data: unknown }> => (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
     snapshotEvents(): Array<{ type: string; data: unknown }>
   }).snapshotEvents()
@@ -1185,4 +1185,196 @@ test('L6 §7.4-10/11 LIVE: a mounted Remote surface renders the tool call as it 
   const view = fixture.vt.getViewport().join('')
   assert.equal(view.includes('LIVE-TOOL-ARGS'), true,
     'the unknown tool\'s raw arguments render through the bounded generic fallback')
+})
+
+/* ───────── §7.4-10 KNOWN tool LIVE lifecycle (review F8 round 2) ─────── */
+
+/** The KNOWN-tool live script: turn 1 requests an EDIT of a pre-seeded file
+ *  (the Client presenter's known diff-card family). The tool's EXECUTION is
+ *  held open by gating the model's SECOND turn — the durable call/result
+ *  settle while the live phase is provably in flight. */
+class EditToolLlmAdapter extends StubStreamingLlmAdapter {
+  private turn = 0
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    options.signal?.throwIfAborted()
+    this.turn += 1
+    if (this.turn === 1) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'editing now' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'editing now' } }
+      yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 1, id: ToolCallId('live-edit-1'), name: 'edit', argumentsDelta: JSON.stringify({ file_path: 'known-live-target.txt', old_string: 'before', new_string: 'after' }).slice(1, -1) }
+      yield {
+        type: 'block-end', index: 1,
+        block: { type: 'tool-call', id: ToolCallId('live-edit-1'), name: 'edit', arguments: JSON.stringify({ file_path: 'known-live-target.txt', old_string: 'before', new_string: 'after' }) },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    yield* scriptedTextTurn('edit turn complete')
+  }
+}
+
+test('L6 §7.4-10 KNOWN tool LIVE: an in-flight edit renders the Client diff card BEFORE the result settles, then settles from the durable facts', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-tool-known-live'
+  const hostPreset = 'm3-4-pr2-preset'
+  const adapter = new EditToolLlmAdapter()
+  const host = await mountRemotePresentationHost(life, hostPreset, { llmAdapter: adapter })
+  // The REAL filesystem tool suite (the known `edit` the Client presenter
+  // derives its diff card from) over the fixture's real local fs.
+  const toolFs = await import('@deepseek-ai/dsh-tool-fs')
+  await host.ctx.plugin(toolFs)
+  const { writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  writeFileSync(join(host.anchorDir, 'known-live-target.txt'), 'before\n')
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
+  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+
+  // Gate the model's turns at the STREAM START: nothing settles until the
+  // release, so the LIVE phase is observable while the turn is provably open.
+  const release = (adapter as EditToolLlmAdapter & { hold(): () => void }).hold()
+  editor.setDraft('please edit the target file')
+  editor.submitDraft()
+
+  // LIVE phase, PROVABLY in-flight: the transient tool-call preview renders
+  // the KNOWN tool's card while the durable tool/result rows have NOT landed
+  // yet (the held stream cannot have completed the turn).
+  await waitFor('the known live edit preview rendered', () => {
+    const view = fixture.vt.getViewport().join('')
+    return view.includes('edit') && view.includes('editing now')
+  }, 40_000)
+
+  release()
+  await waitFor('the settled edit card rendered', () => {
+    const view = fixture.vt.getViewport().join('')
+    return view.includes('known-live-target.txt')
+  }, 40_000)
+  await waitFor('the turn settled', () =>
+    fixture.vt.getViewport().join('').includes('edit turn complete'), 40_000)
+  // The durable execution really happened: the file carries the edit.
+  const { readFileSync } = await import('node:fs')
+  assert.equal(readFileSync(join(host.anchorDir, 'known-live-target.txt'), 'utf8'), 'after\n',
+    'the Host executed the edit for real (the known-tool card is not a mock)')
+})
+
+/* ───────── §7.4-5 literal skill gesture + Host pre-step (review F8) ────── */
+
+test('L6 §7.4-5 literal skill gesture over a mounted Remote surface: the Client delivers the ORIGINAL line, the HOST pre-step injects the body', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-skill-gesture'
+  const hostPreset = 'm3-4-pr2-preset'
+  const BODY_MARKER = 'PR4-HOST-INJECTED-SKILL-BODY'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  // The Host-side skill authority the official `dsh-tool-skill` pre-step
+  // reads. The Client NEVER loads a body on this branch (its semantic
+  // resolveSkill is explicitly unavailable), so the marker can only come
+  // from the Host pre-step.
+  const skillSummary = {
+    name: 'pr4-skill', description: 'the fixture skill',
+    invocation: { userInvocable: true, modelInvocable: false },
+  }
+  host.ctx.provide('skills', {
+    list: async () => [skillSummary],
+    snapshot: async () => ({ skills: [skillSummary], complete: true }),
+    get: async (name: string) => name === 'pr4-skill'
+      ? { ...skillSummary, provider: 'fixture', content: BODY_MARKER }
+      : undefined,
+  } as never)
+  const toolSkill = await import('@deepseek-ai/dsh-tool-skill')
+  await host.ctx.plugin(toolSkill as never, undefined as never)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
+  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
+  const eventsOf = (): Array<{ type: string; data: unknown }> => (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }).snapshotEvents()
+
+  // Refresh the catalog explicitly (production `/reload`): installs the
+  // snapshot that registers the skill wrapper for the gesture.
+  editor.setDraft('/reload')
+  editor.submitDraft()
+  await waitFor('the catalog refresh applied with the skill', () =>
+    fixture.vt.getViewport().join('').includes('skills'), 30_000)
+
+  editor.setDraft('/pr4-skill do the thing')
+  editor.submitDraft()
+
+  // The gesture line travels VERBATIM as one ordinary user message (the SAME
+  // transport-aware prepared-prompt pipeline an ordinary prompt uses) …
+  await waitFor('the literal gesture line landed durably', () => eventsOf().some(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes('/pr4-skill do the thing')), 40_000)
+  // … and the HOST pre-step injects the body.
+  await waitFor('the Host pre-step injected the skill body', () => eventsOf().some(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes(BODY_MARKER)), 40_000)
+  const literals = eventsOf().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes('/pr4-skill do the thing'))
+  assert.equal(literals.length, 1, 'EXACTLY ONE literal user gesture (never duplicated)')
+  const injected = eventsOf().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(BODY_MARKER))
+  assert.equal(injected.length, 1, 'exactly one injected body message')
+  assert.ok(JSON.stringify(injected[0]!.data).includes('skill-invocation'),
+    'the injection rides the official skill-invocation source kind')
+})
+
+/* ───────── §7.4-7 mounted /status over a paged performance window (F8) ──── */
+
+test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; the RECENT figures fold the MOUNTED window', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-status-paged'
+  const hostPreset = 'm3-4-pr2-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  // The OLDEST turns carry the recent-sample evidence (an embedded durable
+  // stream with two token deltas on the SESSION clock + authoritative usage);
+  // everything newer is an empty-stream turn. The official projections still
+  // own the LIFETIME totals whose source events include these old turns.
+  const SAMPLE_BASE = Date.now() - 10_000
+  for (let turn = 1; turn <= 5; turn += 1) {
+    session.append('turn/start', { turn })
+    session.append('step/start', { turn, step: 1 })
+    session.append('user/message', {
+      id: `u-paged-${turn}`, role: 'user', content: [{ type: 'text', text: `paged prompt ${turn}` }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn, step: 1,
+      message: { id: `a-paged-${turn}`, role: 'assistant', content: [{ type: 'text', text: `paged answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+      usage: { inputTokens: 1_000, outputTokens: 200 },
+      stream: [
+        { type: 'chunk', time: SAMPLE_BASE + 500, chunk: { type: 'text-delta', index: 0, text: 'a' } },
+        { type: 'chunk', time: SAMPLE_BASE + 900, chunk: { type: 'text-delta', index: 0, text: 'b' } },
+      ],
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn, step: 1 })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  // Newer empty-stream turns (their events sit inside the newest window).
+  seedTurns(session, 6, 40, 'paged-newer')
+
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
+  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+  editor.setDraft('/status')
+  editor.submitDraft()
+  // The command executes through the mounted Client registry and opens the
+  // official status panel.
+  await waitFor('the mounted /status panel opened', () =>
+    fixture.vt.getViewport().join('').includes('Stats'), 30_000)
+  // LIFETIME totals: their source events include the oldest turns, so a
+  // bounded-window read could not produce them — the projections must.
+  await waitFor('the projection-backed lifetime totals rendered', () =>
+    /↑[0-9.]+k/u.test(fixture.vt.getViewport().join('')), 20_000)
+  // RECENT evidence: the MOUNTED window (the exact one the Remote status
+  // composition folds) carries admitted throughput samples.
+  const snapshot = await fixture.aggregate.presentation.presentationReader.read(mainId)
+  assert.ok(snapshot !== undefined, 'the mounted Remote window is readable')
+  const statsMod = await import('../src/stats.ts')
+  const recent = statsMod.recentPerformanceOf(snapshot!.durableEvents as never)
+  assert.ok(recent.tokensPerSec > 0,
+    'the mounted window admits recent throughput samples (the composed /status recent figure is fold-backed, never a window-only zero)')
 })
