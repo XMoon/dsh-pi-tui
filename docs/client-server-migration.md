@@ -329,6 +329,22 @@ Do not perform this retirement in M3-4/M3-5/M3-6: those stages cut command
 default and keeps its in-process dispatch surface (busy-Enter, sessionless
 execution, `commands/change` refresh).
 
+**Adjacent follow-up (owner: M8 / PR5 hardening, user-ruled 2026-10-02): the
+`transcriptExportAvailable` capability becomes REQUIRED.** The M3-4 PR4 exit
+state declares it optional on `TuiCommandRunner` with a stated default of
+"unspecified = the historical Direct behavior (available)" — the handler
+refuses only on an explicit `false`. That was the round-5 minimal fix for the
+declaration/behavior contradiction (F14), chosen to avoid a mechanical sweep
+of every test/stub runner mid-review; it is a compatibility convenience, NOT
+the intended capability design. The production seam is already fail-closed
+(`CommandSurfaceDeps.transcriptExportAvailable` is a required boolean and the
+composition root passes an explicit Direct=true / Remote=false). The
+retirement-adjacent change: make the runner field a required `boolean`, move
+the handler back to refusing on `!== true`, complete the stub/runners
+explicitly, and guard-test that a new assembly cannot leave the capability
+undeclared. A capability must force an explicit statement, never default
+open in the wide.
+
 ## Migration process and qualification governance
 
 Permanent process rules for the migration (added after M3-3B; normative for
