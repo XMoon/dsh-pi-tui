@@ -1140,7 +1140,14 @@ export function executeHostCommandSubmission(
     diag: deps.diag,
     sessionId: () => deps.commandSessionId(),
     onResult: (outcome) => {
-      if (deps.isDisposed()) {
+      // PR5 (plan §3.8): the release/cleanup bookkeeping ALWAYS runs (leak
+      // prevention), but a settlement whose ORIGINAL subject was replaced
+      // makes no VISIBLE mutation — the Host may finish the old command and
+      // the durable Host-side settlement completes, yet the replacement
+      // surface must not receive the old draft restore/consume, ack rows,
+      // notices, health repaints or artifact saves.
+      const scopeCurrent = deps.isScopeCurrent(scope)
+      if (deps.isDisposed() || !scopeCurrent) {
         fallbackPin()
         submitTurn.release()
         return
@@ -1264,7 +1271,9 @@ export function executeHostCommandSubmission(
     onError: (error) => {
       fallbackPin()
       submitTurn.release()
-      if (deps.isDisposed()) return
+      // PR5 (plan §3.8): cleanup above ALWAYS runs; a replaced subject's
+      // failure notice/health repaint must not reach the replacement surface.
+      if (deps.isDisposed() || !deps.isScopeCurrent(scope)) return
       // A frozen transition refused the writer admission BEFORE any command
       // dispatch: a PROVEN pre-dispatch refusal (nothing ran), never the generic
       // command-failure / command-health-error path. Restore the draft, settle
@@ -1301,7 +1310,9 @@ export function executeHostCommandSubmission(
     onCancel: () => {
       fallbackPin()
       submitTurn.release()
-      if (deps.isDisposed()) return
+      // PR5 (plan §3.8): same rule as onError — no visible mutation on a
+      // replaced subject.
+      if (deps.isDisposed() || !deps.isScopeCurrent(scope)) return
       const draftDisposition = deps.readCommandDraftDisposition()
       if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
         deps.restoreSubmissionDraft(text)

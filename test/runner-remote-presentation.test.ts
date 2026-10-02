@@ -497,6 +497,18 @@ test('L6: history paging (loadOlder) extends the loaded window without replacing
   const before = await reader.read(mainId)
   assert.ok(before !== undefined, 'the reader serves the retained session')
   if (before.hasMore) {
+    // PR5 (plan §3.2) L6: the truncated window's recent figures are UNKNOWN
+    // — the footer's stats line omits TTFB/tok-s (the seed's assistant
+    // messages carry no valid samples, so a numeric `TTFB 0s · 0 tok/s`
+    // stand-in must NOT paint while hasMore is true).
+    const footerOf = (): string => {
+      const app = fixture.runnerApp() as unknown as { footerRenderRowsForTest(): readonly string[] }
+      return app.footerRenderRowsForTest().join('\n')
+    }
+    await waitFor('the truncated window omits the recent metrics', () => {
+      const footer = footerOf()
+      return footer.length > 0 && !footer.includes('TTFB')
+    }, 15_000)
     const after = await reader.loadOlder(mainId)
     assert.ok(after !== undefined)
     assert.equal(after.durableEvents.length > before.durableEvents.length, true,
