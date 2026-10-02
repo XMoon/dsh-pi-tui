@@ -3717,11 +3717,32 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   (`SupersededReadError`); the Host-command settlement performs its release
   bookkeeping unconditionally but skips every visible mutation once the
   captured scope is superseded (draft restore/consume, acks, notices,
-  health repaint, artifact save, fallback dispatch).
-- **Selected-runtime teardown proof** (plan §3.9): with a pending parked
-  write across the teardown, the runner fiber disposal retires the owned
-  session BEFORE the exactly-once transport disposal, and no durable row
-  lands after it (`runner-remote-races` L6).
+  health repaint, artifact save, fallback dispatch). QUALIFICATION NOTE
+  (plan deviation, reviewer-acknowledged): the mounted variant of these two
+  fences — a parked command read/settlement ACROSS a submit-driven session
+  switch — is not drivable in the real runner: a pending command settlement
+  holds the single submit FIFO turn, so no later submit (the only user
+  reachability for `/resume`/`/sessions` switches) can interleave. The
+  fences are therefore qualified at the unit layer (the command-runtime
+  scope-fence suite; the settlement stale/current pair) plus the mounted
+  pre-dispatch stale-capture L6 (PR3 §12, Connection-generation driven) and
+  the mounted teardown quiescence below. The SAME FIFO constraint applies
+  to the picker fences (a `/preset` roster read or a `/model` directory
+  read pending across a session switch): those reads live inside their
+  command handlers, which hold the submit turn, so no later submit can
+  interleave — their subject fences stay qualified by the existing Direct
+  unit suites (`preset-command`: the S1→S2 subject fence and the
+  roster-drift never-opens case; `model-picker`/`commands.ts` fence tests)
+  over the shared `commands.ts` code path.
+- **Selected-runtime teardown proof** (plan §3.9): with a pending main-path
+  READ (a parked `/status` stats read) and, separately, a pending WRITE (a
+  parked serializer) across the teardown, the runner fiber disposal settles
+  the pending work inside the retirement drain, disposes the selected
+  transport EXACTLY ONCE after the retirement, and no durable row lands and
+  no repaint happens after the disposal (`runner-remote-races` §3.9a/§3.9b
+  L6). The pending read and write cannot be parked SIMULTANEOUSLY in one
+  mounted runner — the second submission queues behind the first's FIFO
+  turn — so the two pending classes are proven as separate mounted cases.
 - **PR4 Client self-claim regression closure** (the PR5 command-routing
   supplement, `temp/m3/pr5-command-fix.md`): the submission gates no longer
   derive Host-NAME authority from the effective line claim (whose union
@@ -3766,6 +3787,51 @@ Every original M3-4 acceptance item, with its disposition:
 | Child viewer / Job / Plugin Manager semantics | OUT_OF_SCOPE_LATER_STAGE | M3-5 (unchanged) |
 | Old optional `transcriptExportAvailable` | SUPERSEDED_BY_PR5_REQUIRED_CAPABILITY | required boolean + guards |
 | Extension registry global lifecycle | OUT_OF_SCOPE_LATER_STAGE | M3-6 (unchanged) |
+
+Original M3-4 overall plan §13 (representative positive evidence) — every
+row, with its disposition:
+
+| §13 positive path | Disposition | Evidence |
+|---|---|---|
+| Remote startup resume | DONE_WITH_EVIDENCE | PR2 L6 (`runner-remote-presentation` cold resume) |
+| Remote sessionless create | DONE_WITH_EVIDENCE | PR3 L6 (`runner-remote-submission` durable first-row sessionless create) |
+| Remote switch/new/fork | DONE_WITH_EVIDENCE | PR2/PR3 L6 (navigation switch/rollover/reconnect; §12 stale capture; /fork d2 smokes) |
+| Remote transcript hydration | DONE_WITH_EVIDENCE | PR2 L6 (official window rows painted once) |
+| Remote live assistant output | DONE_WITH_EVIDENCE | PR2 L6 (transient + durable convergence) |
+| Remote plain prompt | DONE_WITH_EVIDENCE | PR3 L6 (writer spine positive) |
+| Remote queued/steer prompt | DONE_WITH_EVIDENCE | PR3 L6 §37 (queue pane + steer next-step with own rpcId) |
+| Remote model/preset operations | DONE_WITH_EVIDENCE | PR4 + PR5 (port tests; PR5 L6 picker reads + switch + launch preset) |
+| Remote /status publicly-available facts | DONE_WITH_EVIDENCE | PR4 L6 §7.4-7 + PR5 availability + reachability under running/steer |
+| Remote /copy last-assistant | DONE_WITH_EVIDENCE | PR4 L6 (OSC 52 paging) + PR5 reachability under running/steer |
+| Remote /rewind outside initial event window | DONE_WITH_EVIDENCE | PR4 L6 (`runner-remote-rewind`) |
+| Remote Host command | DONE_WITH_EVIDENCE | PR4 L6 §7.4-3 (exactly once through HostCommandPort) |
+| Client-local built-in/extension command | DONE_WITH_EVIDENCE | PR4 L6 §7.4-1/2 + PR5 mounted reachability under running/steer |
+| Remote known tool card live + replay | DONE_WITH_EVIDENCE | PR4 L6 §7.4-10/11 (live + durable replay) |
+| Remote unknown tool generic fallback | DONE_WITH_EVIDENCE | PR4 L6 (bounded generic fallback renders name + raw args) |
+| Remote permission preset cycle | DONE_WITH_EVIDENCE | PR4 L6 (projection-authoritative cycle) |
+| Remote local shell bypass | DONE_WITH_EVIDENCE | PR3 L6 (bypass `!` positive; the frozen carrier gap is the fail-closed row below) |
+| Remote image prompt | DONE_WITH_EVIDENCE | PR3 L6 §37 (staged bytes → PromptContentPart → durable attachment) |
+| Remote durable image read/resend | DONE_WITH_EVIDENCE | PR3 L6 (official readAttachment byte equality; resend via durable blocks) |
+| Remote Session export through the selected backend | DONE_WITH_EVIDENCE | PR4 L6 (Host `/export` claim + SessionArchivePort authority) |
+
+Original M3-4 overall plan §14 (required negative / fail-closed evidence) —
+every row:
+
+| §14 negative path | Disposition | Evidence |
+|---|---|---|
+| Generic local file needing unsupported receipt → reject before Host mutation | DONE_WITH_EVIDENCE | attachment intake refusal (PR3 image/file matrix; the local-command refusal path in `commandIsLocalForAttachments`) |
+| Sessionless standing skill → unavailable | DONE_WITH_EVIDENCE | PR4 L6 §7.4-6 (explicit unavailable, no Session created) |
+| Skill body read → never attempted Client-side | DONE_WITH_EVIDENCE | §7.5 guard (`m3-4-pr4-guards`: no Client SKILL.md read/render) |
+| Independent approval override → unavailable, not "ask" | DONE_WITH_EVIDENCE | PR4 §6.4/§6.6 (Remote access section omits; `approvalOverrideAvailable` marker) |
+| Independent sandbox mode → omitted, not inferred | DONE_WITH_EVIDENCE | PR4 §6.6 L6 (no sandbox fact painted from a Host default) |
+| Remote sandboxed local shell → refuse without unsandboxed fallback | DONE_WITH_EVIDENCE | PR3 L6 §37 CARRIER_GAP (`!`/`!!` fail closed, zero spawn, zero write) |
+| Stale Session/binding generation → no visible commit | DONE_WITH_EVIDENCE | PR1–PR4 (generation caches, §6.5 fences) + PR5 (stale hydrate counterfactual, stale settlement unit + mounted teardown quiescence) |
+| Disconnect/replacement during async operation → no stale repaint | DONE_WITH_EVIDENCE | PR2/PR3 L6 (rollover/reconnect re-init without leaking) + PR5 supplement reachability (mounted runner: TUI commands under running+steer never misroute) |
+| Unknown generated namespace → fail loudly | DONE_WITH_EVIDENCE | `remote-official-contract` gate (generated namespace surface locked) |
+| Client command callback → never Host ctx.commands.execute | DONE_WITH_EVIDENCE | §18.1 guard + PR4 L6 §7.4-1/2 (zero command/run rows) + PR5 running/steer reachability |
+| Remote tool card → never Host ctx.tools.get | DONE_WITH_EVIDENCE | §7.5 guard (no Host tool-registry consultation) |
+| Permission cycle → never Host permissionPresets.set | DONE_WITH_EVIDENCE | §18.3 guard + `permission-cycle` negative lock |
+| Turn-end Remote path → never Host sessions.flush | DONE_WITH_EVIDENCE | PR3 turn-end settlement (official flush contract; no TUI-side sessions.flush anywhere in `runtime/remote`) |
 
 M3-4 = DONE. The next stage is M3-5 (secondary surfaces), not another
 generic M3-4 PR: no automatic "PR6" is created for historical unchecked

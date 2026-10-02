@@ -953,9 +953,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 // The dynamic (client contribution) term is STICKY to the
                 // submit-time route.
                 n => clientLocalAtSubmit && (deps.extensions.isLocal(n, LOCAL_COMMANDS) ?? false),
-                // STICKY SUBMIT-TIME AUTHORITY (PR5 supplement): once the
-                // AUTHORITATIVE host catalog RESOLVED this name, the name is
-                // host territory for the lifetime of the submission.
+                // FINAL LIVE AUTHORITY (PR5 supplement): re-apply the
+                // attachment policy against the AUTHORITATIVE host catalog
+                // at settlement time — a name it resolves now is host
+                // territory regardless of the submit-time view.
                 deps.command.hostCatalogResolves(parsed.name),
               ),
               deps.command.isSkillInvocation(parsed, text),

@@ -696,7 +696,6 @@ test('PR5: a command settlement whose subject was REPLACED performs cleanup only
     submitPrompt: async () => {},
     commandSessionId: () => 's1',
     markTurnTransferred: () => {},
-    deps_diag_placeholder: diag,
     diag,
     // The submit turn's release is the leak-prevention bookkeeping.
     // (supplied via input.submitTurn below)

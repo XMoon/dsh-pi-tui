@@ -99,8 +99,14 @@ class StubStreamingLlmAdapter extends LlmAdapter {
     // The model CONTRACT is the shared fixture's: the Host default selection
     // is `smoke/smoke` (agentDefaultModel below), so the streaming catalog
     // must expose `smoke` — a divergent id here surfaces as a first-turn
-    // model resolution failure, not a completion list.
-    return Promise.resolve([{ provider, id: 'smoke', name: 'Smoke Model' }])
+    // model resolution failure, not a completion list. The SECOND row
+    // (`smoke-alt`) exists for the PR5 picker tests: a directory model whose
+    // name never matches the `current` badge text, so a marker assertion
+    // cannot pass on the model name alone.
+    return Promise.resolve([
+      { provider, id: 'smoke', name: 'Smoke Model' },
+      { provider, id: 'smoke-alt', name: 'Alt Model' },
+    ])
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

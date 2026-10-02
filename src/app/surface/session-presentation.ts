@@ -382,6 +382,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const resetForGeneration = (): void => {
     callArgs.clear()
     mainStreamingToolPreviews.clear()
+    // PR5 (plan §3.2): the replacement subject has NO authoritative window
+    // yet — the recent-performance availability bit returns to `false` until
+    // the new subject's own fenced hydrate proves otherwise (the old
+    // subject's `true` must not leak into the hydrate-pending window).
+    recentPerformanceAvailable = false
     // The new session's subagent delegations are a fresh namespace: stale
     // pending calls from the old session would consume viewer match slots,
     // and dead callId→child maps would silently disable the auto-pop.
