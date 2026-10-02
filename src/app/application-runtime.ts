@@ -122,6 +122,10 @@ export interface RemoteLiveIngressFactory {
       onDurableEvent: (sessionId: string, event: { readonly type: string; readonly seq: number; readonly time: number }) => void
       onLiveInput: (input: import('../runtime/assistant-stream-port.ts').AssistantLiveInput) => void
       onWindowReplaced: (sessionId: string) => void
+      /** Older history prepended to the window front (an official
+       * `loadOlder` by any consumer): re-fold the presentation from the
+       * widened window. */
+      onWindowPrepended: (sessionId: string) => void
       onSessionSnapshotChanged: (sessionId: string) => void
       /** The official PROJECTION store changed: the only channel carrying
        *  projection-owned current values (the Session snapshot never does). */

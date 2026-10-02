@@ -135,6 +135,7 @@ function harness(): Harness {
     surface: surface as never,
     diag,
     isCleanedUp: () => false,
+    refreshStatusCheap: () => {},
     folds: { title: () => undefined },
     direct: {
       installModelSelection: () => {},

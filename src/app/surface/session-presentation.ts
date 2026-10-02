@@ -116,6 +116,12 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
   readonly diag: Diag
   /** True once the runner is disposing: no hydration may start. */
   readonly isCleanedUp: () => boolean
+  /** F10 (round 4): re-derive the footer status from the CURRENT folds —
+   *  the composition root's `refreshStatusCheap` (it owns the semantic
+   *  derivation and the commit). The re-hydrate path calls it after
+   *  replacing the stats fold, so the footer never keeps rendering the
+   *  pre-page figures. */
+  readonly refreshStatusCheap: () => void
   /** Official DSH log folds the composition root owns. */
   readonly folds: {
     readonly title: (events: readonly Event[]) => string | undefined
@@ -652,6 +658,12 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     for (const liveInput of snapshot.liveInputs) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput)
     }
+    // F10 (round 4): the stats fold was just REPLACED by the wider window —
+    // the footer's status derivation still reads the pre-hydrate snapshot,
+    // so a repaint alone would keep rendering the stale (often all-zero)
+    // recent figures. Re-derive the status from the NEW fold in the same
+    // step; the cheap refresh's own fences own the session/binding rules.
+    deps.refreshStatusCheap()
     deps.surface.repaint()
   }
 

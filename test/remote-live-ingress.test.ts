@@ -79,6 +79,7 @@ interface SinkLog {
   durable: Array<{ type: string }>
   live: Array<{ kind: string }>
   replaced: string[]
+  prepended?: string[]
   snapshots?: string[]
   projections?: string[]
 }
@@ -104,6 +105,7 @@ function sinksOf(log: SinkLog): RemoteLiveIngressSinks {
     onDurableEvent: (_id, event) => { log.durable.push({ type: (event as { type: string }).type }) },
     onLiveInput: input => { log.live.push(input as { kind: string }) },
     onWindowReplaced: id => { log.replaced.push(id) },
+    onWindowPrepended: id => { (log.prepended ??= []).push(id) },
     onSessionSnapshotChanged: id => { log.snapshots?.push(id) },
     onProjectionsChanged: id => { log.projections?.push(id) },
   }
@@ -222,6 +224,25 @@ test('a settle-assistant change routes its durable settlement entry exactly once
   })
   assert.deepEqual(log.durable.map(event => (event as { type: string }).type), ['assistant/message'],
     'the settlement durable entry routes through the ordinary durable plane')
+  handle.dispose()
+})
+
+test('a prepend change routes the front-page re-hydrate (F10: ANY official loadOlder consumer)', () => {
+  // An older-history page joined the window front: the append-only folds
+  // cannot take it incrementally, and the page may have been requested by
+  // ANY official reader consumer (keyboard extension, /status facts
+  // composition, copy paging) — so the ingress must surface it, never stay
+  // silent (the silent version left the footer on the stale pre-page fold).
+  const log: SinkLog = { durable: [], live: [], replaced: [] }
+  const source = sourceWith({ entries: [], revision: 1, hasMore: true })
+  const ingress = createRemoteLiveIngress(source.sessions, generationSource())
+  const handle = ingress.subscribe('s', sinksOf(log))
+  assert.ok(handle !== undefined)
+  source.publish({ entries: [], revision: 2, hasMore: false, change: { kind: 'prepend', entries: [{ type: 'event', event: { type: 'user/message', seq: 1, time: 1, data: {} } }] } })
+  assert.deepEqual(log.prepended ?? [], ['s'],
+    'the front page routes the dedicated re-hydrate sink (never silent)')
+  assert.deepEqual(log.replaced, [], 'a prepend is not a reconnect: no full re-hydrate')
+  assert.deepEqual(log.durable, [], 'the front-joined events are NOT routed incrementally (the fold re-takes the whole window)')
   handle.dispose()
 })
 

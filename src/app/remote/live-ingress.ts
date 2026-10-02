@@ -75,6 +75,14 @@ export interface RemoteLiveIngressSinks {
   /** The window was REPLACED (reconnect/gap repair): re-hydrate the whole
    *  presentation from the authoritative new window. */
   readonly onWindowReplaced: (sessionId: string) => void
+  /** Older history PREPENDED to the window front (an official `loadOlder`
+   *  by ANY consumer — the keyboard history extension, the /status facts
+   *  composition, copy paging): the append-only folds cannot take the
+   *  front-joined page incrementally, so the transcript/stats presentation
+   *  (and the footer's derived figures) must re-fold from the widened
+   *  window. F10 (round 4): without this the footer keeps rendering the
+   *  stale pre-page fold — often the all-zero "no samples" view. */
+  readonly onWindowPrepended: (sessionId: string) => void
   /** The Session snapshot changed (pendingSubmissions/running/etc. — the
    *  uSES channel): the pending-input presentation re-joins from the
    *  official sources. */
@@ -259,8 +267,12 @@ export function createRemoteLiveIngress(
           }
           case 'prepend': {
             // Older history joined the window front (loadOlder/jump): the
-            // append-only fold cannot take it incrementally. The surface's
-            // history extension owns the re-hydrate; nothing to route live.
+            // append-only fold cannot take it incrementally. F10 (round 4):
+            // route the re-hydrate through the dedicated sink — the page may
+            // have been requested by ANY official reader consumer (the
+            // keyboard extension, the /status composition, copy paging), so
+            // the surface cannot rely on the paging caller to re-hydrate.
+            sinks.onWindowPrepended(sessionId)
             return
           }
           case 'replace': {
