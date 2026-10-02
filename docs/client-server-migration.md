@@ -3195,6 +3195,19 @@ contract is now explicit:
   tok-s figures stay derived from the exact binding's bounded window through
   the SHARED fold (paging `loadOlder` only while the recent-sample window may
   be incomplete). See `app/remote/session-facts-compose.ts`.
+- **Front-page re-hydrate after ANY official `loadOlder`** — CLOSED by M3-4
+  PR4 round 4 (review F10): the live ingress routes a window `prepend` to a
+  subject-fenced `rehydrateFromWindow` (whichever consumer paged — the
+  keyboard history extension, the `/status` facts composition, copy paging),
+  and the re-hydrate re-derives the footer status from the NEW stats fold in
+  the same step. Before this, only the keyboard path re-hydrated and the
+  footer kept rendering the pre-page fold (often `TTFB 0s · 0 tok/s`) after
+  `/status` had paged the official window wider.
+  **PR5 MUST CLOSE (blocker, not a degradation)**: an incomplete recent-sample
+  window must render as unknown/omitted — the footer must never present
+  authoritative-looking `0s / 0 tok/s` for what is really a not-yet-measured
+  window. The shared binding-owned async stats snapshot (no per-refresh
+  paging storms) is the expected seam.
 - **Per-subject history paging latch**: one Remote `loadOlder` extension is
   in flight per SUBJECT, not per runner — a page still loading for the
   previous session cannot swallow the new session's first boundary gesture.

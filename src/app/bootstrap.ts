@@ -1142,6 +1142,7 @@ export function applyRunnerWithRuntime(
       surface,
       diag,
       isCleanedUp: () => cleanedUp,
+      refreshStatusCheap: () => status.refresh(),
       folds: { title: (events) => foldSessionTitle(events)?.title },
       direct: {
         installModelSelection: (agent) => { directRuntime()?.modelSelections.installForAgent(agent as Agent) },
@@ -1322,6 +1323,19 @@ export function applyRunnerWithRuntime(
           if (ownership.currentSessionId() !== id || cleanedUp) return
           remoteWorkingFoldFor = undefined
           runDetached('remote window re-hydration', () => initRemoteLiveSurface(id), {
+            diag,
+            sessionId: () => id,
+          })
+        },
+        onWindowPrepended: (id) => {
+          // F10 (round 4): an official `loadOlder` page joined the window
+          // front — whoever requested it (keyboard extension, /status facts
+          // composition, copy paging). Re-fold the transcript/stats
+          // presentation from the widened window for the CURRENT session
+          // only; `rehydrateFromWindow` owns the generation/transport fences
+          // and re-derives the footer status from the new fold.
+          if (ownership.currentSessionId() !== id || cleanedUp) return
+          runDetached('remote window front re-hydration', () => presentation.rehydrateFromWindow(id), {
             diag,
             sessionId: () => id,
           })
