@@ -185,6 +185,84 @@ interface RecentTtftSample {
  * identifies a new provider + model clears both windows (bumping the
  * route epoch) before its own samples join.
  */
+
+/**
+ * Whether a bounded event window already proves the recent-performance
+ * sample window COMPLETE (plan §3.4's "whether enough valid samples are
+ * present"): the window's fold RETAINED a full TTFT window AND a full
+ * throughput CANDIDATE window. Counted by the SAME fold the derive uses —
+ * a step/end COUNT can never prove this (steps with no first token,
+ * burst-delivered steps, and failed steps contribute no valid samples),
+ * which is exactly why a count-based page-stop can present partial
+ * TTFT/TPS as if they were complete.
+ */
+export function hasEnoughRecentPerformanceSamples(events: readonly SessionEvent[]): boolean {
+  const admitted = recentPerformanceWindowOf(events).admittedCounts()
+  return admitted.ttft >= RECENT_PERFORMANCE_SAMPLE_LIMIT
+    && admitted.throughput >= RECENT_PERFORMANCE_CANDIDATE_LIMIT
+}
+
+/** Fold one bounded window and expose its recent-performance sample
+ *  windows (the retained-sample counts are the page-stop contract). */
+function recentPerformanceWindowOf(events: readonly SessionEvent[]): RecentPerformanceWindow {
+  const perStep = new Map<string, StepTiming>()
+  const settledPerStep = new Map<string, StepTiming>()
+  const endedSteps = new Set<string>()
+  const recent = new RecentPerformanceWindow()
+  const usage = new StepUsageAccumulator()
+  const stats: SessionStats = { ...EMPTY }
+  let settledTurn: number | undefined
+  const enterSettledTurn = (turn: number): void => {
+    settledTurn = advanceTimingTurn(perStep, settledPerStep, endedSteps, settledTurn, turn)
+  }
+  for (const event of events) {
+    if (isReplacementSurfaceEvent(event)) continue
+    const kind = event.type as string
+    if (event.type === 'turn/start') {
+      enterSettledTurn(event.data.turn)
+    } else if (event.type === 'step/start') {
+      enterSettledTurn(event.data.turn)
+      const key = stepKey(event.data.turn, event.data.step)
+      if (settledTurn !== event.data.turn || endedSteps.has(key) || perStep.has(key)) continue
+      perStep.set(key, { start: event.time })
+    } else if (event.type === 'step/end') {
+      enterSettledTurn(event.data.turn)
+      const key = stepKey(event.data.turn, event.data.step)
+      const timing = settledTurn === event.data.turn ? perStep.get(key) : undefined
+      if (timing?.settled === true) settledPerStep.set(key, timing)
+      if (settledTurn === event.data.turn) perStep.delete(key)
+    } else if (event.type === 'turn/end') {
+      enterSettledTurn(event.data.turn)
+      if (settledTurn === event.data.turn) {
+        perStep.clear()
+        settledPerStep.clear()
+        endedSteps.clear()
+      }
+    } else if (event.type === 'assistant/message') {
+      enterSettledTurn(event.data.turn)
+      const key = stepKey(event.data.turn, event.data.step)
+      const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
+      const tokenRange = tokenTimeRangeFromAssistantStream(event.data.stream)
+      const timing = settledTurn === event.data.turn
+        ? perStep.get(key) ?? settledPerStep.get(key)
+        : undefined
+      if (timing !== undefined) {
+        if (timing.firstDelta === undefined && tokenRange !== undefined) timing.firstDelta = tokenRange.first
+        if (tokenRange !== undefined) {
+          timing.decodeFirstDelta = tokenRange.first
+          timing.decodeLastDelta = tokenRange.last
+        }
+        if (timing.settled !== true) {
+          timing.completed = event.time
+          if (messageUsage !== undefined) timing.usage = messageUsage
+          settleStep(stats, key, timing, recent, routeKeyOf(event.data.message))
+          timing.settled = true
+        }
+      }
+    }
+  }
+  return recent
+}
 class RecentPerformanceWindow {
   /** The route (provider + model) the current window belongs to. */
   routeKey: string | undefined
@@ -248,6 +326,15 @@ class RecentPerformanceWindow {
     const outputTokens = throughput.reduce((sum, sample) => sum + sample.outputTokens, 0)
     const tokensPerSec = decodeMs > 0 ? Math.round((outputTokens * 1000) / decodeMs) : 0
     return { firstTokenMsAvg, tokensPerSec }
+  }
+
+  /** The per-metric RETAINED sample counts (the §3.4 "whether enough valid
+   *  samples are present" contract): each window retains at most its own
+   *  limit, so a FULL window (count == limit) proves the window cannot be
+   *  starved — the derive's latest-five can still lose one sample to a late
+   *  invalidation and backfill from the retained candidates. */
+  admittedCounts(): { ttft: number; throughput: number } {
+    return { ttft: this.ttft.length, throughput: this.throughput.length }
   }
 }
 

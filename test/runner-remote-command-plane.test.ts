@@ -390,3 +390,50 @@ test('L6 §7.4-8 /copy reaches the newest assistant message OUTSIDE the initial 
   assert.equal(Buffer.from(match![1]!, 'base64').toString('utf8'), 'COPY-TARGET-TEXT',
     'the copied text is the last assistant message reached by paging')
 })
+
+test('L6 §D3 (review F2-external): a REAL Host `/export` claim wins over the same-named TUI built-in', async (t) => {
+  // The frozen rc.2 `dsh-session-log-export` Host plugin registers `/export`
+  // (a Web-only ZIP download) — the REAL production collision. The TUI also
+  // owns a Client `/export` built-in. The §D3 precedence contract: the
+  // AUTHORITATIVE HOST catalog resolves the name first — the line goes to
+  // HostCommandPort (one official command/run row), and the Client built-in
+  // never executes its artifact-save path for it.
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-cmd-export-claim'
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    seed: (append) => {
+      // One completed turn so the session is a real conversation subject.
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-export', role: 'user', content: [{ type: 'text', text: 'export prompt' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('assistant/message', {
+        turn: 1, step: 1,
+        message: { id: 'a-export', role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  await settle(120)
+  // The HOST catalog (the official plugin's registration) resolves /export.
+  const resolves = await (async () => {
+    const names = (await fixture.aggregate.presentation.commandSource.readCommands(mainId))?.map(entry => entry.name)
+    return names?.includes('export') === true
+  })()
+  assert.equal(resolves, true,
+    'the official dsh-session-log-export Host registration is in the authoritative catalog')
+  submit(fixture, '/export')
+  // The OFFICIAL executor's durable command/run row is the authority: the
+  // Host claim owns the line (the built-in Client path would leave ZERO
+  // command/run rows and instead start a client-local artifact save).
+  await waitFor('the HOST /export lifecycle rows landed', () => {
+    const kinds = fixture.events(mainId).map(event => event.type)
+    return kinds.includes('command/run') && kinds.includes('command/done')
+  }, 15_000)
+  assert.equal(fixture.hostCommandRuns(mainId), 1,
+    'the /export line executed through the OFFICIAL Host executor exactly once (the Host claim owns it)')
+})

@@ -426,6 +426,9 @@ type CommandDraftDisposition = 'restored' | 'suppressed'
 export type PermissionPresetOutcome =
   | { readonly kind: 'applied' }
   | { readonly kind: 'unavailable'; readonly cause: 'commands' | 'permission' }
+  /** §6.3: dispatched but unobservable (e.g. a post-dispatch transport
+   *  cancellation) — never masked as unavailable, never retried. */
+  | { readonly kind: 'indeterminate'; readonly reason: string }
 
 /**
  * One permission-preset attempt. The LOCAL ownership axis stays INDEPENDENT from
@@ -1473,6 +1476,10 @@ export function registerTuiCommands(
    * the name, `claimed: false` when it resolves the name without claiming
    * this line. */
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** §D3 precedence: whether the AUTHORITATIVE HOST catalog (never the
+   *  claim-set union, which also carries this surface's own Client
+   *  registrations) resolves one slash name. */
+  hostCatalogResolves(name: string): boolean
   /** Whether one slash name is a LIVE TUI-owned skill wrapper (an
    * agent-facing invocation whose `/name` line the host may resolve into an
    * injected skill body). */
@@ -3861,6 +3868,11 @@ export function registerTuiCommands(
     const view = runner.listScopedCommands()
     for (const command of view) if (!owned.has(command.name)) taken.add(command.name)
     for (const name of scopedNames) taken.add(name)
+    // §D3: the AUTHORITATIVE Host catalog participates in the collision
+    // baseline — a skill wrapper must never register over a live Host
+    // command name (on Remote, `listScopedCommands()` is the Client
+    // registry's view, which does NOT carry the Host descriptors).
+    for (const command of authoritativeHostCatalog) taken.add(command.name)
     for (const dispose of skillDisposers.values()) dispose()
     skillDisposers.clear()
     let count = 0
@@ -3985,6 +3997,12 @@ export function registerTuiCommands(
    * thin agent-facing invocation (loadSkill builds the prompt), never a host
    * claim. */
   const hostClaimOf = (parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined => {
+    // A TUI-owned skill wrapper is an agent-facing invocation — never a
+    // Host-command claim (its `/name args` line still belongs to the command
+    // PLANE through the LOCAL/skill ownership checks). §D3 Host-vs-wrapper
+    // PRECEDENCE is decided separately by `hostCatalogResolves` against the
+    // AUTHORITATIVE Host catalog, so a wrapper sharing a REAL Host name can
+    // never shadow it (the registration side also refuses taken Host names).
     if (skillDisposers.has(parsed.name)) return undefined
     const descriptor = claims.get(parsed.name)
     if (descriptor === undefined) return undefined
@@ -4571,6 +4589,14 @@ export function registerTuiCommands(
         return { kind: 'error', text: outcome.outcome.cause === 'commands'
           ? 'commands service unavailable'
           : '/permission unavailable (permission presets not composed)' }
+      }
+      if (outcome.outcome.kind === 'indeterminate') {
+        // §6.3: dispatched but unobservable — never claim failure, never
+        // invite a retry (this preset disables approvals).
+        return {
+          kind: 'error',
+          text: 'the permission switch was dispatched but its result is unknown — check the footer before relying on it; do not retry blindly',
+        }
       }
       return { kind: 'success', text: 'danger-full-access — approvals off' }
     },
@@ -5639,6 +5665,12 @@ export function registerTuiCommands(
      * contribution (the dispatch caller excludes TUI-local commands itself via
      * LOCAL_COMMANDS). */
     hostClaimOf,
+    /** §D3 precedence discriminator: whether the AUTHORITATIVE HOST CATALOG
+     *  (never the claim-set union, which also carries this surface's own
+     *  Client registrations) resolves one slash name. A same-named TUI
+     *  built-in or skill wrapper must never shadow a resolved Host command. */
+    hostCatalogResolves: (name: string): boolean =>
+      authoritativeHostCatalog.some(command => command.name === name),
     /** Whether one slash name is a LIVE TUI-owned skill wrapper (the
      * revalidating transition wrappers included). */
     isSkillWrapper: (name: string): boolean => skillDisposers.has(name),

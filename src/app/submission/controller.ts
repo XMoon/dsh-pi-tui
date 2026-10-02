@@ -81,6 +81,10 @@ export interface SubmissionCommandPlane<ExactAgent> {
 export interface SubmissionCommandAuthority {
   wasAdvertisedClaim(name: string): boolean
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** §D3 precedence: whether the AUTHORITATIVE HOST catalog resolves the
+   *  name (the claim-set union also carries this surface's own Client
+   *  registrations, so it cannot discriminate Host authority). */
+  hostCatalogResolves(name: string): boolean
   isSkillWrapperName(name: string): boolean
   isSkillInvocation(parsed: { name: string } | undefined, text: string): boolean
   withCommandDelivery<T>(delivery: SubmitDelivery, run: () => T): T
@@ -728,14 +732,20 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // NOT own an argued line of an execute-kind host command: upstream
     // `matchEnter` makes it an ordinary submission, and the host registry
     // resolves by NAME, so asking it would run the command anyway.
+    // §D3 ORDER: the AUTHORITATIVE HOST CATALOG is consulted FIRST — a
+    // resolved Host name owns the line even when a TUI built-in or a skill
+    // wrapper shares it (e.g. the frozen rc.2 Web-only Host `/export`
+    // colliding with the TUI's Client `/export`). The union claim-set cannot
+    // discriminate here (it also carries this surface's own Client
+    // registrations), so the discriminator is `hostCatalogResolves`; only an
+    // unresolved name falls through to the Client-owned routes.
     const commandPlaneOwnsLine = (): boolean => {
       if (parsedAtSubmit === undefined) return true
+      if (deps.command.hostCatalogResolves(parsedAtSubmit.name)) {
+        return deps.command.hostClaimOf(parsedAtSubmit)?.claimed !== false
+      }
       if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true
       if (deps.command.isSkillWrapperName(parsedAtSubmit.name) === true) return true
-      const finalView = deps.command.hostClaimOf(parsedAtSubmit)
-      // A resolved final catalog answers for itself (claimed = the plane
-      // runs the command; unclaimed = an ordinary submission).
-      if (finalView !== undefined) return finalView.claimed
       // The final catalog does not resolve the name at all: the plane decides
       // (a session-scoped command the standing view cannot see) — UNLESS the
       // line was ALREADY a known non-invocation when it was submitted, which
@@ -939,6 +949,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: () => parsedAtSubmit !== undefined
+            // §D3: an authoritative HOST-catalog name disqualifies the
+            // TUI-owned route FIRST (a same-named TUI built-in or skill
+            // wrapper must never shadow a resolved Host command; the union
+            // claim-set cannot discriminate — it carries the Client's own
+            // registrations too).
+            && !deps.command.hostCatalogResolves(parsedAtSubmit.name)
             && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true),
           commandPlaneOwnsLine,
           submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostClaimOf(parsedAtSubmit),
