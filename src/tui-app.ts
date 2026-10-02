@@ -17118,8 +17118,13 @@ export class TuiApp {
       // keep the previous preset. The merged this.status carries the
       // explicit `permission: undefined` (spread semantics), so the
       // undefined check below IS the clear signal.
+      // M3-4 PR4 §6.4: the legacy permission field is Direct-service-fed and
+      // stays ABSENT on the Remote branch. An absent legacy value must not
+      // clear a projection-owned preset (the runner's projection derivation
+      // is the committed authority): only a PRESENT legacy value projects,
+      // and absence keeps the current section untouched.
       const access: AccessStatus = this.status.permission === undefined
-        ? { ...current.access, permissionPreset: undefined }
+        ? { ...current.access }
         : {
             ...current.access,
             permissionPreset: {

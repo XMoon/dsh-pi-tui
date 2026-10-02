@@ -169,6 +169,11 @@ export interface SessionStatusProjection {
    *  value; `null` — "no title yet" — normalizes to absent here). A bounded
    *  event window cannot own this fact: the title event may precede it. */
   readonly title?: string
+  /** The session's committed permission preset (the official `permissions`
+   *  projection's `currentValue` — M3-4 PR4 §6.1): the SINGLE projection-
+   *  authoritative current value; absent = the projection/capability is
+   *  unavailable (never guessed, never a preset-name inference). */
+  readonly permission?: string
   /** The current durable goal (the official `goal` projection view). A LEGAL
    *  `null` means the projection answered "no goal"; an ABSENT field means the
    *  projection was unavailable — the two must never be conflated. A bounded

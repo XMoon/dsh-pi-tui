@@ -787,6 +787,14 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   /** A4-8: clear the search presentation at a session-generation bump. */
   resetSearchPresentation(): void
   /**
+   * M3-4 PR4 §6.4: clear the SUBJECT-OWNED status sections (access,
+   * composition, collaboration) at a session-generation bump. This is the
+   * session-lifecycle owner's explicit reset — the ONLY writer that may
+   * clear a projection-owned permission preset (a legacy writer never
+   * may). The new owner's own projections re-derive every section.
+   */
+  resetSubjectStatus(): void
+  /**
    * Early teardown: release the jobs-event subscription at its original FIRST
    * cleanup position (before the Job observation and the browser handle), so
    * no Job listener can refresh a dying surface.
@@ -1143,6 +1151,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // representative pass can never hide behind a single stage emission.
     searchProfiler.stage('search.resolve-representatives')
   }
+  const resetSubjectStatus = (): void => {
+    status.update({ access: {}, composition: {}, collaboration: { plan: { effective: false } } })
+  }
+
   const resetSearchPresentation = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
     // Only a runner that actually holds search state needs to publish the
     // atomic clear: an unconditional empty commit would force a pointless
@@ -2993,6 +3005,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     paintNow,
     repaint: () => repaintActive(),
     resetSearchPresentation,
+
+    resetSubjectStatus,
     disposeJobEvents() {
       jobsEventsDispose?.()
       jobsEventsDispose = undefined
