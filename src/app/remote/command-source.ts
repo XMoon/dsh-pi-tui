@@ -39,6 +39,10 @@ export interface RemoteCommandSource {
    *  Connection generation. `undefined` = the read was superseded by a
    *  Connection rollover (never an empty success). */
   read(sessionId: string, signal?: AbortSignal): Promise<RemoteCommandCatalogRead | undefined>
+  /** Read ONLY the Host command metadata (§2.2): the coordinator maps the
+   *  command provider here and the skill provider through the semantic skill
+   *  capability, so one failing provider degrades alone. */
+  readCommands(sessionId: string, signal?: AbortSignal): ReturnType<RemoteSurfaceAuthorityReader['readCommands']>
 }
 
 /** The narrow one-source face this bundle consumes: the SAME shared sessions
@@ -57,5 +61,6 @@ export function createRemoteCommandSource(inputs: RemoteCommandSourceInputs): Re
   const reader = new RemoteSurfaceAuthorityReader(inputs.authority, inputs.generation)
   return {
     read: (sessionId, signal) => reader.read(sessionId, signal),
+    readCommands: (sessionId, signal) => reader.readCommands(sessionId, signal),
   }
 }

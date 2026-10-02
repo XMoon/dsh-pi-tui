@@ -89,6 +89,8 @@ export interface RemoteApplicationSelection {
  */
 export interface RemoteCommandSourceFace {
   read(sessionId: string, signal?: AbortSignal): Promise<import('../runtime/surface-authority-port.ts').SurfaceAuthoritySnapshot | undefined>
+  /** The commands-only, generation-fenced metadata read (PR4 §2.2). */
+  readCommands(sessionId: string, signal?: AbortSignal): Promise<import('../runtime/surface-authority-port.ts').SurfaceAuthoritySnapshot['commands'] | undefined>
 }
 
 export interface RemoteApplicationSources {

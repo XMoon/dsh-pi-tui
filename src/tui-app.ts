@@ -17113,26 +17113,24 @@ export class TuiApp {
       const project = cwd === '' ? undefined : cwd.split('/').filter(Boolean).at(-1)
       const branch = this.status.branch === undefined || this.status.branch === '' ? undefined : this.status.branch
       const composition: CompositionStatus = { ...current.composition, model }
-      // The owned fields are ALWAYS set — a disappearing permission (like
-      // a disappearing model/cwd/branch) must clear the stale fact, never
-      // keep the previous preset. The merged this.status carries the
-      // explicit `permission: undefined` (spread semantics), so the
-      // undefined check below IS the clear signal.
-      // M3-4 PR4 §6.4: the legacy permission field is Direct-service-fed and
-      // stays ABSENT on the Remote branch. An absent legacy value must not
-      // clear a projection-owned preset (the runner's projection derivation
-      // is the committed authority): only a PRESENT legacy value projects,
-      // and absence keeps the current section untouched.
-      const access: AccessStatus = this.status.permission === undefined
-        ? { ...current.access }
-        : {
-            ...current.access,
-            permissionPreset: {
-              id: this.status.permission,
-              label: this.status.permission,
-              matched: this.status.permission !== 'custom',
-            },
-          }
+      // M3-4 PR4 §6.4 — this legacy writer is a PARTIAL compatibility writer
+      // for access: it owns `permissionPreset` ONLY while a legacy Direct
+      // service value exists. An absent legacy value expresses NO opinion —
+      // it never writes the key — so a projection-owned value survives an
+      // unrelated legacy refresh (workspace/usage). Clearing a RETIRED
+      // subject's sections is the session-lifecycle owner's explicit reset
+      // (the surface's resetSubjectStatus), never this writer's.
+      // (A local mutable shape: AccessStatus' fields are readonly, so
+      // `Partial<AccessStatus>` could not be built incrementally.)
+      const accessPatch: { permissionPreset?: AccessStatus['permissionPreset'] } = {}
+      if (this.status.permission !== undefined) {
+        accessPatch.permissionPreset = {
+          id: this.status.permission,
+          label: this.status.permission,
+          matched: this.status.permission !== 'custom',
+        }
+      }
+      const access: AccessStatus = { ...current.access, ...accessPatch }
       const workspace: WorkspaceStatus = {
         ...current.workspace,
         cwd,
