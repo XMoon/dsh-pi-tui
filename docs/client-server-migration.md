@@ -25,7 +25,7 @@ M3-4 PR1 DONE      (application runtime-selection spine: `SelectedApplicationRun
 M3-4 PR2 DONE      (main Session read/presentation/status over the Remote aggregate — see the M3-4 PR2 section)
 M3-4 PR3 DONE      (submission/interaction/shell authority over the Remote main Session — see the M3-4 PR3 notes)
 M3-4 PR4 IN REVIEW (main-session command/action plane: implementation landed — Client command registry (both branches), Host claim precedence, whole-log rewind, Client-derived tool cards, permission projection/cycle; the review loop is closing the remaining mandatory L6 scenarios before DONE)
-M3-4 IN PROGRESS   (main TUI Remote composition; PR1–PR4 of the PR train landed — remaining PRs close the rest of the M3-4 surface)
+M3-4 DONE          (main TUI Remote composition; the PR train PR1–PR5 landed — PR5 closed the final main-surface gaps; next stage M3-5)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -329,21 +329,17 @@ Do not perform this retirement in M3-4/M3-5/M3-6: those stages cut command
 default and keeps its in-process dispatch surface (busy-Enter, sessionless
 execution, `commands/change` refresh).
 
-**Adjacent follow-up (owner: M8 / PR5 hardening, user-ruled 2026-10-02): the
-`transcriptExportAvailable` capability becomes REQUIRED.** The M3-4 PR4 exit
-state declares it optional on `TuiCommandRunner` with a stated default of
-"unspecified = the historical Direct behavior (available)" — the handler
-refuses only on an explicit `false`. That was the round-5 minimal fix for the
-declaration/behavior contradiction (F14), chosen to avoid a mechanical sweep
-of every test/stub runner mid-review; it is a compatibility convenience, NOT
-the intended capability design. The production seam is already fail-closed
-(`CommandSurfaceDeps.transcriptExportAvailable` is a required boolean and the
-composition root passes an explicit Direct=true / Remote=false). The
-retirement-adjacent change: make the runner field a required `boolean`, move
-the handler back to refusing on `!== true`, complete the stub/runners
-explicitly, and guard-test that a new assembly cannot leave the capability
-undeclared. A capability must force an explicit statement, never default
-open in the wide.
+**Adjacent follow-up (owner: M8 / PR5 hardening, user-ruled 2026-10-02) —
+CLOSED by M3-4 PR5: the `transcriptExportAvailable` capability is now
+REQUIRED.** The M3-4 PR4 exit state declared it optional on
+`TuiCommandRunner` with a stated default of "unspecified = the historical
+Direct behavior (available)" — the handler refused only on an explicit
+`false`. That was the round-5 minimal fix for the declaration/behavior
+contradiction (F14). PR5 retired the convenience: the runner field is a
+required `boolean`, the handler refuses on `!== true`, every typed assembly
+declares it (Direct=true / Remote=false), and the PR5 guard test locks the
+required declaration plus the per-runtime production composition. A
+capability forces an explicit statement; it never defaults open in the wide.
 
 ## Migration process and qualification governance
 
@@ -3219,11 +3215,18 @@ contract is now explicit:
   the same step. Before this, only the keyboard path re-hydrated and the
   footer kept rendering the pre-page fold (often `TTFB 0s · 0 tok/s`) after
   `/status` had paged the official window wider.
-  **PR5 MUST CLOSE (blocker, not a degradation)**: an incomplete recent-sample
-  window must render as unknown/omitted — the footer must never present
-  authoritative-looking `0s / 0 tok/s` for what is really a not-yet-measured
-  window. The shared binding-owned async stats snapshot (no per-refresh
-  paging storms) is the expected seam.
+  **PR5 MUST CLOSE (blocker, not a degradation)** — CLOSED by M3-4 PR5: an
+  incomplete recent-sample window now renders as unknown/omitted. The
+  presentation owner carries ONE availability bit beside the stats fold
+  (`SessionPresentation.mainRecentPerformanceAvailable()`), committed in the
+  same fenced hydrate commits (cold Remote hydrate, `rehydrateFromWindow`
+  after `loadOlder`, window replacement): `available = hasMore === false ||
+  hasEnoughRecentPerformanceSamples(window)`. The status `performance`
+  fields are optional, the footer `performance:*`/`stats-line` items omit
+  unproven metrics (never a `TTFB 0s · 0 tok/s` stand-in), `/status` keeps
+  the lifetime `LLM` wall only, and a stale rehydrate cannot flip the
+  replacement subject's bit. Direct full-log semantics are unchanged
+  (numeric zero stays a measured value).
 - **Per-subject history paging latch**: one Remote `loadOlder` extension is
   in flight per SUBJECT, not per runner — a page still loading for the
   previous session cannot swallow the new session's first boundary gesture.
@@ -3240,8 +3243,14 @@ contract is now explicit:
   preflight only shapes an EARLY UX notice (a broken roster answer warns
   before the create); it never drops the requested value, and a preflight
   ERROR (an unreadable roster) logs without changing the create input. The
-  `--preset` resume WRITE is skipped on Remote in PR2 (read-only scope); its
-  final seam is verified with the preset lifecycle in the command PR.
+  `--preset` resume WRITE — CLOSED by M3-4 PR5 (plan §3.5): the Remote
+  resume applies the launch preset through the SAME semantic
+  `PresetCatalog.selectSessionPreset()` the `/preset` command uses, after
+  `open(sessionId)` reads the recorded preset from the official projection.
+  A blank resumed session switches (exactly one official selection row,
+  never retried); a started Session keeps its recorded preset with the
+  existing fixed/`agent-preset/locked` warning; committed+superseded makes
+  no stale visible success mutation.
 
 ### Working-fold proof hierarchy (the §7.5 equivalence closure)
 
@@ -3552,7 +3561,7 @@ longer resolves the Host tools registry outside the Direct branch.
 - **Remote `!` / `!!` remain fail-closed** (M3-4 PR3 shell authority
   amendment, unchanged by PR4).
 
-## M3-4 status (IN PROGRESS — PR1–PR4 landed)
+## M3-4 status (DONE — PR1–PR5 landed)
 
 M3-4 composes the main TUI application over the Remote Backend. The stage is
 a PR train; each PR closes its own slice with closure evidence.
@@ -3677,3 +3686,87 @@ hydration, eventSource presentation, status projection, the production
 submission serializer, command runtime, tool cards, rewind, images, local
 shell, permission cycle and secondary surfaces are later M3-4 PRs (PR2+
 consume the seam without re-deciding runtime/Connection/owner composition).
+
+### PR5 — Main TUI Remote Closure & Exit (COMPLETE)
+
+PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
+(`next @ 8b536b20`, DSH `0.2.0-rc.2`, source `639ed015`). What landed:
+
+- **Required transcript capability** (plan §3.1): `transcriptExportAvailable`
+  is a required `boolean` on `TuiCommandRunner`; `/transcript` refuses on
+  `!== true`; every typed assembly declares it (Direct=true / Remote=false);
+  a guard test locks the declaration and the per-runtime composition.
+  `/export` semantics are unchanged (SessionArchivePort authority).
+- **Truthful recent performance** (plan §3.2): the ONE presentation-owned
+  availability bit beside the stats fold (`mainRecentPerformanceAvailable`),
+  committed in the same fenced hydrate commits; optional status performance
+  fields; footer `/status` omission rules; a stale rehydrate cannot flip the
+  replacement subject's bit; Direct unchanged.
+- **Model/preset main-surface reads** (plan §3.3/§3.4): the `/model` picker
+  current value reads `ModelCatalog.sessionSelection()` (the official
+  projection on Remote; the live Direct owner on Direct); `/preset` current
+  and blankness are branch-neutral (`SessionReader.sessionStatus()?.preset`
+  / `blank()`), Direct keeps its `composedPreset(agent.ctx)` preference.
+- **Launch preset on resume** (plan §3.5): the Remote resume applies
+  `--preset` through the semantic `PresetCatalog.selectSessionPreset()` —
+  blank sessions switch (one official selection row, never retried), started
+  sessions keep their recorded preset with the fixed warning, every
+  settlement maps explicitly.
+- **Async currentness fences** (plan §3.7/§3.8): `currentSessionStats` /
+  `lastAssistantText` re-validate the ORIGINAL scope after the await
+  (`SupersededReadError`); the Host-command settlement performs its release
+  bookkeeping unconditionally but skips every visible mutation once the
+  captured scope is superseded (draft restore/consume, acks, notices,
+  health repaint, artifact save, fallback dispatch).
+- **Selected-runtime teardown proof** (plan §3.9): with a pending parked
+  write across the teardown, the runner fiber disposal retires the owned
+  session BEFORE the exactly-once transport disposal, and no durable row
+  lands after it (`runner-remote-races` L6).
+- **PR4 Client self-claim regression closure** (the PR5 command-routing
+  supplement, `temp/m3/pr5-command-fix.md`): the submission gates no longer
+  derive Host-NAME authority from the effective line claim (whose union
+  carries this Client's own TUI registrations). `isLocalCommandLine` /
+  `commandIsLocalForAttachments` take an explicit `hostResolvesName` from
+  `hostCatalogResolves`; the echo gate, deferred contribution re-check and
+  late attachment refusal consume the same discriminator. TUI local
+  commands (`/status`, `/copy`, `/transcript`, ...) stay reachable through
+  their Client handlers while the session runs under steer-resolved busy
+  delivery — never steered into the agent inbox, never a Host executor row
+  (mounted L6 with negative controls: plain prompts still steer; a real
+  Host command still executes exactly once; the Host `/export` collision
+  precedence is unchanged). `/quit` joins `SESSIONLESS_COMMANDS` as
+  `/exit`'s alias (identical no-session behavior, guard-locked).
+
+### M3-4 exit closure matrix (original-plan reconciliation)
+
+Every original M3-4 acceptance item, with its disposition:
+
+| Original item | Disposition | Evidence |
+|---|---|---|
+| Remote cold resume transcript | DONE_WITH_EVIDENCE | PR2 L6 (`runner-remote-presentation`) |
+| Live assistant settlement | DONE_WITH_EVIDENCE | PR2/PR4 L6 (transient+durable convergence) |
+| History paging `loadOlder` | DONE_WITH_EVIDENCE | PR2 L6 + PR5 availability omission/stale guards |
+| `/copy` whole-history reach | DONE_WITH_EVIDENCE | PR4 L6 (OSC 52 paging) + PR5 scope fence + running-reachability |
+| `/status` lifetime facts | DONE_WITH_EVIDENCE | PR4 L6 + PR5 post-await scope fence + running-reachability |
+| Footer TTFT/TPS truthfulness | DONE_WITH_EVIDENCE | PR5 (availability bit + omission rendering) |
+| `/model` current marker | DONE_WITH_EVIDENCE | PR5 (semantic `sessionSelection` read, L6) |
+| `/preset` current marker + blankness | DONE_WITH_EVIDENCE | PR5 (projection reads, L6 blank + started refusal) |
+| resume `--preset` apply | DONE_WITH_EVIDENCE | PR5 (semantic selectSessionPreset, L6 apply + locked) |
+| `/export` availability | DONE_WITH_EVIDENCE | PR4 L6 (Host collision + SessionArchive authority) |
+| `/transcript` Remote | INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX | PR5 (required capability, explicit refusal L6) |
+| Remote local shell (`!`/`!!`) | INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX | PR3 shell amendment (fail-closed, unchanged) |
+| permission cycle / tool cards | DONE_WITH_EVIDENCE | PR4 L6 (reused) |
+| Client command reachability under running/steer | DONE_WITH_EVIDENCE | PR5 supplement L6 (`runner-remote-command-plane`) |
+| `/exit` ↔ `/quit` sessionless parity | DONE_WITH_EVIDENCE | PR5 supplement (policy + guard test) |
+| Selected-runtime teardown | DONE_WITH_EVIDENCE | PR5 (`runner-remote-races` §3.9) |
+| Remote sessionless `/model` default write | INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX | adapter `unsupported`; docs corrected (entry-contract §2.2) |
+| Old giant PR5 race cross-product | SUPERSEDED | four representative classes + currentness invariants (PR2–PR5) |
+| Remote local shell positive path | SUPERSEDED | Host-user-shell authority: Remote stays fail-closed |
+| Global fatal/HMR teardown matrix | DEFERRED_TO_M3_6 | stage boundary (unchanged) |
+| Child viewer / Job / Plugin Manager semantics | OUT_OF_SCOPE_LATER_STAGE | M3-5 (unchanged) |
+| Old optional `transcriptExportAvailable` | SUPERSEDED_BY_PR5_REQUIRED_CAPABILITY | required boolean + guards |
+| Extension registry global lifecycle | OUT_OF_SCOPE_LATER_STAGE | M3-6 (unchanged) |
+
+M3-4 = DONE. The next stage is M3-5 (secondary surfaces), not another
+generic M3-4 PR: no automatic "PR6" is created for historical unchecked
+checklist items.
