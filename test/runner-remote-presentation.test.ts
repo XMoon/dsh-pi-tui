@@ -165,6 +165,13 @@ async function mountRemotePresentationHost(
   } as never)
   const goalUnit = await import('@deepseek-ai/dsh-goal')
   await base.ctx.plugin(goalUnit.default as never, { defaultMaxGoalRounds: 5 } as never)
+  // PR4 §4/§3: the whole-log turnOutline + sessionStats projection rows —
+  // the Remote /rewind picker and /status lifetime authorities. The same
+  // official rows the production base patch mounts.
+  const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+  await base.ctx.plugin(turnOutline)
+  const sessionStats = await import('@deepseek-ai/dsh-session-stats')
+  await base.ctx.plugin(sessionStats)
   return base
 }
 

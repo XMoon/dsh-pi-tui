@@ -39,7 +39,7 @@ import type { DraftImageStore } from '../../image/draft-store.ts'
 import { checkImageLimits } from '../../image/intake.ts'
 import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../image/submit.ts'
 import { resolveComposerDelivery } from '../../commands.ts'
-import { collectRewindCandidates, rewindPickerItem } from '../../rewind.ts'
+import { rewindCandidateOfLoadedWindow, rewindOutlineRows } from '../../rewind.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
@@ -63,11 +63,11 @@ import type { ClientActions } from './client-actions.ts'
 import type { SettingsRuntime } from './settings-runtime.ts'
 import type { StatusRuntime } from './status-runtime.ts'
 
-/** The live-agent surface the event adapter reads (identity + rewind log). */
+/** The live-agent surface the event adapter reads (identity only; the
+ *  whole-log rewind authorities live in the injected rewind reads). */
 export interface ApplicationEventsAgent {
   readonly session: {
     readonly id: string
-    snapshotEvents(): Parameters<typeof collectRewindCandidates>[0]
   }
 }
 
@@ -177,8 +177,22 @@ export interface ApplicationEventsDeps {
   /** The deployment image policy (the Host attachments service `imageLimits`),
    *  re-read per paste. */
   readonly imageLimits: () => Parameters<typeof checkImageLimits>[2] | undefined
-  /** The SessionRuntime rewind fork action (idle double-Esc / `/rewind`). */
+  /** The rewind whole-log reads + the fork action (idle double-Esc /
+   *  `/rewind`). M3-4 PR4 §4: the picker enumerates the official
+   *  `turnOutline` projection (whole-log — old turns outside the bounded
+   *  presentation window included); the selection jumps the window with
+   *  `loadThrough(seq)` and derives the EXACT material from the loaded
+   *  durable events. Both branches share this owner. */
   readonly rewind: {
+    /** The whole-log turn outline (the picker authority). */
+    turnOutline(sessionId: string): readonly import('../../runtime/presentation-read-port.ts').TurnOutlineEntryDto[] | undefined
+    /** Jump the window backwards through the OFFICIAL loadThrough loop and
+     *  return the loaded durable events (undefined = no materialized
+     *  binding / superseded settle — never a guessed boundary). */
+    loadThrough(sessionId: string, seq: number, signal?: AbortSignal): Promise<readonly import('../../runtime/presentation-read-port.ts').PresentationDurableEvent[] | undefined>
+    /** Whether a superseded rewind selection must drop (the transport
+     *  identity re-check after every await; Remote-specific). */
+    isSelectionCurrent(sessionId: string): boolean
     forkSession(
       sourceSessionId: string,
       atSeq: number,
@@ -217,11 +231,6 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
       app.notify('clear the current draft before rewinding', 'info')
       return
     }
-    const candidates = collectRewindCandidates(source.session.snapshotEvents())
-    if (candidates.length === 0) {
-      app.notify('no completed user turn to rewind', 'info')
-      return
-    }
     // Capture the picker-open identity, not only the Session id. A switch away
     // and back to the same id must still supersede the old candidate.
     const sourceId = source.session.id
@@ -229,23 +238,61 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
       sessionId: sourceId,
       navigationEpoch: deps.lifecycle.navigationEpoch(),
     }
+    // §4.1/§4.2: the picker authority is the whole-log turnOutline
+    // projection — never a full-log page scan, never the bounded window.
+    const outline = deps.rewind.turnOutline(sourceId)
+    const rows = outline === undefined ? [] : rewindOutlineRows(outline)
+    if (rows.length === 0) {
+      // Distinguish the two honest empties: an UNAVAILABLE outline (no
+      // whole-log authority reachable for this session — a projection
+      // capability gap on the Remote branch, or an unreadable one) never
+      // masquerades as "history has no turns" (§19.3 truthful-unavailable).
+      app.notify(outline === undefined
+        ? 'rewind history is unavailable right now'
+        : 'no completed user turn to rewind', 'info')
+      return
+    }
     app.openPicker(
-      candidates.map(rewindPickerItem),
+      rows,
       (value) => {
-        const candidate = candidates.find(item => String(item.turnStartSeq) === value)
-        if (candidate === undefined) return
+        const selectedSeq = Number(value)
         let adopted = false
-        deps.lifecycle.runOwned('conversation rewind', () => deps.rewind.forkSession(
-          sourceId,
-          candidate.forkAtSeq,
-          () => {
-            adopted = true
-            app.setDraft(candidate.editorText)
-          },
-          pickerIdentity,
-        ), {
+        deps.lifecycle.runOwned('conversation rewind', async () => {
+          // §4.3: capture the identities, jump the window through the
+          // OFFICIAL loadThrough loop, re-check, derive the EXACT material
+          // from the loaded durable events (the full editor text, never the
+          // outline's bounded preview), then dispatch the existing fork.
+          const loaded = await deps.rewind.loadThrough(sourceId, selectedSeq, deps.lifecycle.signal())
+          if (deps.lifecycle.isCleanedUp()) return
+          if (loaded === undefined) {
+            app.notify('the session changed while rewinding — try again', 'info')
+            return
+          }
+          if (!deps.rewind.isSelectionCurrent(sourceId)) {
+            app.notify('the session changed while rewinding — try again', 'info')
+            return
+          }
+          const candidate = rewindCandidateOfLoadedWindow(loaded as never, selectedSeq)
+          if (candidate === undefined) {
+            app.notify('the selected turn could not be resolved — try again', 'error')
+            return
+          }
+          return deps.rewind.forkSession(
+            sourceId,
+            candidate.forkAtSeq,
+            () => {
+              adopted = true
+              app.setDraft(candidate.editorText)
+            },
+            pickerIdentity,
+          ).then(outcome => ({ outcome, candidate }))
+        }, {
           sessionId: () => sourceId,
-          onResult: (outcome) => {
+          onResult: (result) => {
+            // A pre-fork settle (a loadThrough drop / an unresolved
+            // selection) already notified; nothing further here.
+            if (result === undefined) return
+            const { outcome, candidate } = result
             if (outcome.kind === 'success' && adopted) {
               if (candidate.hasNonTextContent) {
                 app.notify(`rewound to turn ${candidate.turn}; original non-text content was not re-staged — review it before sending`, 'error')

@@ -31,6 +31,7 @@ import {
 import { cancellationError } from '../../detached.ts'
 import { contextPressureOccupancy, type SessionContentSearchPage, type SessionProjectionSummary, type SessionReader, type SessionStatusProjection, type SessionSummary } from '../session-reader-port.ts'
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
+import { directTurnOutlineCompat } from '../../rewind.ts'
 import { detachedSessionStatus } from '../session-status-projection.ts'
 
 /**
@@ -331,15 +332,28 @@ export class DirectSessionReader implements SessionReader {
     const agent = this.liveAgent(sessionId)
     if (agent === undefined) return undefined
     // The official whole-log `turnOutline` projection (M3-4 /rewind
-    // foundation): a detached read of the Host fold, never a client-side
-    // outline over the raw log.
+    // foundation): a detached read of the Host fold. The DIRECT-only
+    // compatibility fallback below (§18.4) exists so minimal compositions
+    // without the `session-turn-outline` Host row keep the SAME semantic
+    // through the exact attached Session's full snapshot — the Remote
+    // adapter has no fallback (projection-only, fail-closed).
     const projections = this.sessionProjections()
-    if (projections === undefined) return undefined
+    if (projections === undefined) {
+      // CAPABILITY unavailable (no projection service at all): the Direct
+      // compatibility fold. NEVER taken for an authoritative empty `[]`.
+      return directTurnOutlineCompat(agent.session.snapshotEvents())
+    }
     try {
-      return detachedTurnOutline(projections.snapshot(agent.session, ['turnOutline'])?.values?.turnOutline)
+      const outline = detachedTurnOutline(projections.snapshot(agent.session, ['turnOutline'])?.values?.turnOutline)
+      if (outline !== undefined) return outline
+      // VALUE unavailable: the projection service exists but this key has
+      // no unit mounted (undefined value, never `[]`) — the compatibility
+      // fold over the EXACT same attachment.
+      return directTurnOutlineCompat(agent.session.snapshotEvents())
     } catch {
-      // An unavailable/broken projection read is `undefined` (unknown),
-      // never a crash and never a partial client-side fold.
+      // A THROWING projection read is a projection FAILURE, not an
+      // unavailable capability: surface it as unknown (`undefined`), never
+      // masked by the compatibility fold.
       return undefined
     }
   }
