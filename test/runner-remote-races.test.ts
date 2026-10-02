@@ -132,6 +132,8 @@ interface RaceFixture {
   vt: VirtualTerminal
   runnerApp(): unknown
   aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>
+  /** PR5 §3.9: drive the runner fiber's registered teardown directly. */
+  runnerFiberDispose(): Promise<void>
 }
 
 async function mountRaceRunner(
@@ -184,7 +186,13 @@ async function mountRaceRunner(
   await runnerFiber
   await waitFor('race runner mount', () => vt.getViewport().join('').length > 0, 20_000)
   life.defer(() => { void runnerFiber.dispose() })
-  return { host, vt, runnerApp: (): unknown => apps.at(-1), aggregate }
+  return {
+    host,
+    vt,
+    runnerApp: (): unknown => apps.at(-1),
+    aggregate,
+    runnerFiberDispose: () => runnerFiber.dispose(),
+  }
 }
 
 function submitDraft(fixture: RaceFixture, text: string, request: string = 'enter'): void {
@@ -252,4 +260,70 @@ test('L6 §12 pre-dispatch stale capture: a submission parked mid-serialize surv
   // the stale write; a fresh submit dispatches normally).
   submitDraft(fixture, 'fresh after reconnect tau')
   await waitFor('fresh write after reconnect', () => hostUserRows(fixture, 'race-stale-a').some(row => row.includes('fresh after reconnect tau')), 20_000)
+})
+
+/* ── PR5 (plan §3.9): selected-runtime teardown with pending main-path work ── */
+
+test('L6 PR5 §3.9: selected Remote runtime teardown retires the owned session BEFORE the transport disposal, with pending work and no duplicate disposal', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr3-race-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId('race-teardown-a'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  {
+    const session = host.ctx.sessions.get(SessionId('race-teardown-a')) as unknown as {
+      append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    }
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('user/message', {
+      id: 'u-td', role: 'user', content: [{ type: 'text', text: 'teardown probe' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: 'a-td', role: 'assistant', content: [{ type: 'text', text: 'TEARDOWN-COPY' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+      stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+  // One pending WRITE parks inside serialize (the official echo exists, the
+  // Host prompt was never dispatched) across the whole teardown window.
+  const parked = parkedSerializer()
+  parked.park()
+  const fixture = await mountRaceRunner(life, {
+    presetId,
+    resumeSessionId: 'race-teardown-a',
+    host,
+    serializer: parked.serializer,
+  })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  submitDraft(fixture, 'pending write across teardown upsilon')
+  await waitFor('parked inside serialize', () => parked.parked(), 10_000)
+  // Instrument the selected transport disposer (order + duplicate probes).
+  // The retirement order (surface → retireOwnedSession → disposeTransport)
+  // is driven by the runner fiber's registered disposal effect — the same
+  // owner as every production teardown path (fiber unload / exit).
+  const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
+  let transportDisposals = 0
+  const originalDispose = selected.disposeTransport.bind(selected)
+  selected.disposeTransport = async (): Promise<void> => {
+    transportDisposals += 1
+    await originalDispose()
+  }
+  // Release the parked write and START the teardown together: the pending
+  // work settles while the registered effect runs the ordered teardown
+  // (disposeSurface → retireOwnedSession drains the pending settlement work
+  // → disposeTransport). Whatever the drained write dispatched happened
+  // BEFORE the transport disposal; nothing new may land after it.
+  parked.release()
+  await fixture.runnerFiberDispose()
+  assert.equal(transportDisposals, 1,
+    'the selected transport disposes exactly once through the runner teardown')
+  // Post-disposal quiescence: after the transport disposal no further
+  // durable row lands (the counterfactual window for a post-disposal
+  // visible commit).
+  const rowsAtDisposal = hostUserRows(fixture, 'race-teardown-a').length
+  await new Promise(resolve => setTimeout(resolve, 2000))
+  assert.equal(hostUserRows(fixture, 'race-teardown-a').length, rowsAtDisposal,
+    'no durable row lands after the selected transport disposal (no post-disposal visible commit)')
 })

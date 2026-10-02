@@ -640,3 +640,147 @@ test('P1 lock: a session/writer-held steer rejection is settled by the submissio
   assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
     'the helper never restores behind the owner (no double restore)')
 })
+
+/* ── PR5 (plan §3.8): stale Host-command settlement makes no visible commit ── */
+
+test('PR5: a command settlement whose subject was REPLACED performs cleanup only, never a visible mutation', async () => {
+  // The §3.8 invariant: the Host may finish the old command and the durable
+  // Host-side settlement completes, but once the captured SessionScope is no
+  // longer current the old operation cannot mutate the replacement TUI
+  // surface — no draft restore/consume, no ack rows, no notices, no health
+  // repaint, no artifact save. The release bookkeeping (pin + submit turn)
+  // MUST still run.
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  let released = false
+  let scopeCurrent = true
+  const deps = {
+    isDisposed: () => false,
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    loggerError: (message: string) => { calls.push(`log:${message}`) },
+    readDraft: () => '',
+    mergeDraftIntoEditor: () => true,
+    restoreSubmissionDraft: () => { calls.push('restore') },
+    consumeDraftAttachments: () => { calls.push('consume') },
+    draftHasAttachments: () => false,
+    pinDraftAttachments: () => () => { calls.push('fallbackPin') },
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    isScopeCurrent: () => scopeCurrent,
+    refuseByTransitionFence: () => { calls.push('fence') },
+    lateAttachmentRefusal: () => undefined,
+    commandSubmitAttachments: () => [],
+    isTuiOwnedCommand: () => false,
+    commandPlaneOwnsLine: () => false,
+    submittedHostClaim: () => undefined,
+    commandSignal: () => new AbortController().signal,
+    // A HOST command that SUCCEEDS while held, then the subject is replaced
+    // before the settlement runs (the /export artifact-save sink is the
+    // strongly observable mutation the plan demands).
+    invokeCommandPlane: async () => {
+      scopeCurrent = false
+      return { kind: 'committed' as const, matched: true, execution: { commandId: 'export', result: { kind: 'success' as const } } }
+    },
+    beginCommandSettlement: () => {},
+    abortCommandSettlement: () => {},
+    settleCommandSettlement: () => {},
+    trackSettlementWork: () => {},
+    captureCommandHealthRef: () => 'health-ref',
+    clearCommandHealthError: () => { calls.push('health-clear') },
+    recordCommandHealthError: () => { calls.push('health') },
+    readCommandDraftDisposition: () => undefined,
+    shouldConsumeAdvertisedMiss: () => false,
+    isIndeterminateSkillWrite: () => false,
+    startArtifactSave: () => { calls.push('artifactSave') },
+    submitPrompt: async () => {},
+    commandSessionId: () => 's1',
+    markTurnTransferred: () => {},
+    deps_diag_placeholder: diag,
+    diag,
+    // The submit turn's release is the leak-prevention bookkeeping.
+    // (supplied via input.submitTurn below)
+  }
+  executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+    text: '/export',
+    toggled: '/export',
+    scope: SCOPE,
+    submitRequestId: 'request-stale',
+    submitAckToken: 9,
+    generation: 1,
+    localEchoInstalled: false,
+    wasAdvertisedAtSubmit: true,
+    parsedName: 'export',
+    submitTurn: { wait: Promise.resolve(), release: () => { released = true; calls.push('turnRelease') } },
+  })
+  await drainUntil(() => calls.includes('fallbackPin'))
+  assert.equal(released, true, 'the submit turn is ALWAYS released (leak prevention)')
+  assert.ok(calls.includes('fallbackPin'), 'the fallback pin is ALWAYS released')
+  // NO visible mutation of the replacement surface.
+  assert.deepEqual(calls.filter(call =>
+    call === 'restore' || call === 'consume' || call === 'settleLocal'
+    || call.startsWith('ack:') || call.startsWith('notify') || call === 'health-clear'
+    || call === 'health' || call === 'artifactSave' || call.startsWith('log:')), [],
+    'a stale settlement performs no visible mutation (no restore/consume/ack/notice/health/artifact-save)')
+})
+
+test('PR5 positive control: a current-scope settlement performs the normal visible behavior', async () => {
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const deps = {
+    isDisposed: () => false,
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    loggerError: (message: string) => { calls.push(`log:${message}`) },
+    readDraft: () => '',
+    mergeDraftIntoEditor: () => true,
+    restoreSubmissionDraft: () => { calls.push('restore') },
+    consumeDraftAttachments: () => { calls.push('consume') },
+    draftHasAttachments: () => false,
+    pinDraftAttachments: () => () => {},
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    isScopeCurrent: () => true,
+    refuseByTransitionFence: () => { calls.push('fence') },
+    lateAttachmentRefusal: () => undefined,
+    commandSubmitAttachments: () => [],
+    isTuiOwnedCommand: () => false,
+    commandPlaneOwnsLine: () => false,
+    submittedHostClaim: () => undefined,
+    commandSignal: () => new AbortController().signal,
+    invokeCommandPlane: async () =>
+      ({ kind: 'committed' as const, matched: true, execution: { commandId: 'export', result: { kind: 'success' as const } } }),
+    beginCommandSettlement: () => {},
+    abortCommandSettlement: () => {},
+    settleCommandSettlement: () => {},
+    trackSettlementWork: () => {},
+    captureCommandHealthRef: () => 'health-ref',
+    clearCommandHealthError: () => { calls.push('health-clear') },
+    recordCommandHealthError: () => { calls.push('health') },
+    readCommandDraftDisposition: () => undefined,
+    shouldConsumeAdvertisedMiss: () => false,
+    isIndeterminateSkillWrite: () => false,
+    startArtifactSave: () => { calls.push('artifactSave') },
+    submitPrompt: async () => {},
+    commandSessionId: () => 's1',
+    markTurnTransferred: () => {},
+    diag,
+  }
+  executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+    text: '/export',
+    toggled: '/export',
+    scope: SCOPE,
+    submitRequestId: 'request-live',
+    submitAckToken: 10,
+    generation: 1,
+    localEchoInstalled: false,
+    wasAdvertisedAtSubmit: true,
+    parsedName: 'export',
+    submitTurn: { wait: Promise.resolve(), release: () => {} },
+  })
+  await drainUntil(() => calls.includes('artifactSave'))
+  assert.ok(calls.includes('artifactSave'), 'a current-scope /export success starts the artifact save')
+  assert.ok(calls.includes('settleLocal') && calls.some(call => call.startsWith('ack:')),
+    'a current-scope settlement settles its rows normally')
+  assert.ok(calls.includes('consume'), 'a current-scope success consumes the draft attachments')
+})

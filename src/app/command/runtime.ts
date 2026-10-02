@@ -198,8 +198,29 @@ export function bindCommandRuntime(deps: CommandRuntimeDeps): CommandRuntime {
     // The scope's owner is proven current before the read; the port resolves
     // the session id to its exact live Agent internally.
     currentApprovalOverride: (scope) => deps.surface.approvalOverride(liveSessionId(scope)),
-    currentSessionStats: (scope, signal) => deps.surface.sessionStats(liveSessionId(scope), signal),
-    lastAssistantText: (scope, signal) => deps.surface.lastAssistantText(liveSessionId(scope), signal),
+    // PR5 (plan §3.7): the async whole-log stats read re-checks the ORIGINAL
+    // scope after settle — the Remote transport fences answer binding
+    // identity, not VISIBLE TUI ownership, so a session switch mid-read must
+    // never deliver the old subject's figures to the /status panel.
+    currentSessionStats: async (scope, signal) => {
+      const sessionId = liveSessionId(scope)
+      const stats = await deps.surface.sessionStats(sessionId, signal)
+      if (!deps.scope.isCurrent(scope)) {
+        throw new SupersededReadError('the session changed while reading the session stats')
+      }
+      return stats
+    },
+    // PR5 (plan §3.7): the paged last-assistant-text read applies the SAME
+    // post-await original-scope fence — a /copy that began on session A
+    // must never clipboard A's text after the visible owner became B.
+    lastAssistantText: async (scope, signal) => {
+      const sessionId = liveSessionId(scope)
+      const text = await deps.surface.lastAssistantText(sessionId, signal)
+      if (!deps.scope.isCurrent(scope)) {
+        throw new SupersededReadError('the session changed while reading the last assistant text')
+      }
+      return text
+    },
     refreshSessionCatalog: async (scope, source) => {
       // SYNC admission: the scope must still be the current owner, and the
       // exact Direct owner is captured by the surface in this same step.
