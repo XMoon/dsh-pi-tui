@@ -579,3 +579,60 @@ test('a double settled() is idempotent and cannot clear a follow-up refresh', as
   gate.settled()
   assert.deepEqual(starts, [1, 2], 'the follow-up was not cleared by the stale settle')
 })
+
+test('PR4 F2b: a FAILED commands provider degrades to an issue — the successful skills provider still updates its own field', async () => {
+  // Provider isolation (§2.2): the coordinator's mergePartial keeps the
+  // last-good HOST commands when the commands provider failed (an empty
+  // replace would erase the claim set) while a successful skills read
+  // updates the skills field. The Remote read surface expresses a commands
+  // failure as {commands: [], issues: [{provider: 'commands'}]}.
+  const first = snapshotOf({ commands: [Object.freeze({ name: 'last-good-host', description: 'h' })], skills: [Object.freeze({ name: 'old-skill', description: 'o' })] })
+  const second = Object.freeze({
+    commands: Object.freeze([]),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze([Object.freeze({ name: 'fresh-skill', description: 'f' })]),
+    issues: Object.freeze([Object.freeze({ provider: 'commands' as const, message: 'commands/list failed' })]),
+  })
+  let call = 0
+  const { hooks, installed } = scriptedHooks({
+    read: async () => { call += 1; return call === 1 ? first : second },
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  await coordinator.refresh({ source: 'live-session', target: { kind: 'agent', key: 1 }, agent: fakeAgent() })
+  const outcome = await coordinator.refresh({ source: 'reload', target: { kind: 'agent', key: 1 }, agent: fakeAgent() })
+  assert.equal(outcome.kind, 'applied', 'a commands-provider failure is not a whole-refresh failure')
+  if (outcome.kind === 'applied') {
+    assert.deepEqual(outcome.snapshot.commands.map(command => command.name), ['last-good-host'],
+      'the failed commands field keeps the LAST-GOOD host commands (mergePartial)')
+    assert.deepEqual(outcome.snapshot.skills.map(skill => skill.name), ['fresh-skill'],
+      'the successful skills provider DID update its own field')
+  }
+})
+
+test('PR4 F2a: the admission target identity is re-checked right before install (a settle→install rollover settles superseded)', async () => {
+  // The §2.2/§16 FINAL-install fence: the transport identity captured at
+  // admission must still be live immediately before installSnapshot — a
+  // same-id binding rollover in the gap between the read's settle and the
+  // synchronous install must not commit the retired snapshot.
+  const gate = deferred<SurfaceCatalogSnapshot>()
+  let identity: { marker: string } | undefined = { marker: 'binding-X' }
+  const { hooks, installed } = scriptedHooks({ read: async () => gate.promise })
+  hooks.captureTargetIdentity = () => identity
+  hooks.isTargetCurrent = captured => captured === identity
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const refresh = coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: 1 },
+    agent: fakeAgent(),
+  })
+  // The read settles; BEFORE the install runs, the binding rolls over.
+  gate.resolve(snapshotA)
+  await Promise.resolve()
+  identity = { marker: 'binding-Y' }
+  const outcome = await refresh
+  assert.equal(outcome.kind, 'superseded',
+    'the rollover between settle and install invalidates the commit')
+  assert.deepEqual(installed, [], 'the retired snapshot never installed')
+})

@@ -50,13 +50,39 @@ test('§18.1 the TUI-owned registration path never requires the Host commands se
   assert.ok(commands.includes("if (clientCommands === undefined) throw new Error('client command registry unavailable')"),
     'the Client registry is the mandatory registration surface')
   const oneBody = commands.slice(
-    commands.indexOf('const registerOne = ('),
+    commands.indexOf('const registerOne ='),
     commands.indexOf('// `commands.execute()` normalizes'),
   )
   assert.ok(oneBody.includes('clientCommands.register(definition)'),
     'every TUI definition registers into the Client registry first')
+})
+
+test('§D2 (review round 3 ruling): Direct keeps the Host compatibility MIRROR; Remote callback isolation stays complete', () => {
+  // The stage contract (m3-entry-contract §3.3, disambiguated by the M3-4
+  // owner ruling): ONE TUI definition; Direct may mirror-register it into
+  // the in-process Host registry (the compatibility adapter — never a
+  // second business authority), while Remote keeps ZERO Host ctx.commands
+  // registration/execution for a TUI callback.
+  const commands = code('commands.ts')
+  const oneBody = commands.slice(
+    commands.indexOf('const registerOne ='),
+    commands.indexOf('// `commands.execute()` normalizes'),
+  )
+  assert.ok(oneBody.includes('clientCommands.register(definition)'),
+    'the Client registry is the FIRST registration (the definition owner)')
+  assert.ok(oneBody.includes('commands.register(definition)'),
+    'the Direct compatibility mirror registers the SAME definition into the Host registry')
   assert.ok(oneBody.includes('if (commands === undefined) return disposeClient'),
-    'the Host registration is the optional Direct compatibility half')
+    'the mirror is Direct-only (Remote registers nothing into the Host service)')
+  // The REMOTE half of the submission route stays Client-only: the projected
+  // agent never reaches ctx.commands.execute.
+  const controller = code('app/submission/controller.ts')
+  const route = controller.slice(
+    controller.indexOf('if (tuiOwnedCommand) {'),
+    controller.indexOf('// The HOST route:'),
+  )
+  assert.ok(route.includes('clientCommands.execute('),
+    'the Remote TUI-owned route executes through the Client registry')
 })
 
 /* ─────────────────── §18.2 Remote tool presenter gate ────────────────── */

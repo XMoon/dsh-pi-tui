@@ -428,12 +428,27 @@ test('L6 §D3 (review F2-external): a REAL Host `/export` claim wins over the sa
     'the official dsh-session-log-export Host registration is in the authoritative catalog')
   submit(fixture, '/export')
   // The OFFICIAL executor's durable command/run row is the authority: the
-  // Host claim owns the line (the built-in Client path would leave ZERO
-  // command/run rows and instead start a client-local artifact save).
+  // Host claim owns the line (the Client /export CALLBACK never executes —
+  // note the shared command settlement still triggers the TUI's own
+  // startArtifactSave('export') AFTER the Host success, which is the
+  // correct local-save flow, not a Client-command execution).
   await waitFor('the HOST /export lifecycle rows landed', () => {
     const kinds = fixture.events(mainId).map(event => event.type)
     return kinds.includes('command/run') && kinds.includes('command/done')
   }, 15_000)
   assert.equal(fixture.hostCommandRuns(mainId), 1,
     'the /export line executed through the OFFICIAL Host executor exactly once (the Host claim owns it)')
+})
+
+test('L6 §7.4-6 sessionless standing skill: the Remote refresh reports EXPLICIT unavailable and creates NO Session', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRunner(life, {})
+  const before = fixture.host.ctx.sessions.list().length
+  submit(fixture, '/reload')
+  await waitFor('the explicit standing-unavailable copy rendered', () =>
+    fixture.vt.getViewport().join('').includes('catalog refresh failed')
+    && fixture.vt.getViewport().join('').includes('no sessionless standing skill catalog'), 15_000)
+  await settle(150)
+  assert.equal(fixture.host.ctx.sessions.list().length, before,
+    'the Remote standing refresh creates NO hidden Session')
 })
