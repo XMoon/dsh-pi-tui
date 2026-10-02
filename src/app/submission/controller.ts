@@ -694,13 +694,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // occurrence. They keep their existing command feedback.
     const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
       || (submitView?.claimed !== true
-        // §D3 line authority: a HOST-RESOLVED name is not a TUI-local line
-        // even when the catalog does not claim THIS argued line — `/export
-        // foo` is an ordinary submission and gets its immediate echo like
-        // every prompt (review round 2, external finding).
-        && deps.command.hostClaimOf(parsedAtSubmit) === undefined
-        && !LOCAL_COMMANDS.has(parsedAtSubmit.name)
-        && deps.command.isSkillWrapperName(parsedAtSubmit.name) !== true)
+        // §D3 line authority (round 4): the submit-time echo gate now
+        // consumes the SAME line-authority primitive as the delivery,
+        // attachment and dispatch gates below (`isLocalCommandLine`: a
+        // HOST-RESOLVED name is never a TUI-local line — not when the
+        // catalog CLAIMS this line, and not when it merely RESOLVES the
+        // name without claiming this argued line). `/export foo` is an
+        // ordinary submission and gets its immediate echo like every
+        // prompt, instead of silently vanishing behind a blocked FIFO
+        // turn. Skill invocations keep their own exclusion.
+        && !isLocalCommandLine(
+          parsedAtSubmit.name,
+          deps.command.isSkillWrapperName,
+          undefined,
+          submitView,
+        )
+        && !deps.command.isSkillInvocation(parsedAtSubmit, text))
     // Install the echo NOW for a known ordinary prompt on an existing
     // session — before the FIFO turn and the asynchronous admission. A
     // deferred start installs after the session materializes, below.

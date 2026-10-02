@@ -5177,6 +5177,20 @@ export function registerTuiCommands(
       if (invocation.rawInput.trim() !== '') {
         return { kind: 'error', text: 'The /transcript command does not accept a path.' }
       }
+      // Truthful-unavailable on the wire backend: the Markdown renderer
+      // reads the whole Session event history (`snapshotEvents`), for which
+      // no transport-neutral seam exists yet — the Remote post-success
+      // artifact save would resolve the projected agent and crash inside
+      // `renderTranscriptMarkdown` after the command already reported
+      // success. Refuse at the handler instead (a shown notice plus the
+      // restored draft, never a late artifact failure). `/export` stays
+      // available on both backends (it renders from `SessionArchivePort`,
+      // not the Session).
+      if (runner.commandRegistry === undefined) {
+        const text = 'transcript export is unavailable on this backend'
+        app.notify(text, 'error')
+        return { kind: 'error', text }
+      }
       return { kind: 'success', text: 'Transcript export requested.' }
     },
   })
