@@ -619,6 +619,16 @@ export interface TuiCommandRunner {
    */
   prepareDraftMessage(text: string): Promise<import('@deepseek-ai/dsh-llm').UserMessage>
   /**
+   * The TRANSPORT-AWARE prepared-prompt builder (PR4 review round: the Remote
+   * branch's session writer requires the serializer's PreparedPrompt — a raw
+   * UserMessage fails its preflight with "no prepared prompt snapshot"). Wired
+   * on Remote to the SAME builder the ordinary submission path uses
+   * (`prepareRemotePrompt`), so a skill gesture is delivered exactly like a
+   * plain prompt; absent on Direct, where `prepareDraftMessage` stays
+   * authoritative.
+   */
+  prepareTransportMessage?(text: string, requestId: string): Promise<unknown>
+  /**
    * The live session's workspace (its header cwd), falling back to the
    * process cwd before any session exists. The editor autocomplete, the
    * footer/welcome cwd, and the per-directory input history follow THIS,
@@ -3743,6 +3753,11 @@ export function registerTuiCommands(
     // the pin and permanently block pruning of the referenced drafts.
     const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage | undefined
+    // The delivery payload the session writer receives: on Remote the writer's
+    // serializer requires the PreparedPrompt built by the SAME transport-aware
+    // preparation the ordinary submission uses; on Direct the immutable
+    // UserMessage stays the contract.
+    let deliveryMessage: unknown
     try {
       // A transition ALREADY pending when this invocation is about to enter the
       // writer is refused by the admission itself (draft restored by the catch
@@ -3763,7 +3778,9 @@ export function registerTuiCommands(
         > => {
           skillSignal.throwIfAborted()
           if (!runner.isSessionScopeCurrent(scope)) return { kind: 'stale' }
-          userMessage = await runner.prepareDraftMessage(line)
+          deliveryMessage = runner.prepareTransportMessage !== undefined
+            ? await runner.prepareTransportMessage(line, commandId ?? `skill-${name}`)
+            : (userMessage = await runner.prepareDraftMessage(line))
           skillSignal.throwIfAborted()
           if (!runner.isSessionScopeCurrent(scope)) return { kind: 'stale' }
           // Web parity (busyEnter): a skill invocation is an agent-facing
@@ -3778,10 +3795,10 @@ export function registerTuiCommands(
           // intentionally best-effort rather than a same-step batch; if the
           // first prompt does not commit, the body is never sent.
           if (delivery !== 'steer' && hostLoadsSkillBody) {
-            return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, userMessage, 'queue') }
+            return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'queue') }
           }
           if (fallbackBody !== undefined) {
-            const first = await runner.sessionWriter.prompt(scope.sessionId, userMessage, 'steer')
+            const first = await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'steer')
             if (first.kind !== 'committed') return { kind: 'written', outcome: first }
             // The original invocation is durable once the first prompt
             // commits. Consume its attachments before the body prompt so a
@@ -3799,7 +3816,7 @@ export function registerTuiCommands(
               throw error
             }
           }
-          return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, userMessage, 'steer') }
+          return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'steer') }
         }))
       if (admission.kind === 'stale') return { kind: 'error', text: 'the session changed while loading the skill — try again' }
       const outcome = admission.outcome

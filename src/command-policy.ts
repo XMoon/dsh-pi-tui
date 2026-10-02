@@ -125,12 +125,16 @@ export function isLocalCommandLine(
   isDynamicLocal: ((name: string) => boolean) | undefined,
   hostView?: HostCommandClaim | undefined,
 ): boolean {
-  // A TUI-owned name is local no matter what the host catalog holds: the
-  // dispatch excludes LOCAL_COMMANDS from the host route, so the
-  // classification must not claim a host authority the route never grants.
+  // §D3 line authority (review round 2): a HOST-RESOLVED name is never
+  // TUI-local — not when the catalog CLAIMS the line (a Host command
+  // invocation) and not when it resolves the name without claiming THIS
+  // line (an argued `/export foo` of an execute-kind Host command is an
+  // ORDINARY submission, matching the dispatch's commandPlaneOwnsLine
+  // order). Only a name the host catalog does not resolve falls through to
+  // the Client-owned terms.
+  if (hostView !== undefined) return false
   if (LOCAL_COMMANDS.has(name)) return true
   if (isSkillWrapper?.(name) === true) return false
-  if (hostView !== undefined) return false
   return isDynamicLocal?.(name) ?? false
 }
 
@@ -200,12 +204,21 @@ export function commandIsLocalForAttachments(
  * @param running - whether the live agent reports running.
  * @param gesture - the composer gesture that raised the submission.
  * @param busyEnter - the persisted preference value (''/undefined = queue).
+ * @param isTuiLocalLine - whether the line is a TUI-LOCAL command line by
+ *   the §D3 line authority ({@link isLocalCommandLine}'s order: a
+ *   HOST-RESOLVED name — claimed or merely resolved — is never local). The
+ *   caller derives it once and shares it with every gate, so an argued
+ *   `/export foo` of an execute-kind Host command follows the ORDINARY
+ *   queue/steer busy policy instead of a local-command placeholder.
+ *   Absent = fall back to the legacy LOCAL_COMMANDS set (callers that have
+ *   no host view yet, e.g. the pre-parse echo path).
  */
 export function resolveSubmitDelivery(
   parsed: { name: string; rawInput?: string } | undefined,
   running: boolean,
   gesture: ComposerSubmitGesture,
   busyEnter: string | undefined,
+  isTuiLocalLine?: boolean,
 ): SubmitDelivery {
   if (parsed !== undefined) {
     // `/skill <name> [args...]` is an AGENT-facing invocation (loadSkill),
@@ -217,7 +230,7 @@ export function resolveSubmitDelivery(
     // steers; its delivery value is only ever a placeholder for the (never
     // taken) skill-delivery binding. Client contributions never reach this
     // resolver at all (the namespace dispatch routes them first).
-    if (LOCAL_COMMANDS.has(parsed.name)) return 'queue'
+    if (isTuiLocalLine ?? LOCAL_COMMANDS.has(parsed.name)) return 'queue'
   }
   return resolveComposerDelivery(running, gesture, busyEnter)
 }
