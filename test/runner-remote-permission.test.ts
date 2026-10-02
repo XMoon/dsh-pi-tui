@@ -275,20 +275,42 @@ test('L6 §7.4-13 stale permission: apply A → switch B before settle → NO B 
     originalNotify(message, kind)
   }
 
-  // 1. The cycle gesture on A — the /permission execution now HOLDS.
+  // 1. The cycle gesture on A — the /permission execution now HOLDS. A
+  //    failure past this point must still release the gate (the runOwned
+  //    settlement waits on it during teardown).
+  life.defer(() => releasePermission?.())
   const cycle = (app as unknown as { events: { onCyclePermission?: () => void } }).events.onCyclePermission
   assert.ok(cycle !== undefined)
   cycle!()
   await waitFor('the gated /permission dispatch started', () => gatedLines.length === 1, 10_000)
 
   // 2. SWITCH to B while A's apply is still in flight (the real /resume
-  //    submit gesture through the mounted surface).
+  //    submit gesture through the mounted surface). A and B carry
+  //    DISTINCT conversation rows, so the current subject is proven by the
+  //    AUTHORITY the surface renders from: B's own rows visible AND A's
+  //    rows retired — never by a predicate A already satisfies.
+  const appendOf = (id: string) => host.ctx.sessions.get(SessionId(id)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  for (const [id, label] of [[sessionA, 'alpha-perm'] as const, [sessionB, 'beta-perm'] as const]) {
+    const session = appendOf(id)
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('user/message', {
+      id: `u-${label}`, role: 'user', content: [{ type: 'text', text: `${label} probe row` }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
   const mounted = app as unknown as { setDraft(text: string): void; submitDraft(): void }
   mounted.setDraft(`/resume ${sessionB}`)
   mounted.submitDraft()
-  await waitFor('B\'s projection preset rendered (B is the current subject)', () => {
-    const current = app.statusStore.snapshot().access?.permissionPreset?.id
-    return current !== undefined
+  await waitFor('B is the committed current subject (B rows rendered, A rows retired)', () => {
+    const view = vt.getViewport().join('')
+    return view.includes('beta-perm probe row') && !view.includes('alpha-perm probe row')
+  }, 20_000)
+  await waitFor('B\'s projection preset rendered', () => {
+    return app.statusStore.snapshot().access?.permissionPreset?.id !== undefined
   }, 20_000)
   const bPreset = app.statusStore.snapshot().access!.permissionPreset!.id!
 

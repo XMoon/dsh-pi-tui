@@ -1377,24 +1377,39 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
     append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
   }
-  // The OLDEST turns carry the recent-sample evidence (an embedded durable
-  // stream with two token deltas on the SESSION clock + authoritative usage);
-  // everything newer is an empty-stream turn. The official projections still
-  // own the LIFETIME totals whose source events include these old turns.
-  const SAMPLE_BASE = Date.now() - 10_000
+  // The OLDEST turns carry the recent-sample evidence. CLOCK CONTRACT
+  // (round-5 hardening, review F8.2): the fold's TTFT is
+  // max(0, first-chunk-time − step/start event time) and its decode span is
+  // max(0, assistant/message event time − first-chunk-time) — BOTH event
+  // times are the official Session's real wall clock (append assigns
+  // Date.now()), while the STREAM chunk times are fixture-controlled. So a
+  // legal non-zero sample needs: chunks anchored slightly AHEAD of the
+  // step/start append (non-zero TTFT), and the assistant/message appended
+  // only AFTER a real wait past the first chunk (non-zero decode span).
+  // The seeded span is ~100ms TTFT and ~400ms decode per sampled turn
+  // (±loop jitter), which renders as `TTFB 0.1s`-class and a bounded
+  // three-digit `tok/s` — asserted as a REQUIRED MATCH (assert.match
+  // throws on failure; the previous `exec() !== undefined` form was
+  // vacuously true because exec returns null, not undefined).
   for (let turn = 1; turn <= 5; turn += 1) {
+    const anchor = Date.now()
     session.append('turn/start', { turn })
     session.append('step/start', { turn, step: 1 })
     session.append('user/message', {
       id: `u-paged-${turn}`, role: 'user', content: [{ type: 'text', text: `paged prompt ${turn}` }], source: { kind: 'user' },
     }, { surfaceOp: 'append' })
+    // The assistant/message must land at a WALL time after the first chunk
+    // time for the decode span to be observable: wait past the whole seeded
+    // chunk window BEFORE appending the settlement (the event time is the
+    // Session's real Date.now(), the chunk times are the fixture's).
+    await new Promise(resolve => setTimeout(resolve, 400))
     session.append('assistant/message', {
       turn, step: 1,
       message: { id: `a-paged-${turn}`, role: 'assistant', content: [{ type: 'text', text: `paged answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
       usage: { inputTokens: 1_000, outputTokens: 200 },
       stream: [
-        { type: 'chunk', time: SAMPLE_BASE + 500, chunk: { type: 'text-delta', index: 0, text: 'a' } },
-        { type: 'chunk', time: SAMPLE_BASE + 900, chunk: { type: 'text-delta', index: 0, text: 'b' } },
+        { type: 'chunk', time: anchor + 100, chunk: { type: 'text-delta', index: 0, text: 'a' } },
+        { type: 'chunk', time: anchor + 300, chunk: { type: 'text-delta', index: 0, text: 'b' } },
       ],
     }, { surfaceOp: 'append' })
     session.append('step/end', { turn, step: 1 })
@@ -1433,11 +1448,28 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // figures also prove the composition's loadOlder paging actually ran.
   await waitFor('the panel rendered the exact lifetime totals', () =>
     fixture.vt.getViewport().join('').includes('↑5.0k ↓1.0k'), 20_000)
+  // ROUND-5 hardening — REQUIRED MATCHES on the RENDERED row (assert.match
+  // throws when the pattern does not match; the round-4 `exec() !==
+  // undefined` guards were vacuously true — exec returns null). The TTFT
+  // window is seeded at ~100ms per sampled turn → a `0.1s`-class rendering
+  // (a broken wiring that renders 0 fails: `0.0s`/`0s` does not match);
+  // the throughput window is 200 tokens over a ~400ms decode span → a
+  // three-digit tok/s figure (a broken wiring that renders 0 fails). The
+  // upper bound keeps the match honest against the seeded arithmetic.
   const panelView = fixture.vt.getViewport().join('')
-  const ttfbMatch = /TTFB 0\.([1-9]\d*)s/u.exec(panelView)
-  const tpsMatch = /([1-9]\d*) tok\/s/u.exec(panelView)
-  assert.ok(ttfbMatch !== undefined,
-    `the panel's rendered recent TTFB must be non-zero:\n${panelView}`)
-  assert.ok(tpsMatch !== undefined,
-    `the panel's rendered recent throughput must be non-zero:\n${panelView}`)
+  assert.match(panelView, /TTFB 0\.[1-9]\d*s/u,
+    `the panel's rendered recent TTFB must be the seeded non-zero figure:\n${panelView}`)
+  assert.match(panelView, /([1-9]\d{1,3}) tok\/s/u,
+    `the panel's rendered recent throughput must be the seeded non-zero figure:\n${panelView}`)
+  // FOOTER consistency after the /status paging (F10): the footer's own
+  // stats row re-derived from the WIDENED fold — it must no longer show the
+  // no-sample zeros the initial bounded window produced.
+  const footerRows = (fixture.runnerApp() as unknown as {
+    footerRenderRowsForTest(): readonly string[]
+  }).footerRenderRowsForTest()
+  const footerText = footerRows.join(' ')
+  assert.match(footerText, /TTFB 0\.[1-9]\d*s/u,
+    `the footer re-derived its recent figures from the widened fold after the /status paging:\n${footerText}`)
+  assert.match(footerText, /([1-9]\d{1,3}) tok\/s/u,
+    `the footer's recent throughput re-derived from the widened fold:\n${footerText}`)
 })
