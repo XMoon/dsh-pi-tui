@@ -209,6 +209,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; li
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
+    transcriptExportAvailable: true,
     commandRegistry: ctx.get('commands') as never,
     clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws',

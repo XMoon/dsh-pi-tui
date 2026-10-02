@@ -104,6 +104,7 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
       questions: {
         onRequest: () => true,

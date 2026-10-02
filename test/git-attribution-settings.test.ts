@@ -130,6 +130,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
     hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
       questions: {
         onRequest: () => true,

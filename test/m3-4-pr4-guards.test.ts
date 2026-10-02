@@ -231,3 +231,26 @@ test('§7.5 unavailable Remote approval/sandbox facts are omitted, never guessed
   assert.equal(remoteAccess.includes('sandbox'), false,
     'the Remote access branch never infers a sandbox mode')
 })
+
+/* ───────── PR5: the required transcript-export capability declaration ──── */
+
+test('PR5 the transcript-export capability is REQUIRED and refused unless exactly true', () => {
+  const commands = code('commands.ts')
+  const declaration = commands.indexOf('readonly transcriptExportAvailable: boolean')
+  assert.ok(declaration !== -1,
+    'the runner capability is a required boolean (no optional marker)')
+  assert.equal(code('commands.ts').includes('transcriptExportAvailable?:'), false,
+    'no optional declaration of the capability may reappear')
+  const handler = commands.slice(commands.indexOf("name: 'transcript'"))
+  assert.ok(handler.includes('runner.transcriptExportAvailable !== true'),
+    'the /transcript handler refuses unless the declared capability is exactly true')
+  // The production composition declares it per selected runtime, and the
+  // command-surface backend deps type requires it structurally: a new
+  // assembly cannot omit the capability.
+  const bootstrap = code('app/bootstrap.ts')
+  assert.ok(bootstrap.includes('transcriptExportAvailable: selectedRuntime.kind === \'direct\''),
+    'the production composition declares the capability from the selected runtime kind')
+  const surface = code('app/command/surface.ts')
+  assert.ok(surface.includes('readonly transcriptExportAvailable: boolean'),
+    'the command-surface backend deps keep the field required (structural guard)')
+})
