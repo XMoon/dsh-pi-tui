@@ -138,6 +138,9 @@ export function createRemotePresentationSource(
       // face is the same one remote-official-contract.test.ts proves.
       authority: wire.client.remote,
       generation,
+      // §16: the SAME shared sessions service is the exact-binding fence
+      // source (a same-id release/re-retain invalidates a settled read).
+      bindings: sessions,
     }),
     submissionPresentation: new RemoteSubmissionPresentation(sessions, generation),
     liveIngress: createRemoteLiveIngress(sessions, generation, CURRENT_STATUS_PROJECTION_KEYS),

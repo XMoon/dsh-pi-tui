@@ -289,6 +289,10 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   wasAdvertisedClaim(name: string): boolean
   /** Does the CURRENT effective host catalog claim this line? */
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** §D3 precedence: does the AUTHORITATIVE HOST catalog resolve the name?
+   *  (The claim-set union cannot answer this — it also carries this
+   *  surface's own Client registrations.) */
+  hostCatalogResolves(name: string): boolean
   /** Is a slash name a LIVE TUI-owned skill wrapper? */
   isSkillWrapperName(name: string): boolean
   /** Consume one TUI-local command draft disposition. */
@@ -382,6 +386,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * (PR115-fix problem 1). */
   
   let hostClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
+
+  /** The §D3 precedence discriminator installed by registerTuiCommands: does
+   *  the AUTHORITATIVE HOST catalog resolve the name (never the union claim
+   *  set, which also carries this surface's own Client registrations)? */
+  let hostCatalogResolves: ((name: string) => boolean) | undefined
 
   /** The skill-wrapper test installed by registerTuiCommands: is a slash
    * name a LIVE TUI-owned skill wrapper? The steer path consults it to
@@ -500,21 +509,33 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   ): Promise<import('../../surface-catalog.ts').SurfaceCatalogSnapshot> => {
     const source = deps.remoteCommandSource
     if (source === undefined) throw new Error('the Remote command source is unavailable')
+    // §2.2 admission capture: the transport identity (Connection generation
+    // + exact binding) is taken BEFORE any provider read; every settle is
+    // re-checked against THIS frozen token (plan §16: a same-id binding
+    // rollover or a Connection replacement must invalidate the refresh —
+    // the reader's own fences cover each provider's round-trip, this covers
+    // the COMBINED settle: one provider may settle before the rollover and
+    // the other after).
+    const admissionToken = source.captureTransportToken(sessionId)
     // §2.2: the command metadata comes from the authority reader and the
-    // skill metadata from the semantic skill capability, INDEPENDENTLY — one
-    // failing provider degrades only its own field (the coordinator's
-    // mergePartial keeps that field's last-good list) and never zeroes the
-    // Host command catalog the dispatch's claim set is built from.
+    // skill metadata from the semantic skill capability, INDEPENDENTLY— one
+    // failing provider degrades only its own field through the coordinator's
+    // provider isolation below (an `issues` entry + the last-good list via
+    // mergePartial; an EMPTY commands array would erase the Host claim set,
+    // so a failed commands provider must NEVER produce an empty success).
     const [commandsResult, skillsResult] = await Promise.allSettled([
       source.readCommands(sessionId, signal),
       deps.catalog.skills.listHumanSkills(sessionId, signal),
     ])
     signal.throwIfAborted()
-    if (commandsResult.status === 'rejected') {
-      const reason = commandsResult.reason
-      if (reason instanceof SupersededReadError) throw reason
-      throw reason
+    // §2.2/§16 combined-settle fence: after BOTH providers settled, the
+    // admission transport must still be live — a rollover between the two
+    // settles invalidates the WHOLE snapshot (it may mix two bindings'
+    // facts), so it settles superseded, never installs.
+    if (!source.isTransportTokenCurrent(sessionId, admissionToken)) {
+      throw new SupersededReadError('the connection changed during the catalog refresh')
     }
+    if (commandsResult.status === 'rejected') throw commandsResult.reason
     if (commandsResult.value === undefined) {
       throw new SupersededReadError('the connection changed during the catalog refresh')
     }
@@ -640,6 +661,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       }
       wasAdvertisedClaim = installed.wasAdvertised
       hostClaimOf = installed.hostClaimOf
+      hostCatalogResolves = installed.hostCatalogResolves
       isSkillWrapperName = installed.isSkillWrapper
       refreshCommandCompletions = installed.refreshCommandCompletions
       withCommandDelivery = installed.withDelivery
@@ -1001,6 +1023,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     refreshLiveCatalogById,
     wasAdvertisedClaim: (name) => wasAdvertisedClaim?.(name) === true,
     hostClaimOf: (parsed) => hostClaimOf?.(parsed),
+    hostCatalogResolves: (name) => hostCatalogResolves?.(name) === true,
     isSkillWrapperName: (name) => isSkillWrapperName?.(name) === true,
     takeCommandDraftDisposition: (commandId) => takeCommandDraftDisposition?.(commandId),
     refreshCompletions: () => refreshCommandCompletions?.(),

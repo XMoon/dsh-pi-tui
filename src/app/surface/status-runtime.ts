@@ -56,6 +56,10 @@ export interface StatusHostFacts extends AccessDeriveDeps {
   readonly sessionProjections: PlanProjectionLike | undefined
 }
 
+/** The semantic apply outcome of one permission-cycle write (§6.3; the
+ *  semantic port type re-exported for the authority bundle consumers). */
+export type PermissionCycleApplyOutcome = import('../../runtime/config-port.ts').PermissionPresetApplyOutcome
+
 /**
  * The Remote-branch official Session facts (M3-4 PR2): when the selected
  * runtime is Remote there is no live Direct Agent, so the owner reads the
@@ -130,13 +134,24 @@ export interface StatusRuntimeDeps {
     /** The captured live scope (the ownership fence for the write). */
     captureLiveScope(): import('../session/scope.ts').LiveSessionScope | undefined
     isScopeCurrent(scope: import('../session/scope.ts').LiveSessionScope): boolean
+    /** Capture the Remote transport identity (Connection generation + exact
+     *  binding) at gesture admission. `undefined` = the Direct branch (no
+     *  transport fence; the scope fence above is the whole owner check). */
+    captureTransportToken(): unknown
+    /** Whether the captured transport identity is still live (a same-id
+     *  binding rollover without a TUI owner commit reads stale). Always
+     *  `true` when no token was captured (Direct). */
+    isTransportTokenCurrent(token: unknown): boolean
     /** The projection-authoritative current permission of the CURRENT
      *  session (absent = unavailable — never guessed). */
     currentPermission(): string | undefined
     /** The advertised preset names, in cycle order. */
     presetNames(): readonly string[]
-    /** The semantic write (ConfigPort → the official Host command path). */
-    apply(sessionId: string, presetId: string, signal?: AbortSignal): Promise<{ readonly kind: 'applied' } | { readonly kind: 'unavailable'; readonly cause: 'commands' | 'permission' }>
+    /** The semantic write (ConfigPort → the official Host command path). An
+     *  `indeterminate` outcome means the write was DISPATCHED but its settle
+     *  is unobservable (e.g. a post-dispatch transport cancellation) — it is
+     *  never silently downgraded to `unavailable`, never retried. */
+    apply(sessionId: string, presetId: string, signal?: AbortSignal): Promise<PermissionCycleApplyOutcome>
   }
 }
 
@@ -604,9 +619,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // write carrier).
     if (deps.permissionCycle !== undefined) {
       const authority = deps.permissionCycle
-      // SYNC admission: the scope must be current BEFORE any read/write.
+      // SYNC admission: the scope must be current BEFORE any read/write. The
+      // transport token is captured in the SAME synchronous step (§6.3): a
+      // same-id binding rollover during the apply must read stale, so the
+      // old gesture never notifies/repaints the replacement surface.
       const scope = authority.captureLiveScope()
       if (scope === undefined) return
+      const transportToken = authority.captureTransportToken()
       const names = authority.presetNames()
       if (names.length === 0) return
       const current = authority.currentPermission()
@@ -615,17 +634,32 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       if (next === undefined || next === current) return
       // The gesture is an OWNED async operation (docs/failure-model.md): one
       // runOwned settlement, never a bare discard. Every terminal branch
-      // re-checks the owner identity after the await.
+      // re-checks BOTH owner identities after the await: the scope (a TUI
+      // owner commit) AND the transport token (a Connection/binding
+      // rollover WITHOUT a TUI owner commit).
       runOwned('permission cycle', async () => {
         const outcome = await authority.apply(scope.sessionId, next)
         if (deps.isCleanedUp()) return
         // A stale owner repaints NOTHING for the replacement session
         // (§15.6): the write may have committed on the OLD session.
         if (!authority.isScopeCurrent(scope)) return
+        if (!authority.isTransportTokenCurrent(transportToken)) return
         if (outcome.kind === 'unavailable') {
           deps.surface.app.notify(outcome.cause === 'commands'
             ? 'permission switch unavailable (commands service)'
             : 'permission switch unavailable (presets not composed)', 'error')
+          return
+        }
+        if (outcome.kind === 'indeterminate') {
+          // §6.3/§15.6: the write was dispatched but its settle is
+          // unobservable — report it truthfully, never as a known failure,
+          // and NEVER retry automatically (an ambiguous dispatch must not
+          // duplicate). The pushed projection repaints the committed value
+          // if the switch landed.
+          deps.surface.app.notify(
+            `permission switch to ${next} was dispatched but the result is unknown — check the footer before relying on it`,
+            'error',
+          )
           return
         }
         // APPLIED: do NOT install next as committed locally — the pushed
@@ -643,6 +677,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         onError: (error) => {
           if (deps.isCleanedUp()) return
           if (!authority.isScopeCurrent(scope)) return
+          if (!authority.isTransportTokenCurrent(transportToken)) return
           deps.surface.app.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
         },
       })

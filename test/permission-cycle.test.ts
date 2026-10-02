@@ -49,12 +49,16 @@ test('§6.1 a foreign/absent permissions view reads absent (never guessed)', () 
 function harness(options: {
   readonly current?: string
   readonly names?: readonly string[]
-  readonly outcome?: { kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' } | { kind: 'throw'; error: Error }
+  readonly outcome?: { kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' } | { kind: 'indeterminate'; reason: string } | { kind: 'throw'; error: Error }
   readonly staleAfterApply?: boolean
+  /** The transport token flips stale during the apply await (scope stays
+   *  current — a same-id binding rollover WITHOUT a TUI owner commit). */
+  readonly transportStaleAfterApply?: boolean
 }) {
   const applied: Array<{ sessionId: string; presetId: string }> = []
   const notices: Array<{ message: string; kind: 'info' | 'error' }> = []
   let scopeCurrent = true
+  let transportCurrent = true
   const ctx = new Context()
   const deps = {
     // runOwned's mandatory diagnostics channel (the cycle is an OWNED
@@ -86,11 +90,14 @@ function harness(options: {
     permissionCycle: {
       captureLiveScope: () => ({ subject: {}, sessionId: 'session-a', generation: 1 }) as never,
       isScopeCurrent: () => scopeCurrent,
+      captureTransportToken: () => ({ token: 'transport-identity' }),
+      isTransportTokenCurrent: () => transportCurrent,
       currentPermission: () => options.current,
       presetNames: () => options.names ?? ['read-only', 'workspace-write', 'danger-full-access'],
       apply: async (sessionId: string, presetId: string) => {
         applied.push({ sessionId, presetId })
         if (options.staleAfterApply) scopeCurrent = false
+        if (options.transportStaleAfterApply) transportCurrent = false
         const outcome = options.outcome
         if (outcome === undefined) return { kind: 'applied' as const }
         if (outcome.kind === 'throw') throw outcome.error
@@ -141,6 +148,30 @@ test('§6.3 a stale scope after the await notifies NOTHING (no replacement-sessi
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(h.applied.length, 1, 'the write WAS dispatched (may have committed on the old session)')
   assert.deepEqual(h.notices, [], 'a stale owner repaints/notifies nothing for the replacement (§15.6)')
+})
+
+test('§6.3/§16 a same-id transport rollover during the apply notifies NOTHING (the scope alone proves nothing)', async () => {
+  // The binding was replaced under the SAME session id with no TUI owner
+  // commit: the scope stays current, the transport token does not.
+  const h = harness({ current: 'read-only', transportStaleAfterApply: true })
+  h.runtime.cyclePermission()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(h.applied.length, 1, 'the write WAS dispatched (may have committed on the old binding)')
+  assert.deepEqual(h.notices, [], 'a stale transport must not notify/repaint the replacement binding (§16)')
+})
+
+test('§6.3 an indeterminate outcome reports the unknown settle truthfully (never as failure, never retried)', async () => {
+  const h = harness({
+    current: 'read-only',
+    outcome: { kind: 'indeterminate', reason: 'the permission switch was dispatched but cancelled before its result arrived' },
+  })
+  h.runtime.cyclePermission()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(h.applied.length, 1, 'exactly one dispatch')
+  assert.equal(h.notices.length, 1)
+  assert.equal(h.notices[0]?.kind, 'error')
+  assert.match(h.notices[0]!.message, /unknown/, 'the notice says the RESULT is unknown, not that the switch failed')
+  assert.doesNotMatch(h.notices[0]!.message, /unavailable|failed/, 'an indeterminate settle is never masked as unavailable/failed')
 })
 
 test('§6.3 an unavailable outcome surfaces truthfully (never a retry)', async () => {

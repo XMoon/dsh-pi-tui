@@ -43,6 +43,13 @@ export interface RemoteCommandSource {
    *  command provider here and the skill provider through the semantic skill
    *  capability, so one failing provider degrades alone. */
   readCommands(sessionId: string, signal?: AbortSignal): ReturnType<RemoteSurfaceAuthorityReader['readCommands']>
+  /** Capture the §2.2/§16 admission transport identity (Connection
+   *  generation + exact binding) for one session's catalog operation. */
+  captureTransportToken(sessionId: string): unknown
+  /** Whether the captured transport identity is still live for the
+   *  session (a same-id binding rollover or Connection replacement reads
+   *  stale — the COMBINED settle of a multi-provider read re-checks this). */
+  isTransportTokenCurrent(sessionId: string, token: unknown): boolean
 }
 
 /** The narrow one-source face this bundle consumes: the SAME shared sessions
@@ -52,15 +59,34 @@ export interface RemoteCommandSourceInputs {
   readonly authority: RemoteSurfaceAuthoritySource
   /** The ONE shared Connection generation source (fence owner). */
   readonly generation: RemoteConnectionGenerationSource
+  /** The ONE shared sessions service — the §16 exact-binding fence source
+   *  (a same-id release/re-retain must invalidate a settled metadata read). */
+  readonly bindings: {
+    binding(id: string): unknown
+  }
 }
 
 /** Assemble the Remote command source from the ONE aggregate's shared
  *  faces. The `RemoteSurfaceAuthorityReader` is constructed here (per §D1,
  *  outside `Backend`) and never re-created per read. */
 export function createRemoteCommandSource(inputs: RemoteCommandSourceInputs): RemoteCommandSource {
-  const reader = new RemoteSurfaceAuthorityReader(inputs.authority, inputs.generation)
+  const reader = new RemoteSurfaceAuthorityReader(inputs.authority, inputs.generation, inputs.bindings as never)
+  // The §2.2/§16 transport identity the COMBINED catalog read re-checks
+  // after every settle (the SAME generation + exact-binding pair the
+  // sessionFacts fence exposes; sourced from this bundle's own inputs).
+  const transportOf = (sessionId: string): unknown => ({
+    generation: inputs.generation.getSnapshot(),
+    binding: inputs.bindings.binding(sessionId),
+  })
   return {
     read: (sessionId, signal) => reader.read(sessionId, signal),
     readCommands: (sessionId, signal) => reader.readCommands(sessionId, signal),
+    captureTransportToken: transportOf,
+    isTransportTokenCurrent: (sessionId, token) => {
+      const captured = token as { generation?: unknown; binding?: unknown } | undefined
+      if (captured === undefined || typeof captured !== 'object') return false
+      if (!Object.is(captured.generation, inputs.generation.getSnapshot())) return false
+      return inputs.bindings.binding(sessionId) === captured.binding
+    },
   }
 }

@@ -190,9 +190,16 @@ export interface ApplicationEventsDeps {
      *  return the loaded durable events (undefined = no materialized
      *  binding / superseded settle — never a guessed boundary). */
     loadThrough(sessionId: string, seq: number, signal?: AbortSignal): Promise<readonly import('../../runtime/presentation-read-port.ts').PresentationDurableEvent[] | undefined>
-    /** Whether a superseded rewind selection must drop (the transport
-     *  identity re-check after every await; Remote-specific). */
-    isSelectionCurrent(sessionId: string): boolean
+    /** Capture the transport identity the selection was admitted under
+     *  (Remote: Connection generation + exact binding; Direct reads
+     *  `undefined`). Captured ONCE at picker open — the check below only
+     *  ever COMPARES this frozen identity. */
+    captureSelectionIdentity(sessionId: string): unknown
+    /** Whether the captured selection identity is still the live transport
+     *  for this session (the §6.5 re-check after every await; a
+     *  same-session-id binding rollover reads stale). `identity ===
+     *  undefined` (the Direct branch) is always current. */
+    isSelectionCurrent(sessionId: string, identity: unknown): boolean
     forkSession(
       sourceSessionId: string,
       atSeq: number,
@@ -232,8 +239,12 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
       return
     }
     // Capture the picker-open identity, not only the Session id. A switch away
-    // and back to the same id must still supersede the old candidate.
+    // and back to the same id must still supersede the old candidate — and the
+    // REMOTE transport identity (Connection generation + exact binding) is
+    // captured here ONCE: a same-id binding rollover while the picker is open
+    // must invalidate the pending selection (§2.2/§16).
     const sourceId = source.session.id
+    const selectionIdentity = deps.rewind.captureSelectionIdentity(sourceId)
     const pickerIdentity: RewindNavigationIdentity = {
       sessionId: sourceId,
       navigationEpoch: deps.lifecycle.navigationEpoch(),
@@ -268,7 +279,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             app.notify('the session changed while rewinding — try again', 'info')
             return
           }
-          if (!deps.rewind.isSelectionCurrent(sourceId)) {
+          if (!deps.rewind.isSelectionCurrent(sourceId, selectionIdentity)) {
             app.notify('the session changed while rewinding — try again', 'info')
             return
           }

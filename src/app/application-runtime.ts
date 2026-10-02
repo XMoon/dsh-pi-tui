@@ -91,6 +91,12 @@ export interface RemoteCommandSourceFace {
   read(sessionId: string, signal?: AbortSignal): Promise<import('../runtime/surface-authority-port.ts').SurfaceAuthoritySnapshot | undefined>
   /** The commands-only, generation-fenced metadata read (PR4 §2.2). */
   readCommands(sessionId: string, signal?: AbortSignal): Promise<import('../runtime/surface-authority-port.ts').SurfaceAuthoritySnapshot['commands'] | undefined>
+  /** The §2.2/§16 admission transport identity (generation + exact
+   *  binding), captured ONCE before the provider reads. */
+  captureTransportToken(sessionId: string): unknown
+  /** Whether the captured transport identity is still live (the COMBINED
+   *  multi-provider settle re-checks this after every await). */
+  isTransportTokenCurrent(sessionId: string, token: unknown): boolean
 }
 
 export interface RemoteApplicationSources {

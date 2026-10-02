@@ -1401,17 +1401,21 @@ export function applyRunnerWithRuntime(
       const sessionStatsProjectionOf = (sessionId: string): unknown =>
         remoteSources === undefined ? undefined : remoteSources.sessionFacts.sessionStatsProjection(sessionId)
       /** The §6.5 transport-identity fence the Remote compositions re-check
-       *  after every await (Connection generation + exact binding object). */
-      const remoteTransportFenceOf = (sessionId: string) => ({
-        isCurrent: () => {
-          const sources = remoteSources
-          if (sources === undefined) return false
-          return sources.sessionFacts.isTransportTokenCurrent(
-            sessionId,
-            sources.sessionFacts.captureTransportToken(sessionId),
-          )
-        },
-      })
+       *  after every await (Connection generation + exact binding object).
+       *  The token is captured ONCE at construction (the operation's
+       *  admission); `isCurrent` only ever COMPARES that frozen token — a
+       *  same-session-id binding rollover between capture and settle must
+       *  read stale, never re-capture the replacement as current. */
+      const remoteTransportFenceOf = (sessionId: string) => {
+        const sources = remoteSources
+        const token = sources === undefined ? undefined : sources.sessionFacts.captureTransportToken(sessionId)
+        return {
+          isCurrent: () => {
+            if (sources === undefined || token === undefined) return false
+            return sources.sessionFacts.isTransportTokenCurrent(sessionId, token)
+          },
+        }
+      }
     // Explicit annotation: the Direct seams below read the owner back
     // (late-bound through `command`), so the initializer cannot drive inference.
     const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({
@@ -1440,6 +1444,8 @@ export function applyRunnerWithRuntime(
         remoteCommandSource: {
           read: (sessionId, signal) => remoteSources.commandSource.read(sessionId, signal),
           readCommands: (sessionId, signal) => remoteSources.commandSource.readCommands(sessionId, signal),
+          captureTransportToken: (sessionId) => remoteSources.commandSource.captureTransportToken(sessionId),
+          isTransportTokenCurrent: (sessionId, token) => remoteSources.commandSource.isTransportTokenCurrent(sessionId, token),
         },
         remoteFacts: {
           running: (sessionId) => remoteSources.sessionFacts.running(sessionId),
@@ -1603,6 +1609,20 @@ export function applyRunnerWithRuntime(
       permissionCycle: {
         captureLiveScope: () => sessionScope.captureLive(),
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        // §6.3 transport fence: captured in the SAME synchronous admission
+        // step as the scope. Direct reads `undefined` (no transport
+        // identity); Remote captures the Connection generation + exact
+        // binding so a same-id rollover during the apply reads stale.
+        captureTransportToken: () => {
+          if (remoteSources === undefined) return undefined
+          const sessionId = ownership.currentSessionId()
+          return sessionId === undefined
+            ? undefined
+            : remoteSources.sessionFacts.captureTransportToken(sessionId)
+        },
+        isTransportTokenCurrent: (token) => token === undefined
+          ? true
+          : remoteSources !== undefined && remoteSources.sessionFacts.isTransportTokenCurrent(ownership.currentSessionId() ?? '', token),
         currentPermission: () => {
           const sessionId = ownership.currentSessionId()
           if (sessionId === undefined) return undefined
@@ -1735,15 +1755,15 @@ export function applyRunnerWithRuntime(
     // diff). The registry is read through ctx.get: property access
     // (ctx.tools) trips cordis's inject guard, and an absent registry must
     // degrade to generic cards rather than fail the render.
-    const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined
-    // PR4 §5.2: the presentation bridge is branch-split. Direct keeps the
-    // Host presenter compatibility (the live registry, agent-scoped); the
-    // Remote branch derives cards from raw call/result facts ONLY — no
-    // ctx.tools access, no presentCall/presentResult, no wire callback.
+    // PR4 §5.2 (review F7): the Host registry lookup itself is DIRECT-ONLY —
+    // resolved lazily inside the Direct branch's lookup, never on the Remote
+    // path (Step 5 forbids a Remote bootstrap tools lookup; the guard
+    // asserts the lookup sits behind the branch discriminator).
     const present = remoteSources === undefined
       ? toolPresenterFrom(name => {
         const agent = agentNow()
         if (agent === undefined) return undefined
+        const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined
         return tools?.get(name, agent)
       })
       : createClientToolPresenter()
@@ -2144,12 +2164,18 @@ export function applyRunnerWithRuntime(
           const snapshot = await presentationLoadThrough(sessionId, seq, signal)
           return snapshot === undefined ? undefined : snapshot.durableEvents
         },
-        isSelectionCurrent: (sessionId) => remoteSources === undefined
+        // §2.2/§16: the transport identity is captured ONCE at picker open
+        // (Direct reads `undefined`); the post-await check only COMPARES that
+        // frozen token, so a same-id binding rollover while the picker was
+        // open invalidates the pending selection — it can never re-capture
+        // the replacement binding as current.
+        captureSelectionIdentity: (sessionId) => remoteSources === undefined
+          ? undefined
+          : remoteSources.sessionFacts.captureTransportToken(sessionId),
+        isSelectionCurrent: (sessionId, identity) => identity === undefined
           ? true
-          : remoteSources.sessionFacts.isTransportTokenCurrent(
-            sessionId,
-            remoteSources.sessionFacts.captureTransportToken(sessionId),
-          ),
+          : remoteSources !== undefined
+            && remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, identity),
         forkSession: (sourceSessionId, atSeq, onAdopted, pickerIdentity) =>
           sessionRuntime.forkSession(sourceSessionId, atSeq, onAdopted, pickerIdentity),
       },

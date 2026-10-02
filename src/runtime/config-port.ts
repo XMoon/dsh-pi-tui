@@ -394,8 +394,18 @@ export interface PermissionConfig {
     sessionId: string,
     presetId: string,
     signal?: AbortSignal,
-  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }>
+  ): Promise<PermissionPresetApplyOutcome>
 }
+
+/** The semantic outcome of one permission-preset apply (PR4 §6.3). An
+ * `indeterminate` settle means the write was DISPATCHED but its result is
+ * unobservable (e.g. a post-dispatch transport cancellation): it stays
+ * observable as indeterminate — never silently downgraded to `unavailable`,
+ * never retried. */
+export type PermissionPresetApplyOutcome =
+  | { readonly kind: 'applied' }
+  | { readonly kind: 'unavailable'; readonly cause: 'commands' | 'permission' }
+  | { readonly kind: 'indeterminate'; readonly reason: string }
 
 /** One official allowed child-LLM route (the exact provider+model pair
  * the official `subagent-model-selection-settings` section authorizes). */

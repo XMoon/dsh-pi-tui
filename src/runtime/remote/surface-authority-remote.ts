@@ -132,17 +132,35 @@ function generationMatches(
   return Object.is(captured, generation.getSnapshot())
 }
 
+/** The structural binding face the authority read pins (the same
+ *  per-operation binding fence the presentation reader uses: a same-id
+ *  release/re-retain must not hand a settled read to a replacement). */
+interface RemoteAuthorityBindingSource {
+  binding(id: string): { readonly session: unknown } | undefined
+}
+
+function pinExistingBinding(
+  sessions: RemoteAuthorityBindingSource,
+  sessionId: string,
+): { readonly binding: { readonly session: unknown } } | undefined {
+  const binding = sessions.binding(sessionId)
+  return binding === undefined ? undefined : { binding }
+}
+
 /** Read command and human-skill authority for one current Connection generation. */
 export class RemoteSurfaceAuthorityReader implements SurfaceAuthorityReader {
   private readonly source: RemoteSurfaceAuthoritySource
   private readonly generation: RemoteConnectionGenerationSource
+  private readonly bindings: RemoteAuthorityBindingSource | undefined
 
   constructor(
     source: RemoteSurfaceAuthoritySource,
     generation: RemoteConnectionGenerationSource,
+    bindings?: RemoteAuthorityBindingSource,
   ) {
     this.source = source
     this.generation = generation
+    this.bindings = bindings
   }
 
   /**
@@ -159,6 +177,12 @@ export class RemoteSurfaceAuthorityReader implements SurfaceAuthorityReader {
     signal?.throwIfAborted()
     const capturedGeneration = this.generation.getSnapshot()
     if (capturedGeneration === undefined) return undefined
+    // §16 binding fence: pin the EXACT binding for the whole round-trip so a
+    // same-id release/re-retain cannot hand the settled read to a
+    // replacement (the generation check alone misses a binding-only
+    // rollover within one generation).
+    const pinned = this.bindings === undefined ? undefined : pinExistingBinding(this.bindings, sessionId)
+    if (this.bindings !== undefined && pinned === undefined) return undefined
     const requestSignal = signal ?? new AbortController().signal
     let descriptors: readonly RemoteCommandDescriptor[]
     try {
@@ -166,10 +190,10 @@ export class RemoteSurfaceAuthorityReader implements SurfaceAuthorityReader {
       requestSignal.throwIfAborted()
     } catch (error) {
       requestSignal.throwIfAborted()
-      if (!generationMatches(this.generation, capturedGeneration)) return undefined
+      if (!this.stillCurrent(capturedGeneration, sessionId, pinned)) return undefined
       throw error
     }
-    if (!generationMatches(this.generation, capturedGeneration)) return undefined
+    if (!this.stillCurrent(capturedGeneration, sessionId, pinned)) return undefined
     return Object.freeze(descriptors.map(commandSummaryOf))
   }
 
@@ -177,6 +201,8 @@ export class RemoteSurfaceAuthorityReader implements SurfaceAuthorityReader {
     signal?.throwIfAborted()
     const capturedGeneration = this.generation.getSnapshot()
     if (capturedGeneration === undefined) return undefined
+    const pinned = this.bindings === undefined ? undefined : pinExistingBinding(this.bindings, sessionId)
+    if (this.bindings !== undefined && pinned === undefined) return undefined
     const requestSignal = signal ?? new AbortController().signal
 
     // Unwrap each RemoteResult before aggregation so a failed provider settles
@@ -199,15 +225,29 @@ export class RemoteSurfaceAuthorityReader implements SurfaceAuthorityReader {
       requestSignal.throwIfAborted()
     } catch (error) {
       requestSignal.throwIfAborted()
-      if (!generationMatches(this.generation, capturedGeneration)) return undefined
+      if (!this.stillCurrent(capturedGeneration, sessionId, pinned)) return undefined
       throw error
     }
-    if (!generationMatches(this.generation, capturedGeneration)) return undefined
+    if (!this.stillCurrent(capturedGeneration, sessionId, pinned)) return undefined
 
     const snapshot = {
       commands: Object.freeze(commandDescriptors.map(commandSummaryOf)),
       skills: Object.freeze(skillEntries.map(skillSummaryOf)),
     }
     return Object.freeze(snapshot)
+  }
+
+  /** The combined §2.2/§16 fence: the Connection generation AND (when a
+   *  binding source is provided) the exact binding object must both still
+   *  be live for the settled read to belong to this operation. */
+  private stillCurrent(
+    capturedGeneration: RemoteConnectionGeneration,
+    sessionId: string,
+    pinned: { readonly binding: { readonly session: unknown } } | undefined,
+  ): boolean {
+    if (!generationMatches(this.generation, capturedGeneration)) return false
+    if (this.bindings !== undefined && pinned !== undefined
+      && this.bindings.binding(sessionId) !== pinned.binding) return false
+    return true
   }
 }
