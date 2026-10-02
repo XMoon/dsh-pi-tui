@@ -1482,6 +1482,12 @@ export function applyRunnerWithRuntime(
         blank: () => sessionBlank(),
       },
       clientCwd: cwd,
+      // PR5 (plan §3.2): the /status panel reads the presentation-owned
+      // recent-performance availability beside the composed stats (Remote
+      // only — Direct's complete-log fold is authoritative by construction).
+      ...(remoteSources === undefined ? {} : {
+        recentPerformanceAvailable: () => presentation.mainRecentPerformanceAvailable(),
+      }),
       surface: {
         setNotificationMode: (mode) => surface.setNotificationMode(mode),
         setNotificationMethod: (method) => surface.setNotificationMethod(method),
@@ -1675,7 +1681,13 @@ export function applyRunnerWithRuntime(
         planMode: ctx.get('planMode'),
         sessionProjections: ctx.get('sessionProjections'),
       }),
-      presentation: { mainStats: () => presentation.mainStats() },
+      presentation: {
+        mainStats: () => presentation.mainStats(),
+        // PR5 (plan §3.2): the presentation-owned recent-performance
+        // availability authority (one bit beside the fold, committed in the
+        // same fenced hydrate).
+        mainRecentPerformanceAvailable: () => presentation.mainRecentPerformanceAvailable(),
+      },
       viewer: { read: () => viewerRef?.read() },
       clientCwd: cwd,
       // M3-4 PR2: the Remote-branch official Session facts (the status

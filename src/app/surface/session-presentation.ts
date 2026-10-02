@@ -33,7 +33,7 @@ import { compactingFromLog, workingFromLog } from '../../compaction-presentation
 import { foldGoal, goalTextOf } from '../../status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../history.ts'
 import { hydrateSessionUi } from '../../session-ui-hydrate.ts'
-import { StatsFolder } from '../../stats.ts'
+import { StatsFolder, hasEnoughRecentPerformanceSamples } from '../../stats.ts'
 import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep } from '../../streaming-tool-preparing.ts'
 import { TranscriptFolder } from '../../transcript.ts'
 import { TranscriptWindowController } from '../../transcript-window.ts'
@@ -253,6 +253,20 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
    * (the honest model for a bounded window; the fold stays cheap).
    */
   rehydrateFromWindow(sessionId: string): Promise<void>
+  /**
+   * PR5 truthfulness (plan §3.2): whether the main stats fold's
+   * RECENT-performance figures are AUTHORITATIVE for presentation. `true`
+   * on Direct (the fold reads the COMPLETE in-process session log) and on a
+   * Remote window that proved its recent-sample evidence (the window
+   * reached the history start, or the fold retained enough valid samples —
+   * `hasEnoughRecentPerformanceSamples`). `false` while a bounded Remote
+   * window cannot prove either: the footer/status must OMIT the recent
+   * metrics (never a numeric `0s · 0 tok/s` stand-in). This is the ONE
+   * presentation-owned availability authority beside the stats fold; it is
+   * committed in the SAME fenced hydrate that commits the fold itself, so
+   * a stale hydrate can never flip the replacement subject's bit.
+   */
+  mainRecentPerformanceAvailable(): boolean
   /** The synchronous surface reset that follows a generation bump (A2 seam). */
   resetForGeneration(): void
 }
@@ -316,6 +330,14 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   })
 
   let statsFolder = new StatsFolder()
+
+  /**
+   * PR5 (plan §3.2): the presentation-owned recent-performance availability
+   * of the CURRENT main stats fold (see `mainRecentPerformanceAvailable`).
+   * Starts `false` (no authoritative window is committed yet) and flips only
+   * inside the SAME fenced hydrate commits that replace `statsFolder`.
+   */
+  let recentPerformanceAvailable = false
 
   // Coalesced repaint is surface-owned (A4-8): the runner no longer owns
   // the flush timer; the surface routing schedules its own repaint.
@@ -426,6 +448,15 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     readonly planActive: boolean
     readonly working: boolean
     /**
+     * PR5 (plan §3.2): whether `events` may PROVE the recent-performance
+     * sample evidence. Present on the Remote branch: `false` while the
+     * bounded window has neither reached the history start nor retained
+     * enough valid recent samples (the footer then omits the recent
+     * metrics). Absent on Direct, whose `events` is the COMPLETE log (the
+     * fold's own figures are authoritative by construction).
+     */
+    readonly recentPerformanceAvailable?: boolean
+    /**
      * The official CURRENT-VALUE facts (M3-4 PR2). Present on the Remote
      * branch, where `events` is only a BOUNDED window: the title/goal/todos of
      * a long session may have been written before the window and must come
@@ -443,6 +474,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
     statsFolder = hydrated.statsFolder
+    // PR5: the availability bit commits with the SAME fold it describes —
+    // one fenced commit, one subject (a stale hydrate cannot flip the
+    // replacement subject's bit because the §6.5 fences above already
+    // dropped it before reaching this line).
+    recentPerformanceAvailable = input.recentPerformanceAvailable ?? true
     for (const liveInput of input.liveBaseline) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput)
     }
@@ -596,6 +632,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // Only a TRUNCATED window (hasMore) defers to the official running bit.
     const foldProven = !snapshot.hasMore
     const working = foldProven ? workingFromLog(events) : (deps.remote.running(sessionId) ?? false)
+    // PR5 (plan §3.2): the bounded window's recent-performance authority —
+    // the window reaches the history start (its zero is a measured zero) OR
+    // the fold retained enough valid samples for both recent windows. A
+    // truncated window short of both keeps the footer's recent metrics
+    // OMITTED (unknown), never a numeric zero stand-in.
+    const recentPerformanceAvailable = foldProven
+      || hasEnoughRecentPerformanceSamples(snapshot.durableEvents as never[])
     // The official CURRENT-VALUE facts (title/goal/todos/cwd) — their source
     // events may precede this bounded window, so the projection owns them.
     const facts = deps.remote.facts?.(sessionId)
@@ -611,6 +654,8 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       // which hydratePresentation expresses through the injected value.
       planActive: planActiveRemote(sessionId),
       working,
+      // PR5: the window's recent-performance proof travels with the fold.
+      recentPerformanceAvailable,
     })
     // The committed window revision: the caller feeds it to the live ingress
     // so the hydrate→subscribe gap is detected and recovered (never lost).
@@ -655,6 +700,12 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
     statsFolder = hydrated.statsFolder
+    // PR5: the widened window re-proves (or disproves) its recent-sample
+    // evidence in the SAME fenced commit that replaced the fold — a
+    // `loadOlder` that reaches enough samples (or the history start) flips
+    // the footer's omitted metrics on with the new fold, never after it.
+    recentPerformanceAvailable = !snapshot.hasMore
+      || hasEnoughRecentPerformanceSamples(snapshot.durableEvents as never[])
     for (const liveInput of snapshot.liveInputs) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput)
     }
@@ -669,6 +720,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
 
   const mainFolder = (): TranscriptFolder => folder
   const mainStats = (): StatsFolder => statsFolder
+  const mainRecentPerformanceAvailable = (): boolean => recentPerformanceAvailable
   const mainWindow = (): TranscriptWindowController => windowController
   const restoreMainTranscriptAnchor = (): void => {
     windowController.isLatest()
@@ -686,6 +738,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     main: mainPresentation,
     mainFolder,
     mainStats,
+    mainRecentPerformanceAvailable,
     mainWindow,
     applyAssistantInput,
     setToolArgs,

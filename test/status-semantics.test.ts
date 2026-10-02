@@ -242,3 +242,26 @@ test('access: alpha.4 drops the event-log fold inputs entirely (service-only rea
   const without = deriveAccessStatus({})
   assert.deepEqual(without, {})
 })
+
+// ── PR5: recent-performance availability (plan §3.2) ───────────────────────
+
+test('usage PR5: an unproven recent window OMITS the recent metrics (never a zero stand-in)', () => {
+  const usage = usageFromStats(STATS, undefined, undefined, { recentPerformanceAvailable: false })
+  assert.deepEqual(usage.performance, { llmMs: 120000 },
+    'llmMs stays (lifetime); the two recent metrics are absent, not zero')
+  // The default (absent options) keeps the figures: the fold's own
+  // complete-log semantics are authoritative.
+  const direct = usageFromStats(STATS)
+  assert.deepEqual(direct.performance, { llmMs: 120000, firstTokenMs: 2000, tokensPerSec: 40 })
+  // A numeric zero with availability proven stays a legitimate measured 0.
+  const zeroMeasured = usageFromStats({ ...STATS, firstTokenMsAvg: 0, tokensPerSec: 0 })
+  assert.deepEqual(zeroMeasured.performance, { llmMs: 120000, firstTokenMs: 0, tokensPerSec: 0 })
+})
+
+test('usage PR5: the Remote override branch honors the same availability rule', () => {
+  const official = { tokens: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+  const usage = usageFromStats(STATS, undefined, official, { recentPerformanceAvailable: false })
+  assert.deepEqual(usage.performance, { llmMs: 120000 })
+  const proven = usageFromStats(STATS, undefined, official, { recentPerformanceAvailable: true })
+  assert.deepEqual(proven.performance, { llmMs: 120000, firstTokenMs: 2000, tokensPerSec: 40 })
+})

@@ -338,18 +338,24 @@ function defaultRow2Left(snap: StatusSnapshot): RefItem[] {
       order: items.length,
     })
   }
-  items.push({
-    text: toneText(`TTFB ${sec(p.firstTokenMs)}`, 'textMuted'),
-    compact: toneText(sec(p.firstTokenMs), 'textMuted'),
-    importance: 40,
-    order: items.length,
-  })
-  items.push({
-    text: toneText(`${p.tokensPerSec} tok/s`, 'textMuted'),
-    compact: toneText(`${p.tokensPerSec}t/s`, 'textMuted'),
-    importance: 45,
-    order: items.length,
-  })
+  // PR5: an absent recent metric (unproven bounded window) omits its item —
+  // the reference composer mirrors the builtin truthfulness rule.
+  if (p.firstTokenMs !== undefined) {
+    items.push({
+      text: toneText(`TTFB ${sec(p.firstTokenMs)}`, 'textMuted'),
+      compact: toneText(sec(p.firstTokenMs), 'textMuted'),
+      importance: 40,
+      order: items.length,
+    })
+  }
+  if (p.tokensPerSec !== undefined) {
+    items.push({
+      text: toneText(`${p.tokensPerSec} tok/s`, 'textMuted'),
+      compact: toneText(`${p.tokensPerSec}t/s`, 'textMuted'),
+      importance: 45,
+      order: items.length,
+    })
+  }
   items.push({
     text: `t${snap.usage.turns}/s${snap.usage.steps}`,
     compact: `t${snap.usage.turns}/s${snap.usage.steps}`,

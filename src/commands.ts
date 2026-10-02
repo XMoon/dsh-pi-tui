@@ -735,6 +735,13 @@ export interface TuiCommandRunner {
    */
   currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
   /**
+   * PR5 (plan §3.2): whether the CURRENT main window's recent-performance
+   * figures are presentation-authoritative (Direct full log, or a Remote
+   * window that proved its samples / reached the history start). Absent on
+   * stub compositions = `true` (the fold's own complete-log semantics).
+   */
+  readonly recentPerformanceAvailable?: () => boolean
+  /**
    * The pinned Session's last assistant-message text ('' when the message
    * carries no text block), or `undefined` when there is none. Async since
    * M3-4 PR4 §D5: the Remote branch pages loadOlder until the newest
@@ -5272,7 +5279,14 @@ export function registerTuiCommands(
             description: color.textDim(scope.sessionId),
             currentValue: color.textDim(displaySessionId(scope.sessionId)),
           },
-          { id: 'session-stats', label: 'Stats', description: stats === undefined ? 'unmeasured' : formatStats(stats), currentValue: '' },
+          {
+            id: 'session-stats',
+            label: 'Stats',
+            description: stats === undefined
+              ? 'unmeasured'
+              : formatStats(stats, runner.recentPerformanceAvailable?.() ?? true),
+            currentValue: '',
+          },
           {
             id: 'session-context',
             label: 'Context',

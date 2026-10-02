@@ -534,3 +534,36 @@ test('an unavailable token projection renders the performance segment alone (no 
   assert.equal(compact.startsWith('· ') || compact.startsWith(' · '), false, `no leading separator (compact):\n${compact}`)
   assert.equal(compact, 'TTFB 2s · 40t/s', `the performance segment alone (compact):\n${compact}`)
 })
+
+test('PR5: unavailable recent metrics omit the performance segments (never a zero stand-in)', () => {
+  const unavailable = snapshotWith(snap => {
+    snap.usage.tokens = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 }
+    snap.usage.performance = { llmMs: 8100 }
+  })
+  // stats-line: the token segment survives; the recent tail is omitted.
+  assert.equal(render('stats-line', unavailable), '↑1.2k ↓3.4k')
+  // split formats that need the missing fact render nothing.
+  assert.equal(render('performance', unavailable, { id: 'performance', format: 'latency' }), '')
+  assert.equal(render('performance', unavailable, { id: 'performance', format: 'speed' }), '')
+  assert.equal(render('performance', unavailable, { id: 'performance', format: 'full' }), '')
+  // A proven zero stays a legitimate measured value.
+  const zero = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 }
+  })
+  assert.equal(render('performance', zero, { id: 'performance', format: 'full' }), 'TTFB 0s · 0 tok/s')
+  assert.equal(render('stats-line', zero), '↑0 ↓0 | TTFB 0s · 0 tok/s')
+})
+
+test('PR5: a partially available recent window renders the available half only', () => {
+  const latencyOnly = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8100, firstTokenMs: 2_600 }
+  })
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'latency' }), 'TTFB 2.6s')
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'speed' }), '')
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'full' }), 'TTFB 2.6s')
+  const speedOnly = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8100, tokensPerSec: 51 }
+  })
+  assert.equal(render('performance', speedOnly, { id: 'performance', format: 'full' }), '51 tok/s')
+  assert.equal(render('performance', speedOnly, { id: 'performance', format: 'latency' }), '')
+})
