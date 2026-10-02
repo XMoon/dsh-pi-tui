@@ -29,7 +29,7 @@
 import type { PresentationDurableEvent, PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
 import type { SessionStatusProjection } from '../../runtime/session-reader-port.ts'
 import type { SessionStats } from '../../stats.ts'
-import { recentPerformanceOf, RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../../stats.ts'
+import { hasEnoughRecentPerformanceSamples, recentPerformanceOf } from '../../stats.ts'
 
 /** The whole-log projection facts the composition consumes (detached). */
 export interface RemoteStatsProjectionFacts {
@@ -85,27 +85,14 @@ function lastAssistantTextOfWindow(events: readonly PresentationDurableEvent[]):
 }
 
 /** Whether the recent-sample window may still be missing the latest steps.
- *  The candidate buffer is twice the derived window, so paging continues
- *  while the window proves fewer completed steps than the worst case the
- *  recent contract may still need (the derived metric pools only the
- *  latest `RECENT_PERFORMANCE_SAMPLE_LIMIT` VALID samples). */
+ * The fold's OWN admission rules answer (§3.4's "whether enough valid
+ * samples are present"): a step/end COUNT is only an upper bound — steps
+ * with no first token, burst-delivered steps, and failed steps contribute
+ * no valid sample, so the window must keep paging until the fold itself
+ * proves both sample windows retained full (or the history start is
+ * reached). */
 function recentSamplesIncomplete(events: readonly PresentationDurableEvent[]): boolean {
-  // Count the completed steps the window itself proves (step/end events of
-  // distinct steps). While the window carries fewer than the sample-limit's
-  // worst case AND more history exists, the latest completed steps may still
-  // be beyond the window front — page once more.
-  let steps = 0
-  const seen = new Set<string>()
-  for (const event of events) {
-    if (event.type !== 'step/end') continue
-    const data = event.data as { readonly turn?: unknown; readonly step?: unknown }
-    if (typeof data.turn !== 'number' || typeof data.step !== 'number') continue
-    const key = `${data.turn}/${data.step}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    steps += 1
-  }
-  return steps < RECENT_PERFORMANCE_SAMPLE_LIMIT * 2
+  return !hasEnoughRecentPerformanceSamples(events as never[])
 }
 
 /**
@@ -128,19 +115,23 @@ export async function composeRemoteSessionStats(input: {
   //    latest completed steps may still be missing.
   let snapshot = await reader.read(sessionId, signal)
   if (snapshot === undefined || !fence.isCurrent()) return undefined
-  let paged = 0
+  // Page while the fold itself cannot prove the recent sample windows full
+  // (§3.4's valid-sample contract) and older history remains. There is NO
+  // page-count cap: an all-invalid-sample session pages to the history
+  // start and then reports the same figures the whole-log fold would — a
+  // silent cap would present a partial window as a complete one (the
+  // review's §3 finding). The official loadOlder pages are bounded by the
+  // Host's own paging contract; a superseded transport drops out below.
   while (
     snapshot.coverage === 'bounded'
     && snapshot.hasMore
     && !snapshot.loadingOlder
     && recentSamplesIncomplete(snapshot.durableEvents)
-    && paged < 10
   ) {
     signal?.throwIfAborted()
     const next = await reader.loadOlder(sessionId, signal)
     if (next === undefined || !fence.isCurrent()) return undefined
     snapshot = next
-    paged += 1
   }
   if (!fence.isCurrent()) return undefined
   const recent = recentPerformanceOf(snapshot.durableEvents as never[])
