@@ -958,9 +958,10 @@ export function applyRunnerWithRuntime(
         // decision and the diagnostic therefore cannot disagree with what the
         // adapter actually mounted. On the Remote branch there is no Direct
         // Agent: the recorded preset reads the official `agentPreset`
-        // projection through the status facts, and the launch-preset WRITE
-        // is deliberately skipped (PR2 is read/presentation only; the preset
-        // write path is the command PR's ownership — plan §12 boundary).
+        // projection through the semantic SessionReader, and the launch
+        // preset applies through `PresetCatalog.selectSessionPreset` while
+        // the session is blank (M3-4 PR5 §3.5; the Host owns the
+        // `agent-preset/locked` refusal for a started Session).
         const resumedDirectAgent = handle.direct === undefined ? undefined : (handle.direct.agent as Agent | undefined)
         if (resumedDirectAgent !== undefined) {
           const recorded = sessionPresetOf(ctx, resumedDirectAgent.session)
@@ -989,13 +990,59 @@ export function applyRunnerWithRuntime(
             }
           }
         } else {
-          // Remote resume: the official `agentPreset` projection is the
-          // recorded-preset authority; the launch-preset write is skipped
-          // (read/presentation-only scope).
-          const facts = remoteSources === undefined ? undefined : remoteSources.sessionFacts.sessionStatus(String(sessionId))
+          // Remote resume (M3-4 PR5 §3.5): the official `agentPreset`
+          // projection is the recorded-preset authority. The launch-preset
+          // write is expressed through the SAME semantic
+          // `PresetCatalog.selectSessionPreset` port the /preset command
+          // uses — the Host owns blankness and the `agent-preset/locked`
+          // refusal; a started Session keeps its recorded preset and warns.
+          const sessionIdText = String(sessionId)
+          const recorded = backend.sessionReader.sessionStatus(sessionIdText)?.preset
+          if (launchPreset !== undefined && launchPreset !== recorded) {
+            const outcome = await backend.catalog.presets.selectSessionPreset(
+              sessionIdText,
+              launchPreset,
+              lifecycleController.signal,
+            )
+            startupStatus.clear()
+            const settled = outcome.outcome
+            if (settled.kind === 'committed') {
+              if (outcome.ownership === 'current') {
+                // The authoritative projection becomes the display truth (the
+                // projection channel repaints the footer/welcome).
+                diag.info('preset applied on remote resume', { session: sessionIdText, preset: launchPreset })
+              } else {
+                // committed + superseded: the write landed Host-side but this
+                // startup no longer owns the visible subject — no stale
+                // success mutation, and never a retry.
+                diag.warn('preset applied on remote resume superseded', { session: sessionIdText, preset: launchPreset })
+              }
+            } else if (settled.kind === 'rejected' && settled.error.code === 'agent-preset/locked') {
+              const message = `session ${sessionIdText} has started; its agent preset ${recorded ?? 'default'} is fixed, ignoring --preset ${launchPreset}`
+              ctx.logger.warn(`tui-runner: ${message}`)
+              diag.warn('preset ignored on remote resume', { session: sessionIdText, preset: launchPreset })
+            } else if (settled.kind === 'rejected') {
+              ctx.logger.warn(`tui-runner: --preset ${launchPreset} not applied on resume: ${settled.error.message}`)
+              diag.warn('preset not applied on remote resume', { session: sessionIdText, preset: launchPreset, error: settled.error.message })
+            } else if (settled.kind === 'cancelled') {
+              // Honor startup cancellation: the abort path below owns the
+              // unwind; a cancelled preset write is not an error.
+              diag.debug('preset write cancelled on remote resume', { session: sessionIdText, preset: launchPreset })
+            } else if (settled.kind === 'indeterminate') {
+              ctx.logger.warn(`tui-runner: --preset ${launchPreset} result on resume is indeterminate; not retrying`)
+              diag.warn('preset write indeterminate on remote resume', { session: sessionIdText, preset: launchPreset, error: settled.error.message })
+            } else {
+              // unsupported: this frozen Remote composition advertises
+              // selectSessionPreset — an unsupported answer is a contract
+              // failure, surfaced truthfully (never retried, never
+              // translated into `locked`).
+              ctx.logger.warn(`tui-runner: --preset ${launchPreset} not applied on resume: ${settled.reason}`)
+              diag.warn('preset write unsupported on remote resume', { session: sessionIdText, preset: launchPreset, reason: settled.reason })
+            }
+          }
           diag.info('resume ok', {
             session: sessionId,
-            preset: facts?.preset ?? 'default',
+            preset: backend.sessionReader.sessionStatus(sessionIdText)?.preset ?? recorded ?? 'default',
           })
         }
       } catch (error) {
@@ -1103,33 +1150,47 @@ export function applyRunnerWithRuntime(
       initialSkills = resolution.skills
       surfaceNotice = resolution.notice
     }
-    /** The preset the live agent runs on, when the deployment composes one. */
+    /** The preset the live session runs on, when the deployment composes one.
+     *  Branch-neutral (M3-4 PR5 §3.4): Direct prefers the live composed
+     *  preset (`composedPreset(agent.ctx)` — the actual composition
+     *  authority) with the recorded projection as fallback; Remote reads the
+     *  official `agentPreset` projection through the SAME semantic
+     *  `SessionReader.sessionStatus` port. Sessionless = undefined. */
     const currentPreset = (): string | undefined => {
       const agent = agentNow()
-      if (agent === undefined) return undefined
-      const presets = ctx.get('agentPresets') as {
-        composedPreset?: (agentCtx: unknown) => unknown
-      } | undefined
-      if (typeof presets?.composedPreset === 'function') {
-        try {
-          const composed = presets.composedPreset(agent.ctx)
-          if (typeof composed === 'string') return composed
-        } catch {
-          // During teardown, fall back to the DSH projection read below.
+      if (agent !== undefined) {
+        const presets = ctx.get('agentPresets') as {
+          composedPreset?: (agentCtx: unknown) => unknown
+        } | undefined
+        if (typeof presets?.composedPreset === 'function') {
+          try {
+            const composed = presets.composedPreset(agent.ctx)
+            if (typeof composed === 'string') return composed
+          } catch {
+            // During teardown, fall back to the DSH projection read below.
+          }
         }
+        return sessionPresetOf(ctx, agent.session)
       }
-      return sessionPresetOf(ctx, agent.session)
+      // Remote branch: the official Session projection is the authority (a
+      // sessionless surface answers undefined).
+      const sessionId = ownership.currentSessionId()
+      if (sessionId === undefined) return undefined
+      return backend.sessionReader.sessionStatus(sessionId)?.preset
     }
     /** The Host turn-boundary authority's blank state for the live Session —
      *  the SAME projection the official `agentPresets.select` re-check reads.
-     *  Never derived from the TUI transcript. */
+     *  Never derived from the TUI transcript. Branch-neutral (PR5 §3.4): the
+     *  current session id drives the semantic reader, never a Direct-Agent
+     *  prerequisite. */
     const sessionBlank = (): boolean | undefined => {
       const agent = agentNow()
-      if (agent === undefined) return undefined
+      const sessionId = agent === undefined ? ownership.currentSessionId() : agent.session.id
+      if (sessionId === undefined) return undefined
       // The Host-authoritative blank read lives BEHIND the semantic Session
       // reader port (v2 §0.6): the runner no longer knows the Direct
       // projection name or the turn-boundary reducer.
-      return backend.sessionReader.blank(agent.session.id)
+      return backend.sessionReader.blank(sessionId)
     }
     // A5b-1: the live-session presentation owner (main transcript/stats folds,
     // the main presentation target, the generation reset and the ONE cold

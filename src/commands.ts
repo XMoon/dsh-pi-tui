@@ -4256,7 +4256,6 @@ export function registerTuiCommands(
     name: 'model',
     description: 'Switch the model (and reasoning effort) for this session',
     handler: async () => {
-      const selected = runner.selected
       const models = runner.catalog.models
       if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
       // The picker belongs to the Session that opened it: capture BOTH the
@@ -4459,10 +4458,17 @@ export function registerTuiCommands(
           const sessionless = runner.currentSessionId === undefined
           picker.setDirectory({
             directory,
-            // A live Session highlights its effective selection; a sessionless
-            // surface highlights the directory default and never fabricates a
+            // PR5 (plan §3.3): a live Session's current value comes from the
+            // TRANSPORT-NEUTRAL semantic read `ModelCatalog.sessionSelection`
+            // (Direct: the live Agent's selection owner; Remote: the official
+            // `modelSelection` projection of the retained binding) — never
+            // the Direct-oriented `selected.current` facade, which answers
+            // `undefined` on the Remote branch. A sessionless surface
+            // highlights the directory default and never fabricates a
             // `current` model.
-            current: sessionless ? directory.default : selected.current,
+            current: sessionless
+              ? directory.default
+              : models.sessionSelection(runner.currentSessionId),
             sessionless,
           })
         },

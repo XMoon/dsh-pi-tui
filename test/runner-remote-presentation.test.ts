@@ -144,7 +144,7 @@ interface RemoteRunnerFixture {
 }
 
 /** The Host fixture: the shared rc.2 base plus the projection rows PR2 reads. */
-async function mountRemotePresentationHost(
+export async function mountRemotePresentationHost(
   life: TestLifecycle,
   presetId: string,
   options: { readonly llmAdapter?: LlmAdapter } = {},
@@ -181,7 +181,7 @@ async function mountRemotePresentationHost(
  * Host. The runner consumes only the aggregate's selected core + the
  * presentation-source bundle — no Direct graph is ever constructed.
  */
-async function mountRemoteRunner(
+export async function mountRemoteRunner(
   life: TestLifecycle,
   options: {
     presetId?: string
@@ -194,12 +194,21 @@ async function mountRemoteRunner(
     /** Use the PRODUCTION prompt serializer (a live turn must actually
      *  submit — the default test stand-in refuses serialization). */
     productionSerializer?: boolean
+    /** PR5 §3.5: the launch `--preset` the startup service carries beside
+     *  `--session` (the resume launch-preset apply path). */
+    launchPresetId?: string
+    /** Extra preset ids registered on the Host roster (PR5 §3.5 needs a
+     *  second selectable preset). */
+    extraPresetIds?: readonly string[]
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
   const host = options.host ?? await mountRemotePresentationHost(life, presetId, {
     ...options.llmAdapter === undefined ? {} : { llmAdapter: options.llmAdapter },
   })
+  for (const extra of options.extraPresetIds ?? []) {
+    await host.ctx.get('agentPresets')!.register({ id: extra, name: `preset ${extra}`, plugins: [] })
+  }
   const cwd = options.cwd ?? host.anchorDir
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
@@ -227,6 +236,7 @@ async function mountRemoteRunner(
   runnerCtx.provide('appExit', (code: number) => { void code })
   runnerCtx.provide(TUI_STARTUP_SERVICE, {
     sessionId: options.resumeSessionId,
+    ...(options.launchPresetId === undefined ? {} : { presetId: options.launchPresetId }),
     shippedPresetRoot: host.workRoot,
   })
   const override: RemoteApplicationOverride = {
