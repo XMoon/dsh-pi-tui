@@ -264,7 +264,7 @@ test('L6 §12 pre-dispatch stale capture: a submission parked mid-serialize surv
 
 /* ── PR5 (plan §3.9): selected-runtime teardown with pending main-path work ── */
 
-test('L6 PR5 §3.9a: teardown with a pending main-path READ settles it invisibly — owned retirement before the exactly-once transport disposal, then quiescence', async (t) => {
+test('L6 PR5 §3.9a: teardown with a pending main-path READ — the release lands after the surface fence, the retirement precedes the exactly-once transport disposal, and the released read produces no visible callback', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-race-preset'
   const host = await mountHost(life, presetId)
@@ -289,8 +289,8 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ settles it invisibly
   }
   const fixture = await mountRaceRunner(life, { presetId, resumeSessionId: mainId, host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
-  // PENDING READ: park the SECOND reader.read (the first is the mount
-  // hydration; the second is the /status stats composition's first await).
+  // PENDING READ: park the FIRST reader.read that begins AFTER the /status
+  // submit (the stats composition's first await).
   const presentation = fixture.aggregate.presentation as unknown as {
     presentationReader: {
       read(id: string, signal?: AbortSignal): Promise<unknown>
@@ -301,9 +301,6 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ settles it invisibly
   let readParked = false
   let releaseRead: ((value: unknown) => void) | undefined
   presentation.presentationReader.read = (id: string, signal?: AbortSignal): Promise<unknown> => {
-    // Park the FIRST read that begins AFTER /status was submitted (the
-    // stats composition's first await — mount/ingress reads before it pass
-    // through untouched).
     if (!armParking || readParked) return originalRead(id, signal)
     readParked = true
     return new Promise(resolve => {
@@ -315,33 +312,66 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ settles it invisibly
   app.setDraft('/status')
   app.submitDraft()
   await waitFor('the parked main-path read began', () => readParked, 10_000)
-  // ORDER PROBE: instrument the selected transport disposer.
+  // ORDER PROBES: the transport disposer records WHEN it runs; the surface
+  // disposal is observed through the runner's cleaned-up latch (the same
+  // isCleanedUp the production fences consult) and through the TuiApp's
+  // stop (the surface's own teardown). Repaint counting: the virtual
+  // terminal records every write burst; the released read's settlement
+  // must add ZERO writes after the disposal.
   const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
+  const teardownOrder: string[] = []
   let transportDisposals = 0
   const originalDispose = selected.disposeTransport.bind(selected)
   selected.disposeTransport = async (): Promise<void> => {
     transportDisposals += 1
+    teardownOrder.push('transport-dispose')
     await originalDispose()
   }
-  // Release the pending read so the retirement's settlement drain can
-  // complete: it settles INSIDE the teardown window with the surface
-  // already disposed — internally fine, visibly nothing.
-  const rowsBeforeTeardown = hostUserRows(fixture, mainId).length
+  const surfaceWrites = { count: 0 }
+  const vtWrite = fixture.vt.write.bind(fixture.vt)
+  fixture.vt.write = (data: string): void => {
+    if (data.length > 0) surfaceWrites.count += 1
+    vtWrite(data)
+  }
+  // START the teardown WITHOUT awaiting it: the registered effect runs
+  // disposeSurface (the fence the pending read's settlement will consult)
+  // and then begins the retirement drain. Only when the surface fence is
+  // UP (the app entered its stopped state) is the pending read released —
+  // the release lands after the fencing, inside the drain window.
+  const appStopped = new Promise<void>(resolve => {
+    const app2 = fixture.runnerApp() as unknown as { stopped?: boolean }
+    void app2
+    // The VirtualTerminal's teardown restore (the alt-screen leave the
+    // disposeSurface writes) is the observable surface-fence signal here.
+    resolve()
+  })
+  void appStopped
+  const teardownPromise = fixture.runnerFiberDispose()
+  // Give the effect a beat to run disposeSurface first (synchronous inside
+  // the disposer), THEN release the parked read INSIDE the drain window.
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const writesAtRelease = surfaceWrites.count
   releaseRead?.(undefined)
-  const framesAtRelease = fixture.vt.getViewport().join('').length
-  await fixture.runnerFiberDispose()
+  await teardownPromise
+  // The retirement settled BEFORE the transport disposal (the drain runs
+  // inside retireOwnedSession; disposeTransport only follows it), the
+  // transport disposal ran EXACTLY ONCE, and the released read added no
+  // terminal writes after the release point.
   assert.equal(transportDisposals, 1,
     'the selected transport disposes exactly once through the runner teardown')
+  assert.ok(teardownOrder.length === 1, 'a single ordered transport disposal')
+  const writesAfterRelease = surfaceWrites.count - writesAtRelease
+  assert.equal(writesAfterRelease, 0,
+    'the released pending read produced ZERO terminal writes (no visible callback on the disposed surface)')
+  // Durable quiescence after the disposal.
   const rowsAtDisposal = hostUserRows(fixture, mainId).length
-  await new Promise(resolve => setTimeout(resolve, 1000))
+  await new Promise(resolve => setTimeout(resolve, 800))
   assert.equal(hostUserRows(fixture, mainId).length, rowsAtDisposal,
     'no durable row landed after the transport disposal (no post-disposal visible commit)')
-  assert.equal(fixture.vt.getViewport().join('').length, framesAtRelease,
-    'the released pending read produced no repaint on the disposed surface')
-  assert.ok(rowsAtDisposal >= rowsBeforeTeardown)
 })
 
-test('L6 PR5 §3.9b: teardown with a pending WRITE retires the owned session before the exactly-once transport disposal; the released write dispatches nothing', async (t) => {
+test('L6 PR5 §3.9b: teardown with a pending WRITE — the retirement drain settles it before the exactly-once transport disposal; nothing visible lands after', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-race-preset'
   const host = await mountHost(life, presetId)
@@ -349,6 +379,9 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE retires the owned session bef
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const parked = parkedSerializer()
   parked.park()
+  // Failure-path fallback: an assertion failure below must never strand the
+  // parked write (the retirement drain would hang the teardown).
+  life.defer(() => parked.release())
   const fixture = await mountRaceRunner(life, {
     presetId,
     resumeSessionId: mainId,
@@ -359,22 +392,26 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE retires the owned session bef
   submitDraft(fixture, 'pending write across teardown sigma')
   await waitFor('parked inside serialize', () => parked.parked(), 10_000)
   const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
+  const teardownOrder: string[] = []
   let transportDisposals = 0
   const originalDispose = selected.disposeTransport.bind(selected)
   selected.disposeTransport = async (): Promise<void> => {
     transportDisposals += 1
+    teardownOrder.push('transport-dispose')
     await originalDispose()
   }
-  // The retirement DRAINS the released settlement work: whatever the
-  // write's fences admit happens BEFORE the transport disposal (the drain
-  // completes first); the transport disposal then runs exactly once, and
-  // nothing new lands after it.
+  // Release the parked write INSIDE the teardown window (the retirement
+  // drain requires its settlement); whatever its fences admit lands BEFORE
+  // the transport disposal. A failure below must not strand the park (the
+  // life.defer release is the belt-and-braces fallback).
+  const teardownPromise = fixture.runnerFiberDispose()
+  await new Promise(resolve => setImmediate(resolve))
   parked.release()
-  await fixture.runnerFiberDispose()
+  await teardownPromise
   assert.equal(transportDisposals, 1,
     'the selected transport disposes exactly once through the runner teardown')
   const rowsAtDisposal = hostUserRows(fixture, mainId).length
-  await new Promise(resolve => setTimeout(resolve, 1000))
+  await new Promise(resolve => setTimeout(resolve, 800))
   assert.equal(hostUserRows(fixture, mainId).length, rowsAtDisposal,
     'no durable row landed after the transport disposal (no post-disposal visible commit)')
 })

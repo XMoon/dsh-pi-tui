@@ -815,4 +815,3 @@ test('L6 PR5: /exit (the canonical alias) behaves identically sessionless', asyn
   await waitFor('/exit requested the exit', () => exits.length === 1, 15_000)
   assert.equal(countSessions(), 0, '/exit exits without creating a session (alias parity with /quit)')
 })
-
