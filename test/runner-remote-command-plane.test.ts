@@ -56,7 +56,19 @@ class StubStreamingLlmAdapter extends LlmAdapter {
     return Promise.resolve([{ provider, id: 'smoke', name: 'Smoke Model' }])
   }
 
-  override async *stream(): AsyncGenerator<never> {}
+  private held: Promise<void> | undefined
+
+  override async *stream(): AsyncGenerator<never> {
+    // A held stream never yields: the turn stays RUNNING until released.
+    if (this.held !== undefined) await this.held
+  }
+
+  /** Hold every subsequent stream open until released (a running turn). */
+  hold(): () => void {
+    let release: () => void = () => {}
+    this.held = new Promise<void>(resolve => { release = resolve })
+    return release
+  }
 }
 
 interface Fixture {
@@ -96,12 +108,14 @@ async function mountRunner(
       readonly handler: () => { kind: 'success'; text?: string }
     }>
     readonly seed?: (append: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => void) => void
+    /** A test-provided LLM adapter (e.g. one that can hold a turn RUNNING). */
+    readonly llmAdapter?: StubStreamingLlmAdapter
   } = {},
 ): Promise<Fixture> {
   const presetId = options.presetId ?? 'm3-4-pr4-cmd-preset'
   const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
   const host = options.host ?? await createRemoteApplicationHostFixture(life, presetId, {
-    llmAdapter: new StubStreamingLlmAdapter(),
+    llmAdapter: options.llmAdapter ?? new StubStreamingLlmAdapter(),
   })
   // The SAME projection rows the PR2/PR4 presentation fixture mounts (the
   // proven Remote transcript/window prerequisite set).
@@ -628,4 +642,151 @@ test('L6 §7.4-14 stale catalog: refresh A → Connection replacement → the ol
     `the live catalog read carries the surviving command: ${JSON.stringify(liveNames)}`)
   assert.equal(liveNames.includes('stale-cmd'), false,
     'the live catalog read no longer carries the retired name')
+})
+
+/* ── PR5 supplement: Client self-claim reachability under running + steer ── */
+
+test('L6 PR5: TUI local commands stay reachable while the session RUNS and busy delivery resolves to STEER (the PR4 self-claim regression)', async (t) => {
+  // The PR4 regression shape: this Client's own TUI registrations appear in
+  // the effective claim union, and the retired line-claim discriminator
+  // read them as Host territory — so /status under a running session with a
+  // steer-resolved gesture was STEERED as agent input instead of reaching
+  // its Client handler. The PR5 authority correction makes
+  // `hostCatalogResolves` the only Host-NAME discriminator, so the local
+  // line takes the queue placeholder and the handler RUNS.
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr5-reach-status'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    llmAdapter: llm,
+    seed: (append) => {
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-reach', role: 'user', content: [{ type: 'text', text: 'reach opener' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  // Start a REAL running turn (the held stream keeps it open).
+  submit(fixture, 'hold this turn open')
+  await waitFor('the session is running', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+  // busyEnter defaults to queue ⇒ the ACCELERATED chord resolves to STEER
+  // (the composer-policy opposite). /status must still reach its Client
+  // handler (the settings panel opens), never steer.
+  const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+  app.setDraft('/status')
+  app.submitDraft('accelerated')
+  await waitFor('the /status panel opened', () => {
+    const text = fixture.vt.getViewport().join('\n')
+    return text.includes('Session') && text.includes('Stats')
+  }, 15_000)
+  // The steer counterfactual: the literal line must NOT appear as agent
+  // input (no inbox splice carries it), and no Host command/run row exists.
+  const spliced = fixture.events(mainId).some(event =>
+    event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes('/status'))
+  assert.equal(spliced, false, '/status was never steered into the agent inbox')
+  assert.equal(fixture.hostCommandRuns(mainId), 0, 'a TUI built-in never reaches the Host executor')
+  release()
+})
+
+test('L6 PR5: /copy under running + steer copies (the OSC 52 leg runs), never steers', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr5-reach-copy'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    llmAdapter: llm,
+    seed: (append) => {
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-copy-r', role: 'user', content: [{ type: 'text', text: 'copy reach prompt' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('assistant/message', {
+        turn: 1, step: 1,
+        message: { id: 'a-copy-r', role: 'assistant', content: [{ type: 'text', text: 'REACH-COPY-TEXT' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  await waitFor('the window hydrated', () => fixture.vt.getViewport().join('').includes('REACH-COPY-TEXT'), 20_000)
+  submit(fixture, 'hold this turn open')
+  await waitFor('the session is running', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+  const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+  app.setDraft('/copy')
+  app.submitDraft('accelerated')
+  await waitFor('the clipboard payload landed', () =>
+    /\u001b\]52;c;([A-Za-z0-9+/=]+)\u0007/.test(fixture.rawOutput()), 20_000)
+  const match = /\u001b\]52;c;([A-Za-z0-9+/=]+)\u0007/.exec(fixture.rawOutput())
+  assert.equal(Buffer.from(match![1]!, 'base64').toString('utf8'), 'REACH-COPY-TEXT',
+    'the copy ran through its Client handler while the session was running under steer delivery')
+  const spliced = fixture.events(mainId).some(event =>
+    event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes('/copy'))
+  assert.equal(spliced, false, '/copy was never steered into the agent inbox')
+  release()
+})
+
+test('L6 PR5: /transcript under running + steer gives the explicit unavailable error, never steers', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr5-reach-transcript'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const fixture = await mountRunner(life, { resumeSessionId: mainId, llmAdapter: llm, seed: () => {} })
+  submit(fixture, 'hold this turn open')
+  await waitFor('the session is running', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+  const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+  app.setDraft('/transcript')
+  app.submitDraft('accelerated')
+  await waitFor('the truthful-unavailable notice rendered', () =>
+    fixture.vt.getViewport().join('\n').includes('transcript export is unavailable on this backend'), 15_000)
+  const spliced = fixture.events(mainId).some(event =>
+    event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes('/transcript'))
+  assert.equal(spliced, false, '/transcript was never steered into the agent inbox')
+  release()
+})
+
+test('L6 PR5 negative controls: agent-facing and Host-owned lines keep their delivery under the same condition', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr5-reach-neg'
+  let hostRuns = 0
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    llmAdapter: llm,
+    hostCommands: [{ name: 'pr5host', handler: () => { hostRuns += 1; return { kind: 'success', text: 'host ran' } } }],
+    seed: () => {},
+  })
+  await settle(120)
+  submit(fixture, 'hold this turn open')
+  await waitFor('the session is running', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+  const app = fixture.app() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+  // (a) A plain prompt under the accelerated (steer) chord STILL steers.
+  app.setDraft('plain steer probe')
+  app.submitDraft('accelerated')
+  await waitFor('the plain prompt steered', () => fixture.events(mainId).some(event =>
+    event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes('plain steer probe')), 20_000)
+  // (b) A REAL Host command still executes through Host authority exactly
+  // once (the authoritative catalog resolves its name).
+  app.setDraft('/pr5host')
+  app.submitDraft('accelerated')
+  await waitFor('the Host command ran', () => hostRuns === 1, 15_000)
+  await settle()
+  assert.equal(hostRuns, 1, 'the Host command executed exactly once')
+  release()
 })

@@ -694,20 +694,20 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // occurrence. They keep their existing command feedback.
     const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
       || (submitView?.claimed !== true
-        // §D3 line authority (round 4): the submit-time echo gate now
-        // consumes the SAME line-authority primitive as the delivery,
-        // attachment and dispatch gates below (`isLocalCommandLine`: a
-        // HOST-RESOLVED name is never a TUI-local line — not when the
-        // catalog CLAIMS this line, and not when it merely RESOLVES the
-        // name without claiming this argued line). `/export foo` is an
-        // ordinary submission and gets its immediate echo like every
-        // prompt, instead of silently vanishing behind a blocked FIFO
-        // turn. Skill invocations keep their own exclusion.
+        // §D3 line authority (round 4) + the PR5 supplement correction: the
+        // submit-time echo gate consumes the SAME NAME-authority primitive
+        // as the delivery gate below (`isLocalCommandLine` with
+        // `hostCatalogResolves`): a HOST-RESOLVED name is never a TUI-local
+        // line, while a TUI built-in's own Client registration (present in
+        // the effective claim union) never reads as Host territory.
+        // `/export foo` is an ordinary submission and gets its immediate
+        // echo like every prompt, instead of silently vanishing behind a
+        // blocked FIFO turn. Skill invocations keep their own exclusion.
         && !isLocalCommandLine(
           parsedAtSubmit.name,
           deps.command.isSkillWrapperName,
           undefined,
-          submitView,
+          deps.command.hostCatalogResolves(parsedAtSubmit.name),
         )
         && !deps.command.isSkillInvocation(parsedAtSubmit, text))
     // Install the echo NOW for a known ordinary prompt on an existing
@@ -953,10 +953,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 // The dynamic (client contribution) term is STICKY to the
                 // submit-time route.
                 n => clientLocalAtSubmit && (deps.extensions.isLocal(n, LOCAL_COMMANDS) ?? false),
-                // STICKY SUBMIT-TIME AUTHORITY: once the host catalog RESOLVED
-                // this name, the name is host territory for the lifetime of the
-                // submission.
-                line => deps.command.hostClaimOf(line) ?? submitView,
+                // STICKY SUBMIT-TIME AUTHORITY (PR5 supplement): once the
+                // AUTHORITATIVE host catalog RESOLVED this name, the name is
+                // host territory for the lifetime of the submission.
+                deps.command.hostCatalogResolves(parsed.name),
               ),
               deps.command.isSkillInvocation(parsed, text),
             )
@@ -1414,10 +1414,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const parsed = parseCommand(text)
     // The CURRENT host catalog's view of THIS LINE, asked ONCE for the
     // synchronous routing decisions below (the deferred resolution asks
-    // again, against the catalog the session committed). A name the
-    // catalog RESOLVES is host territory even when it does not claim this
-    // line: `/compact extra` is an ordinary submission, never a same-named
-    // client contribution's.
+    // again, against the catalog the session committed). This is the
+    // LINE-LEVEL claim view only (a `leadingInput` descriptor claims its
+    // argued line; an execute-kind one claims the bare token) — the
+    // Host-vs-Client NAME authority is `hostCatalogResolves`, which the
+    // gates below consult separately (PR5 supplement: the claim union also
+    // carries this Client's own TUI registrations).
     const hostView = parsed === undefined ? undefined : deps.command.hostClaimOf(parsed)
     // Command semantics matrix (plan §19.3): slash commands are not LLM
     // prompts — an image-bearing command line is REJECTED explicitly
@@ -1441,7 +1443,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           parsed,
           deps.command.isSkillWrapperName,
           n => deps.extensions.isLocal(n, LOCAL_COMMANDS) ?? false,
-          deps.command.hostClaimOf,
+          deps.command.hostCatalogResolves(parsed.name),
         ),
         deps.command.isSkillInvocation(parsed, text),
       )
@@ -1457,14 +1459,19 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // claimed or merely resolved — is never a TUI-local line, so an argued
     // `/export foo` of an execute-kind Host command follows the ORDINARY
     // prompt policy everywhere (busy queue/steer, multimodal attachments),
-    // matching the dispatch's commandPlaneOwnsLine order.
+    // matching the dispatch's commandPlaneOwnsLine order. PR5 supplement:
+    // the discriminator is the AUTHORITATIVE-catalog NAME authority
+    // (`hostCatalogResolves`), never the effective line claim — the claim
+    // union carries this Client's own TUI registrations, and a self-claim
+    // must not disqualify the TUI's own local commands (the PR4 regression:
+    // /status under a running session resolved to steer).
     const tuiLocalLine = parsed === undefined
       ? false
       : isLocalCommandLine(
         parsed.name,
         deps.command.isSkillWrapperName,
         isBareCommandLine(parsed) ? (name => deps.extensions.isLocal(name, LOCAL_COMMANDS)) : undefined,
-        deps.command.hostClaimOf(parsed),
+        deps.command.hostCatalogResolves(parsed.name),
       )
     // The submission's effective delivery mode — resolved ONCE, here at
     // the boundary (web ComposerSubmissionPolicy parity, DSH
@@ -1520,11 +1527,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const contribution = parsed === undefined
       || !isBareCommandLine(parsed)
       || deps.command.isSkillWrapperName(parsed.name) === true
-      // A name the host catalog RESOLVES is host territory even when it does
-      // not claim THIS line: the line is an ordinary submission, so a
-      // same-named contribution — reachable only in the failed-source
-      // collision state — never runs for it.
-      || hostView !== undefined
+      // A name the AUTHORITATIVE host catalog RESOLVES is host territory even
+      // when it does not claim THIS line: the line is an ordinary submission,
+      // so a same-named contribution — reachable only in the failed-source
+      // collision state — never runs for it. PR5 supplement: the effective
+      // line claim (whose union carries this Client's own TUI registrations)
+      // must never serve as this NAME-authority discriminator.
+      || deps.command.hostCatalogResolves(parsed.name)
       ? undefined
       : deps.extensions.findContribution(parsed.name)
     if (parsed !== undefined && contribution !== undefined) {
@@ -1552,15 +1561,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           if (deps.isCleanedUp() || deps.liveAgent() === undefined) return
           // AUTHORITY RE-CHECK after the session exists: the deferred start
           // commits a session whose scoped catalog the standing view could
-          // not see, and the skill catalog may load with it. A live HOST
-          // claim FOR THIS LINE or a TUI skill wrapper outranks the
-          // contribution that was decided before the session existed. (A host
-          // name can only CLAIM this bare line: the argued lines a catalog
-          // resolves without claiming are ordinary submissions and never
-          // reach this branch.) The delivery resolved before the session
-          // existed, so it is a queue-mode submission: `dispatchViaSession`
-          // delivers the line itself.
-          if (deps.command.hostClaimOf(parsed) !== undefined || deps.command.isSkillWrapperName(parsed.name) === true) {
+          // not see, and the skill catalog may load with it. A HOST-resolved
+          // NAME or a TUI skill wrapper outranks the contribution that was
+          // decided before the session existed. PR5 supplement: the
+          // discriminator is the AUTHORITATIVE-catalog NAME authority
+          // (`hostCatalogResolves`), never the effective line claim — a TUI
+          // built-in sharing the name appears in the claim union's Client
+          // registrations and must not read as Host territory. The delivery
+          // resolved before the session existed, so it is a queue-mode
+          // submission: `dispatchViaSession` delivers the line itself.
+          if (deps.command.hostCatalogResolves(parsed.name) || deps.command.isSkillWrapperName(parsed.name) === true) {
             dispatchViaSession(text, persistHistory, delivery)
             return
           }
