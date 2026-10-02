@@ -1219,10 +1219,10 @@ class EditToolLlmAdapter extends StubStreamingLlmAdapter {
       yield { type: 'text-delta', index: 0, text: 'editing now' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'editing now' } }
       yield { type: 'block-start', index: 1, blockType: 'tool-call' }
-      yield { type: 'tool-call-delta', index: 1, id: ToolCallId('live-edit-1'), name: 'edit', argumentsDelta: JSON.stringify({ file_path: 'known-live-target.txt', old_string: 'before', new_string: 'after' }).slice(1, -1) }
+      yield { type: 'tool-call-delta', index: 1, id: ToolCallId('live-edit-1'), name: 'edit', argumentsDelta: JSON.stringify({ file_path: 'known-live-target.txt', old_string: 'LIVE-OLD', new_string: 'LIVE-NEW' }).slice(1, -1) }
       yield {
         type: 'block-end', index: 1,
-        block: { type: 'tool-call', id: ToolCallId('live-edit-1'), name: 'edit', arguments: JSON.stringify({ file_path: 'known-live-target.txt', old_string: 'before', new_string: 'after' }) },
+        block: { type: 'tool-call', id: ToolCallId('live-edit-1'), name: 'edit', arguments: JSON.stringify({ file_path: 'known-live-target.txt', old_string: 'LIVE-OLD', new_string: 'LIVE-NEW' }) },
       }
       // HOLD here: the live frames above are observable, the turn is OPEN and
       // the Host cannot execute the tool (no finish) until the test releases.
@@ -1247,7 +1247,7 @@ test('L6 §7.4-10 KNOWN tool LIVE: an in-flight edit renders the Client diff car
   await host.ctx.plugin(toolFs)
   const { writeFileSync } = await import('node:fs')
   const { join } = await import('node:path')
-  writeFileSync(join(host.anchorDir, 'known-live-target.txt'), 'before\n')
+  writeFileSync(join(host.anchorDir, 'known-live-target.txt'), 'LIVE-OLD\n')
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
 
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
@@ -1264,17 +1264,31 @@ test('L6 §7.4-10 KNOWN tool LIVE: an in-flight edit renders the Client diff car
     snapshotEvents(): Array<{ type: string; data: unknown }>
   }).snapshotEvents()
 
-  // LIVE phase, PROVABLY in-flight: the transient tool-call frames render the
-  // KNOWN tool's card, and the durable `tool/call`/`tool/result` rows are
-  // ABSENT (the turn cannot settle while held — a settled-phase pass is
-  // impossible by construction, not by timing luck).
+  // LIVE phase, PROVABLY in-flight: the transient tool-call frames render
+  // the KNOWN tool's SPECIALIZED Preparing card — evidence only that
+  // derivation can produce: the `Preparing Edit known-live-target.txt` row
+  // (the edit variant's design title + its `file_path` summary key), never
+  // the prompt text (which says neither `Preparing` nor the file name) and
+  // never a generic card (which carries no edit-specific title/path row).
+  // The durable `tool/call`/`tool/result` rows are ABSENT (the turn cannot
+  // settle while held — a settled-phase pass is impossible by construction,
+  // not by timing luck).
   await waitFor('the known live edit preview rendered', () => {
     const view = fixture.vt.getViewport().join('')
     const durable = durableOf().map(event => event.type)
-    return view.includes('edit') && view.includes('editing now')
+    return view.includes('Preparing Edit known-live-target.txt')
       && !durable.includes('tool/call') && !durable.includes('tool/result')
   }, 40_000)
-
+  // COUNTERFACTUAL (review F8 round 4): the held row must come from the
+  // edit-specialized summary derivation (title + `file_path` key), never
+  // from a generic fallback — the edit summary keys pick `file_path` over
+  // every other string arg, so the old/new strings (`LIVE-OLD`/`LIVE-NEW`)
+  // CANNOT appear in the held view, while the generic raw-args fallback
+  // would carry them. Removing the known-tool summary derivation is exactly
+  // what makes these assertions fail.
+  const heldView = fixture.vt.getViewport().join('')
+  assert.ok(!heldView.includes('LIVE-OLD') && !heldView.includes('LIVE-NEW'),
+    `the held card must be the specialized Preparing row, not a generic/raw-args fallback:\n${heldView}`)
   release()
   // The durable rows land only after the release.
   await waitFor('the durable edit rows landed', () => {
@@ -1289,7 +1303,7 @@ test('L6 §7.4-10 KNOWN tool LIVE: an in-flight edit renders the Client diff car
     fixture.vt.getViewport().join('').includes('edit turn complete'), 40_000)
   // The durable execution really happened: the file carries the edit.
   const { readFileSync } = await import('node:fs')
-  assert.equal(readFileSync(join(host.anchorDir, 'known-live-target.txt'), 'utf8'), 'after\n',
+  assert.equal(readFileSync(join(host.anchorDir, 'known-live-target.txt'), 'utf8'), 'LIVE-NEW\n',
     'the Host executed the edit for real (the known-tool card is not a mock)')
 })
 
@@ -1406,7 +1420,24 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   const snapshot = await fixture.aggregate.presentation.presentationReader.read(mainId)
   assert.ok(snapshot !== undefined, 'the mounted Remote window is readable')
   const statsMod = await import('../src/stats.ts')
-  const recent = statsMod.recentPerformanceOf(snapshot!.durableEvents as never)
+  const recent = statsMod.recentPerformanceOf(snapshot!.durableEvents as never[])
   assert.ok(recent.tokensPerSec > 0,
     'the mounted window admits recent throughput samples (the composed /status recent figure is fold-backed, never a window-only zero)')
+  // ROUND-4 hardening — the RENDERED panel row is the authority, not the
+  // source-level fold above: the Stats row carries the EXACT projection-
+  // backed lifetime totals (5 sampled turns × 1000/200 + 40 newer × 1/1 =
+  // ↑5.0k ↓1.0k) AND non-zero rendered recent figures (TTFB ≠ 0s,
+  // tok/s ≠ 0), so a future /status wiring break cannot hide behind a
+  // green source-level assertion. The samples live ONLY in the oldest
+  // turns (outside the initial bounded window), so non-zero rendered
+  // figures also prove the composition's loadOlder paging actually ran.
+  await waitFor('the panel rendered the exact lifetime totals', () =>
+    fixture.vt.getViewport().join('').includes('↑5.0k ↓1.0k'), 20_000)
+  const panelView = fixture.vt.getViewport().join('')
+  const ttfbMatch = /TTFB 0\.([1-9]\d*)s/u.exec(panelView)
+  const tpsMatch = /([1-9]\d*) tok\/s/u.exec(panelView)
+  assert.ok(ttfbMatch !== undefined,
+    `the panel's rendered recent TTFB must be non-zero:\n${panelView}`)
+  assert.ok(tpsMatch !== undefined,
+    `the panel's rendered recent throughput must be non-zero:\n${panelView}`)
 })

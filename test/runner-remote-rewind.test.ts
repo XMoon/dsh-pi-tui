@@ -199,3 +199,136 @@ test('L6 §7.4-9: Remote /rewind lists an out-of-window turn from turnOutline, t
   assert.equal(childTurns.length, 1, 'the child inherits exactly the predecessor completed turn (turn 1)')
   await waitFor('rewind success notice', () => vt.getViewport().join('').includes('rewound to turn 2'), 15_000)
 })
+
+test('L6 §7.4-15 stale rewind: select A\'s old turn → switch away mid-loadThrough → the old selection never forks', async (t) => {
+  // The race §2.2/§16/§4.3 fence: the picker selection for A starts the
+  // official loadThrough jump, the surface switches to B while it is in
+  // flight, and the release must NOT fork anything — no child session on
+  // the Host, no draft install, and the truthful "session changed" notice.
+  const life = testLifecycle(t)
+  const sessionA = 'm3-4-pr4-rewind-stale-a'
+  const sessionB = 'm3-4-pr4-rewind-stale-b'
+  const presetId = 'm3-4-pr4-preset'
+  const host = await mountPr4Host(life, presetId)
+  await host.harness.create(SessionId(sessionA), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(sessionB), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const appendOf = (id: string) => host.ctx.sessions.get(SessionId(id)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  const seedTurn = (id: string, turn: number, prompt: string): void => {
+    const session = appendOf(id)
+    session.append('turn/start', { turn })
+    session.append('step/start', { turn, step: 1 })
+    session.append('user/message', {
+      id: `u-${id}-${turn}`, role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn, step: 1,
+      message: { id: `a-${id}-${turn}`, role: 'assistant', content: [{ type: 'text', text: `answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+      stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn, step: 1 })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  // A carries the rewindable turns; B exists as the switch target.
+  for (let turn = 1; turn <= 6; turn += 1) seedTurn(sessionA, turn, `stale prompt ${turn}`)
+
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  // GATE the REAL loadThrough read the mounted rewind path consumes (the
+  // production object, wrapped so the original still runs inside).
+  let releaseLoad: (() => void) | undefined
+  const loadGate = new Promise<void>(resolve => { releaseLoad = resolve })
+  const reader = aggregate.presentation.presentationReader as {
+    loadThrough(sessionId: string, seq: number, signal?: AbortSignal): Promise<unknown>
+  }
+  const originalLoadThrough = reader.loadThrough.bind(reader)
+  let gatedLoads = 0
+  reader.loadThrough = async (sessionId, seq, signal) => {
+    gatedLoads += 1
+    await loadGate
+    return originalLoadThrough(sessionId, seq, signal)
+  }
+
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+  life.defer(restoreTerminal)
+
+  const runnerCtx = host.ctx
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+
+  runnerCtx.provide('appExit', (code: number) => { void code })
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, {
+    sessionId: sessionA,
+    shippedPresetRoot: host.workRoot,
+  })
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+  }
+  const apps: unknown[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: unknown) {
+    apps.push(this)
+    return originalStart.call(this)
+  }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: sessionA } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => runnerFiber.dispose())
+  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+
+  const app = await (async () => {
+    for (let i = 0; i < 600; i += 1) {
+      const candidate = apps.at(-1) as unknown as {
+        setDraft(text: string): void
+        submitDraft(): void
+        getDraft(): string
+        tui: { handleTerminalInput(data: string): void }
+      } | undefined
+      if (candidate !== undefined && typeof candidate.setDraft === 'function') return candidate
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed the draft surface')
+  })()
+  await waitFor('A hydrated', () => vt.getViewport().join('').includes('stale prompt 6') || vt.getViewport().join('').includes('answer 6'), 20_000)
+
+  // Open the picker on A and select the OLDEST rewindable turn (turn 2 —
+  // the last row of 5; 4 down-arrow presses).
+  app.setDraft('/rewind')
+  app.submitDraft()
+  await waitFor('picker open', () => vt.getViewport().join('').includes('Rewind conversation'), 15_000)
+  for (let i = 0; i < 4; i += 1) app.tui.handleTerminalInput('\x1b[B')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  app.tui.handleTerminalInput('\r')
+  await waitFor('the gated loadThrough started', () => gatedLoads === 1, 10_000)
+
+  // SWITCH to B while A's loadThrough is still held.
+  const hostIdsBefore = new Set(host.ctx.sessions.list().map(session => String(session.id)))
+  app.setDraft(`/resume ${sessionB}`)
+  app.submitDraft()
+  await waitFor('B is the current subject', () =>
+    vt.getViewport().join('').includes('answer 6') === false, 20_000)
+
+  // Release: the stale selection must NOT fork — no new child session, no
+  // draft install, and the truthful notice on the CURRENT surface.
+  releaseLoad?.()
+  await waitFor('the truthful stale notice rendered', () =>
+    vt.getViewport().join('').includes('the session changed while rewinding'), 15_000)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.deepEqual(host.ctx.sessions.list().map(session => String(session.id)).filter(id => !hostIdsBefore.has(id)), [],
+    'the stale selection never forked a replacement session (zero children)')
+  assert.equal(app.getDraft(), '', 'the stale selection never installed its editor text')
+})
