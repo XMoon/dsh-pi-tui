@@ -199,6 +199,12 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
      * reachable on the selected backend (Direct true / Remote false). */
     readonly hostShellCompletion: boolean
+    /** M3-4 PR4 round 5: whether the readable-transcript artifact is
+     * renderable on the selected backend (Direct true — the renderer reads
+     * the in-process Session history; Remote false — no transport-neutral
+     * whole-history seam yet). An explicit business capability, never
+     * derived from the M8-retiring Host-registry compatibility mirror. */
+    readonly transcriptExportAvailable: boolean
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {
@@ -856,6 +862,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // send-time canonicalization against the Host filesystem.
       hostFile: deps.backend.hostFile,
       hostShellCompletion: deps.backend.hostShellCompletion,
+      // The readable-transcript business capability (round 5): explicitly
+      // backend-owned, NEVER derived from the commandRegistry mirror below
+      // (that mirror retires with M8).
+      transcriptExportAvailable: deps.backend.transcriptExportAvailable,
       // The minimal commands registry for the TUI's OWN registrations
       // (migration M1.11) — the runner assembly dependency, never a Host
       // capability exposed to command handlers. Direct-only on PR4: the
@@ -1084,13 +1094,23 @@ export async function composeRemoteSurfaceCatalog(input: {
     commands = [...commandsResult.value].sort((left, right) => left.name < right.name ? -1 : 1)
   }
   // The skills provider is handled INDEPENDENTLY: its fulfilled result is
-  // always used (a commands failure never discards it), and its own failure /
-  // incompleteness degrades only its field.
+  // always used (a commands failure never discards it), and its own failure
+  // / incompleteness / unavailability degrades only its field. An
+  // `undefined` fulfillment is the port's declared "no skill registry
+  // reachable for this session" (catalog-port §listHumanSkills) — a
+  // truthful-unavailable OBSERVATION, never an empty success: it degrades
+  // to a skills issue so the coordinator's merge keeps the last-good
+  // skills (a same-target transient registry loss must not erase the
+  // installed set; a genuinely empty-but-complete catalog still clears it).
   let skills: readonly import('../../skill-catalog.ts').HumanSkillSummary[] = []
   if (skillsResult.status === 'fulfilled') {
-    skills = skillsResult.value?.skills ?? []
-    if (skillsResult.value !== undefined && skillsResult.value.complete !== true) {
-      issues.push({ provider: 'skills', message: 'incomplete skill observation' })
+    if (skillsResult.value === undefined) {
+      issues.push({ provider: 'skills', message: 'the skill registry is unreachable for this session' })
+    } else {
+      skills = skillsResult.value.skills
+      if (skillsResult.value.complete !== true) {
+        issues.push({ provider: 'skills', message: 'incomplete skill observation' })
+      }
     }
   } else {
     issues.push({ provider: 'skills', message: safeErrorMessage(skillsResult.reason) })

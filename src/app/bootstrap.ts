@@ -1500,6 +1500,12 @@ export function applyRunnerWithRuntime(
         // where the TUI process IS the Host (Direct). Remote has no qualified
         // shell carrier, so it must show no shell-specific suggestions.
         hostShellCompletion: selectedRuntime.kind === 'direct',
+        // The readable-transcript business capability (PR4 round 5): the
+        // Markdown renderer reads the whole in-process Session event
+        // history — Direct only until a transport-neutral whole-history
+        // seam exists. Deliberately NOT derived from the commands-registry
+        // compatibility mirror (its retirement is owned by M8).
+        transcriptExportAvailable: selectedRuntime.kind === 'direct',
       },
       session: {
         ensureSession: () => sessionRuntime.ensureSession(),

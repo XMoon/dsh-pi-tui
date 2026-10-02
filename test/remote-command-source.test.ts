@@ -255,3 +255,87 @@ test('PR4 F2b (review round 3): the coordinator over the REAL composition keeps 
       'the successful skills provider updated its own field')
   }
 })
+
+test('PR4 F2b.2 (review round 4): a FULFILLED-UNDEFINED skills observation is an issue, never an empty success', async () => {
+  // The port contract declares `undefined` = "no skill registry reachable
+  // for this session" (catalog-port §listHumanSkills). The composition must
+  // degrade it to a skills ISSUE (the coordinator's merge keeps last-good
+  // skills) — never fold it into `skills: []`, which a same-target registry
+  // blip would otherwise use to ERASE the installed set.
+  const generation = generationSource({ id: 1 } as RemoteConnectionGeneration)
+  const bindings = bindingsSource({ session: {} })
+  const source = createRemoteCommandSource({
+    authority: {
+      commands: { list: async () => ({ ok: true, value: [{ name: 'fresh-host', description: 'h' }] }) },
+      skills: { list: async () => ({ ok: true, value: { skills: [] } }) },
+    },
+    generation,
+    bindings: bindings as never,
+  })
+  const snapshot = await composeRemoteSurfaceCatalog({
+    source,
+    listHumanSkills: async () => undefined,
+    sessionId: 'session-a',
+    signal: new AbortController().signal,
+  })
+  assert.deepEqual(snapshot.commands.map(command => command.name), ['fresh-host'],
+    'the successful commands provider still commits its own field')
+  assert.deepEqual(snapshot.skills, [],
+    'the unavailable skills observation contributes NO fresh rows of its own')
+  assert.equal(snapshot.issues.length, 1)
+  assert.equal(snapshot.issues[0]?.provider, 'skills',
+    'the unavailable observation degrades to a skills issue (never a silent empty success)')
+})
+
+test('PR4 F2b.2 (review round 4): the coordinator keeps the LAST-GOOD skills across a fulfilled-undefined observation; a genuinely empty complete catalog still clears', async () => {
+  let skillsState: 'good' | 'unreachable' | 'empty-complete' = 'good'
+  const generation = generationSource({ id: 1 } as RemoteConnectionGeneration)
+  const bindings = bindingsSource({ session: {} })
+  const source = createRemoteCommandSource({
+    authority: {
+      commands: { list: async () => ({ ok: true, value: [{ name: 'host-cmd', description: 'h' }] }) },
+      skills: { list: async () => ({ ok: true, value: { skills: [] } }) },
+    },
+    generation,
+    bindings: bindings as never,
+  })
+  const diag = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} }
+  const coordinator = new CatalogRefreshCoordinator({
+    readAgent: async () => composeRemoteSurfaceCatalog({
+      source,
+      listHumanSkills: async () => {
+        if (skillsState === 'unreachable') return undefined
+        return {
+          skills: skillsState === 'empty-complete' ? [] : [{ name: 'installed-skill', description: 's' }],
+          complete: true,
+        } as never
+      },
+      sessionId: 'session-a',
+      signal: new AbortController().signal,
+    }),
+    readStanding: async () => { throw new Error('unused') },
+    installSnapshot: () => {},
+    enterCatalogTransition: () => {},
+  }, new AbortController().signal, diag as never)
+
+  const first = await coordinator.refresh({ source: 'live-session', target: { kind: 'agent', key: 1 }, agent: {} as never })
+  assert.equal(first.kind, 'applied')
+  // A same-target registry blip (fulfilled undefined): the installed skills
+  // must SURVIVE (the issue routes the field to mergePartial's last-good).
+  skillsState = 'unreachable'
+  const second = await coordinator.refresh({ source: 'reload', target: { kind: 'agent', key: 1 }, agent: {} as never })
+  assert.equal(second.kind, 'applied')
+  if (second.kind === 'applied') {
+    assert.deepEqual(second.snapshot.skills.map(skill => skill.name), ['installed-skill'],
+      'an unreachable registry keeps the last-good skills (never an erasing empty success)')
+  }
+  // A genuinely EMPTY-but-complete observation is a real catalog fact: it
+  // must still CLEAR the field (the fix must not smuggle staleness back).
+  skillsState = 'empty-complete'
+  const third = await coordinator.refresh({ source: 'reload', target: { kind: 'agent', key: 1 }, agent: {} as never })
+  assert.equal(third.kind, 'applied')
+  if (third.kind === 'applied') {
+    assert.deepEqual(third.snapshot.skills, [],
+      'a complete empty catalog legitimately clears the installed skills')
+  }
+})
