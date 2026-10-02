@@ -24,7 +24,7 @@ M3-3B DONE         (rc.2 retarget + frozen-contract reconvergence; rc.2 Question
 M3-4 PR1 DONE      (application runtime-selection spine: `SelectedApplicationRuntime` core + the Remote application runtime aggregate + the internal selection seam in bootstrap; normal/default remains Direct, no public/config/env selector — see the M3-4 status section)
 M3-4 PR2 DONE      (main Session read/presentation/status over the Remote aggregate — see the M3-4 PR2 section)
 M3-4 PR3 DONE      (submission/interaction/shell authority over the Remote main Session — see the M3-4 PR3 notes)
-M3-4 PR4 DONE      (main-session command/action plane: Client command registry + Host claim precedence, whole-log rewind, Client-derived tool cards, permission projection/cycle — see the M3-4 PR4 section; review round 2 hardened the transport-identity fences)
+M3-4 PR4 IN REVIEW (main-session command/action plane: implementation landed — Client command registry (both branches), Host claim precedence, whole-log rewind, Client-derived tool cards, permission projection/cycle; the review loop is closing the remaining mandatory L6 scenarios before DONE)
 M3-4 IN PROGRESS   (main TUI Remote composition; PR1–PR4 of the PR train landed — remaining PRs close the rest of the M3-4 surface)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -291,12 +291,43 @@ in Stage D.
 | M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; the user shell (`!`/`!!`, both policies) must execute in the Host execution environment — until a qualified one-shot Host user-shell carrier is released, Remote `!`/`!!` stay fail-closed (U11a/U11b); remote external editor unsupported | Security review; fail-closed locality checks |
 | M6 | Production dual stack: `--backend wire-local` opt-in, direct default; extension CI matrix (direct × wire-local) | One stable observation cycle; no perceptible regression |
 | M7 | Default flip to wire-local; `--backend direct` rollback kept for ≥ 1 release | Rollback verified on the release train |
-| M8 | Direct ownership retirement (the SessionHandle `direct` escape — live Agent/AgentHandle; the physical lock stack is already removed legacy) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) |
+| M8 | Direct ownership retirement (the SessionHandle `direct` escape — live Agent/AgentHandle; the physical lock stack is already removed legacy) **plus the Direct command-callback ownership retirement** (the Host `ctx.commands` compatibility mirror of TUI built-ins; see the M8 entry below) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash); Direct and wire-local share one `ClientCommandRegistry` callback ownership |
 
 The former in-process client wording is obsolete upstream architecture, not an
 implementation target. Redesign the adapter around the DSH Connection, official
 Session client object, and domain/generated remotes before starting M3. Do not
 add old/new DSH runtime capability branches to the 0.4 Direct backend.
+
+### M8 — Direct command callback ownership retirement (owner: M8)
+
+Not owned by M3-4 / M3-5 / M3-6. This is the intentional leftover the M3-4 PR4
+stage exits with, recorded here with its later owner (Debt-boundary rule above).
+
+**Current compatibility (M3-4 exit state):**
+
+```text
+TUI built-ins have ONE ClientCommandRegistry definition.
+Direct additionally MIRRORS the same definition into Host ctx.commands
+  (one definition — an adapter compatibility mirror, never a second
+  business authority).
+Remote never performs this mirror and executes Client callbacks locally
+  (zero Host ctx.commands registration/execution on the Remote branch).
+```
+
+**Retirement (M8):**
+
+```text
+after wire-local becomes the default and the Direct rollback window has
+  completed,
+remove the Direct Host-registry mirror registration/execution;
+Direct and wire-local then share ClientCommandRegistry callback ownership;
+HostCommandPort remains exclusively for authoritative Host commands.
+```
+
+Do not perform this retirement in M3-4/M3-5/M3-6: those stages cut command
+*execution ownership* over to the wire while Direct stays the production
+default and keeps its in-process dispatch surface (busy-Enter, sessionless
+execution, `commands/change` refresh).
 
 ## Migration process and qualification governance
 
@@ -3349,7 +3380,7 @@ matrix, the docs lane, and the updated deprecated-reader allowance (the
 Remote `currentWorkingFromLog` folds the official window; the Direct
 allowance text tracks the branch-guarded line) are all green.
 
-## M3-4 PR4 — Command / Action / Rewind / Tool / Permission (COMPLETE)
+## M3-4 PR4 — Command / Action / Rewind / Tool / Permission (IN REVIEW — implementation landed, qualification matrix closing)
 
 Plan: `temp/m3/dsh-pi-tui-m3-4-pr4-command-action-rewind-tool-permission-plan-v1-20261002.md`.
 Direct remains the production default; the Remote path is reachable only
@@ -3379,13 +3410,13 @@ longer resolves the Host tools registry outside the Direct branch.
   `app/command/client-command-registry.ts` is the Client-owned execution
   registry. Every TUI definition registers there FIRST; on Direct the same
   definition additionally registers into the Host registry (the compatibility
-  adapter that keeps the in-process dispatch surface unchanged), on Remote it
-  does not. The submission controller classifies the route explicitly: a REAL
-  Direct Agent (the `inbox`-bearing in-process object) keeps the in-process
-  executor; the Remote structural projection executes through the Client
-  registry, so `ctx.commands.execute(projectedAgent)` is unreachable.
-  `runLocalCommand` prefers the extension bridge, then the Client registry,
-  then (Direct only) the Host handler fallback. Remote skill wrappers are
+  MIRROR — one definition, the adapter that keeps the in-process dispatch
+  surface unchanged; it is NOT a second business authority). Retiring that
+  mirror is owned by **M8 — Direct command callback ownership retirement**
+  (see the M8 entry in the milestone table above), not by this stage. On
+  Remote the mirror never happens (Remote callback isolation is complete:
+  zero Host `ctx.commands` registration or execution, zero Host `findHandler`
+  fallback). Remote skill wrappers are
   literal gestures: no Client body load exists, the original `/name args` line
   travels verbatim, and the Host `dsh-tool-skill` pre-step owns definition
   resolution, the user-invocability re-check and body injection.
