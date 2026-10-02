@@ -581,6 +581,17 @@ export interface TuiCommandRunner {
    * Direct keeps the Host registration so the in-process dispatch surface
    * (busy-Enter, sessionless execution) is unchanged. */
   readonly commandRegistry: CommandRegistryLike | undefined
+  /** Whether the readable-transcript artifact is renderable on this backend
+   * (M3-4 PR4 round 5): `true` on Direct — the Markdown renderer reads the
+   * whole in-process Session event history; `false` on the wire backend,
+   * where no transport-neutral whole-history seam exists yet. This is a
+   * business CAPABILITY, deliberately NOT derived from
+   * {@link commandRegistry}: that field is the Direct Host-registry
+   * compatibility mirror whose retirement is owned by M8, and a business
+   * decision must never hang off a compatibility implementation. Optional
+   * with a Direct default so the existing runner stubs keep compiling; the
+   * Remote composition root explicitly passes `false`. */
+  readonly transcriptExportAvailable?: boolean
   /** The Client-owned command registry (M3-4 PR4 §D2): every TUI built-in
    *  and dynamic skill-wrapper definition registers here FIRST. On Direct
    *  the same definitions additionally register into the Host commands
@@ -5177,7 +5188,8 @@ export function registerTuiCommands(
       if (invocation.rawInput.trim() !== '') {
         return { kind: 'error', text: 'The /transcript command does not accept a path.' }
       }
-      // Truthful-unavailable on the wire backend: the Markdown renderer
+      // Truthful-unavailable on the wire backend (the explicit capability,
+      // never the M8-retiring Host-mirror field): the Markdown renderer
       // reads the whole Session event history (`snapshotEvents`), for which
       // no transport-neutral seam exists yet — the Remote post-success
       // artifact save would resolve the projected agent and crash inside
@@ -5186,7 +5198,7 @@ export function registerTuiCommands(
       // restored draft, never a late artifact failure). `/export` stays
       // available on both backends (it renders from `SessionArchivePort`,
       // not the Session).
-      if (runner.commandRegistry === undefined) {
+      if (runner.transcriptExportAvailable !== true) {
         const text = 'transcript export is unavailable on this backend'
         app.notify(text, 'error')
         return { kind: 'error', text }
