@@ -180,8 +180,15 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
   assert.ok(seamsAt > 0, 'the injected Direct seams were not found')
   const seamsEnd = indexSource.indexOf('\n      surfaceCatalogContext:', seamsAt)
   const seamsBody = indexSource.slice(seamsAt, seamsEnd)
-  assert.equal(count(seamsBody, 'command.attachmentForSession('), 2,
-    'the Host-session seams must resolve the exact fenced attachment')
+  // PR4 §3.3/§12.4 relocated the Direct stats / last-assistant reads into the
+  // branch-shared helpers just above the seams (they are still the composition
+  // root's OWN fenced-attachment reads): the invariant is "every Direct
+  // session-log read resolves the exact fenced attachment", checked
+  // composition-root-wide, while the seams keep no raw current read.
+  assert.equal(count(indexSource, 'command.attachmentForSession('), 2,
+    'the Direct session-log reads must resolve the exact fenced attachment')
+  assert.equal(count(seamsBody, 'deps.liveAgent()'), 0,
+    'the seams never resolve the raw current attachment')
   assert.equal(count(seamsBody, 'commands.list(agentNow())'), 1,
     'only listScopedCommands may read the raw current attachment (a display read)')
 })

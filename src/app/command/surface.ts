@@ -500,15 +500,43 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   ): Promise<import('../../surface-catalog.ts').SurfaceCatalogSnapshot> => {
     const source = deps.remoteCommandSource
     if (source === undefined) throw new Error('the Remote command source is unavailable')
-    const read = await source.read(sessionId, signal)
-    if (read === undefined) throw new SupersededReadError('the connection changed during the catalog refresh')
+    // §2.2: the command metadata comes from the authority reader and the
+    // skill metadata from the semantic skill capability, INDEPENDENTLY — one
+    // failing provider degrades only its own field (the coordinator's
+    // mergePartial keeps that field's last-good list) and never zeroes the
+    // Host command catalog the dispatch's claim set is built from.
+    const [commandsResult, skillsResult] = await Promise.allSettled([
+      source.readCommands(sessionId, signal),
+      deps.catalog.skills.listHumanSkills(sessionId, signal),
+    ])
+    signal.throwIfAborted()
+    if (commandsResult.status === 'rejected') {
+      const reason = commandsResult.reason
+      if (reason instanceof SupersededReadError) throw reason
+      throw reason
+    }
+    if (commandsResult.value === undefined) {
+      throw new SupersededReadError('the connection changed during the catalog refresh')
+    }
+    const issues: Array<import('../../surface-catalog.ts').SurfaceCatalogIssue> = []
+    let skills: readonly import('../../skill-catalog.ts').HumanSkillSummary[] = []
+    if (skillsResult.status === 'fulfilled') {
+      skills = skillsResult.value?.skills ?? []
+      if (skillsResult.value !== undefined && skillsResult.value.complete !== true) {
+        issues.push({ provider: 'skills', message: 'incomplete skill observation' })
+      }
+    } else {
+      // A provider failure empties only its OWN field; the install side keeps
+      // that field's last-good list (readSurfaceCatalog's provider isolation).
+      issues.push({ provider: 'skills', message: safeErrorMessage(skillsResult.reason) })
+    }
     const sortByName = (entries: readonly import('../../surface-catalog.ts').SurfaceCommandSummary[]) =>
       [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
     return Object.freeze({
-      commands: Object.freeze(sortByName(read.commands)),
+      commands: Object.freeze(sortByName(commandsResult.value)),
       scopedCommands: Object.freeze([]),
-      skills: Object.freeze([...read.skills]),
-      issues: Object.freeze([]),
+      skills: Object.freeze([...skills]),
+      issues: Object.freeze(issues.map(issue => Object.freeze({ ...issue }))),
     })
   }
   /**

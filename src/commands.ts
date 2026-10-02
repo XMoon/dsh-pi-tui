@@ -1828,9 +1828,21 @@ export function registerTuiCommands(
   const collisionHealth = new Map<string, { ref: { slot: string; id: string; owner: string }; message: string }>()
   const installCompletions = (
     entries: readonly SurfaceCommandSummary[],
-    options: { display?: 'merged' | 'none' } = {},
+    options: { display?: 'merged' | 'none'; claimsFrom?: readonly SurfaceCommandSummary[] } = {},
   ): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
+    // PR4 §D3: the CLAIM set is the Host authority record. On the Remote
+    // branch the display list may be a Client-only merge (an ad-hoc
+    // re-synthesis), so the claims are built from the LAST AUTHORITATIVE Host
+    // catalog instead — a client-only refresh must never erase a Host claim.
+    // The union of (a) the Host-authoritative catalog and (b) THIS surface's
+    // own registrations (TUI built-ins + live skill wrappers). On Direct the
+    // Host registry already carries (b), so the union is idempotent; on
+    // Remote (b) lives only in the Client registry and must still be
+    // advertised. A Client-only refresh can never ERASE a Host claim.
+    const ownRegistrations = clientCommands.list().map(definition => commandSummaryOf(definition))
+    const claimsSource = [...(options.claimsFrom ?? entries), ...ownRegistrations]
+      .sort((left, right) => left.name < right.name ? -1 : 1)
     // HOST CLAIMS first: the claim set is the host's AUTHORITY record (the
     // dispatch consults it), so it must never depend on the client merge — a
     // failed synthesis must not cost a host command its claim. The INPUT KIND
@@ -1838,7 +1850,7 @@ export function registerTuiCommands(
     // same record: which line the command claims and whether that line may
     // carry attachments are both descriptor facts, so they can never describe
     // two different catalogs.
-    claims = new Map(sorted.map(command => [command.name, {
+    claims = new Map(claimsSource.map(command => [command.name, {
       leadingInput: command.input !== undefined,
       attachments: command.input?.attachments === true,
     }]))
@@ -1908,6 +1920,13 @@ export function registerTuiCommands(
   /** The saved probed scoped overrides (see installSurfaceSnapshot). */
   let savedScopedCommands: readonly SurfaceCommandSummary[] = []
   /**
+   * The LAST AUTHORITATIVE Host command catalog (PR4 §D3): every claim the
+   * dispatch consults comes from here, never from a client-merged display
+   * list. Written by the snapshot install and by the Direct live read; the
+   * Remote branch's ad-hoc completion re-synthesis never touches it.
+   */
+  let authoritativeHostCatalog: readonly SurfaceCommandSummary[] = []
+  /**
    * The sessionless completion view: the CURRENT global layer (fresh read —
    * TUI built-ins, global plugins and installed skill wrappers all flow in)
    * overlaid with the saved scoped overrides from the latest snapshot.
@@ -1947,9 +1966,12 @@ export function registerTuiCommands(
    * collision never costs a host command its claim.
    * @param entries - the host catalog rows for the current scope.
    */
-  const installCompletionsContained = (entries: readonly SurfaceCommandSummary[]): void => {
+  const installCompletionsContained = (
+    entries: readonly SurfaceCommandSummary[],
+    options: { claimsFrom?: readonly SurfaceCommandSummary[] } = {},
+  ): void => {
     try {
-      installCompletions(entries)
+      installCompletions(entries, options)
     } catch (error) {
       // The failed pass marks the command SOURCE failed (upstream
       // `source-failed` parity: the source's whole group is removed): no
@@ -1979,7 +2001,7 @@ export function registerTuiCommands(
         // The cordis logger must not block the submission path.
       }
       try {
-        installCompletions(entries, { display: 'none' })
+        installCompletions(entries, { display: 'none', ...options })
       } catch {
         // Clearing the display is plain work: a failure here is a core bug,
         // not a contribution problem — leave the previous list in place.
@@ -1992,17 +2014,29 @@ export function registerTuiCommands(
     // — MERGED with the Client registry's own descriptors on every branch
     // (PR4 §D2): the Client registrations are visible even where the scoped
     // view's Host source does not carry them (Remote).
+    //
+    // PR4 §D3: the DISPLAY list and the CLAIM source are separate inputs.
+    // The Direct live read IS the Host authority (refresh it); the Remote
+    // branch's view is a Client-side merge, so its claims keep coming from
+    // the last authoritative Host catalog the coordinator installed.
     if (runner.currentSessionId === undefined) {
-      installCompletionsContained(mergeGlobalAndSavedScoped())
+      const entries = mergeGlobalAndSavedScoped()
+      if (commands !== undefined) authoritativeHostCatalog = entries
+      installCompletionsContained(entries, commands === undefined
+        ? { claimsFrom: authoritativeHostCatalog }
+        : {})
       return
     }
     const scoped = runner.listScopedCommands()
+    if (commands !== undefined) authoritativeHostCatalog = scoped
     const byName = new Map<string, SurfaceCommandSummary>()
     for (const entry of scoped) byName.set(entry.name, entry)
     for (const definition of clientCommands.list()) {
       byName.set(definition.name, commandSummaryOf(definition))
     }
-    installCompletionsContained([...byName.values()])
+    installCompletionsContained([...byName.values()], commands === undefined
+      ? { claimsFrom: authoritativeHostCatalog }
+      : {})
   }
   // ── registry-change coalescing ─────────────────────────────────────────
   // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
@@ -3872,6 +3906,8 @@ export function registerTuiCommands(
    * plain model message while the catalog is unavailable.
    */
   const installSurfaceSnapshot = (snapshot: SurfaceCatalogSnapshot): void => {
+    // The snapshot's command rows ARE the Host authority (PR4 §D3).
+    authoritativeHostCatalog = snapshot.commands
     const scopedNames = new Set(snapshot.scopedCommands.map(command => command.name))
     const skillsFailed = snapshot.issues.some(issue => issue.provider === 'skills')
     withCommandCommit(() => {
@@ -3883,7 +3919,12 @@ export function registerTuiCommands(
       // mergePartial already retained it in `snapshot.skills`).
       if (!skillsFailed) currentSkillReferences = snapshot.skills
       savedScopedCommands = snapshot.scopedCommands
-      installCompletionsContained(mergeGlobalAndSavedScoped())
+      // PR4 §D3: THIS snapshot IS the Host authority — its command rows are
+      // the claim source. The display list may add Client entries; the
+      // claims must not be rebuilt from a client-merged list (the Direct
+      // merge happens to include the live Host global layer, the Remote one
+      // does not).
+      installCompletionsContained(mergeGlobalAndSavedScoped(), { claimsFrom: snapshot.commands })
     })
   }
   /**

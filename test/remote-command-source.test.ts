@@ -91,6 +91,6 @@ test('negative lock: the command source module never widens the authority reader
     generation: generationSource({ id: 1 } as RemoteConnectionGeneration),
   })
   assert.equal(typeof source.read, 'function')
-  assert.deepEqual(Object.keys(source).sort(), ['read'],
-    'the exposed bundle carries ONLY the metadata read — no execute, no callbacks, no registry')
+  assert.deepEqual(Object.keys(source).sort(), ['read', 'readCommands'],
+    'the exposed bundle carries ONLY the metadata reads — no execute, no callbacks, no registry')
 })

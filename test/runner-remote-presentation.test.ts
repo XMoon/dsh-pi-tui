@@ -51,6 +51,7 @@ import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { ToolCallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
@@ -620,6 +621,86 @@ async function waitForApp(fixture: RemoteRunnerFixture): Promise<{
   }
   throw new Error('the mounted TuiApp never exposed pendingInputForTest')
 }
+
+test('L6 §7.4-10/11 an edit tool card renders from RAW durable call/result facts (no Host presenter)', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-toolcard'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  const appendOf = (id: string) => seedHost.ctx.sessions.get(SessionId(id)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  // Three plain turns through the file's OWN proven seeding helper, then a
+  // fourth turn carrying the edit tool call/result — the card must be
+  // derived by the CLIENT presenter from those raw facts (the Remote branch
+  // never consults the Host tool registry).
+  seedTurns(appendOf(mainId), 1, 3, 'card')
+  const session = appendOf(mainId)
+  session.append('turn/start', { turn: 4 })
+  session.append('step/start', { turn: 4, step: 1 })
+  session.append('user/message', {
+    id: 'u-toolcard', role: 'user', content: [{ type: 'text', text: 'please edit the file' }], source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  session.append('tool/call', {
+    turn: 4, step: 1, callId: 'call-toolcard', name: 'edit',
+    arguments: JSON.stringify({ path: 'src/toolcard-target.ts', old_string: 'before', new_string: 'after' }),
+  })
+  session.append('tool/result', {
+    turn: 4, step: 1,
+    // The OFFICIAL durable tool-result message (its `source.callId` is the
+    // pairing the client session ingest reads — a hand-rolled `toolCallId`
+    // field fails the official invariant and kills the session window).
+    message: createToolResultMessage({
+      callId: ToolCallId('call-toolcard'),
+      content: [{ type: 'text', text: 'updated' }],
+      isError: false,
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: 4, step: 1,
+    message: { id: 'a-toolcard', role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+    stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+  }, { surfaceOp: 'append' })
+  // A SECOND tool call in the same turn: an UNKNOWN/custom tool. Its card
+  // must use the bounded generic fallback (name + raw args), never nothing.
+  session.append('tool/call', {
+    turn: 4, step: 1, callId: 'call-custom', name: 'pr4_custom_tool',
+    arguments: JSON.stringify({ marker: 'CUSTOM-ARGS-MARKER' }),
+  })
+  session.append('tool/result', {
+    turn: 4, step: 1,
+    message: createToolResultMessage({
+      callId: ToolCallId('call-custom'),
+      content: [{ type: 'text', text: 'CUSTOM-RESULT-MARKER' }],
+      isError: false,
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 4, step: 1 })
+  session.append('turn/end', { turn: 4, reason: { kind: 'completed' } })
+
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  // The transcript renders (the proven baseline) …
+  // The transcript renders (the proven baseline) …
+  await waitFor('the seeded conversation rendered', () =>
+    fixture.vt.getViewport().join('').includes('card answer 3'), 20_000)
+  // … and the edit card contributes the raw-fact path.
+  await waitFor('the edit card rendered with its raw-fact path', () =>
+    fixture.vt.getViewport().join('').includes('toolcard-target.ts'), 20_000)
+  const view = fixture.vt.getViewport().join('')
+  assert.ok(/Edit|edit/u.test(view),
+    'the Client presenter derived the edit card header from the raw call arguments')
+  assert.equal(view.includes('updated'), true,
+    'the settled result text rendered through the existing Client result derivations')
+  // The unknown/custom tool keeps its bounded generic card: the name and its
+  // raw argument marker are visible (never a silent drop, never a Host lookup).
+  assert.equal(view.includes('pr4_custom_tool'), true,
+    'the unknown tool name renders through the bounded generic fallback')
+  assert.equal(view.includes('CUSTOM-ARGS-MARKER'), true,
+    'the bounded raw args render for an unknown tool')
+  assert.equal(view.includes('CUSTOM-RESULT-MARKER'), true,
+    'the settled result text renders for an unknown tool')
+})
 
 test('L6 §6.6: the Remote branch OMITS the Host-derived access section when the permission projection carries no value (no sandbox fact is painted)', async (t) => {
   const life = testLifecycle(t)

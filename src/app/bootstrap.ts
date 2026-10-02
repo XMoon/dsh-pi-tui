@@ -1439,6 +1439,7 @@ export function applyRunnerWithRuntime(
       ...(remoteSources === undefined ? {} : {
         remoteCommandSource: {
           read: (sessionId, signal) => remoteSources.commandSource.read(sessionId, signal),
+          readCommands: (sessionId, signal) => remoteSources.commandSource.readCommands(sessionId, signal),
         },
         remoteFacts: {
           running: (sessionId) => remoteSources.sessionFacts.running(sessionId),
@@ -2641,6 +2642,24 @@ export function applyRunnerWithRuntime(
     // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
     // the first terminal input cannot arrive before this call stack unwinds.
     command.register({ snapshot: initialSnapshot, skills: initialSkills })
+    // PR4 §2.2: the DIRECT branch's Host command catalog arrives through the
+    // pre-mount prefetch above; the REMOTE branch has no Direct agent to
+    // prefetch, so a RESUMED session installs its authoritative Host catalog
+    // through the command source now (before the first input). Without this
+    // the Host claims are unknown and a same-named Client contribution would
+    // shadow a real Host command — the exact §D3 violation.
+    if (remoteSources !== undefined) {
+      const resumedSessionId = ownership.currentSessionId()
+      if (resumedSessionId !== undefined) {
+        try {
+          await command.refreshLiveCatalogById(resumedSessionId)
+        } catch (error) {
+          // The coordinator owns degradation (last-good/notice); a failed
+          // install must not block the mount.
+          diag.warn('remote startup catalog refresh failed', { error: safeErrorMessage(error) })
+        }
+      }
+    }
     if (surfaceNotice !== undefined) {
       app.notify(surfaceNotice, 'error')
       surfaceNotice = undefined

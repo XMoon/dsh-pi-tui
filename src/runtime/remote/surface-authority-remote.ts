@@ -145,6 +145,34 @@ export class RemoteSurfaceAuthorityReader implements SurfaceAuthorityReader {
     this.generation = generation
   }
 
+  /**
+   * Read ONLY the Host command catalog metadata for one current Connection
+   * generation (M3-4 PR4 §2.2): the coordinator maps the command provider
+   * through this reader and the skill provider through
+   * \`SkillCatalogCapability\`, so one failing provider cannot zero the
+   * other. Metadata-only and generation-fenced; \`undefined\` = superseded.
+   */
+  async readCommands(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<readonly import('../surface-authority-port.ts').SurfaceAuthoritySnapshot['commands'][number][] | undefined> {
+    signal?.throwIfAborted()
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) return undefined
+    const requestSignal = signal ?? new AbortController().signal
+    let descriptors: readonly RemoteCommandDescriptor[]
+    try {
+      descriptors = unwrapRemote('commands/list', await this.source.commands.list(sessionId))
+      requestSignal.throwIfAborted()
+    } catch (error) {
+      requestSignal.throwIfAborted()
+      if (!generationMatches(this.generation, capturedGeneration)) return undefined
+      throw error
+    }
+    if (!generationMatches(this.generation, capturedGeneration)) return undefined
+    return Object.freeze(descriptors.map(commandSummaryOf))
+  }
+
   async read(sessionId: string, signal?: AbortSignal): Promise<SurfaceAuthoritySnapshot | undefined> {
     signal?.throwIfAborted()
     const capturedGeneration = this.generation.getSnapshot()
