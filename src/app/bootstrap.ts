@@ -119,6 +119,7 @@ import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapsh
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
+import { DirectPresentationReader } from '../runtime/direct/presentation-read-direct.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { dangerCommand } from '../command-policy.ts'
@@ -582,6 +583,19 @@ export function applyRunnerWithRuntime(
      * future selected Remote transport disposes adapters -> Client -> Host
      * fibers, never the current Session (that stays `app/session` ownership).
      */
+    /** PR4 §4.3: the branch-shared loadThrough read (Direct maps to its
+     *  full-coverage adapter; Remote runs the official jump loop off the
+     *  exact retained binding, generation-fenced inside the reader). */
+    const presentationLoadThrough = async (
+      sessionId: string,
+      seq: number,
+      signal?: AbortSignal,
+    ): Promise<import('../runtime/presentation-read-port.ts').PresentationReadSnapshot | undefined> => {
+      const reader = remoteSources === undefined
+        ? directPresentationReader
+        : remoteSources.presentationReader
+      return reader.loadThrough(sessionId, seq, signal)
+    }
     const disposeSelectedTransport = (): Promise<void> => selectedRuntime.disposeTransport()
     disposeSelectedTransportRef = disposeSelectedTransport
     /**
@@ -591,6 +605,17 @@ export function applyRunnerWithRuntime(
      * identity/currentness goes through the ownership subject.
      */
     const agentNow = (): Agent | undefined => directRuntime()?.owners.currentDirectAttachment()
+
+    /** The Direct presentation reader (PR4 §4.3): the full-coverage adapter
+     *  over the exact attachment map + the assistant-stream baseline — the
+     *  SAME sources the parity shadow consumes; never a second fold. */
+    const directPresentationReader = new DirectPresentationReader({
+      agentFor: (sessionId) => {
+        const agent = agentNow()
+        return agent !== undefined && agent.session.id === sessionId ? agent : undefined
+      },
+      assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
+    })
     /**
      * Whether the ownership subject captured at ADMISSION is still the CURRENT
      * one (exact owner + generation). `captureSubject()` is undefined for a
@@ -2073,6 +2098,24 @@ export function applyRunnerWithRuntime(
       drafts: { get images() { return draftImages }, get files() { return draftFiles } },
       imageLimits: () => ctx.get('attachments')?.imageLimits as Parameters<typeof checkImageLimits>[2] | undefined,
       rewind: {
+        // PR4 §4: the whole-log picker authority + the loadThrough detail
+        // read, both behind the semantic SessionReader port (Direct reads
+        // the Host projection / the full-log adapter; Remote reads the
+        // exact retained binding's projection + the official jump loop).
+        // §4.1: the picker authority is the semantic read — ONE contract on
+        // both branches. (The Direct adapter owns its §18.4 compatibility
+        // fallback internally; this owner never branches.)
+        turnOutline: (sessionId) => backend.sessionReader.turnOutline(sessionId),
+        loadThrough: async (sessionId, seq, signal) => {
+          const snapshot = await presentationLoadThrough(sessionId, seq, signal)
+          return snapshot === undefined ? undefined : snapshot.durableEvents
+        },
+        isSelectionCurrent: (sessionId) => remoteSources === undefined
+          ? true
+          : remoteSources.sessionFacts.isTransportTokenCurrent(
+            sessionId,
+            remoteSources.sessionFacts.captureTransportToken(sessionId),
+          ),
         forkSession: (sourceSessionId, atSeq, onAdopted, pickerIdentity) =>
           sessionRuntime.forkSession(sourceSessionId, atSeq, onAdopted, pickerIdentity),
       },
@@ -2097,7 +2140,16 @@ export function applyRunnerWithRuntime(
         }),
         isCleanedUp: () => cleanedUp,
         requestExit,
-        liveAgent: () => agentNow(),
+        // PR4 §4: the application-event owner's live-agent face is
+        // transport-neutral — the Remote branch has no Direct Agent, so the
+        // identity falls back to the CURRENT owner's session id (the rewind
+        // owner consumes only session.id since §4.1).
+        liveAgent: () => {
+          const agent = agentNow()
+          if (agent !== undefined) return agent
+          const sessionId = remoteSources === undefined ? undefined : ownership.currentSessionId()
+          return sessionId === undefined ? undefined : { session: { id: sessionId } }
+        },
         generation: () => ownership.generation(),
         currentSessionId: () => ownership.currentSessionId(),
         navigationEpoch: () => ownership.navigationEpoch(),

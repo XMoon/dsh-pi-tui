@@ -931,10 +931,18 @@ test('/rewind forwards the Host-owned fork anchor through the real picker callba
     ]
   }
   const firstTurn = withHumanPrompt('first answer')
+  // PR4 §4: the second span carries turn 1 — the REAL Host invariant the
+  // official turnOutline projection (and the Direct compat fold) relies on:
+  // turn numbers are host-assigned and monotone. The legacy fixture reused
+  // turn 0 for both spans, which the old full-log fold happened to tolerate
+  // but a whole-log outline correctly collapses.
   const secondTurn = withHumanPrompt('second answer').map(event => ({
     ...event,
     seq: event.seq + firstTurn.length,
     time: event.time + firstTurn.length * 1000,
+    ...('turn' in (event.data as Record<string, unknown>)
+      ? { data: { ...(event.data as Record<string, unknown>), turn: 1 } }
+      : {}),
   })) as unknown as SessionEvent[]
   const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' }, 0),

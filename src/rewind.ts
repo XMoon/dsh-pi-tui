@@ -130,3 +130,129 @@ export function rewindPickerItem(candidate: RewindCandidate): PickerItem {
       : {}),
   }
 }
+
+/**
+ * Build picker rows from the official whole-log \`turnOutline\` projection
+ * (M3-4 PR4 §4.2): every STARTED turn is listed — old turns outside the
+ * current presentation event window included — using the projection's own
+ * bounded previews. The row value is the turn's \`turn/start\` seq (the
+ * \`loadThrough\` jump target); the first outline entry is EXCLUDED exactly
+ * like the full-log fold (a first human turn has no predecessor boundary to
+ * fork at).
+ * @param outline - the official turnOutline projection entries (ascending).
+ * @returns the newest-first picker rows.
+ */
+export function rewindOutlineRows(outline: readonly {
+  readonly turn: number
+  readonly seq: number
+  readonly prompt: string
+  readonly response: string
+}[]): Array<{ readonly value: string; readonly label: string }> {
+  const rows: Array<{ readonly value: string; readonly label: string }> = []
+  for (let index = outline.length - 1; index >= 1; index -= 1) {
+    const entry = outline[index]!
+    const prompt = entry.prompt === '' ? '(no text prompt)' : entry.prompt
+    rows.push({ value: String(entry.seq), label: `turn ${entry.turn} · ${prompt}` })
+  }
+  return rows
+}
+
+/**
+ * Derive the EXACT rewind material for one selected turn from the durable
+ * events a \`loadThrough(turnStartSeq)\` window returned (§4.3): the
+ * selected direct human message's FULL editor text (never the outline's
+ * bounded preview), its non-text marker, and the predecessor valid
+ * \`turn/end\` fork boundary — the SAME visibility rules as
+ * \`collectRewindCandidates\`, scoped to the selected turn.
+ * @param events - the loaded window's durable events (source order).
+ * @param selectedTurnStartSeq - the selected row's \`turn/start\` seq.
+ * @returns the exact candidate, or undefined when the window cannot derive
+ *  it (a malformed span never invents a fork point).
+ */
+export function rewindCandidateOfLoadedWindow(
+  events: readonly SessionEvent[],
+  selectedTurnStartSeq: number,
+): RewindCandidate | undefined {
+  // Locate the selected turn's start; remember the latest turn/end before it.
+  let selectedTurn: number | undefined
+  for (const event of events) {
+    if (event.type !== 'turn/start') continue
+    if (Number(event.seq) === selectedTurnStartSeq) {
+      selectedTurn = event.data.turn
+      break
+    }
+  }
+  if (selectedTurn === undefined) return undefined
+  // The selected turn's primary direct human message (first non-empty).
+  let primary: { seq: number; blocks: readonly ContentBlock[] } | undefined
+  for (const event of events) {
+    if (event.type !== 'user/message') continue
+    const seq = Number(event.seq)
+    if (seq < selectedTurnStartSeq) continue
+    if (primary !== undefined) break
+    if (event.data.source.kind !== 'user') continue
+    if (isEmptyMessage(event.data.content)) continue
+    primary = { seq, blocks: event.data.content }
+  }
+  if (primary === undefined) return undefined
+  // The predecessor boundary: the LAST valid turn/end BEFORE the selected
+  // turn/start (a first turn therefore has none — the outline excludes it,
+  // and a loaded window that cannot prove one never invents it).
+  let forkAtSeq: number | undefined
+  for (const event of events) {
+    if (event.type !== 'turn/end') continue
+    const seq = Number(event.seq)
+    if (seq >= selectedTurnStartSeq) break
+    forkAtSeq = seq
+  }
+  if (forkAtSeq === undefined) return undefined
+  const editorText = textOf(primary.blocks)
+  return {
+    turnStartSeq: selectedTurnStartSeq,
+    forkAtSeq,
+    turn: selectedTurn,
+    messageSeq: primary.seq,
+    editorText,
+    preview: singleLinePreview(editorText),
+    hasNonTextContent: primary.blocks.some(block => block.type !== 'text'),
+  }
+}
+
+/**
+ * The DIRECT compatibility outline fold (M3-4 PR4 §18.4): map the exact
+ * attached Direct Session's full in-process snapshot onto the official
+ * \`turnOutline\` entry shape, so the shared rewind picker owner keeps ONE
+ * contract (`SessionReader.turnOutline`) on minimal Direct compositions
+ * that mount no \`session-turn-outline\` projection unit. The Remote branch
+ * NEVER uses this fold (projection-only, fail-closed).
+ *
+ * The fold mirrors the official projection's shape rules: every STARTED
+ * turn becomes an entry (a non-advancing \`turn/start\` is ignored),
+ * each turn's prompt is its FIRST non-empty direct human message's preview,
+ * and later human messages in the same turn keep the first preview. The
+ * first entry is included so the shared row builder's position-based
+ * "no predecessor boundary" exclusion sees the SAME data shape the
+ * official projection produces.
+ * @param events - the exact attachment's full session snapshot.
+ * @returns the ascending outline entries (response previews stay empty —
+ *  the picker never renders them).
+ */
+export function directTurnOutlineCompat(events: readonly SessionEvent[]): Array<{ turn: number; seq: number; prompt: string; response: string }> {
+  const entries: Array<{ turn: number; seq: number; prompt: string; response: string }> = []
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      const last = entries.at(-1)
+      if (last !== undefined && event.data.turn <= last.turn) continue
+      entries.push({ turn: event.data.turn, seq: Number(event.seq), prompt: '', response: '' })
+      continue
+    }
+    if (event.type === 'user/message') {
+      const last = entries.at(-1)
+      if (last === undefined || last.prompt !== '') continue
+      if (!isHumanTurnMessage(event)) continue
+      if (isEmptyMessage(event.data.content)) continue
+      last.prompt = singleLinePreview(textOf(event.data.content))
+    }
+  }
+  return entries
+}
