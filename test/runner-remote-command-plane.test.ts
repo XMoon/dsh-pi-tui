@@ -502,28 +502,37 @@ test('L6 truthful-unavailable (review round 4): Remote /transcript refuses EXPLI
     'the Remote /transcript refusal never reaches the Host command executor')
 })
 
-test('L6 §7.4-14 stale catalog: refresh A → same-id binding replacement → the old snapshot cannot commit', async (t) => {
+test('L6 §7.4-14 stale catalog: refresh A → Connection replacement → the old snapshot cannot commit', async (t) => {
   // The F2a install fence over the MOUNTED composition. The stale payload is
   // REAL by construction: the gated read completes FIRST (its snapshot
-  // verifiably contains `stale-cmd`), then holds; while held, the exact
-  // binding is REPLACED (A → B → A: B is really created, the official
-  // binding object identity changes) and `stale-cmd` is DISPOSED — so the
-  // held wrapper returns a snapshot whose content is wrong for every later
-  // state. Without the install fence that stale snapshot WOULD commit (the
-  // counterfactual force); with it, the completion rows must never offer
-  // the retired name, and a later legitimate refresh reads the live
+  // verifiably contains `stale-cmd`), then holds; while held, the OFFICIAL
+  // Connection is REPLACED (`reconnect()`: the plan scenario's second form —
+  // the /reload submit's FIFO turn is taken by the held refresh, so a second
+  // submit cannot drive a switch; the frozen admission token's generation
+  // component dies with the old Connection) and `stale-cmd` is DISPOSED — so
+  // the held wrapper returns a snapshot whose content is wrong for every
+  // later state. Without the install fence that stale snapshot WOULD commit
+  // (the counterfactual force); with it, the completion rows must never
+  // offer the retired name, and a later legitimate refresh reads the live
   // (absent) catalog.
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr4-catalog-stale-a'
   const fixture = await mountRunner(life, { resumeSessionId: sessionA })
 
-  // The Host command whose name only the STALE snapshot carries.
+  // The Host command whose name only the STALE snapshot carries, plus a
+  // SURVIVOR command that stays registered — the post-release positive
+  // control must see the survivor and never the retired name.
   const commands = fixture.host.ctx.commands as {
     register(def: { name: string; description: string; handler: () => { kind: 'success' } }): () => void
   }
   const disposeStale = commands.register({
     name: 'stale-cmd',
     description: 'the stale catalog entry',
+    handler: () => ({ kind: 'success' }),
+  })
+  commands.register({
+    name: 'live-cmd',
+    description: 'the surviving catalog entry',
     handler: () => ({ kind: 'success' }),
   })
 
@@ -535,12 +544,14 @@ test('L6 §7.4-14 stale catalog: refresh A → same-id binding replacement → t
     readCommands(sessionId: string, signal?: AbortSignal): Promise<readonly { name: string }[] | undefined>
   }
   const originalReadCommands = commandSource.readCommands.bind(commandSource)
-  let gatedReads = 0
+  const postReleaseReads: Array<{ sessionId: string; names: readonly string[] | undefined }> = []
+  let readCount = 0
   let heldRead = false
   commandSource.readCommands = async (sessionId, signal) => {
-    gatedReads += 1
+    readCount += 1
     const result = await originalReadCommands(sessionId, signal)
-    if (gatedReads === 1 && sessionId === sessionA) {
+    if (readCount > 1) postReleaseReads.push({ sessionId, names: result?.map(entry => entry.name) })
+    if (readCount === 1 && sessionId === sessionA) {
       // The stale payload is verified BEFORE the hold: this snapshot really
       // contains the command the later state will have disposed.
       assert.ok(result?.some(entry => entry.name === 'stale-cmd') === true,
@@ -552,16 +563,12 @@ test('L6 §7.4-14 stale catalog: refresh A → same-id binding replacement → t
     return result
   }
 
-  // The official binding identity BEFORE the replacement (the object the
-  // fences key on).
-  const { SessionId: Sid } = await import('@deepseek-ai/dsh-session')
-  const bindingOf = (id: string): unknown =>
-    (fixture.aggregate.wire.client.sessions as { binding(id: never): unknown }).binding(Sid(id) as never)
+  // The OFFICIAL Connection face (the frozen admission token's generation
+  // component is the identity this scenario kills).
   const connection = fixture.aggregate.wire.client.connection as unknown as {
     generation: { getSnapshot(): { readonly id: number } | undefined }
     reconnect(): void
   }
-  const bindingBefore = bindingOf(sessionA)
   const generationBefore = connection.generation.getSnapshot()?.id
 
   // The refresh gesture on A: the read completes and HOLDS with the saved
@@ -577,16 +584,17 @@ test('L6 §7.4-14 stale catalog: refresh A → same-id binding replacement → t
   // CONNECTION REPLACEMENT (plan scenario 14's second form — the /reload
   // submit's FIFO turn is held by the gated refresh, so a second submit
   // cannot run): the OFFICIAL reconnect replaces the Connection generation
-  // while the read is still held. The frozen admission token's generation
-  // is now dead — the held snapshot may only ever settle as superseded.
-connection.reconnect()
-  await waitFor('the Connection generation was replaced', () =>
-    connection.generation.getSnapshot()?.id !== generationBefore, 15_000)
-  // The reconnect replaces the OFFICIAL Connection generation — the exact
-  // identity component the frozen admission token carries. The binding the
-  // new generation re-opens for the same session is a NEW connection's
-  // binding by construction; asserting the generation CHANGE (above) is the
-  // authoritative proof the held refresh's token is dead.
+  // while the read is still held. The rc.2 client publishes
+  // generation=undefined SYNCHRONOUSLY on 'connecting' and only later a NEW
+  // numeric id once reconnected — so the wait must demand a DEFINED and
+  // DIFFERENT id: that proves both the old token's retirement AND that the
+  // replacement Connection is actually established (a mere `!== old` would
+  // pass while the client is still connecting with no generation at all).
+  connection.reconnect()
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== generationBefore
+  }, 20_000)
 
   // The stale content becomes permanently wrong: the Host registration is
   // disposed while the wrapper still holds its saved snapshot.
@@ -603,16 +611,21 @@ connection.reconnect()
   }).commandCompletionsForTest()
   assert.equal(rows.some(row => row.name === 'stale-cmd'), false,
     `the stale snapshot never commits (the retired Host command must not appear): ${JSON.stringify(rows.map(row => row.name))}`)
-  // The CURRENT subject's own refresh (a real /reload after the release)
-  // reads the LIVE catalog — the command is disposed, so the name stays
-  // absent there too, proving the absence is the catalog's truth rather
-  // than a test-side suppression.
+  // The current subject's own refresh (a real /reload after the release)
+  // over the NEW Connection.
   submit(fixture, '/reload')
-  await waitFor('the post-release refresh read the live catalog', () => gatedReads >= 2, 15_000)
-  await settle(800)
-  const rowsAfter = (fixture.app() as unknown as {
-    commandCompletionsForTest(): readonly { name: string }[]
-  }).commandCompletionsForTest()
-  assert.equal(rowsAfter.some(row => row.name === 'stale-cmd'), false,
-    'the post-release refresh (the current catalog, command disposed) keeps the retired name absent')
+  await settle(600)
+  // POSITIVE CONTROL, direct on the provider's settled result: the
+  // post-release refresh actually READ the live catalog over the new
+  // Connection (a defined, non-empty result containing the survivor) —
+  // never a started-but-undefined read (the old `count >= 2` form could not
+  // distinguish that), and the retired name is absent from what it read.
+  const liveRead = postReleaseReads.find(read => read.sessionId === sessionA && read.names !== undefined)
+  assert.ok(liveRead !== undefined,
+    `a post-release refresh must settle a DEFINED read over the new Connection: ${JSON.stringify(postReleaseReads)}`)
+  const liveNames = liveRead.names as readonly string[]
+  assert.ok(liveNames.includes('live-cmd'),
+    `the live catalog read carries the surviving command: ${JSON.stringify(liveNames)}`)
+  assert.equal(liveNames.includes('stale-cmd'), false,
+    'the live catalog read no longer carries the retired name')
 })
