@@ -191,6 +191,9 @@ async function mountRemoteRunner(
     host?: Awaited<ReturnType<typeof mountRemotePresentationHost>>
     /** A test-provided LLM endpoint (e.g. one that can hold a turn open). */
     llmAdapter?: LlmAdapter
+    /** Use the PRODUCTION prompt serializer (a live turn must actually
+     *  submit — the default test stand-in refuses serialization). */
+    productionSerializer?: boolean
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -201,7 +204,7 @@ async function mountRemoteRunner(
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
-    promptSerializer: testPromptSerializer,
+    ...(options.productionSerializer === true ? {} : { promptSerializer: testPromptSerializer }),
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -1094,4 +1097,92 @@ test('L6: a projection-owned value changed by ANOTHER writer reaches the surface
   await waitFor('the new model reached the surface', () => modelOf() === 'second-model', 20_000)
   assert.equal(modelOf(), 'second-model',
     'the live projection channel refreshed the current-value fact (a stale footer would still say first-model)')
+})
+
+/* ───────────── §7.4-10/11 LIVE tool lifecycle (review F8) ───────────── */
+
+/** The LIVE tool-call LLM script: one turn that requests the fixture tool
+ *  (finish `tool-calls`), then one turn of plain text — the Host executes
+ *  the tool between them and the durable call/result rows land on the
+ *  official wire while the surface is MOUNTED. */
+class ToolCallLlmAdapter extends StubStreamingLlmAdapter {
+  private turn = 0
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    options.signal?.throwIfAborted()
+    this.turn += 1
+    if (this.turn === 1) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'using the tool' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'using the tool' } }
+      yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 1, id: ToolCallId('live-call-1'), name: 'pr4_live_fixture', argumentsDelta: '{"marker":"LIVE-TOOL-ARGS"}' }
+      yield {
+        type: 'block-end', index: 1,
+        block: { type: 'tool-call', id: ToolCallId('live-call-1'), name: 'pr4_live_fixture', arguments: '{"marker":"LIVE-TOOL-ARGS"}' },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    yield* scriptedTextTurn('tool turn complete')
+  }
+}
+
+test('L6 §7.4-10/11 LIVE: a mounted Remote surface renders the tool call as it executes on the Host, then settles from the durable result', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-tool-live'
+  const hostPreset = 'm3-4-pr2-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset, {
+    llmAdapter: new ToolCallLlmAdapter(),
+  })
+  // A REAL Host-registered fixture tool the scripted model turn requests.
+  // It is deliberately NOT one of the Client presenter's known names: the
+  // mounted card must ride the bounded generic fallback (§7.4-11's mounted
+  // proof), while the live→settled convergence (§7.4-10's live proof) is
+  // the Host executing this very call through the official loop.
+  const tools = await import('@deepseek-ai/dsh-tools')
+  host.ctx.tools.register(tools.defineContentToolFixture({
+    name: 'pr4_live_fixture',
+    description: 'the live lifecycle fixture tool',
+    parameters: {},
+    execute: async () => [{ type: 'text', text: 'LIVE-TOOL-RESULT' }],
+  }))
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
+  const app = await waitForApp(fixture)
+  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+  const eventsOf = (): Array<{ type: string; data: unknown }> => (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }).snapshotEvents()
+
+  // The REAL submit gesture starts the turn; the Host runs the scripted
+  // model turn, executes the tool, then settles the follow-up turn.
+  editor.setDraft('run the fixture tool please')
+  editor.submitDraft()
+
+  // LIVE phase: the in-flight call card appears while the turn is open —
+  // derived from the transient/live facts, never a Host presenter. (The
+  // generous window absorbs a first-run cold fixture startup.)
+  await waitFor('the live tool name rendered', () =>
+    fixture.vt.getViewport().join('').includes('pr4_live_fixture'), 40_000)
+  // SETTLED phase: the durable result lands through the official eventSource
+  // ingress and the card settles with the executed result text.
+  await waitFor('the settled result rendered', () =>
+    fixture.vt.getViewport().join('').includes('LIVE-TOOL-RESULT'), 20_000)
+  // The turn completes end-to-end on the Host (the durable rows exist).
+  await waitFor('the durable tool rows landed', () => {
+    const kinds = eventsOf().map(event => event.type)
+    return kinds.includes('tool/call') && kinds.includes('tool/result')
+  }, 20_000)
+  const callRow = eventsOf().find(event => event.type === 'tool/call')
+  assert.equal((callRow?.data as { name?: string } | undefined)?.name, 'pr4_live_fixture',
+    'the durable call row names the fixture tool (the Host executed it for real)')
+  await waitFor('the follow-up turn settled', () =>
+    fixture.vt.getViewport().join('').includes('tool turn complete'), 20_000)
+  // The bounded generic fallback keeps the raw args visible (the mounted
+  // unknown-tool contract; a Host presenter would never be consulted).
+  const view = fixture.vt.getViewport().join('')
+  assert.equal(view.includes('LIVE-TOOL-ARGS'), true,
+    'the unknown tool\'s raw arguments render through the bounded generic fallback')
 })

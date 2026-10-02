@@ -22,7 +22,10 @@ M3-2 DONE          (Remote Session owner spine: exact-`SessionBinding` `SessionO
 M3-3A DONE         (Remote session/runtime/catalog/host-file semantic closure: official contextPressure + turnOutline + sessionStatus projection reads, subagent allowlist on the official model directory, Remote skills/list + fileReferences/list adapters, truthful Host-file unavailable states, PresentationReader.loadThrough, one-source M3-3A semantic bundle — zero product cutover, see the M3-3A status section)
 M3-3B DONE         (rc.2 retarget + frozen-contract reconvergence; rc.2 Question semantics in the semantic port on BOTH backends with a timed/continued UI lifecycle; Remote ConfigPort settings mirror; Remote `/api/session.export` archive; complete experimental Remote `Backend` + `BackendKind 'remote'` — zero product cutover, see the M3-3B status section)
 M3-4 PR1 DONE      (application runtime-selection spine: `SelectedApplicationRuntime` core + the Remote application runtime aggregate + the internal selection seam in bootstrap; normal/default remains Direct, no public/config/env selector — see the M3-4 status section)
-M3-4 IN PROGRESS   (main TUI Remote composition; PR1 of the PR train landed — full Remote main surface NOT YET COMPLETE)
+M3-4 PR2 DONE      (main Session read/presentation/status over the Remote aggregate — see the M3-4 PR2 section)
+M3-4 PR3 DONE      (submission/interaction/shell authority over the Remote main Session — see the M3-4 PR3 notes)
+M3-4 PR4 DONE      (main-session command/action plane: Client command registry + Host claim precedence, whole-log rewind, Client-derived tool cards, permission projection/cycle — see the M3-4 PR4 section; review round 2 hardened the transport-identity fences)
+M3-4 IN PROGRESS   (main TUI Remote composition; PR1–PR4 of the PR train landed — remaining PRs close the rest of the M3-4 surface)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -3352,6 +3355,23 @@ Plan: `temp/m3/dsh-pi-tui-m3-4-pr4-command-action-rewind-tool-permission-plan-v1
 Direct remains the production default; the Remote path is reachable only
 through the internal selection seam, and PR4 makes the main
 slash-command/action plane run over the selected Remote main Session.
+
+### Review round 2 — transport-identity fence hardening
+
+The internal review-fix loop (round 1, external review in parallel) found
+that several §6.5 "re-check the transport identity after every await"
+checks re-CAPTURED the token at check time — comparing the current token
+with itself, so a same-session-id binding rollover read as current. Fixed
+in the review round: the stats/lastAssistantText compositions capture the
+token ONCE at operation admission; the rewind picker captures the
+selection identity at PICKER OPEN and only ever compares it; the
+permission cycle captures the transport token in the same synchronous
+admission step as the scope and re-checks it on every settle (with a
+post-dispatch `indeterminate` settle kept observable, never masked as
+`unavailable`); the live catalog read carries the admission transport
+token across the COMBINED provider settle and the authority reader itself
+pins the exact binding for its round-trips; the Remote bootstrap no
+longer resolves the Host tools registry outside the Direct branch.
 
 ### What landed
 

@@ -79,6 +79,16 @@ test('§18.2 the Remote presentation bridge is Client-derived (no Host registry,
     'the Direct branch keeps the Host presenter compatibility')
   assert.ok(selection.includes('createClientToolPresenter()'),
     'the Remote branch mounts the Client-derived presenter')
+  // Review F7: the Host tools registry LOOKUP must sit inside the Direct
+  // branch's lazy resolver — the Remote bootstrap path never resolves it.
+  const directBranch = selection.slice(
+    selection.indexOf('toolPresenterFrom('),
+    selection.indexOf('createClientToolPresenter()'),
+  )
+  assert.ok(directBranch.includes("ctx.get('tools')"),
+    'the Host tools lookup lives inside the Direct-only resolver')
+  assert.equal(selection.slice(selection.indexOf('createClientToolPresenter()')).includes('ctx.get'), false,
+    'the Remote presenter path performs no ctx.get lookup')
 })
 
 /* ───────────────────── §18.3 Permission write gate ───────────────────── */

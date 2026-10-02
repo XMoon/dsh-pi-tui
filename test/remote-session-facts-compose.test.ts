@@ -108,12 +108,22 @@ test('§3.3 stats: bounded paging stops once enough recent samples are loaded', 
     }
     return out
   }
+  // NOTE (review F3): each page-2 turn carries a VALID assistant sample
+  // (an embedded durable stream with two token deltas + usage) — the page
+  // stops because the FOLD proves the sample windows full, not because of
+  // any completed-step count.
+  const page2Events: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
+  let seq2 = 0
+  for (let turn = 1; turn <= RECENT_PERFORMANCE_SAMPLE_LIMIT * 2; turn += 1) {
+    page2Events.push(...validSampleTurn(turn, seq2))
+    seq2 += 5
+  }
   const page1: PresentationReadSnapshot = {
     sessionId: 's', durableEvents: stepTriplets(1) as never, liveInputs: [], revision: 1,
     coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
   }
   const page2: PresentationReadSnapshot = {
-    sessionId: 's', durableEvents: stepTriplets(RECENT_PERFORMANCE_SAMPLE_LIMIT * 2) as never, liveInputs: [], revision: 2,
+    sessionId: 's', durableEvents: page2Events as never, liveInputs: [], revision: 2,
     coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
   }
   let loadOlderCalls = 0
@@ -129,6 +139,132 @@ test('§3.3 stats: bounded paging stops once enough recent samples are loaded', 
   assert.ok(stats !== undefined)
   assert.equal(loadOlderCalls, 1, 'paging stops once the recent-sample window is complete (never loads the whole log)')
   assert.equal(stats.turns, 30, 'the projection still owns lifetime totals')
+})
+
+/** One completed turn whose assistant message carries a VALID sample (an
+ *  embedded durable stream with two token deltas + usage) — the fold's own
+ *  admission rules count it for both metrics. */
+function validSampleTurn(turn: number, seqBase: number): Array<Record<string, unknown> & { type: string; seq: number; time: number }> {
+  return [
+    { type: 'turn/start', seq: seqBase, time: 0, data: { turn } },
+    { type: 'step/start', seq: seqBase + 1, time: 0, data: { turn, step: 1 } },
+    {
+      type: 'assistant/message', seq: seqBase + 2, time: 1_000,
+      data: {
+        turn, step: 1,
+        message: { id: `m-${turn}`, role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
+        usage: { inputTokens: 1, outputTokens: 100 },
+        stream: [
+          { type: 'chunk', time: 500, chunk: { type: 'text-delta', index: 0, text: 'a' } },
+          { type: 'chunk', time: 900, chunk: { type: 'text-delta', index: 0, text: 'b' } },
+        ],
+      },
+    },
+    { type: 'step/end', seq: seqBase + 3, time: 1_100, data: { turn, step: 1 } },
+    { type: 'turn/end', seq: seqBase + 4, time: 1_100, data: { turn, reason: { kind: 'completed' } } },
+  ]
+}
+
+/** One completed turn with NO valid sample: an assistant message with an
+ *  empty stream (no first token, no decode range — counted by step/end,
+ *  admitted by nothing). This is the F3 discriminator shape. */
+function invalidSampleTurn(turn: number, seqBase: number): Array<Record<string, unknown> & { type: string; seq: number; time: number }> {
+  return [
+    { type: 'turn/start', seq: seqBase, time: 0, data: { turn } },
+    { type: 'step/start', seq: seqBase + 1, time: 0, data: { turn, step: 1 } },
+    {
+      type: 'assistant/message', seq: seqBase + 2, time: 1_000,
+      data: {
+        turn, step: 1,
+        message: { id: `mi-${turn}`, role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
+        stream: [],
+      },
+    },
+    { type: 'step/end', seq: seqBase + 3, time: 1_100, data: { turn, step: 1 } },
+    { type: 'turn/end', seq: seqBase + 4, time: 1_100, data: { turn, reason: { kind: 'completed' } } },
+  ]
+}
+
+test('§3.3/F3 stats: 10 invalid newest steps DO NOT stop paging — the fold keeps paging to the valid samples', async () => {
+  // Page 1: TEN completed steps with NO valid samples (empty streams) —
+  // the retired count-based stop (10 ≥ 5×2) would stop here and report
+  // TTFT/TPS = 0/0 while valid history exists one page older.
+  const page1Events: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
+  let seq = 0
+  for (let turn = 1; turn <= 10; turn += 1) {
+    page1Events.push(...invalidSampleTurn(turn, seq))
+    seq += 5
+  }
+  // Page 2: the FIVE valid samples the recent contract needs.
+  const page2Events: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
+  for (let turn = 11; turn <= 10 + RECENT_PERFORMANCE_SAMPLE_LIMIT; turn += 1) {
+    page2Events.push(...validSampleTurn(turn, seq))
+    seq += 5
+  }
+  const page1: PresentationReadSnapshot = {
+    sessionId: 's', durableEvents: page1Events as never, liveInputs: [], revision: 1,
+    coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
+  }
+  const page2: PresentationReadSnapshot = {
+    sessionId: 's', durableEvents: [...page2Events, ...page1Events] as never, liveInputs: [], revision: 2,
+    coverage: 'bounded', hasMore: false, loadingOlder: false, openState: 'open',
+  }
+  let loadOlderCalls = 0
+  const stats = await composeRemoteSessionStats({
+    sessionId: 's',
+    reader: {
+      read: async () => page1,
+      loadOlder: async () => { loadOlderCalls += 1; return page2 },
+    },
+    fence: { isCurrent: () => true },
+    facts: { sessionStats: { turns: 15, steps: 15, llmMs: 1 }, usage: undefined, contextWindow: undefined },
+  })
+  assert.ok(stats !== undefined)
+  assert.equal(loadOlderCalls, 1, 'invalid completed steps never satisfy the page-stop (the fold keeps paging)')
+  assert.equal(stats.firstTokenMsAvg, 500, 'the valid samples (step/start 0 → first token 500) drive TTFT')
+  assert.ok(stats.tokensPerSec > 0, 'the valid samples drive the throughput figure')
+})
+
+test('§3.3/F3 stats: a NEVER-satisfied window pages to the history start and equals the whole-log fold (no silent cap)', async () => {
+  // The whole log is invalid-sample turns; the recent contract can never be
+  // satisfied. Paging must run to the HISTORY START (hasMore=false) and then
+  // report the same figures the whole-log fold would — never a partial
+  // window after a fixed page cap (the retired paged<10 trap).
+  const allInvalid: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
+  let seq = 0
+  const TURNS = 40 // 8 pages of 5 events each — far beyond any old 10-page cap
+  for (let turn = 1; turn <= TURNS; turn += 1) {
+    allInvalid.push(...invalidSampleTurn(turn, seq))
+    seq += 5
+  }
+  const pages: PresentationReadSnapshot[] = []
+  for (let pageIndex = 0; pageIndex < TURNS / 5; pageIndex += 1) {
+    const window = allInvalid.slice(pageIndex * 25)
+    pages.push({
+      sessionId: 's', durableEvents: window as never, liveInputs: [], revision: pageIndex + 1,
+      coverage: 'bounded', hasMore: pageIndex < TURNS / 5 - 1, loadingOlder: false, openState: 'open',
+    })
+  }
+  // The final page is the history start (full coverage) — built as a
+  // fresh snapshot object (the interface is read-only).
+  pages[pages.length - 1] = { ...pages.at(-1)!, coverage: 'full' }
+  let loadOlderCalls = 0
+  const stats = await composeRemoteSessionStats({
+    sessionId: 's',
+    reader: {
+      read: async () => pages[0]!,
+      loadOlder: async () => { loadOlderCalls += 1; return pages[loadOlderCalls] },
+    },
+    fence: { isCurrent: () => true },
+    facts: { sessionStats: { turns: TURNS, steps: TURNS, llmMs: 1 }, usage: undefined, contextWindow: undefined },
+  })
+  assert.ok(stats !== undefined)
+  assert.equal(loadOlderCalls, TURNS / 5 - 1, 'paging ran to the history start (every page, no cap)')
+  // The whole-log reference: the same all-invalid log folds to 0/0 — so the
+  // composed figures are the WHOLE-LOG TRUTH here (not a partial artifact).
+  const wholeLog = await import('../src/stats.ts').then(m => m.computeStats(allInvalid as never))
+  assert.equal(stats.firstTokenMsAvg, wholeLog.firstTokenMsAvg)
+  assert.equal(stats.tokensPerSec, wholeLog.tokensPerSec)
 })
 
 test('§3.6 lastAssistantText: newest message inside the window returns verbatim', async () => {

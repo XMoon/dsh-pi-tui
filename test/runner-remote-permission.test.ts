@@ -151,4 +151,21 @@ test('L6 §7.4-12: Remote permission cycle — projection current, one semantic 
   const names = [...aggregate.selected.backend.config.permissions.presetNames()]
   assert.equal(after, names[(names.indexOf(before) + 1) % names.length]!,
     'the cycle followed the ConfigPort catalog order')
+
+  // 4. §7.4-12's "exactly one apply": the durable `command/run` rows of the
+  //    official /permission executor (the authoritative once-only evidence,
+  //    the same negative-fact probe the command-plane L6 uses — never a
+  //    test-internal flag).
+  await waitFor('the official /permission lifecycle rows landed', () => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    const kinds = session.snapshotEvents().map(event => event.type)
+    return kinds.includes('command/run') && kinds.includes('command/done')
+  }, 15_000)
+  const permissionRuns = (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }).snapshotEvents().filter(event => event.type === 'command/run')
+  assert.equal(permissionRuns.length, 1,
+    'the cycle dispatched EXACTLY ONE official /permission command (no retry, no duplicate)')
 })
