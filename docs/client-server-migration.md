@@ -3718,7 +3718,7 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   bookkeeping unconditionally but skips every visible mutation once the
   captured scope is superseded (draft restore/consume, acks, notices,
   health repaint, artifact save, fallback dispatch). QUALIFICATION NOTE
-  (plan deviation, reviewer-acknowledged): the mounted variant of these two
+  (technical FIFO constraint acknowledged by the reviewer; the required-acceptance change itself is PENDING the plan owner's decision): the mounted variant of these two
   fences — a parked command read/settlement ACROSS a submit-driven session
   switch — is not drivable in the real runner: a pending command settlement
   holds the single submit FIFO turn, so no later submit (the only user
@@ -3738,13 +3738,14 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   directory read never paints the old subject current onto the replacement
   surface).
 - **Selected-runtime teardown proof** (plan §3.9): with a pending main-path
-  READ (a parked `/status` stats read, released only after the teardown's
-  surface disposal has run — inside the retirement drain window) and,
-  separately, a pending WRITE (a parked serializer, same window), the
-  runner fiber disposal settles the pending work invisibly: the transport
-  disposer runs EXACTLY ONCE, AFTER the retirement drain, the released
-  pending read produces ZERO terminal writes on the disposed surface, and
-  no durable row lands after the disposal (`runner-remote-races`
+  READ (a parked `/status` stats read) and, separately, a pending WRITE (a
+  parked serializer), the runner fiber disposal is OBSERVED through real
+  event probes (the mounted TuiApp's own `stop` and the selected transport
+  disposer): the surface stop is observed BEFORE the release, the
+  transport has NOT disposed inside the drain window, the released pending
+  work settles with ZERO terminal writes on the disposed surface, the
+  transport disposer then runs EXACTLY ONCE after the surface stop, and no
+  durable row lands after the disposal (`runner-remote-races`
   §3.9a/§3.9b L6). The pending read and write cannot be parked
   SIMULTANEOUSLY in one mounted runner — the second submission queues
   behind the first's FIFO turn — so the two pending classes are proven as

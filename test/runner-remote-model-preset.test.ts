@@ -357,7 +357,7 @@ test('L6 PR5 §3.4: a /preset SWITCH on a blank Remote session commits through t
   assert.equal(selectedRows.length, 1, 'exactly one official selection row (never retried)')
 })
 
-test('L6 PR5 §3.3: a /model directory read pending across a session replacement never paints the old subject current', async (t) => {
+test('L6 PR5 §3.3: a /model directory read pending across a session replacement never hydrates the stale panel (owner-fence regression)', async (t) => {
   const life = testLifecycleOf(t)
   const mainA = 'm3-4-pr5-model-fence-a'
   const mainB = 'm3-4-pr5-model-fence-b'
@@ -365,50 +365,76 @@ test('L6 PR5 §3.3: a /model directory read pending across a session replacement
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
   await seedHost.harness.create(SessionId(mainA), undefined, { cwd: seedHost.anchorDir })
   const appendA = sessionAppender(seedHost.ctx, mainA)
-  seedCompletedTurn(appendA, 1, 'model fence probe', 'model fence answer')
+  seedCompletedTurn(appendA, 1, 'model fence probe', 'model fence answer A')
   appendA('model/selection', { provider: 'smoke', model: 'smoke' })
-  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainA, host: seedHost }) as unknown as RunnerFixture
+  // B carries its OWN transcript marker: the visible-owner proof below
+  // requires B-ONLY content on the surface (a retained projection alone is
+  // not a visible-owner commit).
   await seedHost.harness.create(SessionId(mainB), undefined, { cwd: seedHost.anchorDir })
-  sessionAppender(seedHost.ctx, mainB)('model/selection', { provider: 'smoke', model: 'smoke-alt' })
+  const appendB = sessionAppender(seedHost.ctx, mainB)
+  seedCompletedTurn(appendB, 1, 'model fence probe B', 'MODEL-FENCE-B-MARKER')
+  appendB('model/selection', { provider: 'smoke', model: 'smoke-alt' })
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainA, host: seedHost }) as unknown as RunnerFixture
   await waitFor('A facts retained', () =>
     fixture.override.presentation.sessionFacts.sessionStatus(mainA)?.model?.model === 'smoke', 15_000)
-  // Park the OFFICIAL directory read at the LLM adapter seam (the Host's
-  // buildModelCatalog awaits the adapter's listModels): the picker's owned
-  // background workflow is a DETACHED read — the /model handler already
-  // returned, so the submit FIFO stays free for the /resume switch.
-  const adapter = (seedHost.ctx.llm as unknown as {
-    registeredAdapters?: Map<string, { listModels(provider: string): Promise<unknown> }>
-  })
-  void adapter
+  // Park the OFFICIAL directory read at the Host llm.listModels seam
+  // (buildModelCatalog awaits it). The read NEVER fabricates a directory on
+  // failure: a broken park rejects and fails the test.
   const llmService = seedHost.ctx.llm as unknown as {
     listModels(provider: string): Promise<unknown>
   }
   const originalListModels = llmService.listModels.bind(llmService)
   let catalogParked = false
   let releaseCatalog: (() => void) | undefined
+  let parkFailed = false
   llmService.listModels = (provider: string): Promise<unknown> => {
     if (catalogParked) return originalListModels(provider)
     catalogParked = true
-    return new Promise(resolve => {
-      releaseCatalog = () => { void originalListModels(provider).then(resolve, () => resolve([])) }
+    return new Promise((resolve, reject) => {
+      releaseCatalog = () => {
+        originalListModels(provider).then(resolve, error => {
+          parkFailed = true
+          reject(error)
+        })
+      }
     })
   }
+  // Failure-path fallback: a failed assertion must not strand the parked
+  // read (the owned workflow would hang the runner teardown).
+  life.defer(() => releaseCatalog?.())
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const frame = (): string => fixture.vt.getViewport().join('\n')
   submit(fixture.runnerApp(), '/model')
   await waitFor('the parked directory read began', () => catalogParked, 10_000)
-  // Replace the visible subject while the directory read is pending.
+  // Replace the visible subject while the directory read is parked. The
+  // switch is proven by B-ONLY transcript content (the hydrated marker), not
+  // by a retained projection.
   submit(fixture.runnerApp(), `/resume ${mainB}`)
-  await waitFor('the visible owner became B', () =>
+  // Visible-owner proof: B is retained AND the A-only transcript content
+  // has RETIRED from the rendered surface (the replacement hydrate paints
+  // B's window in place of A's). The B marker itself may sit outside the
+  // initial viewport depending on window timing, so the RETIREMENT of A's
+  // unique content is the discriminating observable.
+  await waitFor('B facts retained', () =>
     fixture.override.presentation.sessionFacts.sessionStatus(mainB)?.model?.model === 'smoke-alt', 15_000)
-  // Release the OLD subject's directory read: its owner fence must close
-  // the stale loading panel — the OLD subject's current (smoke) must never
-  // be painted onto B's surface.
-  releaseCatalog?.()
-  await new Promise(resolve => setTimeout(resolve, 600))
-  const lines = fixture.vt.getViewport().join('\n').split('\n').map(strip)
-  const smokeRow = lines.find(line => line.includes('Smoke Model') && /current/.test(line))
-  assert.equal(smokeRow === undefined, true,
-    'the stale directory read never painted the OLD subject current (smoke) onto the replacement surface')
+  await waitFor('the visible owner became B (A-only transcript content retired)', () =>
+    frame().includes('model fence answer A') === false, 20_000)
+  // Release the old subject's directory read and let the OWNED workflow
+  // settle (success or typed failure — never a fabricated empty directory).
+  const release = releaseCatalog
+  releaseCatalog = undefined
+  release?.()
+  await new Promise(resolve => setTimeout(resolve, 800))
+  assert.equal(parkFailed, false, 'the parked official directory read settled successfully')
+  // The owner fence must have CLOSED A's stale loading panel: no picker
+  // panel rows hydrate at all (the release arrived for a replaced subject —
+  // neither A's current nor any directory hydration may paint).
+  const lines = frame().split('\n').map(strip)
+  const stalePanelRows = lines.filter(line =>
+    (line.includes('Smoke Model') || line.includes('Alt Model')) && !line.includes('MODEL-FENCE-B-MARKER'))
+  assert.deepEqual(stalePanelRows, [],
+    'the stale /model panel was CLOSED by the owner fence — no directory rows hydrated onto the replacement surface')
+  // B keeps its own projection value.
   assert.equal(fixture.override.presentation.sessionFacts.sessionStatus(mainB)?.model?.model, 'smoke-alt',
     'B keeps its own projection value')
 })
