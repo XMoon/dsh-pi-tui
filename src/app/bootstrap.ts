@@ -69,7 +69,7 @@ import { parseGitAttributionMode, type GitAttributionState } from '../git-attrib
 import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
-import { computeStats } from '../stats.ts'
+import { computeStats, type SessionStats } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
@@ -118,6 +118,7 @@ import {
 import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
+import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { dangerCommand } from '../command-policy.ts'
@@ -1339,6 +1340,43 @@ export function applyRunnerWithRuntime(
     // runner facade is built later, after the semantic command runtime binds.
     // Every owner below is read live (getter/closure), so this site's order is
     // irrelevant and no capability can go stale.
+      // PR4 §3.3/§3.6: the branch-shared seam bodies. The DIRECT folds read
+      // the exact attachment's whole log; the REMOTE compositions read the
+      // official whole-log projections + the paged bounded window through
+      // the shared composers (never a Direct attachment resolution).
+      const directSessionStats = (sessionId: string): SessionStats =>
+        computeStats(command.attachmentForSession(sessionId).session.snapshotEvents())
+      const directLastAssistantText = (sessionId: string): string | undefined => {
+        const session = command.attachmentForSession(sessionId).session
+        // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
+        // materialize the whole log for one message.
+        for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
+          const event = session.eventAt(SessionSeq(seq))
+          if (event?.type !== 'assistant/message') continue
+          return event.data.message.content
+            .filter(block => block.type === 'text')
+            .map(block => (block as { text: string }).text)
+            .join('')
+        }
+        return undefined
+      }
+      /** The official whole-log `sessionStats` projection value off the
+       *  exact retained binding (PR4 §3.3; unknown-shaped until the composer
+       *  narrows it; an absent projection reads unmeasured totals). */
+      const sessionStatsProjectionOf = (sessionId: string): unknown =>
+        remoteSources === undefined ? undefined : remoteSources.sessionFacts.sessionStatsProjection(sessionId)
+      /** The §6.5 transport-identity fence the Remote compositions re-check
+       *  after every await (Connection generation + exact binding object). */
+      const remoteTransportFenceOf = (sessionId: string) => ({
+        isCurrent: () => {
+          const sources = remoteSources
+          if (sources === undefined) return false
+          return sources.sessionFacts.isTransportTokenCurrent(
+            sessionId,
+            sources.sessionFacts.captureTransportToken(sessionId),
+          )
+        },
+      })
     // Explicit annotation: the Direct seams below read the owner back
     // (late-bound through `command`), so the initializer cannot drive inference.
     const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({
@@ -1474,21 +1512,27 @@ export function applyRunnerWithRuntime(
           if (commands === undefined) throw new Error('commands service unavailable')
           return commands.list(agentNow()).map(commandSummaryOf)
         },
-        sessionStats: (sessionId) => computeStats(command.attachmentForSession(sessionId).session.snapshotEvents()),
-        lastAssistantText: (sessionId) => {
-          const session = command.attachmentForSession(sessionId).session
-          // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
-          // materialize the whole log for one message.
-          for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
-            const event = session.eventAt(SessionSeq(seq))
-            if (event?.type !== 'assistant/message') continue
-            return event.data.message.content
-              .filter(block => block.type === 'text')
-              .map(block => block.text)
-              .join('')
-          }
-          return undefined
-        },
+        sessionStats: (sessionId, signal) => remoteSources === undefined
+          ? Promise.resolve(directSessionStats(sessionId))
+          : composeRemoteSessionStats({
+            sessionId,
+            reader: remoteSources.presentationReader,
+            fence: remoteTransportFenceOf(sessionId),
+            facts: {
+              sessionStats: sessionStatsProjectionOf(sessionId),
+              usage: remoteSources.sessionFacts.sessionStatus(sessionId)?.usage,
+              contextWindow: remoteSources.sessionFacts.sessionStatus(sessionId)?.context?.contextWindow,
+            },
+            signal,
+          }),
+        lastAssistantText: (sessionId, signal) => remoteSources === undefined
+          ? Promise.resolve(directLastAssistantText(sessionId))
+          : composeRemoteLastAssistantText({
+            sessionId,
+            reader: remoteSources.presentationReader,
+            fence: remoteTransportFenceOf(sessionId),
+            signal,
+          }),
         promptAdmission: (agent, hasImages, task) => {
           const runtime = directRuntime()
           if (runtime === undefined) return Promise.resolve(task())

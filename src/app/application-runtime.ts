@@ -146,6 +146,10 @@ export interface RemoteSessionFactsSource {
    *  generation + exact binding object; see the owning module). */
   captureTransportToken(sessionId: string): unknown
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** The official whole-log `sessionStats` projection value off the exact
+   *  retained binding (PR4 §3.3; unknown-shaped — the composer narrows it;
+   * an absent capability reads undefined, never a window-fold substitute). */
+  sessionStatsProjection(sessionId: string): unknown
 }
 
 /** The internal application runtime-selection seam input (M3-4 PR1): which

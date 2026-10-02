@@ -701,13 +701,21 @@ export interface TuiCommandRunner {
   /** The pinned Session's approval-policy override, or `undefined` when it
    *  has none. A stale scope throws {@link SupersededReadError}. */
   currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
-  /** The pinned Session's folded stats, or `undefined` when the owner exposes
-   *  none. A stale scope throws {@link SupersededReadError}. */
-  currentSessionStats(scope: LiveSessionScope): SessionStats | undefined
-  /** The pinned Session's last assistant-message text ('' when the message
-   *  carries no text block), or `undefined` when there is none. A stale scope
-   *  throws {@link SupersededReadError}. */
-  lastAssistantText(scope: LiveSessionScope): string | undefined
+  /**
+   * The pinned Session's whole-log stats, or `undefined` when the owner
+   * exposes none. Async since M3-4 PR4 §D5: the Remote branch composes the
+   * official projections with bounded paging for the recent window. A stale
+   * scope throws {@link SupersededReadError}.
+   */
+  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
+  /**
+   * The pinned Session's last assistant-message text ('' when the message
+   * carries no text block), or `undefined` when there is none. Async since
+   * M3-4 PR4 §D5: the Remote branch pages loadOlder until the newest
+   * durable assistant message is inside the window. A stale scope throws
+   * {@link SupersededReadError}.
+   */
+  lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   /** Refresh the LIVE Session's scoped catalog through the coordinator. The
    *  scope is validated at the SYNC admission (the exact owner is captured
    *  there) and again after the read settles; a stale scope throws
@@ -4927,7 +4935,7 @@ export function registerTuiCommands(
       const scope = await runner.requireLiveSessionScope()
       // The last assistant-message text comes from the exact owner the scope
       // pins (the facade throws on a stale scope, never a stale read).
-      const text = runner.lastAssistantText(scope)
+      const text = await runner.lastAssistantText(scope)
       if (text === undefined) return { kind: 'error', text: 'no assistant message yet' }
       if (text === '') return { kind: 'error', text: 'last assistant message has no text' }
       // Issue #7: the SAME client-local shared user-clipboard policy as the
@@ -5121,7 +5129,7 @@ export function registerTuiCommands(
     description: 'Show session stats and identity',
     handler: async () => {
       const scope = await runner.requireLiveSessionScope()
-      const stats = runner.currentSessionStats(scope)
+      const stats = await runner.currentSessionStats(scope)
       // Explicit status: measure NOW through the runner's context
       // coordinator — the panel and the cached footer value share ONE
       // measurement (no duplicate reads, no stale footer). Stubs without
