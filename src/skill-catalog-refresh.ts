@@ -41,6 +41,7 @@
 export type CatalogReadTarget = object
 import type { Diag } from './diag.ts'
 import { safeErrorMessage } from './error-boundary.ts'
+import { SupersededReadError } from './runtime/read-error.ts'
 import type { HumanSkillCatalog } from './skill-catalog.ts'
 import type { SurfaceCatalogSnapshot } from './surface-catalog.ts'
 
@@ -177,6 +178,14 @@ export class CatalogRefreshCoordinator {
     } catch (error) {
       if (signal.aborted || epoch !== this.epoch) {
         this.diag.debug('catalog refresh superseded', { epoch, source: request.source })
+        return { kind: 'superseded' }
+      }
+      // A transport/ownership supersession the provider detected itself
+      // (§2.2/§16: the connection or exact binding rolled over during the
+      // read) is a SUPERSESSION, never a user-facing failure — a later
+      // refresh for the replacement transport owns the next commit.
+      if (error instanceof SupersededReadError) {
+        this.diag.debug('catalog refresh superseded (transport)', { epoch, source: request.source })
         return { kind: 'superseded' }
       }
       const message = safeErrorMessage(error)

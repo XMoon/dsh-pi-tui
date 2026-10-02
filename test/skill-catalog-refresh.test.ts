@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshHooks } from '../src/skill-catalog-refresh.ts'
+import { SupersededReadError } from '../src/runtime/read-error.ts'
 import { createDiag } from '../src/diag.ts'
 import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
@@ -227,6 +228,27 @@ test('a read failure reports failed, installs nothing and keeps the transition s
   assert.deepEqual(installed, [], 'a failed read never installs (the transition commands stay)')
   assert.ok(calls.some(call => call.kind === 'transition'), 'the transition was still entered')
   assert.ok(lines.some(line => /WARN catalog unavailable/.test(line) && /registry exploded/.test(line)))
+})
+
+test('PR4 F2: a SupersededReadError from the read settles superseded (never a user-facing failure)', async () => {
+  // The provider detected a transport/ownership rollover itself (§2.2/§16 —
+  // e.g. the combined catalog read's admission-token re-check after both
+  // providers settled). That is a SUPERSESSION: no install, no WARN, and a
+  // later refresh for the replacement transport owns the next commit.
+  const { hooks, installed } = scriptedHooks({
+    read: async () => { throw new SupersededReadError('the connection changed during the catalog refresh') },
+  })
+  const { diag, lines } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const outcome = await coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: 1 },
+    agent: fakeAgent(),
+  })
+  assert.equal(outcome.kind, 'superseded')
+  assert.deepEqual(installed, [], 'a superseded transport never installs')
+  assert.equal(lines.some(line => /WARN catalog unavailable/.test(line)), false,
+    'a transport supersession is not reported as a catalog failure')
 })
 
 test('a lifecycle abort supersedes the refresh: no install, no failure report', async () => {

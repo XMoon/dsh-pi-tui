@@ -75,7 +75,9 @@ import type { RemoteLlmRemotes } from './model-remote.ts'
 import type { RemotePresetRemotes } from './preset-remote.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
-import { remoteFailureMessage } from './write-failure.ts'
+import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
+import { isRemoteBusinessRefusalCode } from '../write-outcome.ts'
+import type { PermissionPresetApplyOutcome } from '../config-port.ts'
 
 /* ------------------------------------------------------------------------- *
  * Structural official rc.2 wire faces (never a Host package import).
@@ -1239,13 +1241,30 @@ class RemotePermissionConfig implements PermissionConfig {
     sessionId: string,
     presetId: string,
     signal?: AbortSignal,
-  ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }> {
+  ): Promise<PermissionPresetApplyOutcome> {
     // The preset id is validated against the composed catalog BEFORE it
     // reaches the official command line: an unknown (or hostile) id can never
     // be interpolated into an arbitrary /permission invocation.
     if (!this.presetNames().includes(presetId)) return { kind: 'unavailable', cause: 'permission' }
     const result = await this.commands.execute(sessionId, `/permission ${presetId}`, [], signal)
-    if (!result.ok) return { kind: 'unavailable', cause: 'permission' }
+    if (!result.ok) {
+      // §6.3: a post-dispatch failure is NOT proof the switch did not
+      // happen. A cancellation-shaped settle (the command was already on the
+      // wire when it was cancelled) and any unclassifiable transport failure
+      // are INDETERMINATE — observable as such, never silently downgraded
+      // to `unavailable`, never retried (plan §6.3/§15.6; the same
+      // post-dispatch vocabulary the HostCommandPort uses).
+      const code = remoteFailureCode(result.error)
+      if (code !== undefined && !isRemoteBusinessRefusalCode(code)) {
+        return {
+          kind: 'indeterminate',
+          reason: code === 'gateway/cancelled'
+            ? 'the permission switch was dispatched but cancelled before its result arrived'
+            : remoteFailureMessage(result.error),
+        }
+      }
+      return { kind: 'unavailable', cause: 'permission' }
+    }
     // `undefined` is the official "no matching command" result: the preset
     // was not switched, so this is not an applied outcome.
     if (result.value === undefined) return { kind: 'unavailable', cause: 'permission' }
