@@ -10,6 +10,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createRemoteCommandSource, type RemoteCommandSource } from '../src/app/remote/command-source.ts'
+import { composeRemoteSurfaceCatalog } from '../src/app/command/surface.ts'
+import { CatalogRefreshCoordinator } from '../src/skill-catalog-refresh.ts'
 import type { RemoteApplicationSource } from '../src/app/remote/presentation-source.ts'
 import type { SurfaceAuthoritySnapshot } from '../src/runtime/surface-authority-port.ts'
 
@@ -172,4 +174,84 @@ test('negative lock: the command source module never widens the authority reader
   assert.deepEqual(Object.keys(source).sort(),
     ['captureTransportToken', 'isTransportTokenCurrent', 'read', 'readCommands'],
     'the exposed bundle carries ONLY the metadata reads + the transport fence — no execute, no callbacks, no registry')
+})
+
+
+test('PR4 F2b (review round 3): through the REAL composition, a FAILED commands provider keeps the FULFILLED skills', async () => {
+  // The production path — not a hand-made snapshot: the real command source
+  // (whose readCommands rejects on a provider failure) composed by the real
+  // `composeRemoteSurfaceCatalog`.
+  const generation = generationSource({ id: 1 } as RemoteConnectionGeneration)
+  const bindings = bindingsSource({ session: {} })
+  const source = createRemoteCommandSource({
+    authority: {
+      commands: { list: async () => ({ ok: false, error: new Error('commands/list exploded') }) },
+      skills: { list: async () => ({ ok: true, value: { skills: [] } }) },
+    },
+    generation,
+    bindings: bindings as never,
+  })
+  const snapshot = await composeRemoteSurfaceCatalog({
+    source,
+    listHumanSkills: async () => ({
+      skills: [{ name: 'fresh-skill', description: 'f' }],
+      complete: true,
+    }) as never,
+    sessionId: 'session-a',
+    signal: new AbortController().signal,
+  })
+  assert.deepEqual(snapshot.commands, [], 'the failed commands field degrades to empty + an issue')
+  assert.deepEqual(snapshot.skills.map(skill => skill.name), ['fresh-skill'],
+    'the FULFILLED skills provider is never discarded by a commands failure')
+  assert.equal(snapshot.issues.length, 1)
+  assert.equal(snapshot.issues[0]?.provider, 'commands')
+})
+
+test('PR4 F2b (review round 3): the coordinator over the REAL composition keeps the last-good Host claims and adopts the fresh skills', async () => {
+  let commandsFail = false
+  let skillsVersion = 'old'
+  const generation = generationSource({ id: 1 } as RemoteConnectionGeneration)
+  const bindings = bindingsSource({ session: {} })
+  const source = createRemoteCommandSource({
+    authority: {
+      commands: {
+        list: async () => commandsFail
+          ? { ok: false, error: new Error('commands/list exploded') }
+          : { ok: true, value: [{ name: 'last-good-host', description: 'h' }] },
+      },
+      skills: { list: async () => ({ ok: true, value: { skills: [] } }) },
+    },
+    generation,
+    bindings: bindings as never,
+  })
+  const installed: Array<{ commands: readonly { name: string }[]; skills: readonly { name: string }[] }> = []
+  const diag = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} }
+  const coordinator = new CatalogRefreshCoordinator({
+    readAgent: async () => composeRemoteSurfaceCatalog({
+      source,
+      listHumanSkills: async () => ({
+        skills: [{ name: `${skillsVersion}-skill`, description: 's' }],
+        complete: true,
+      }) as never,
+      sessionId: 'session-a',
+      signal: new AbortController().signal,
+    }),
+    readStanding: async () => { throw new Error('unused') },
+    installSnapshot: (snapshot) => { installed.push(snapshot as never) },
+    enterCatalogTransition: () => {},
+  }, new AbortController().signal, diag as never)
+
+  const first = await coordinator.refresh({ source: 'live-session', target: { kind: 'agent', key: 1 }, agent: {} as never })
+  assert.equal(first.kind, 'applied')
+  // Now the commands provider fails while the skills provider moves on.
+  commandsFail = true
+  skillsVersion = 'fresh'
+  const second = await coordinator.refresh({ source: 'reload', target: { kind: 'agent', key: 1 }, agent: {} as never })
+  assert.equal(second.kind, 'applied', 'a commands-provider failure is not a whole-refresh failure')
+  if (second.kind === 'applied') {
+    assert.deepEqual(second.snapshot.commands.map(c => c.name), ['last-good-host'],
+      'mergePartial kept the last-good HOST claims (the claim set is never erased)')
+    assert.deepEqual(second.snapshot.skills.map(s => s.name), ['fresh-skill'],
+      'the successful skills provider updated its own field')
+  }
 })

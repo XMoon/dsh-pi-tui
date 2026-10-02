@@ -1195,6 +1195,21 @@ test('L6 §7.4-10/11 LIVE: a mounted Remote surface renders the tool call as it 
  *  settle while the live phase is provably in flight. */
 class EditToolLlmAdapter extends StubStreamingLlmAdapter {
   private turn = 0
+  /** The test's OWN gate (the inherited base gate is consumed inside the base
+   *  stream this override replaces): held between the live frames and the
+   *  finish, so the live phase is provable and nothing can settle early. */
+  private holdGate: Promise<void> | undefined
+  private releaseHold: (() => void) | undefined
+
+  hold(): () => void {
+    this.holdGate = new Promise<void>(resolve => { this.releaseHold = resolve })
+    return () => {
+      const open = this.releaseHold
+      this.holdGate = undefined
+      this.releaseHold = undefined
+      open?.()
+    }
+  }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     options.signal?.throwIfAborted()
@@ -1209,6 +1224,10 @@ class EditToolLlmAdapter extends StubStreamingLlmAdapter {
         type: 'block-end', index: 1,
         block: { type: 'tool-call', id: ToolCallId('live-edit-1'), name: 'edit', arguments: JSON.stringify({ file_path: 'known-live-target.txt', old_string: 'before', new_string: 'after' }) },
       }
+      // HOLD here: the live frames above are observable, the turn is OPEN and
+      // the Host cannot execute the tool (no finish) until the test releases.
+      const gate = this.holdGate
+      if (gate !== undefined) await gate
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
@@ -1234,21 +1253,34 @@ test('L6 §7.4-10 KNOWN tool LIVE: an in-flight edit renders the Client diff car
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
   const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
 
-  // Gate the model's turns at the STREAM START: nothing settles until the
-  // release, so the LIVE phase is observable while the turn is provably open.
-  const release = (adapter as EditToolLlmAdapter & { hold(): () => void }).hold()
+  // Gate the model turn BETWEEN the live frames and the finish: the card is
+  // observable while the turn is provably open and NO durable tool row can
+  // have landed (the Host executes the tool only after the finish).
+  const release = adapter.hold()
   editor.setDraft('please edit the target file')
   editor.submitDraft()
 
-  // LIVE phase, PROVABLY in-flight: the transient tool-call preview renders
-  // the KNOWN tool's card while the durable tool/result rows have NOT landed
-  // yet (the held stream cannot have completed the turn).
+  const durableOf = (): Array<{ type: string; data: unknown }> => (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }).snapshotEvents()
+
+  // LIVE phase, PROVABLY in-flight: the transient tool-call frames render the
+  // KNOWN tool's card, and the durable `tool/call`/`tool/result` rows are
+  // ABSENT (the turn cannot settle while held — a settled-phase pass is
+  // impossible by construction, not by timing luck).
   await waitFor('the known live edit preview rendered', () => {
     const view = fixture.vt.getViewport().join('')
+    const durable = durableOf().map(event => event.type)
     return view.includes('edit') && view.includes('editing now')
+      && !durable.includes('tool/call') && !durable.includes('tool/result')
   }, 40_000)
 
   release()
+  // The durable rows land only after the release.
+  await waitFor('the durable edit rows landed', () => {
+    const kinds = durableOf().map(event => event.type)
+    return kinds.includes('tool/call') && kinds.includes('tool/result')
+  }, 40_000)
   await waitFor('the settled edit card rendered', () => {
     const view = fixture.vt.getViewport().join('')
     return view.includes('known-live-target.txt')

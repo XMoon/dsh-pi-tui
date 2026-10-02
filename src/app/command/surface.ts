@@ -506,7 +506,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * The Remote live-catalog read: the command source's generation-fenced
    * snapshot mapped onto the coordinator's snapshot shape (scoped overrides
    * do not exist on the Remote branch — the whole catalog is the effective
-   * view; scopedCommands is empty).
+   * view; scopedCommands is empty). The composition itself lives in
+   * {@link composeRemoteSurfaceCatalog} so the production read is directly
+   * regression-testable.
    */
   const readRemoteSurfaceCatalog = async (
     sessionId: string,
@@ -514,69 +516,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   ): Promise<import('../../surface-catalog.ts').SurfaceCatalogSnapshot> => {
     const source = deps.remoteCommandSource
     if (source === undefined) throw new Error('the Remote command source is unavailable')
-    // §2.2 admission capture: the transport identity (Connection generation
-    // + exact binding) is taken BEFORE any provider read; every settle is
-    // re-checked against THIS frozen token (plan §16: a same-id binding
-    // rollover or a Connection replacement must invalidate the refresh —
-    // the reader's own fences cover each provider's round-trip, this covers
-    // the COMBINED settle: one provider may settle before the rollover and
-    // the other after).
-    const admissionToken = source.captureTransportToken(sessionId)
-    // §2.2: the command metadata comes from the authority reader and the
-    // skill metadata from the semantic skill capability, INDEPENDENTLY— one
-    // failing provider degrades only its own field through the coordinator's
-    // provider isolation below (an `issues` entry + the last-good list via
-    // mergePartial; an EMPTY commands array would erase the Host claim set,
-    // so a failed commands provider must NEVER produce an empty success).
-    const [commandsResult, skillsResult] = await Promise.allSettled([
-      source.readCommands(sessionId, signal),
-      deps.catalog.skills.listHumanSkills(sessionId, signal),
-    ])
-    signal.throwIfAborted()
-    // §2.2/§16 combined-settle fence: after BOTH providers settled, the
-    // admission transport must still be live — a rollover between the two
-    // settles invalidates the WHOLE snapshot (it may mix two bindings'
-    // facts), so it settles superseded, never installs.
-    if (!source.isTransportTokenCurrent(sessionId, admissionToken)) {
-      throw new SupersededReadError('the connection changed during the catalog refresh')
-    }
-    if (commandsResult.status === 'rejected') {
-      const reason = commandsResult.reason
-      if (reason instanceof SupersededReadError) throw reason
-      // §2.2 provider isolation: a FAILED commands provider degrades to an
-      // issues entry — the coordinator's mergePartial keeps the last-good
-      // HOST commands (an empty replace would erase the claim set) while the
-      // successful skills provider still updates its own field. Only a
-      // transport supersession (above) fails the whole read.
-      return Object.freeze({
-        commands: Object.freeze([]),
-        scopedCommands: Object.freeze([]),
-        skills: Object.freeze([]),
-        issues: Object.freeze([Object.freeze({ provider: 'commands' as const, message: safeErrorMessage(reason) })]),
-      })
-    }
-    if (commandsResult.value === undefined) {
-      throw new SupersededReadError('the connection changed during the catalog refresh')
-    }
-    const issues: Array<import('../../surface-catalog.ts').SurfaceCatalogIssue> = []
-    let skills: readonly import('../../skill-catalog.ts').HumanSkillSummary[] = []
-    if (skillsResult.status === 'fulfilled') {
-      skills = skillsResult.value?.skills ?? []
-      if (skillsResult.value !== undefined && skillsResult.value.complete !== true) {
-        issues.push({ provider: 'skills', message: 'incomplete skill observation' })
-      }
-    } else {
-      // A provider failure empties only its OWN field; the install side keeps
-      // that field's last-good list (readSurfaceCatalog's provider isolation).
-      issues.push({ provider: 'skills', message: safeErrorMessage(skillsResult.reason) })
-    }
-    const sortByName = (entries: readonly import('../../surface-catalog.ts').SurfaceCommandSummary[]) =>
-      [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
-    return Object.freeze({
-      commands: Object.freeze(sortByName(commandsResult.value)),
-      scopedCommands: Object.freeze([]),
-      skills: Object.freeze([...skills]),
-      issues: Object.freeze(issues.map(issue => Object.freeze({ ...issue }))),
+    return composeRemoteSurfaceCatalog({
+      source,
+      listHumanSkills: (id, readSignal) => deps.catalog.skills.listHumanSkills(id, readSignal),
+      sessionId,
+      signal,
     })
   }
   /**
@@ -1082,4 +1026,79 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     buildRunner,
     runner,
   }
+}
+
+/**
+ * The Remote live-catalog composition (PR4 §2.2/§16), extracted so the
+ * PRODUCTION read is directly regression-testable (review round 3: a
+ * hand-made snapshot cannot prove the reader's provider isolation).
+ *
+ * Provider isolation is symmetric: a rejected commands provider degrades to
+ * an `issues` entry — the coordinator's `mergePartial` then keeps the
+ * last-good Host claims — while a FULFILLED skills provider still updates its
+ * own field. A transport supersession (the admission token no longer live
+ * after BOTH settles, or an authoritative `undefined` from the commands read)
+ * invalidates the whole snapshot instead: it may mix two bindings' facts.
+ * @param input - the production seams and the session/signal.
+ * @returns the composed snapshot for the coordinator.
+ */
+export async function composeRemoteSurfaceCatalog(input: {
+  readonly source: {
+    readCommands(sessionId: string, signal?: AbortSignal): Promise<readonly import('../../surface-catalog.ts').SurfaceCommandSummary[] | undefined>
+    captureTransportToken(sessionId: string): unknown
+    isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  }
+  readonly listHumanSkills: (sessionId: string, signal?: AbortSignal) => Promise<import('../../skill-catalog.ts').HumanSkillCatalog | undefined>
+  readonly sessionId: string
+  readonly signal: AbortSignal
+}): Promise<import('../../surface-catalog.ts').SurfaceCatalogSnapshot> {
+  const { source, listHumanSkills, sessionId, signal } = input
+  // §2.2 admission capture: the transport identity (Connection generation +
+  // exact binding) is taken BEFORE any provider read; every settle is
+  // re-checked against THIS frozen token (§16: a same-id binding rollover or a
+  // Connection replacement must invalidate the refresh — the reader's own
+  // fences cover each provider's round-trip, this covers the COMBINED settle:
+  // one provider may settle before the rollover and the other after).
+  const admissionToken = source.captureTransportToken(sessionId)
+  const [commandsResult, skillsResult] = await Promise.allSettled([
+    source.readCommands(sessionId, signal),
+    listHumanSkills(sessionId, signal),
+  ])
+  signal.throwIfAborted()
+  // Combined-settle fence: after BOTH providers settled, the admission
+  // transport must still be live.
+  if (!source.isTransportTokenCurrent(sessionId, admissionToken)) {
+    throw new SupersededReadError('the connection changed during the catalog refresh')
+  }
+  const issues: Array<import('../../surface-catalog.ts').SurfaceCatalogIssue> = []
+  let commands: readonly import('../../surface-catalog.ts').SurfaceCommandSummary[] = []
+  if (commandsResult.status === 'rejected') {
+    const reason = commandsResult.reason
+    if (reason instanceof SupersededReadError) throw reason
+    // A FAILED commands provider degrades to an issue (never an empty
+    // success): mergePartial keeps the last-good Host claims for this field.
+    issues.push({ provider: 'commands', message: safeErrorMessage(reason) })
+  } else if (commandsResult.value === undefined) {
+    throw new SupersededReadError('the connection changed during the catalog refresh')
+  } else {
+    commands = [...commandsResult.value].sort((left, right) => left.name < right.name ? -1 : 1)
+  }
+  // The skills provider is handled INDEPENDENTLY: its fulfilled result is
+  // always used (a commands failure never discards it), and its own failure /
+  // incompleteness degrades only its field.
+  let skills: readonly import('../../skill-catalog.ts').HumanSkillSummary[] = []
+  if (skillsResult.status === 'fulfilled') {
+    skills = skillsResult.value?.skills ?? []
+    if (skillsResult.value !== undefined && skillsResult.value.complete !== true) {
+      issues.push({ provider: 'skills', message: 'incomplete skill observation' })
+    }
+  } else {
+    issues.push({ provider: 'skills', message: safeErrorMessage(skillsResult.reason) })
+  }
+  return Object.freeze({
+    commands: Object.freeze(commands),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze([...skills]),
+    issues: Object.freeze(issues.map(issue => Object.freeze({ ...issue }))),
+  })
 }
