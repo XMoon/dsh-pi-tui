@@ -27,6 +27,12 @@ import type { ComposerSubmitGesture } from './tui-app.ts'
 export const SESSIONLESS_COMMANDS = new Set([
   'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
+  // `/quit` is `/exit`'s canonical command alias (the runner registers
+  // /exit → /quit); before a session exists both must exit WITHOUT creating
+  // one — the alias must not silently drift out of the sessionless set
+  // (PR5 supplement §6: sessionless alias parity, locked by the policy
+  // guard test).
+  'quit',
   // `/statusline` is the approved alias of `/footer` (same configurator,
   // other-agent muscle memory) — it rides the same ownership sets, so it
   // executes locally, never steers, and works before any session exists.
@@ -111,28 +117,33 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
  * @param name - the slash name.
  * @param isSkillWrapper - the live skill-wrapper test (absent = none).
  * @param isDynamicLocal - the live client-contribution test (absent = none).
- * @param hostView - the host catalog's view of THIS LINE (`undefined` = the
- *   catalog does not resolve the name at all; see {@link HostCommandClaim}).
- *   A name the catalog RESOLVES is never a client-local line: when the
- *   catalog claims the line the host's own `input.attachments` declaration
- *   decides, and when it does not (an argued line of an execute-kind
- *   command) the line is an ordinary submission — never a same-named client
- *   contribution's.
+ * @param hostResolvesName - whether the AUTHORITATIVE HOST CATALOG resolves
+ *   the NAME (PR5 supplement: derived from `hostCatalogResolves`, NEVER from
+ *   the effective line claim — the claim-set union also carries this
+ *   Client's own TUI registrations, so a self-claim must not disqualify the
+ *   TUI's own local commands). A Host-resolved name is never a client-local
+ *   line: when the catalog claims the line the host's own
+ *   `input.attachments` declaration decides, and when it does not (an argued
+ *   line of an execute-kind command) the line is an ordinary submission —
+ *   never a same-named client contribution's.
  */
 export function isLocalCommandLine(
   name: string,
   isSkillWrapper: ((name: string) => boolean) | undefined,
   isDynamicLocal: ((name: string) => boolean) | undefined,
-  hostView?: HostCommandClaim | undefined,
+  hostResolvesName: boolean,
 ): boolean {
-  // §D3 line authority (review round 2): a HOST-RESOLVED name is never
-  // TUI-local — not when the catalog CLAIMS the line (a Host command
-  // invocation) and not when it resolves the name without claiming THIS
-  // line (an argued `/export foo` of an execute-kind Host command is an
-  // ORDINARY submission, matching the dispatch's commandPlaneOwnsLine
-  // order). Only a name the host catalog does not resolve falls through to
-  // the Client-owned terms.
-  if (hostView !== undefined) return false
+  // §D3 line authority (review round 2) + the PR5 supplement authority
+  // correction: a HOST-RESOLVED name is never TUI-local — not when the
+  // catalog CLAIMS the line (a Host command invocation) and not when it
+  // resolves the name without claiming THIS line (an argued `/export foo`
+  // of an execute-kind Host command is an ORDINARY submission, matching the
+  // dispatch's commandPlaneOwnsLine order). Only a name the AUTHORITATIVE
+  // host catalog does not resolve falls through to the Client-owned terms —
+  // the discriminator is NAME authority (`hostCatalogResolves`), never the
+  // effective line claim (a TUI built-in's own Client registration appears
+  // in the claim-set union and must not read as Host territory).
+  if (hostResolvesName) return false
   if (LOCAL_COMMANDS.has(name)) return true
   if (isSkillWrapper?.(name) === true) return false
   return isDynamicLocal?.(name) ?? false
@@ -171,27 +182,30 @@ export function isBareCommandLine(parsed: { name: string; rawInput?: string }): 
  * @param parsed - the parsed slash command (undefined = plain prompt).
  * @param isSkillWrapper - the live skill-wrapper test (absent = none).
  * @param isDynamicLocal - the live client-contribution test (absent = none).
- * @param hostClaim - the live HOST-catalog view of THIS LINE (absent = none).
+ * @param hostResolvesName - whether the AUTHORITATIVE HOST CATALOG resolves
+ *   the name (`hostCatalogResolves` — PR5 supplement: never derived from the
+ *   effective line claim, whose union carries the Client's own TUI
+ *   registrations).
  * @returns whether the line is a local command line.
  */
 export function commandIsLocalForAttachments(
   parsed: { name: string; rawInput?: string } | undefined,
   isSkillWrapper: ((name: string) => boolean) | undefined,
   isDynamicLocal: ((name: string) => boolean) | undefined,
-  hostClaim?: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined,
+  hostResolvesName: boolean,
 ): boolean {
   if (parsed === undefined) return false
   // `/skill <name> ...` is agent-facing (loadSkill owns it) even though the
   // bare `/skill` picker is a TUI-local command.
   if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return false
-  // The host catalog's view of THIS LINE outranks a same-named client
+  // The host catalog's NAME authority outranks a same-named client
   // contribution, exactly like the dispatch's namespace order; the
   // contribution term itself is asked for a BARE line alone (DSH `matchEnter`).
   return isLocalCommandLine(
     parsed.name,
     isSkillWrapper,
     isBareCommandLine(parsed) ? isDynamicLocal : undefined,
-    hostClaim?.(parsed),
+    hostResolvesName,
   )
 }
 
