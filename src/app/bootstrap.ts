@@ -64,6 +64,7 @@ import { preparePrompt } from '../image/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
+import { createClientToolPresenter } from '../tool-presentation-client.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
 import { parseGitAttributionMode, type GitAttributionState } from '../git-attribution.ts'
 import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
@@ -1708,11 +1709,17 @@ export function applyRunnerWithRuntime(
     // (ctx.tools) trips cordis's inject guard, and an absent registry must
     // degrade to generic cards rather than fail the render.
     const tools = ctx.get('tools') as { get(name: string, scope?: object): ToolDefinitionLike | undefined } | undefined
-    const present = toolPresenterFrom(name => {
-      const agent = agentNow()
-      if (agent === undefined) return undefined
-      return tools?.get(name, agent)
-    })
+    // PR4 §5.2: the presentation bridge is branch-split. Direct keeps the
+    // Host presenter compatibility (the live registry, agent-scoped); the
+    // Remote branch derives cards from raw call/result facts ONLY — no
+    // ctx.tools access, no presentCall/presentResult, no wire callback.
+    const present = remoteSources === undefined
+      ? toolPresenterFrom(name => {
+        const agent = agentNow()
+        if (agent === undefined) return undefined
+        return tools?.get(name, agent)
+      })
+      : createClientToolPresenter()
     // Stable signal snapshot of the runner-owned lifecycle controller.
     const signal = lifecycleController.signal
     // Draft stores are Client-local UI state. Image bytes are bounded in
