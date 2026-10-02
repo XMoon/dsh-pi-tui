@@ -1386,11 +1386,13 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // legal non-zero sample needs: chunks anchored slightly AHEAD of the
   // step/start append (non-zero TTFT), and the assistant/message appended
   // only AFTER a real wait past the first chunk (non-zero decode span).
-  // The seeded span is ~100ms TTFT and ~400ms decode per sampled turn
-  // (±loop jitter), which renders as `TTFB 0.1s`-class and a bounded
-  // three-digit `tok/s` — asserted as a REQUIRED MATCH (assert.match
-  // throws on failure; the previous `exec() !== undefined` form was
-  // vacuously true because exec returns null, not undefined).
+  // The seeded span is ~100ms TTFT and ~300ms decode per sampled turn
+  // (settlement lands ≈anchor+400 after the real wait; the first chunk is
+  // at anchor+100 — ±loop jitter), i.e. 200 tokens over ~0.3s ≈ 667 tok/s:
+  // a `TTFB 0.1s`-class and bounded three-digit `tok/s` rendering —
+  // asserted as a REQUIRED MATCH (assert.match throws on failure; the
+  // previous `exec() !== undefined` form was vacuously true because exec
+  // returns null, not undefined).
   for (let turn = 1; turn <= 5; turn += 1) {
     const anchor = Date.now()
     session.append('turn/start', { turn })
@@ -1453,7 +1455,7 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // undefined` guards were vacuously true — exec returns null). The TTFT
   // window is seeded at ~100ms per sampled turn → a `0.1s`-class rendering
   // (a broken wiring that renders 0 fails: `0.0s`/`0s` does not match);
-  // the throughput window is 200 tokens over a ~400ms decode span → a
+  // the throughput window is 200 tokens over a ~300ms decode span → a
   // three-digit tok/s figure (a broken wiring that renders 0 fails). The
   // upper bound keeps the match honest against the seeded arithmetic.
   const panelView = fixture.vt.getViewport().join('')

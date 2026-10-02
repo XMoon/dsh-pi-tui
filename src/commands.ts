@@ -588,9 +588,13 @@ export interface TuiCommandRunner {
    * business CAPABILITY, deliberately NOT derived from
    * {@link commandRegistry}: that field is the Direct Host-registry
    * compatibility mirror whose retirement is owned by M8, and a business
-   * decision must never hang off a compatibility implementation. Optional
-   * with a Direct default so the existing runner stubs keep compiling; the
-   * Remote composition root explicitly passes `false`. */
+   * decision must never hang off a compatibility implementation.
+   *
+   * The DECLARED default of an unspecified field is `true` (the historical
+   * Direct behavior): the handler refuses only on an EXPLICIT `false`, so
+   * a composition that has not declared the capability keeps the
+   * pre-existing semantics. The Remote composition root passes `false`
+   * explicitly. */
   readonly transcriptExportAvailable?: boolean
   /** The Client-owned command registry (M3-4 PR4 §D2): every TUI built-in
    *  and dynamic skill-wrapper definition registers here FIRST. On Direct
@@ -5194,11 +5198,11 @@ export function registerTuiCommands(
       // no transport-neutral seam exists yet — the Remote post-success
       // artifact save would resolve the projected agent and crash inside
       // `renderTranscriptMarkdown` after the command already reported
-      // success. Refuse at the handler instead (a shown notice plus the
-      // restored draft, never a late artifact failure). `/export` stays
-      // available on both backends (it renders from `SessionArchivePort`,
-      // not the Session).
-      if (runner.transcriptExportAvailable !== true) {
+      // success. Refuse ONLY on an explicit `false` (an unspecified
+      // capability keeps the historical Direct default of available).
+      // `/export` stays available on both backends (it renders from
+      // `SessionArchivePort`, not the Session).
+      if (runner.transcriptExportAvailable === false) {
         const text = 'transcript export is unavailable on this backend'
         app.notify(text, 'error')
         return { kind: 'error', text }

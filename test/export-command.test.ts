@@ -290,6 +290,10 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
   registerTuiCommands(stubRunner(ctx, app))
   const defs = commands.defs
 
+  // The stub declares NO transcriptExportAvailable: an UNSPECIFIED
+  // capability keeps the historical Direct default (available) — only an
+  // EXPLICIT false refuses (the false branch is locked by the mounted
+  // Remote /transcript L6).
   const bare = awaitHandler(defs, 'transcript', '')
   assert.equal(bare.kind, 'success')
   assert.equal(bare.text, 'Transcript export requested.')
@@ -299,6 +303,23 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
 
   const path = awaitHandler(defs, 'transcript', 'foo.md')
   assert.equal(path.kind, 'error')
+})
+
+test('/transcript refuses truthfully when the composition declares the capability false (PR4 round 5)', () => {
+  const ctx = new Context()
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  startedApps.add(app)
+  const runner = stubRunner(ctx, app) as import('../src/commands.ts').TuiCommandRunner & {
+    transcriptExportAvailable?: boolean
+  }
+  runner.transcriptExportAvailable = false
+  registerTuiCommands(runner)
+  const refused = awaitHandler(commands.defs, 'transcript', '')
+  assert.equal(refused.kind, 'error')
+  assert.equal(refused.text, 'transcript export is unavailable on this backend')
 })
 
 // The grammar handlers are synchronous acknowledgements; the helper keeps
