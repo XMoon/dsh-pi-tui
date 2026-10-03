@@ -253,13 +253,13 @@ test('A4-4: the status commit and the pending-input presentation are surface-own
   const surface = read('src/app/surface/runtime.ts')
 
   // Status COMMIT coordination: the runner keeps the semantic derivation and
-  // delegates the two-call commit (`status.update` then `mounted().setStatus`).
-  assert.match(surface, /commitStatus\(patch, legacyFacts\)/u,
+  // delegates the ONE atomic display-subject commit (store patch incl. `view`
+  // + legacy footer facts + the presentation projection) through the mounted
+  // app (M3-5 PR1 §9.7).
+  assert.match(surface, /commitStatus\(\n?\s*patch: StatusPatch,/u,
     'the surface must own the status commit')
-  assert.match(surface, /status\.update\(patch\)/u,
-    'the surface must commit the status patch')
-  assert.match(surface, /mounted\(\)\.setStatus\(legacyFacts\)/u,
-    'the surface must commit the legacy footer facts')
+  assert.match(surface, /mounted\(\)\.commitDisplaySubject\(patch, legacyFacts, presentation\)/u,
+    'the surface must commit the display-subject payload through the app')
   assert.match(statusSource, /deps\.surface\.commitStatus\(patch,/u,
     'the status owner must delegate the status commit to the surface')
   assert.doesNotMatch(statusSource, /deps\.surface\.status\.update\(/u,

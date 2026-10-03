@@ -87,6 +87,7 @@
 import { Text, type Component } from '@xmoon76/pi-tui'
 import {
   startProcessTui,
+  type DisplaySubjectPresentation,
   type StatusData,
   type StreamingToolPreview,
   type TodoItem,
@@ -662,10 +663,15 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   onAgentStatus(agentId: string, status: AgentLifecycleStatus): void
   /**
    * A4-4 status COMMIT coordination (plan §13.1): the runner keeps the
-   * semantic derivation; the surface commits the derived patch and then the
-   * legacy footer facts, exactly the two calls `refreshStatusCheap` made.
+   * semantic derivation; the surface commits the derived patch, the legacy
+   * footer facts and the display-subject presentation projection of the SAME
+   * subject in ONE atomic TuiApp commit (M3-5 PR1 §9.7).
    */
-  commitStatus(patch: StatusPatch, legacyFacts: Partial<StatusData>): void
+  commitStatus(
+    patch: StatusPatch,
+    legacyFacts: Partial<StatusData>,
+    presentation: DisplaySubjectPresentation | undefined,
+  ): void
   /** The notification settings write path (`/notify`, `agent/status` policy). */
   setNotificationMode(mode: string): void
   setNotificationMethod(method: string): void
@@ -2566,12 +2572,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     onAgentStatus(agentId, status) {
       feedCompletionStatus(agentId, status)
     },
-    commitStatus(patch, legacyFacts) {
+    commitStatus(patch, legacyFacts, presentation) {
       // A4-4 (plan §13.1): the semantic derivation stays with the runner; the
-      // commit coordination is surface-owned. The two calls and their order
-      // are the exact `refreshStatusCheap` sequence.
-      status.update(patch)
-      mounted().setStatus(legacyFacts)
+      // commit coordination is surface-owned. The three parts are ONE atomic
+      // display-subject commit (M3-5 PR1 §9.7).
+      mounted().commitDisplaySubject(patch, legacyFacts, presentation)
     },
     setNotificationMode(mode) {
       completionController.setMode(parseNotificationMode(mode))

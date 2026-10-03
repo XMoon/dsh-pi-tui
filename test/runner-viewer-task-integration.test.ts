@@ -550,7 +550,14 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
     tokens?: { input: number; output: number }
     performance?: { firstTokenMs: number }
   } | undefined
-  assert.deepEqual(viewerUsage?.tokens, { input: 21, output: 5, cacheRead: 0, cacheWrite: 0 })
+  // M3-5 PR1 §9.5: the child's CUMULATIVE tokens are a SessionStatus fact.
+  // This fixture has no `sessionProjections` service, so the child's official
+  // usage is UNAVAILABLE — the bounded child transcript fold's 21/5 sum must
+  // never be presented as a session total.
+  assert.equal(viewerUsage?.tokens, undefined,
+    'the bounded child fold token sum must not masquerade as the child cumulative usage')
+  // The recent-performance figures stay presentation-local and still reach the
+  // child stats footer.
   assert.ok((viewerUsage?.performance?.firstTokenMs ?? 0) > 0, 'B first-token timing must reach the child stats footer')
 
   // Parent events continue through the runner while the child owns the
@@ -1856,4 +1863,292 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.equal(app.isTasksActive(), false, 'nothing is reachable any more')
 
 
+})
+
+test('M3-5 PR1 L6: the Direct child viewer derives its display subject from SessionStatus(childId) and never leaks the parent', async (t) => {
+  // The decisive Direct application proof: the REAL Task Center/viewer entry
+  // mounts the child, and the status/footer sink shows the child's OWN
+  // SessionStatus facts (model/preset/permission/cwd/context/usage/todos)
+  // resolved through backend.sessionReader.sessionStatus(childId).
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-display-subject-l6-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  // Wide enough that the default footer preset keeps the model/context/token
+  // items (the narrow 80-column budget legitimately drops them).
+  const vt = new VirtualTerminal(140, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const childACwd = join(home, 'child-a-ws')
+  const childBCwd = join(home, 'child-b-ws')
+  const parent = fakeSession({
+    id: 'display-subject-parent',
+    header: { id: 'display-subject-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('parent answer'),
+      event('todo/write', { todos: [{ content: 'PARENT-TODO-V1', status: 'in_progress' }] }, 6),
+    ],
+  })
+  const childA = fakeSession({
+    id: 'display-subject-child-a',
+    header: { id: 'display-subject-child-a', cwd: childACwd, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child a answer'),
+  })
+  const childB = fakeSession({
+    id: 'display-subject-child-b',
+    header: { id: 'display-subject-child-b', cwd: childBCwd, createdAt: 1_700_000_000_002, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child b answer'),
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: childA.id, label: 'child display subject A', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: childB.id, label: 'child display subject B', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  const harness = makeHarness(home, [parent, childA, childB], { provider: 'p', model: 'parent-model' }, undefined, undefined, subagents)
+  for (const id of [childA.id, childB.id]) {
+    const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: id })
+    life.defer(() => handle.dispose())
+  }
+  context = new Context()
+  // The official Session-scoped projections the DirectSessionReader reads. Each
+  // child carries DIFFERENT facts so a leak is immediately visible; the child's
+  // `tokenUsage` (11/5) deliberately differs from its own bounded log fold
+  // (10/2) so the sink proves the projection path, not the fold.
+  const statusValuesBySession: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+    [childA.id]: {
+      modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-a-model' } },
+      agentPreset: 'child-a-preset',
+      permissions: { currentValue: 'read-only' },
+      title: 'child a title',
+      goal: { goal: { objective: 'child a objective', phase: 'active' } },
+      contextPressure: { projectedTokens: 100, contextWindow: 2000 },
+      tokenUsage: { uncachedInputTokens: 11, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      todos: [
+        { content: 'CHILD-A-TODO', status: 'in_progress' },
+        { content: 'CHILD-A-TODO-2', status: 'pending' },
+      ],
+    },
+    [childB.id]: {
+      modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-b-model' } },
+      permissions: { currentValue: 'workspace-write' },
+      title: 'child b title',
+      contextPressure: { pressureTokens: 300, contextWindow: 4000 },
+      tokenUsage: { uncachedInputTokens: 21, outputTokens: 9, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      todos: [{ content: 'CHILD-B-TODO', status: 'pending' }],
+    },
+  }
+  // Flipped by the negative control below: with the child's official
+  // projection REMOVED, its bounded fold sum must never be presented as the
+  // cumulative usage.
+  let childAProjectionAvailable = true
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values = session.header.id === childA.id && !childAProjectionAvailable
+        ? {}
+        : statusValuesBySession[session.header.id]
+      if (values === undefined) return { values: {} }
+      if (keys === undefined) return { values }
+      return {
+        values: Object.fromEntries(keys
+          .filter(key => key in values)
+          .map(key => [key, (values as Record<string, unknown>)[key]])),
+      }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await vt.waitForRender()
+  const mainSnapshot = probe.capturedChildStatus
+  assert.equal(mainSnapshot, undefined, 'the main subject commits no child snapshot')
+
+  // Both children are RUNNING live agents (their catalog row and the exact
+  // Agent status agree).
+  for (const session of [childA, childB]) {
+    ;(liveAgentOf(harness, session.id) as { status: 'idle' | 'running' }).status = 'running'
+  }
+  // The REAL Task Center entry mounts child A.
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'child A must mount through the real Task Center entry')
+
+  const aStatus = probe.capturedChildStatus
+  assert.ok(aStatus, 'the child display subject must commit a StatusStore snapshot')
+  assert.deepEqual(aStatus.view.subject, {
+    kind: 'subagent',
+    id: childA.id,
+    label: 'child display subject A',
+    mode: 'continuable',
+    activity: 'running',
+  })
+  // Every Session-owned section is the CHILD's own SessionStatus.
+  assert.deepEqual(aStatus.composition, {
+    model: { provider: 'deepseek', id: 'child-a-model', displayName: 'child-a-model' },
+    agentPreset: { id: 'child-a-preset', label: 'child-a-preset' },
+  })
+  assert.deepEqual(aStatus.access.permissionPreset, { id: 'read-only', label: 'read-only', matched: true })
+  assert.equal(aStatus.workspace.cwd, childACwd, 'the child workspace must be the child session cwd')
+  assert.deepEqual(aStatus.usage.tokens, { input: 11, output: 5, cacheRead: 0, cacheWrite: 0 },
+    'the CHILD cumulative tokens are the official tokenUsage projection (11/5), not the bounded log fold (10/2)')
+  assert.deepEqual(aStatus.usage.context, { usedTokens: 100, windowTokens: 2000, percent: 5 })
+  assert.equal(aStatus.usage.turns, 1, 'turns stay the child fold’s own presentation fact')
+  assert.equal(aStatus.usage.steps, 1)
+  const aPresentation = probe.capturedDisplaySubject?.presentation
+  assert.ok(aPresentation, 'the child display-subject presentation must travel in the same commit')
+  assert.equal(aPresentation.sessionId, childA.id)
+  assert.equal(aPresentation.workspaceRoot, childACwd)
+  assert.equal(aPresentation.title, 'child a title')
+  assert.deepEqual(aPresentation.todos, [
+    { content: 'CHILD-A-TODO', status: 'in_progress' },
+    { content: 'CHILD-A-TODO-2', status: 'pending' },
+  ])
+  const aLegacy = probe.capturedDisplaySubject?.legacy
+  assert.equal(aLegacy?.model, 'deepseek/child-a-model')
+  assert.equal(aLegacy?.cwd, childACwd)
+  assert.equal(aLegacy?.permission, 'read-only')
+  assert.equal(aLegacy?.contextTokens, 100)
+  assert.equal(aLegacy?.contextWindow, 2000)
+  assert.match(aLegacy?.goal ?? '', /^goal ● child a objective$/u)
+  assert.equal(aLegacy?.turns, 1)
+  assert.equal(aLegacy?.steps, 1)
+  // The PARENT's facts are nowhere on the child subject.
+  assert.notEqual(aStatus.workspace.cwd, home)
+  assert.notEqual(aStatus.composition.model?.id, 'parent-model')
+  assert.notEqual(aLegacy?.model, 'parent-model')
+  // …and the child's OWN facts are ACTUALLY RENDERED (not merely captured):
+  // model/provider, permission, the official cumulative tokens (11/5, never
+  // the bounded fold's 10/2), the official context window, the child todo
+  // count and the child workspace.
+  const viewA = vt.getViewport().join('\n')
+  assert.ok(viewA.includes('[subagent · continuable]'), `the viewer badge must render:\n${viewA}`)
+  assert.ok(viewA.includes('child display subject A'), `the child label must render:\n${viewA}`)
+  assert.ok(viewA.includes('child-a-ws'), `the child workspace must render:\n${viewA}`)
+  assert.ok(viewA.includes('deepseek/child-a-model'), `the child model must render:\n${viewA}`)
+  assert.ok(viewA.includes('[read-only]'), `the child permission must render:\n${viewA}`)
+  assert.ok(viewA.includes('↑11'), `the official child input tokens must render:\n${viewA}`)
+  assert.ok(viewA.includes('↓5'), `the official child output tokens must render:\n${viewA}`)
+  assert.ok(viewA.includes('100/2.0k'), `the official child context must render:\n${viewA}`)
+  assert.ok(viewA.includes('2 active · CHILD-A-TODO'),
+    `the child todo summary/count must render (the parent has 1):\n${viewA}`)
+  assert.ok(viewA.includes('goal ● child a objective'), `the child goal must render:\n${viewA}`)
+  assert.ok(!viewA.includes('PARENT-TODO-V1'), `the parent todo summary must not render:\n${viewA}`)
+  // WHOLE-VIEWPORT negative control (M3-5 PR1 §5/§9.6): the parent session's
+  // model and session identity must not remain visible ANYWHERE on the child
+  // surface — not in the footer and not in the main session's welcome card
+  // (which is hidden while the display subject is the child).
+  assert.ok(!viewA.includes('p/parent-model'), `the parent model must not render anywhere on the child surface:\n${viewA}`)
+  assert.ok(!viewA.includes('display-subject-parent'), `the parent session identity must not render anywhere on the child surface:\n${viewA}`)
+
+  // A LATE parent refresh (a main todo/write + a main turn boundary) while the
+  // child is displayed must never repaint the child subject with parent facts.
+  context.emit('session/event', parent as never, event('todo/write', { todos: [{ content: 'PARENT-TODO-V2', status: 'pending' }] }, 7))
+  context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 8))
+  // Force a fresh CHILD display-subject commit AFTER the parent write: the
+  // child's own projection must be re-derived, not the parent's todo.
+  context.emit('session/event', childA as never, event('step/end', { turn: 1, step: 0 }, 9))
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.view.subject.kind, 'subagent',
+    'the committed display subject must stay the child after a late parent refresh')
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, [
+    { content: 'CHILD-A-TODO', status: 'in_progress' },
+    { content: 'CHILD-A-TODO-2', status: 'pending' },
+  ], 'the parent todo write must not replace the child’s presentation projection')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, childACwd,
+    'the re-committed legacy display fields must stay the child’s')
+
+  // Child A → child B through the SAME real Task Center entry: no A residue.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\x1b[B')
+  await settle()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  const bStatus = probe.capturedChildStatus
+  assert.ok(bStatus, 'child B must commit its own display-subject snapshot')
+  assert.equal(bStatus.view.subject.kind === 'subagent' ? bStatus.view.subject.id : undefined, childB.id,
+    'child B must be the committed display subject')
+  assert.equal(bStatus.composition.model?.id, 'child-b-model')
+  assert.deepEqual(bStatus.access.permissionPreset, { id: 'workspace-write', label: 'workspace-write', matched: true },
+    'B’s own permission, never A’s read-only')
+  assert.equal(bStatus.workspace.cwd, childBCwd)
+  assert.deepEqual(bStatus.usage.tokens, { input: 21, output: 9, cacheRead: 0, cacheWrite: 0 })
+  assert.deepEqual(bStatus.usage.context, { usedTokens: 300, windowTokens: 4000, percent: 8 },
+    'pressureTokens is B’s numerator when projectedTokens is absent')
+  assert.equal(bStatus.composition.agentPreset, undefined, 'B records no preset — A’s must not survive')
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, [{ content: 'CHILD-B-TODO', status: 'pending' }])
+  assert.equal(probe.capturedDisplaySubject?.legacy?.model, 'deepseek/child-b-model')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.permission, 'workspace-write')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.goal, undefined, 'A’s goal must not survive into B')
+  const viewB = vt.getViewport().join('\n')
+  assert.ok(viewB.includes('child display subject B'), `the rendered footer must show B’s identity:\n${viewB}`)
+  assert.ok(viewB.includes('child-b-ws'), `the rendered footer must show B’s workspace:\n${viewB}`)
+  assert.ok(!viewB.includes('child-a-ws'), `A’s workspace must not survive into B:\n${viewB}`)
+
+  // Child → main restores the parent subject.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(restored.includes('p/parent-model'), `the parent footer must return:\n${restored}`)
+  assert.ok(restored.includes('display-subject-parent'), `the parent welcome card must return:\n${restored}`)
+  assert.ok(!restored.includes('[subagent · continuable]'), `the viewer badge must clear:\n${restored}`)
+  assert.ok(!restored.includes('child-b-ws'), `the child workspace must clear:\n${restored}`)
+
+  // NEGATIVE CONTROL: with child A's official SessionStatus projection REMOVED,
+  // its bounded transcript fold sum (10/2) must NOT be presented as the
+  // cumulative usage — an unavailable official fact OMITS the section instead
+  // of folding the window or copying the parent.
+  childAProjectionAvailable = false
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(
+    probe.capturedChildStatus?.view.subject.kind === 'subagent' ? probe.capturedChildStatus.view.subject.id : undefined,
+    childA.id,
+    'child A must be the display subject again',
+  )
+  assert.equal(probe.capturedChildStatus?.usage.tokens, undefined,
+    'the child cumulative tokens are ABSENT when the official projection cannot answer')
+  assert.equal(probe.capturedChildStatus?.usage.context, undefined)
+  const viewNoOfficial = vt.getViewport().join('\n')
+  assert.ok(!viewNoOfficial.includes('↑10'),
+    `the bounded fold's input sum must not stand in for the cumulative usage:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('↑11'), `the removed official value must not linger:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('↓'), `no token figures may render when the official usage is unavailable:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('100/2.0k'), `no context window may render when the official child context is unavailable:\n${viewNoOfficial}`)
+  assert.ok(viewNoOfficial.includes('child display subject A'), `the child identity must still render:\n${viewNoOfficial}`)
 })

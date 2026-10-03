@@ -1728,6 +1728,11 @@ export function applyRunnerWithRuntime(
       generation: () => ownership.generation(),
       currentSessionId: () => ownership.currentSessionId(),
       measureContext: (sessionId) => backend.sessionReader.measureContext(sessionId),
+      // M3-5 PR1 §9.2: the ONE shared Session-scoped status read, bound to
+      // the semantic `SessionReader.sessionStatus` port on BOTH branches (on
+      // Remote this is the same function the branch facts used to expose).
+      // The subject id is ALWAYS explicit: selection belongs to StatusRuntime.
+      sessionStatus: (sessionId) => backend.sessionReader.sessionStatus(sessionId),
       model: {
         selection: () => model.selected.current,
         currentOf: (agent) => model.currentOf(agent),
@@ -1751,11 +1756,10 @@ export function applyRunnerWithRuntime(
       },
       viewer: { read: () => viewerRef?.read() },
       clientCwd: cwd,
-      // M3-4 PR2: the Remote-branch official Session facts (the status
-      // projection + plan wire view). Absent on Direct.
+      // M3-4 PR2: the Remote-ONLY official Session facts (the plan wire view).
+      // The SessionStatus read is the shared `sessionStatus` capability above.
       ...(remoteSources === undefined ? {} : {
         remote: {
-          sessionStatus: (sessionId) => sessionId === undefined ? undefined : remoteSources.sessionFacts.sessionStatus(sessionId),
           plan: (sessionId) => sessionId === undefined ? undefined : remoteSources.sessionFacts.plan(sessionId),
         },
       }),
