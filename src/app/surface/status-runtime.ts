@@ -28,15 +28,17 @@ import { safeErrorMessage } from '../../error-boundary.ts'
 import { bundleVersion, dshVersion, versionDisplay } from '../../dsh-version.ts'
 import { gitBranch } from '../../git-branch.ts'
 import type { ModelSelectionValue } from '../../model-selection.ts'
+import { contextPressureOccupancy } from '../../runtime/session-reader-port.ts'
 import { formatStats, StatsFolder } from '../../stats.ts'
 import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from '../../status/context-measurement.ts'
 import { deriveAccessStatus, type AccessDeriveDeps } from '../../status/derive-access.ts'
-import { foldGoal } from '../../status/derive-goal.ts'
+import { foldGoal, goalTextOf } from '../../status/derive-goal.ts'
 import { derivePlanStatus, deriveRemotePlanStatus, type PlanModeLike, type PlanProjectionLike } from '../../status/derive-plan.ts'
 import { deriveRunnerPermission } from '../../status/derive-permission.ts'
 import { usageFromStats } from '../../status/derive-usage.ts'
 import { plainSectionEqual } from '../../status/equal.ts'
-import type { CompositionStatus, HostStatus, StatusPatch, StatusSnapshot, WorkspaceStatus } from '../../status/types.ts'
+import { resolveDisplaySubject } from '../../status/resolve-subject.ts'
+import type { CompositionStatus, HostStatus, StatusPatch, StatusSnapshot, ViewStatus, WorkspaceStatus } from '../../status/types.ts'
 import { setTerminalTitle, terminalTitleOf } from '../../terminal-title.ts'
 import type { StatusData, TuiApp } from '../../tui-app.ts'
 
@@ -61,16 +63,17 @@ export interface StatusHostFacts extends AccessDeriveDeps {
 export type PermissionCycleApplyOutcome = import('../../runtime/config-port.ts').PermissionPresetApplyOutcome
 
 /**
- * The Remote-branch official Session facts (M3-4 PR2): when the selected
- * runtime is Remote there is no live Direct Agent, so the owner reads the
- * session-scoped official projections through this bundle instead. Every
- * read is `undefined`-total — an unavailable projection stays absent, never
- * a guessed value and never another session's fact.
+ * The genuinely Remote-only official Session facts (M3-4 PR2): when the
+ * selected runtime is Remote there is no live Direct Agent, so the owner
+ * reads the transport-specific projections through this bundle instead.
+ * Every read is `undefined`-total — an unavailable projection stays absent,
+ * never a guessed value and never another session's fact.
+ *
+ * The SessionStatus projection is deliberately NOT here: it is one semantic
+ * read shared by both branches (`StatusRuntimeDeps.sessionStatus`, bound to
+ * `SessionReader.sessionStatus`).
  */
 export interface StatusRemoteFacts {
-  /** The official Session-scoped status projection (model/preset/cwd/
-   *  todos/usage/context of THIS exact session). */
-  readonly sessionStatus: (sessionId: string | undefined) => import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined
   /** The official `plan` projection wire view of THIS session. */
   readonly plan: (sessionId: string | undefined) => { readonly active: boolean; readonly pending: boolean } | undefined
 }
@@ -79,7 +82,14 @@ export interface StatusRemoteFacts {
 export interface StatusSurface {
   readonly app: TuiApp
   readonly status: { snapshot(): StatusSnapshot }
-  commitStatus(patch: StatusPatch, legacyFacts: Partial<StatusData>): void
+  /** ONE atomic display-subject commit (M3-5 PR1 §9.7): the store patch
+   *  (including `view`), the legacy display fields and the presentation
+   *  projection describe the SAME subject. */
+  commitStatus(
+    patch: StatusPatch,
+    legacyFacts: Partial<StatusData>,
+    presentation: import('../../tui-app.ts').DisplaySubjectPresentation | undefined,
+  ): void
 }
 
 /** The narrow capabilities the status owner consumes. Nothing here is a Host
@@ -98,6 +108,14 @@ export interface StatusRuntimeDeps {
   readonly currentSessionId: () => string | undefined
   /** The semantic session reader port (context measurement). */
   readonly measureContext: (sessionId: string) => number | undefined
+  /**
+   * The ONE Session-scoped status read (M3-5 PR1): the official detached
+   * Session facts of the EXPLICIT subject session, on both branches. The
+   * caller owns subject SELECTION (main vs viewed child); this capability
+   * only answers for the id it is given — `undefined` is "unavailable",
+   * never "infer the subject from global state".
+   */
+  readonly sessionStatus: (sessionId: string) => import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined
   /** The model-selection facts (the command/model owner replaces this). */
   readonly model: {
     readonly selection: () => ModelSelectionValue | undefined
@@ -123,8 +141,20 @@ export interface StatusRuntimeDeps {
      *  numeric `0s · 0 tok/s` stand-in for unknown evidence. */
     readonly mainRecentPerformanceAvailable?: () => boolean
   }
-  /** The viewer owner (the display subject while a child is viewed). */
-  readonly viewer: { readonly read: () => { readonly cwd: string; readonly stats: StatsFolder } | undefined }
+  /** The viewer owner: the viewed child's IDENTITY + presentation facts, or
+   *  `undefined` when no child viewer is mounted. Only the display-subject
+   *  SELECTOR reads this — the Session-owned facts come from
+   *  `sessionStatus(viewed.id)`. */
+  readonly viewer: {
+    readonly read: () => {
+      readonly id: string
+      readonly label: string
+      readonly mode: 'one-shot' | 'continuable'
+      readonly activity: 'running' | 'inactive'
+      readonly cwd: string
+      readonly stats: StatsFolder
+    } | undefined
+  }
   /** The diagnostics channel for OWNED async operations (the permission
    *  cycle's runOwned settlement; see docs/failure-model.md). */
   readonly diag: Diag
@@ -200,6 +230,71 @@ export interface StatusRuntime {
   applyGoalChange(event: { readonly type: string; readonly data: unknown }): void
 }
 
+/** The model label vocabulary (one formatting rule for main and child). */
+function modelLabelOf(selection: {
+  readonly provider?: string
+  readonly model?: string
+  readonly reasoningEffort?: string
+}): string {
+  const base = `${selection.provider ?? ''}/${selection.model ?? ''}`
+  return selection.reasoningEffort === undefined ? base : `${base} @${selection.reasoningEffort}`
+}
+
+/** The one detached Session-status DTO the display-subject derivation reads. */
+type DisplaySessionStatus = import('../../runtime/session-reader-port.ts').SessionStatusProjection
+
+/** The child display subject's composition section: the child SessionStatus'
+ *  own model/preset ONLY. An absent child fact stays ABSENT — never the
+ *  parent's model, never the sessionless default and never the child Agent's
+ *  options (M3-5 PR1 §9.4). */
+function childCompositionStatus(status: DisplaySessionStatus | undefined): CompositionStatus {
+  if (status === undefined) return {}
+  const model = status.model
+  return {
+    ...model === undefined ? {} : {
+      model: {
+        provider: model.provider,
+        id: model.model,
+        displayName: model.model,
+        ...model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort },
+      },
+    },
+    ...status.preset === undefined ? {} : { agentPreset: { id: status.preset, label: status.preset } },
+  }
+}
+
+/** The child display subject's access section: the projection-authoritative
+ *  permission preset ONLY. The parent's sandbox/approval/permission state must
+ *  never ride a child surface; an absent child permission is OMITTED. */
+function childAccessStatus(status: DisplaySessionStatus | undefined): {
+  permissionPreset?: { id: string; label: string; matched: boolean }
+} {
+  const permission = status?.permission
+  return permission === undefined
+    ? {}
+    : { permissionPreset: { id: permission, label: permission, matched: true } }
+}
+
+/** The child display subject's model label. `''` is the canonical unknown for
+ *  the required legacy field — it is never the parent's model. */
+function childModelLabel(status: DisplaySessionStatus | undefined): string {
+  const model = status?.model
+  if (model === undefined) return ''
+  return modelLabelOf({
+    provider: model.provider,
+    model: model.model,
+    ...model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort },
+  })
+}
+
+/** The child display subject's goal badge text: an absent projection and the
+ *  legal `null` (no goal) both render no badge — never the parent's goal. */
+function childGoalText(status: DisplaySessionStatus | undefined): string | undefined {
+  if (status === undefined || !('goal' in status)) return undefined
+  const goal = status.goal
+  return goal === undefined || goal === null ? undefined : goalTextOf(goal)
+}
+
 /** Create the status owner (plan §A5b-2). */
 export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   /**
@@ -216,10 +311,12 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   /** Repaint the welcome card from the live agent's current facts. Re-read
    * on every call so a still-blank session's preset switch shows up. */
   
-  /** The Remote-branch Session-scoped projection read for the CURRENT
-   *  session (absent on Direct; `undefined` = unavailable, never guessed). */
-  const remoteStatus = (): import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined =>
-    deps.remote?.sessionStatus(deps.currentSessionId())
+  /** The MAIN subject's shared Session-status read (the Remote branch's
+   *  Agent-less session; a sessionless surface answers `undefined`). */
+  const mainSessionStatus = (): import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined => {
+    const sessionId = deps.currentSessionId()
+    return sessionId === undefined ? undefined : deps.sessionStatus(sessionId)
+  }
 
   const updateWelcomeCard = (): void => {
     const agent = deps.liveAgent()
@@ -227,7 +324,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       // A Remote-branch live session still owns the welcome card: its facts
       // come from the official Session-scoped projections (never a parent
       // fallback, never guessed defaults).
-      const facts = deps.remote === undefined ? undefined : remoteStatus()
+      const facts = deps.remote === undefined ? undefined : mainSessionStatus()
       if (facts === undefined) {
         deps.surface.app.setWelcomeIdle(true)
         return
@@ -281,7 +378,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     if (deps.remote !== undefined) {
       const sessionId = deps.currentSessionId()
       if (sessionId === undefined) return deps.clientCwd
-      return deps.remote.sessionStatus(sessionId)?.cwd
+      return deps.sessionStatus(sessionId)?.cwd
     }
     return deps.clientCwd
   }
@@ -320,9 +417,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    *  and never painted as committed. */
   
   const modelLabel = (): string => {
-    const labelOf = (selection: ModelSelectionValue): string => selection.reasoningEffort === undefined
-      ? `${selection.provider}/${selection.model}`
-      : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
+    const labelOf = (selection: ModelSelectionValue): string => modelLabelOf(selection)
     // The base is the AUTHORITATIVE current selection: for a sessionless
     // surface that is the persisted Host default, NOT the optimistic intent
     // (which is shown only by the marker below). Otherwise a pending
@@ -341,7 +436,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // `unconfirmed` there too, never the bare stale default).
     let base: string
     if (agent === undefined && deps.remote !== undefined) {
-      const remoteFact = remoteStatus()?.model
+      const remoteFact = mainSessionStatus()?.model
       if (remoteFact !== undefined) {
         base = labelOf({
           provider: remoteFact.provider,
@@ -385,7 +480,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // sessionless selection (a session-specific selection must never be
     // masked by the global intent/default).
     if (agent === undefined && deps.remote !== undefined) {
-      const facts = remoteStatus()
+      const facts = mainSessionStatus()
       return {
         ...facts?.model === undefined ? {} : {
           model: {
@@ -421,14 +516,18 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   }
 
   /** M0: the workspace section (cwd/project/branch — project and cwd are
-   * deliberately separate facts). */
+   * deliberately separate facts). `branchAllowed` is the LOCALITY gate: the
+   * local `gitBranch(cwd)` derivation may only speak for a cwd on THIS
+   * process's own filesystem. A Remote child's Host cwd is not a Client
+   * path, so its branch is omitted rather than inferred (M3-5 PR1 §9.4). */
   
-  const deriveWorkspaceStatus = (cwd: string): WorkspaceStatus => {
+  const deriveWorkspaceStatus = (cwd: string, branchAllowed = true): WorkspaceStatus => {
     const parts = cwd.split('/').filter(Boolean)
+    const branch = branchAllowed ? gitBranch(cwd) : ''
     return {
       cwd,
       ...parts.length === 0 ? {} : { project: parts[parts.length - 1]! },
-      ...gitBranch(cwd) === '' ? {} : { branch: gitBranch(cwd) },
+      ...branch === '' ? {} : { branch },
     }
   }
 
@@ -479,29 +578,34 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // itself for an empty value) — the client cwd never impersonates the
     // session's Host workspace here.
     const liveCwd = sessionCwdFact() ?? (deps.currentSessionId() !== undefined && deps.remote !== undefined ? '' : deps.clientCwd)
-    // M0: project the DSH-derived facts into the unified status store
-    // FIRST — the footer paints the store (setStatus below repaints it),
-    // so the derived sections must be committed before the paint or the
-    // footer always shows the previous cycle's facts. The DISPLAY
-    // SUBJECT's facts feed the sections — while the subagent viewer is
-    // open that is the viewed child's own fold and workspace, so the
-    // footer layout never changes, only the data source.
-    const displaySubject = deps.viewer.read()
-    const displayCwd = displaySubject?.cwd ?? liveCwd
-    // While the subagent viewer is open the DISPLAY SUBJECT is the
-    // viewed CHILD: the parent's session-owned sections (composition/
-    // access/plan) are NOT the child's — the child's are not derivable
-    // here, so the sections are cleared (unavailable) instead of leaking
-    // the parent's facts into the snapshot the footer items, extension
-    // items and the command status surface read. The child's OWN facts
-    // (workspace/usage) follow the display subject below; the parent
-    // context measurement must not ride the child's usage either.
+    // M3-5 PR1 §9.3: the ONE display-subject selector. It answers only
+    // "which Session's status is being displayed?" — the current main
+    // Session, or the viewed child Session (the viewer's own read model
+    // supplies the child IDENTITY facts, never the Session facts). It
+    // decides no writer authority and no child activity.
+    const viewed = deps.viewer.read()
+    // ONE SessionStatus cut for the viewed child, taken in the SAME
+    // synchronous step as the identity above: no later re-read can name a
+    // different subject than the one whose facts are committed below. The
+    // MAIN subject keeps its existing Agent/projection reads untouched (a
+    // cheap refresh must not add a projection batch to the main hot path).
+    const childStatus = viewed === undefined ? undefined : deps.sessionStatus(viewed.id)
+    const displayView: ViewStatus = viewed === undefined
+      ? { subject: { kind: 'main' } }
+      : resolveDisplaySubject({
+          childSessionId: viewed.id,
+          label: viewed.label,
+          mode: viewed.mode,
+          activity: viewed.activity,
+        })
     // The derivations mint fresh objects every call: only sections whose
     // CONTENT actually changed are committed — an identical refresh must
     // not churn the store's revision (the store compares by identity) nor
     // wake the command runner's refresh on every streaming event.
     const current = deps.surface.status.snapshot()
-    const composition = displaySubject === undefined ? deriveCompositionStatus() : {}
+    const composition = viewed === undefined
+      ? deriveCompositionStatus()
+      : childCompositionStatus(childStatus)
     // The access section (permission preset / sandbox mode / approval
     // override) is derived from the in-process Host services, which are the
     // LIVE-AGENT subject's facts. On the Remote branch (no live Agent) the
@@ -515,8 +619,12 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // (no public rc.2 carrier — §6.6's truthful-unavailable rows). Direct
     // keeps the in-process service derivation.
     let access: ReturnType<typeof deriveAccessStatus> | {}
-    if (displaySubject !== undefined) {
-      access = {}
+    if (viewed !== undefined) {
+      // M3-5 PR1 §9.4: the CHILD's access is the projection-authoritative
+      // permission preset only — the parent's service-derived sandbox /
+      // approval / permission never rides the child surface, and an absent
+      // child fact is omitted (never the parent's).
+      access = childAccessStatus(childStatus)
     } else if (deps.remote === undefined) {
       access = deriveAccessStatus(
           {
@@ -533,26 +641,35 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       // binding-baseline window) — the section KEEPS its last value instead
       // of flapping to empty: an unavailable projection is not "no
       // permission" (§6.6's truthful-unavailable rule, applied to the row).
-      const status = remoteStatus()
+      // SUBJECT-SCOPED retention (M3-5 PR1): the last value may only be kept
+      // while the PREVIOUS committed snapshot described the SAME (main)
+      // subject — after a child viewer exits, the child's permission must
+      // never become the main session's retained value.
+      const status = mainSessionStatus()
       const currentPreset = status?.permission
       access = currentPreset === undefined
-        ? (current.access ?? {}) as typeof access
+        ? (current.view.subject.kind === 'main' ? (current.access ?? {}) as typeof access : {})
         : { permissionPreset: { id: currentPreset, label: currentPreset, matched: true } }
     }
-    const collaboration = displaySubject === undefined
+    const collaboration = viewed === undefined
       ? {
           plan: deps.remote !== undefined && deps.liveAgent() === undefined
             ? deriveRemotePlanStatus(deps.remote.plan(deps.currentSessionId()))
             : derivePlanStatus(deps.host().planMode, deps.liveAgent(), deps.host().sessionProjections, deps.liveAgent()?.session),
         }
       : { plan: { effective: false } }
-    const workspace = deriveWorkspaceStatus(displayCwd)
+    // The display subject's workspace: the child SessionStatus' OWN cwd
+    // (absent = '', never the parent's workspace). The local `gitBranch`
+    // derivation may speak only for a cwd on THIS process's filesystem — a
+    // Remote child's Host cwd is not one, so its branch is omitted.
+    const displayCwd = viewed === undefined ? liveCwd : (childStatus?.cwd ?? '')
+    const workspace = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
     // The Remote branch's event window is BOUNDED: its fold cannot count the
     // session's lifetime tokens, so the official `tokenUsage` projection (and
     // the route's context capacity) own them there. Direct keeps the fold.
-    const remoteUsageFacts = displaySubject === undefined && deps.liveAgent() === undefined && deps.remote !== undefined
+    const remoteUsageFacts = viewed === undefined && deps.liveAgent() === undefined && deps.remote !== undefined
       ? (() => {
-          const status = remoteStatus()
+          const status = mainSessionStatus()
           // ALWAYS the override object on the Remote branch, even when a
           // projection cannot answer: an empty override means "unknown", which
           // omits the facts. Returning undefined here would silently present
@@ -563,19 +680,41 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           }
         })()
       : undefined
-    const usage = usageFromStats(
-      displaySubject?.stats.snapshot() ?? stats,
-      displaySubject === undefined ? contextTokens : undefined,
-      remoteUsageFacts,
-      // PR5 (plan §3.2): an unproven recent window omits the recent metrics.
-      // A viewer CHILD keeps the numeric figures (its own fold is its whole
-      // subject; the availability authority is the MAIN presentation's).
-      displaySubject === undefined && deps.presentation.mainRecentPerformanceAvailable?.() === false
-        ? { recentPerformanceAvailable: false }
-        : undefined,
-    )
+    // The child's turns/steps and recent-performance figures stay the
+    // viewer-local StatsFolder's own (presentation-local); its CUMULATIVE
+    // tokens/context are the official SessionStatus facts ONLY — an always-
+    // present override object keeps the bounded fold from ever standing in
+    // for a session total (M3-5 PR1 §9.5).
+    const subjectStats = viewed === undefined ? stats : viewed.stats.snapshot()
+    const childContextTokens = childStatus?.context === undefined
+      ? undefined
+      : contextPressureOccupancy(childStatus.context)
+    const usage = viewed === undefined
+      ? usageFromStats(
+          subjectStats,
+          contextTokens,
+          remoteUsageFacts,
+          // PR5 (plan §3.2): an unproven recent window omits the recent
+          // metrics. A viewer CHILD keeps the numeric figures (its own fold is
+          // its whole subject; the availability authority is the MAIN
+          // presentation's).
+          deps.presentation.mainRecentPerformanceAvailable?.() === false
+            ? { recentPerformanceAvailable: false }
+            : undefined,
+        )
+      : usageFromStats(
+          subjectStats,
+          childContextTokens,
+          {
+            ...childStatus?.usage === undefined ? {} : { tokens: childStatus.usage },
+            ...childStatus?.context?.contextWindow === undefined
+              ? {}
+              : { contextWindow: childStatus.context.contextWindow },
+          },
+        )
     const host = deriveHostStatus()
     const patch: {
+      view?: ViewStatus
       composition?: typeof composition
       access?: ReturnType<typeof deriveAccessStatus> | {}
       collaboration?: typeof collaboration
@@ -583,47 +722,84 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       usage?: typeof usage
       host?: typeof host
     } = {}
+    if (!plainSectionEqual(current.view, displayView)) patch.view = displayView
     if (!plainSectionEqual(current.composition, composition)) patch.composition = composition
     if (!plainSectionEqual(current.access, access)) patch.access = access
     if (!plainSectionEqual(current.collaboration, collaboration)) patch.collaboration = collaboration
     if (!plainSectionEqual(current.workspace, workspace)) patch.workspace = workspace
     if (!plainSectionEqual(current.usage, usage)) patch.usage = usage
     if (!plainSectionEqual(current.host, host)) patch.host = host
+    // M3-5 PR1 §9.6: the display-subject PRESENTATION projection. The durable
+    // MAIN presentation state (the todo list, the session title, the session
+    // identity) stays untouched behind this projection; while a child is
+    // displayed its Session-owned facts replace them for every consumer (todo
+    // summary/panel, extension snapshot, /status). An absent child fact is
+    // UNKNOWN here, never the parent's value. It travels in the SAME atomic
+    // commit as the store patch below.
+    const presentation = viewed === undefined
+      ? undefined
+      : {
+          // The child IDENTITY is the Viewer/Subagent authority's fact (D2),
+          // not a SessionStatus fact.
+          sessionId: viewed.id,
+          workspaceRoot: workspace.cwd,
+          // An absent child title is UNKNOWN (''), never the parent's title.
+          title: childStatus?.title ?? '',
+          // The legal `todos` null (no write yet) and an unavailable
+          // projection both read "nothing known" — the parent's list is never
+          // a stand-in.
+          todos: childStatus?.todos ?? [],
+        }
     // A4-4 (plan §13.1): the semantic derivation stays here; the surface
-    // owns the commit coordination (`status.update` then `setStatus`).
-    deps.surface.commitStatus(patch, {
-      model: modelLabel(),
-      // The FULL cwd lands in the structured workspace section (the
-      // footer cwd ITEM shortens for display itself); the legacy
-      // display value (tail segments) is derived from it.
-      cwd: liveCwd,
-      branch: gitBranch(liveCwd),
-      goal: goalText,
-      turns: stats.turns,
-      steps: stats.steps,
-      // PR5 (plan §3.2): the legacy line shares the availability rule with
-      // the structured usage section (the main-subject branch only — a
-      // viewer child's own fold stays numeric).
-      statsLine: formatStats(stats, displaySubject === undefined
-        ? deps.presentation.mainRecentPerformanceAvailable?.() ?? true
-        : true),
-      // EXPLICITLY clear the permission when the service/agent is
-      // unavailable: the legacy merge keeps the old value otherwise,
-      // and syncExtensionState would publish a STALE permission to the
-      // extension snapshot (a state transition where the permission
-      // preset service or the live agent is momentarily gone).
-      permission: deriveRunnerPermission(permission, deps.liveAgent()),
-      // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
-      // TuiApp merge keeps old fields otherwise, and the session
-      // switch / cold-resume window before the deferred measurement
-      // would show the PREVIOUS session's context pressure — exactly the
-      // permission policy above (P1 finding: the previous conditional
-      // spread skipped the fields, leaving session A's measurement on
-      // session B's first frames, indefinitely when B's measurement
-      // fails).
-      contextTokens,
-      contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
-    })
+    // owns the commit coordination. The three parts are ONE atomic
+    // display-subject commit (M3-5 PR1 §9.7).
+    deps.surface.commitStatus(patch, viewed === undefined
+      ? {
+          model: modelLabel(),
+          // The FULL cwd lands in the structured workspace section (the
+          // footer cwd ITEM shortens for display itself); the legacy
+          // display value (tail segments) is derived from it.
+          cwd: liveCwd,
+          branch: gitBranch(liveCwd),
+          goal: goalText,
+          turns: stats.turns,
+          steps: stats.steps,
+          // PR5 (plan §3.2): the legacy line shares the availability rule with
+          // the structured usage section (the main-subject branch only — a
+          // viewer child's own fold stays numeric).
+          statsLine: formatStats(stats, deps.presentation.mainRecentPerformanceAvailable?.() ?? true),
+          // EXPLICITLY clear the permission when the service/agent is
+          // unavailable: the legacy merge keeps the old value otherwise,
+          // and syncExtensionState would publish a STALE permission to the
+          // extension snapshot (a state transition where the permission
+          // preset service or the live agent is momentarily gone).
+          permission: deriveRunnerPermission(permission, deps.liveAgent()),
+          // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
+          // TuiApp merge keeps old fields otherwise, and the session
+          // switch / cold-resume window before the deferred measurement
+          // would show the PREVIOUS session's context pressure — exactly the
+          // permission policy above (P1 finding: the previous conditional
+          // spread skipped the fields, leaving session A's measurement on
+          // session B's first frames, indefinitely when B's measurement
+          // fails).
+          contextTokens,
+          contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
+        }
+      : {
+          // The CHILD's legacy display fields describe the SAME display
+          // subject: every Session-owned field is written explicitly so a
+          // parent value cannot survive the merge.
+          model: childModelLabel(childStatus),
+          cwd: workspace.cwd,
+          branch: workspace.branch ?? '',
+          goal: childGoalText(childStatus),
+          turns: subjectStats.turns,
+          steps: subjectStats.steps,
+          statsLine: formatStats(subjectStats),
+          permission: childStatus?.permission,
+          contextTokens: childContextTokens,
+          contextWindow: childStatus?.context?.contextWindow,
+        }, presentation)
   }
 
   /**

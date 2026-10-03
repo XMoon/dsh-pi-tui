@@ -235,8 +235,11 @@ export interface SurfaceSnapshot {
   readonly themeRevision: number
 }
 
-/** The live session's identity and mode (plan §7.2). Secrets, credentials,
- * raw Context and live Agent objects are NEVER included. */
+/** The current DISPLAY SUBJECT's identity and mode (plan §7.2, M3-5 PR1):
+ * the main session, or the viewed child session while a subagent viewer is
+ * mounted. Every field describes that ONE subject — `viewerMode` tells which
+ * one. Secrets, credentials, raw Context and live Agent objects are NEVER
+ * included. */
 export interface SessionSnapshot {
   readonly sessionId?: string
   readonly title?: string

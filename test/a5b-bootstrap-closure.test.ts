@@ -452,7 +452,7 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     [
       'viewing', 'setViewedQueueAgent', 'activePendingSessionId',
       'pendingSubagentCalls', 'viewCallToChild', 'viewerOpen', 'openingViewer',
-      'viewerSessionAbort', 'refreshViewerFooter', 'enterView', 'exitView',
+      'viewerSessionAbort', 'enterView', 'exitView',
       'viewedChildPresentation', 'settleSubagentSubmit', 'subagentPromptNotice',
     ],
   ],
