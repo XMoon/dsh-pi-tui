@@ -35,16 +35,21 @@ M7  NOT STARTED   (default flip; direct rollback kept for >= 1 release)
 M8  NOT STARTED   (Direct ownership retirement — only after concurrency proof)
 
 Current production backend: direct
-Experimental backend:      ONE complete Backend(kind='remote') assembly exists (M3-3B:
+Experimental backend:      ONE complete Backend(kind='remote') assembly (M3-3B:
                            M3-3A semantics + interaction + config + archive + Plugin
-                           Manager + Job observation); constructed/tested only, never
-                           selected by normal startup
-Experimental Remote:        reads + selected ordinary writes + interaction (approval +
-                           rc.2 Question lifecycle) + ConfigPort settings mirror +
-                           session archive (adapters proven in tests/smoke; the
-                           M3-4 PR1 application aggregate can compose the whole graph
-                           internally — still no production bootstrap call site)
-Remote writes:              experimental/test only (no production wiring)
+                           Manager + Job observation) with the M3-4 main-TUI
+                           application closure (PR1–PR5) composed on top of it;
+                           qualified only through the internal in-process wire path —
+                           normal/default startup constructs Direct and no
+                           public/config/env Remote selector exists
+Experimental Remote:        the M3-4 main-TUI application is closed on the wire
+                           (Session reads/writes, interaction, status, command runtime,
+                           rewind, images, tool cards); secondary surfaces and
+                           writer-held recovery remain M3-5, and normal startup never
+                           selects it
+Remote writes:              available only through the experimental in-process wire
+                           application path; no normal/default production Remote
+                           selection
 Remote attach:              unsupported
 Direct rollback:           available
 ```
@@ -598,8 +603,9 @@ permanent architecture debt.
 - Host-originated declarative UI crosses only as serializable facts/tree/action
   identity; callbacks/components/renderers/editors remain on their owning side.
 
-These four are correctness contracts, not implementation style preferences; the
-per-invariant forbidden forms and the composition-ownership rules live in
+These generated-wire, composition and ownership invariants are correctness
+contracts, not implementation style preferences; the per-invariant forbidden
+forms and the composition-ownership rules live in
 `docs/client-server-coupling.md`.
 
 ### Composition ownership and UI locality clarification (2026-10-03)
@@ -3773,6 +3779,19 @@ is MERGED into `next` as the merged HEAD `e520c016` (the PR's final branch HEAD
   projection on Remote; the live Direct owner on Direct); `/preset` current
   and blankness are branch-neutral (`SessionReader.sessionStatus()?.preset`
   / `blank()`), Direct keeps its `composedPreset(agent.ctx)` preference.
+- **Remote model-fact truthfulness** (whole-PR review F2): an UNAVAILABLE
+  Remote `sessionStatus().model` projection stays unavailable — the welcome
+  card's `model` fact is optional and an absent projection is passed THROUGH
+  (spread away, no `model` key), so the card renders NO model line: never an
+  invented authoritative `"unconfigured"`, never the legacy `"no model"`
+  literal, and an absent projection cannot retain or resurrect the previous
+  Session's model (the fact is re-derived from the CURRENT binding on every
+  status commit). The `SessionReader` authority and the structured footer's
+  existing omission path are unchanged. Evidence:
+  `test/m3-4-pr4-guards.test.ts` "PR5 F2" (the exact `...facts.model === undefined`
+  pass-through plus the card's optional model line) and `test/rendering.test.ts`
+  "F2" (no `unconfigured`, no `no model`, no model value at all while the other
+  facts still render).
 - **Launch preset on resume** (plan §3.5): the Remote resume applies
   `--preset` through the semantic `PresetCatalog.selectSessionPreset()` —
   blank sessions switch (one official selection row, never retried), started
@@ -3886,6 +3905,21 @@ is MERGED into `next` as the merged HEAD `e520c016` (the PR's final branch HEAD
   is NOT origin, and running+steer still reaches the handler, never the
   inbox) plus the Remote running+steer regressions from the earlier
   supplement closure.
+- **Client exact-line ownership** (whole-PR review; §1C-6): the LIVE Client
+  registry is the line-ownership SOURCE, not the static policy name set.
+  `ClientCommandRegistry.claimsLine(parsed)` answers whether THIS exact line is
+  Client-executable: a registered definition claims the BARE token, and an
+  argued line ONLY when the definition declares an `input` descriptor (the
+  official `matchEnter` rule). Bare `/model` is therefore Client owned, `/model
+  foo` is an ordinary submission while that definition declares no `input`,
+  `/preset foo` stays Client owned (`input` declared), and a dynamic skill
+  wrapper must declare `input` to own its argued line. `execute()` enforces the
+  SAME admission (`claimsLineOf`) as its sink invariant, so a producer can never
+  admit a line the registry would not run; `LOCAL_COMMANDS` remains the static
+  policy surface only and no ownership decision reads it (the indirect
+  static-list bridge is forbidden too). Evidence:
+  `test/client-command-registry.test.ts` (bare/argued/no-input/unregistered +
+  the sink refusal) and the `m3-4-pr4-guards` §1C-6 structural locks.
 - **Remote `/yolo` semantic reachability** (PR5 v4 §1D): the Direct-Agent
   prerequisite is removed from the transport-neutral permission apply —
   the mounted L6 proves live-session `/yolo` → ConfigPort → the official
