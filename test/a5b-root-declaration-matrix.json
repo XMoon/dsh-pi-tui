@@ -1820,7 +1820,8 @@
       "hostDependency": false,
       "head": "const draftImages = new DraftImageStore()",
       "tests": [
-        "rules.test.ts"
+        "rules.test.ts",
+        "runner-remote-submission.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
