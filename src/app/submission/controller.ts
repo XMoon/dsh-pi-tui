@@ -1640,7 +1640,19 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // a session exists. Without a live agent it runs locally (and creates
     // none); with a live agent it dispatches through the session's command
     // service, but the persist closure still supplies undefined.
-    if (parsed !== undefined && isSessionless) {
+    // §1C-7 (whole-PR review): the sessionless LOCAL route consumes the SAME
+    // classification. A name in SESSIONLESS_COMMANDS is not by itself a
+    // TUI-owned line: a genuine Host name whose execute-kind descriptor does
+    // NOT claim the ARGUED form (`/model foo`, `/exit foo`) classifies as
+    // `ordinary-submission` with `hostNameReserved`, and re-judging by name
+    // alone pulled it back into the local command surface — the very routing
+    // drift the classifier exists to prevent. Every sessionless name is in
+    // `LOCAL_COMMANDS`, so a genuinely TUI-owned line still classifies as the
+    // TUI client-command family and keeps this route unchanged (and its
+    // delivery stays `queue`, so it is never steered by falling through).
+    if (parsed !== undefined && isSessionless
+      && classification.kind === 'client-command'
+      && classification.source === 'tui') {
       if (deps.liveAgent() === undefined) {
         runLocalCommand(parsed, text, persistHistory, delivery, undefined)
       } else {
