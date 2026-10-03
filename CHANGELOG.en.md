@@ -40,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `space toggle · ↵ continue/review`, with the last question and the review
   page distinguishing continue/review/submit.
 
+- The subagent viewer is now a real display subject: while a viewed child
+  session is on screen, its model/preset/permission, context pressure and
+  window, cumulative token usage, todos and working directory all come from
+  that child session's own session state — never from the parent session and
+  never from the child's local stats fold. The parent's corresponding facts
+  no longer appear on the child surface, and leaving the viewer restores the
+  parent state (including any todo written while viewing) immediately. The
+  extension session snapshot follows the same display subject: `sessionId`/
+  `workspaceRoot`/`title` and `model`/`cwd`/`permission`/`turns`/`steps` plus
+  the activity `todoCount`/`todoSummary` always describe one subject, with
+  `viewerMode` telling whether it is the main session or the viewed child —
+  an identity/status mismatch is no longer published. While a child is viewed,
+  the main session's identity head card (model / working directory / session
+  id) is no longer shown, and the main session's latest identity returns
+  immediately on exit.
+
 ### Fixed
 
 - The fullscreen long user message bubble is now one local disclosure

@@ -27,8 +27,9 @@ M3-4 PR3 DONE      (submission/interaction/shell authority over the Remote main 
 M3-4 PR4 DONE      (main-session command/action plane: implementation landed — Client command registry (both branches), Host origin/claim authority, whole-log rewind, Client-derived tool cards, permission projection/cycle; its review loop closed)
 M3-4 PR5 DONE/MERGED (final main-application closure MERGED as PR #211 into `next @ e520c016`: command Host/Client ORIGIN authority, descriptor/attachment precedence, rewind picker/claimed/adopted/error identity lifecycle with the mounted stale-success L6, `/yolo` Remote reachability, `/status` unknown-vs-zero, Direct cache read/write parity, Ctrl+R identity, docs/contract reconciliation)
 M3-4 DONE          (PR1–PR5 landed and PR5 merged; the main TUI application + command runtime run on the experimental Remote backend — see the M3-4 status section)
+M3-5 PR1 DONE      (child display-subject status foundation: Direct SessionStatus is Session-subject-neutral, ONE shared `SessionStatus(sessionId)` read, the viewed child's Session-owned facts (model/preset/permission/context/usage/todos/cwd/title/goal) come from its own projection, the released extension v2 live-session snapshot preserved with the additive `session.displaySubject`, atomic main↔child↔child transitions — see the M3-5 PR1 status section. Remote child SessionStatus authority is qualified; the Remote Task/child surface stays PR2)
 M3-5 PR4 DONE      (Remote Plugin Manager closure: lifecycle/qualification over an ALREADY backend-neutral surface — one invalidation hint on `PluginManagerPort`, Direct/Remote mappings, demand-aware controller rereads, latest-started read currentness, dispose hardening, real Remote `/plugins` + Settings dual-entry L6, external-change and reconnect invalidation L6 — see the M3-5 PR4 section)
-M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR4 landed, PR1/PR2/PR3/PR5/PR6 remain — see the migration stage pointer)
+M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR4 landed, PR2/PR3/PR5/PR6 remain — see the migration stage pointer)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -59,7 +60,8 @@ Direct rollback:           available
 
 ```text
 M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
-M3-5 = IN PROGRESS          (PR4 Remote Plugin Manager closure landed; PR1/PR2/PR3/PR5/PR6 remain)
+M3-5 = IN PROGRESS          (PR1 child display-subject status foundation and
+                             PR4 Remote Plugin Manager closure landed; PR2/PR3/PR5/PR6 remain)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
@@ -4181,8 +4183,140 @@ currentness, Ctrl+R identity) are recorded above with their evidence. This
 closure state is authoritative at the MERGED HEAD (`next @ e520c016`, PR #211,
 v4 §19) — not only on the pre-merge branch. The next migration stage is M3-5
 (secondary surfaces + writer-held recovery), which is IN PROGRESS; see the
-M3-5 PR4 section below. No automatic "PR6" is created for historical unchecked
+M3-5 PR1/PR4 sections below. No automatic "PR6" is created for historical unchecked
 checklist items.
+
+## M3-5 PR1 status (DONE — child display-subject status foundation)
+
+M3-5 PR1 makes the viewed child Session a first-class **display subject** of
+the Session-scoped status, without adding a second status subsystem.
+
+What landed:
+
+- **Direct `SessionStatus` is Session-subject-neutral.**
+  `DirectSessionReader.sessionStatus(sessionId)` resolves the
+  attached/retained `Session` (`liveSession`) instead of a live Agent, and
+  reads the official projection units of that exact Session. A retained
+  Session whose Agent is inactive (or never mounted in this process) still
+  answers its own facts; no cold Session is materialized merely to obtain
+  status, and no parent/default fallback exists.
+- **ONE shared SessionStatus capability.**
+  `StatusRuntimeDeps.sessionStatus(sessionId)` is bound to
+  `backend.sessionReader.sessionStatus` on BOTH branches (on Remote it is the
+  same function the branch facts already exposed). The Remote-only
+  `StatusRemoteFacts` bundle keeps only the genuinely transport-specific
+  `plan` projection. The capability always receives an EXPLICIT subject id —
+  selection stays in StatusRuntime.
+- **ONE display-subject selector.** StatusRuntime resolves the current main
+  Session or the viewed child (`viewer.read()` supplies the child IDENTITY
+  only), takes ONE `SessionStatus(subjectId)` cut in the same synchronous
+  step, and derives the child's composition (model/preset), access
+  (projection-authoritative permission), workspace (its own cwd; a Remote
+  child's Host cwd never implies a Client-local branch), cumulative tokens and
+  context (numerator = `projectedTokens ?? pressureTokens`, window = the
+  projection's) and todos/title/goal. An absent child fact stays ABSENT — the
+  parent's value, the sessionless default and the child fold's total are never
+  stand-ins.
+- **Viewer-local stays viewer-local.** The child viewer keeps its own
+  `StatsFolder` for turns/steps, recent presentation performance and the stats
+  line. `ViewerRuntime` no longer fabricates any official cwd/tokens/context/
+  todos/model for status presentation.
+- **One atomic commit.** `TuiApp.commitDisplaySubject(patch, legacy,
+  presentation)` installs the Session-owned store sections (including `view`),
+  the ACTIVITY section (`todoCount` = the display-subject list length), the
+  legacy display fields and a DISPOSABLE display-subject presentation
+  projection (todo list / session title / session identity — otherwise durable
+  MAIN state) before ANY notification: one synchronous `StatusStore.update`
+  and then the legacy/extension publish. An already-open todo panel is
+  re-rendered from the same committed projection (enter, child A→B, a child
+  todo change and exit alike). No observer can read `view=child` beside the
+  parent's sections or todo count (or the reverse); the main durable
+  presentation state is never overwritten and returns with its LATEST values.
+- **The main session's welcome card is hidden while a child is the display
+  subject** (its model/workspace/session identity would otherwise describe the
+  parent session on the child surface); its facts are untouched and the LATEST
+  main identity returns on exit. The transcript rows are re-measured on the
+  visibility change, so regular and fullscreen geometry stay consistent.
+- **The existing footer consumers follow the subject.** `model`,
+  `agent-preset`, `permission-preset`, `context`, `git-branch` and `todo` read
+  the committed section, so a viewed child's model/provider, configured preset,
+  available permission, context pressure/window, branch and todo count are
+  actually displayed; an absent child fact renders nothing. Genuinely
+  main-only chrome (Task Center badge, plan state, the `ext:*` bridge, queue,
+  agents, run-state) keeps its subject gate.
+- **Extension snapshot parity.** The extension `SessionSnapshot` describes the
+  same committed display subject: `viewerMode` (derived from the committed
+  `view`), `sessionId`/`workspaceRoot`/`title`, `model`/`cwd`/`branch`/
+  `permission`/`turns`/`steps` and the activity `todoCount`/`todoSummary`. A
+  main identity with child facts (or the reverse) is never published. No new
+  public field was added.
+- **Remote main permission retention is subject-scoped.** The Remote branch's
+  "an unavailable projection keeps its last value" rule now retains only a
+  value the PREVIOUS committed snapshot carried for the SAME (main) subject —
+  a child's permission never becomes the main session's retained value after
+  the viewer closes.
+
+Closure evidence:
+
+- L2 (Direct SessionStatus authority): `test/session-status-projection.test.ts`
+  — a retained Session with no live Agent answers its own model/context/usage/
+  todos/cwd; retained child A / child B isolation; an unattached Session and a
+  missing projection service read unavailable.
+- L1/L2 (display-subject derivation): `test/status-display-subject.test.ts` —
+  the main subject keeps the main view/sections; every child Session-owned
+  section comes from `SessionStatus(childId)`; an unavailable child status
+  leaves those fields absent (never the parent's); child A → child B keeps no
+  A residue; child → main re-derives the main subject; a Remote child's Host
+  cwd implies no local branch while the same cwd does for Direct; the Remote
+  main subject never retains a child's permission; the child context
+  numerator/window are the projection's, never the bounded fold's.
+- Atomicity / first frame: `test/footer-view-subject.test.ts` — the first frame
+  after entering already shows the child subject; every published StatusStore
+  snapshot is subject-consistent across enter/exit; a legacy parent `setStatus`
+  while viewing never clobbers the child subject; absent child usage never
+  leaks the parent token figures.
+- Todo + extension parity: `test/surface-host-app.test.ts` — across
+  main → A → B → main the extension session/activity slices name the current
+  display subject (identity + status fields + todo count/summary), the child
+  todo panel renders the child list, the LATEST main todo returns on exit, and
+  no published snapshot mixes a viewing flag with a main identity (or the
+  reverse).
+- Direct application L6: `test/runner-viewer-task-integration.test.ts` — the
+  REAL `/tasks` → Enter entry mounts the child; the committed child snapshot
+  carries `SessionStatus(childId)`'s model/preset/permission/cwd/context/
+  cumulative tokens (the official 11/5, not the bounded fold's 10/2)/todos and
+  the presentation projection (sessionId/workspaceRoot/title/todos) from the
+  SAME commit, and the RENDERED footer shows the child's model, permission,
+  tokens, context window, todo summary and goal (never the parent's); a late
+  parent refresh cannot repaint the child; child A → child B through the same
+  entry leaves no A residue; exit restores the parent. A negative control
+  re-enters the child with its official projection REMOVED and proves the
+  rendered cumulative tokens/context are omitted — the bounded fold's 10/2 sum
+  is never presented as a session total.
+- Whole-surface subject proof: `test/child-view.test.ts` — while the viewer is
+  mounted the MAIN welcome card (model/workspace/session id) is absent from the
+  viewport, a main identity commit during viewing does not surface, and exit
+  restores the LATEST main facts; the Direct L6 suite asserts the same across
+  the WHOLE viewport (`p/parent-model` and the parent session id appear nowhere
+  while the child is displayed, and return after exit).
+- Todo/activity atomicity: `test/footer-view-subject.test.ts` — with the todo
+  panel ALREADY open on the main subject, the display-subject commit publishes
+  the child's `activity.todoCount` in the same store update and re-renders the
+  open panel; a hidden main `todo/write` cannot replace it; child A→B and exit
+  (with the panel still open) restore the right list. Every published snapshot
+  carries a view subject and a todo count from the SAME subject.
+
+Explicitly NOT claimed by PR1:
+
+- **Remote child viewer L6: NOT YET CLAIMED.** The Remote child
+  SessionStatus authority is qualified (adapter-level semantic + projection
+  tests only); the Remote Task Center/child-viewer production composition is
+  PR2's ownership, so no Remote child-viewer L6 is asserted here.
+- Remote Task Center, Remote Job viewer, Remote Plugin Manager, writer-held
+  caller recovery and the child durable-image read remain M3-5 PR2–PR6.
+
+Remote child SessionStatus authority: qualified. Remote child viewer L6: not
+yet claimed — owner M3-5 PR2.
 
 ## M3-5 PR4 — Remote Plugin Manager closure (DONE)
 
@@ -4251,6 +4385,6 @@ in this PR is labelled L6 for installation.
 
 ### Remaining M3-5 obligations
 
-PR1 (child display-subject status), PR2 (Remote Task Center + real child
-viewer), PR3 (Remote Job viewer), PR5 (writer-held recovery) and PR6 (stage
-closure) remain. `M3-5 DONE` is not claimed anywhere in this PR.
+PR2 (Remote Task Center + real child viewer), PR3 (Remote Job viewer), PR5
+(writer-held recovery) and PR6 (stage closure) remain. `M3-5 DONE` is not
+claimed anywhere in this PR.
