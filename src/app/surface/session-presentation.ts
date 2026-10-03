@@ -267,6 +267,14 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
    * a stale hydrate can never flip the replacement subject's bit.
    */
   mainRecentPerformanceAvailable(): boolean
+  /**
+   * F1 (PR5 §3.2): re-answer the availability bit off the SAME fold the live
+   * ingress just mutated, so a bounded window that committed `false` can flip
+   * on ordinary appended evidence without a `loadOlder`/rehydrate. Monotonic
+   * within a generation (`false → true` only) and it re-derives the status when
+   * the bit flips.
+   */
+  refreshRecentPerformanceAvailability(): void
   /** The synchronous surface reset that follows a generation bump (A2 seam). */
   resetForGeneration(): void
 }
@@ -366,6 +374,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     get window() { return windowController },
     get previews() { return mainStreamingToolPreviews },
     applyToolPreview: (event: Event) => applyStreamingToolPreviewEvent(mainStreamingToolPreviews, event),
+    // Forwarded to the owner's own live refresh (declared below the fold state
+    // it reads); a live accessor so a session commit cannot capture a stale one.
+    refreshRecentPerformanceAvailability: () => refreshRecentPerformanceAvailability(),
   }
 
   // Tool-call arguments by callId, for the approval-preview dialog.
@@ -726,6 +737,25 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const mainFolder = (): TranscriptFolder => folder
   const mainStats = (): StatsFolder => statsFolder
   const mainRecentPerformanceAvailable = (): boolean => recentPerformanceAvailable
+  /**
+   * F1 (PR5 §3.2): the availability bit must follow the SAME fold's LIVE
+   * evidence. A bounded Remote window that committed `false` (truncated, not
+   * enough valid samples yet) can cross the completeness threshold through
+   * ordinary appended events — with no `loadOlder` and no rehydrate. Re-answer
+   * the predicate off the fold the append already updated (never a second scan
+   * or a second fold) and, when it flips, re-derive the status in the same step
+   * so the footer and `/status` stop omitting the recent figures immediately.
+   *
+   * Monotonic within a generation: `false → true` only. A replacement subject
+   * returns to `false` in `resetForGeneration`, and the next fenced hydrate
+   * re-proves it (or disproves it) as before.
+   */
+  const refreshRecentPerformanceAvailability = (): void => {
+    if (recentPerformanceAvailable) return
+    if (!statsFolder.hasEnoughRecentEvidence()) return
+    recentPerformanceAvailable = true
+    deps.refreshStatusCheap()
+  }
   const mainWindow = (): TranscriptWindowController => windowController
   const restoreMainTranscriptAnchor = (): void => {
     windowController.isLatest()
@@ -744,6 +774,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     mainFolder,
     mainStats,
     mainRecentPerformanceAvailable,
+    refreshRecentPerformanceAvailability,
     mainWindow,
     applyAssistantInput,
     setToolArgs,

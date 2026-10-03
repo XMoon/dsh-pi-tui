@@ -235,7 +235,12 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       deps.surface.app.setWelcomeCard({
         cwd: facts.cwd ?? '',
         sessionId: facts.sessionId,
-        model: facts.model === undefined ? 'unconfigured' : `${facts.model.provider}/${facts.model.model}`,
+        // F2/PR5 truthfulness: an ABSENT `model` projection fact is
+        // UNAVAILABLE, never an authoritative "unconfigured" business value —
+        // the fact is omitted and the card renders no model line.
+        ...facts.model === undefined
+          ? {}
+          : { model: `${facts.model.provider}/${facts.model.model}` },
         version: versionDisplay(),
         ...facts.preset === undefined ? {} : { preset: facts.preset },
       })

@@ -1002,7 +1002,7 @@ const WELCOME_FACT_LABEL_WIDTH = 9
  * - width < 24: compact text rows, no full whale
  */
 class WelcomeCard implements Component {
-  private facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string } | undefined
+  private facts: { cwd: string; sessionId: string; model?: string; version: string; preset?: string } | undefined
   private idle = false
   private lastWidth = -1
   private cached: string[] = []
@@ -1017,7 +1017,7 @@ class WelcomeCard implements Component {
   private whaleVariant = -1
 
   /** Replace the facts; the next render rebuilds the card. */
-  setFacts(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
+  setFacts(facts: { cwd: string; sessionId: string; model?: string; version: string; preset?: string }): void {
     this.facts = facts
     this.idle = false
     this.cached = []
@@ -1146,7 +1146,9 @@ class WelcomeCard implements Component {
     const label = (text: string): string => `${text}${' '.repeat(Math.max(0, WELCOME_FACT_LABEL_WIDTH - text.length))}`
     return [
       `${color.textStrong('dsh-pi-tui')}  ${color.textMuted(facts.version)}`,
-      `${color.textDim(label('model'))}${color.text(facts.model)}`,
+      // An ABSENT model fact (a Remote projection that cannot answer yet) omits
+      // the line entirely — the label never carries an invented business value.
+      ...facts.model === undefined ? [] : [`${color.textDim(label('model'))}${color.text(facts.model)}`],
       ...(facts.preset === undefined ? [] : [`${color.textDim(label('preset'))}${color.text(facts.preset)}`]),
       `${color.textDim(label('cwd'))}${color.text(facts.cwd)}`,
       `${color.textDim(label('session'))}${color.text(facts.sessionId)}`,
@@ -1159,7 +1161,7 @@ class WelcomeCard implements Component {
     return [
       `${color.textStrong('🐋 dsh-pi-tui')} ${color.textMuted(facts.version)}`,
       [
-        color.text(facts.model),
+        facts.model === undefined ? '' : color.text(facts.model),
         facts.preset === undefined ? '' : `preset ${color.text(facts.preset)}`,
       ].filter(part => part !== '').join(' · '),
       color.text(facts.cwd),
@@ -12931,7 +12933,7 @@ export class TuiApp {
    * previous head.
    * @param facts - directory, session id, model, version, and the optional agent preset to display.
    */
-  setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
+  setWelcomeCard(facts: { cwd: string; sessionId: string; model?: string; version: string; preset?: string }): void {
     if (this.workspaceRoot !== facts.cwd) {
       this.workspaceRoot = facts.cwd
       // Path-bearing message components capture the root at construction;
@@ -12944,7 +12946,7 @@ export class TuiApp {
     this.extensionHost?.updateSession({
       sessionId: facts.sessionId,
       workspaceRoot: facts.cwd,
-      ...facts.model === '' ? {} : { model: facts.model },
+      ...facts.model === undefined || facts.model === '' ? {} : { model: facts.model },
     })
   }
 
