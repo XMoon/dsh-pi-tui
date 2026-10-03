@@ -2741,6 +2741,30 @@ test('a name the host catalog resolves with an UNCLAIMED line never runs the col
     'the MODEL receives the raw line')
 })
 
+test('whole-PR F2: an ordinary line under a Host name a LIVE skill wrapper shares takes the ORDINARY steer route', async (t) => {
+  // The RAW skill predicate used to outrank the classification on this sibling:
+  // with a live `/grilling` wrapper AND a genuine execute-kind Host `/grilling`,
+  // `/grilling args` is an ORDINARY submission (the Host does not claim the
+  // argued line) — so a steer must take the ordinary steer path, never the
+  // wrapper's skill delivery (which would run the wrapper handler and steer a
+  // rewritten line).
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+    hostCommands: ['grilling'],
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.host.steered.length + harness.host.followedUp.length > 0, 5_000)
+  assert.equal(harness.executed.some(entry => entry.line.startsWith('/grilling')), false,
+    `the wrapper must not run an ordinary line: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.steered.length, 1, 'the ordinary steer reaches the agent inbox')
+  const steered = harness.host.steered[0] as { content: readonly { text?: string }[] }
+  assert.deepEqual(steered.content.map(block => block.text), ['/grilling args'],
+    'the RAW line steers — never a rewritten skill invocation')
+})
 test('§D3 immediate echo (review F11): an argued line of a host-resolved name echoes BEFORE the FIFO turn it waits behind', async (t) => {
   // The submit-time echo gate must consume the SAME §D3 line authority as
   // the delivery/attachment/dispatch gates: a HOST-RESOLVED name is never a
@@ -3268,6 +3292,87 @@ test('a DISAPPEARED host name never turns an attachment-bearing line into a loca
     'the model receives the multimodal prompt')
 })
 
+test('whole-PR F1: a vanished SAME-NAME TUI Host command keeps the argued line ordinary WITH its attachment', async (t) => {
+  // The static TUI name list used to absorb this line after the disappearance:
+  // `/model` is in LOCAL_COMMANDS, so the final attachment classification
+  // re-judged the line as a TUI command and refused the attachment that was
+  // legal at submit time (the genuine Host execute-kind descriptor did not
+  // claim `/model <image>`).
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-f1-attach-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
+  const { harness, mounted, imageSaves, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    // A genuine GLOBAL Host `/model`: execute-kind, so it never claims the
+    // argued form.
+    hostCommands: ['model'],
+  })
+  harness.onCreateSession(() => { disposeHostCommand('model') })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/model ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'vanished same-name TUI host command with an image')
+  assert.equal(mounted.app.notifyTextForTest(), '',
+    'the sticky submit-time non-invocation must not become a local-command refusal')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/model')),
+    `never the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.equal(imageSaves.length, 1, 'the image is admitted through the ordinary model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'image'],
+    'the model receives the multimodal prompt')
+})
+
+test('whole-PR F1 control: the SAME vanished SAME-NAME line (no attachment) is delivered, never plane-run', async (t) => {
+  const life = testLifecycle(t)
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    hostCommands: ['model'],
+  })
+  harness.onCreateSession(() => { disposeHostCommand('model') })
+  mounted.app.setDraft('/model prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'vanished same-name TUI host command')
+  assert.equal(harness.createdSessionIds.length, 1, 'the ordinary path creates the session')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/model')),
+    `the vanished name is never asked to run the argued line: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the line is an ordinary submission')
+})
+
+test('whole-PR F1: a vanished genuine Host name is NOT reclaimed by a live skill wrapper (sticky non-invocation)', async (t) => {
+  // The discriminating case for the STICKY submit-time non-invocation: the
+  // genuine Host `/grilling` (execute-kind) does not claim `/grilling args`, so
+  // the line is an ordinary submission; the name then disappears while a LIVE
+  // skill wrapper `/grilling` remains. Without the sticky authority the wrapper
+  // term owns the line, and the skill route delivers the wrapper's skill body
+  // instead of the raw ordinary line.
+  const life = testLifecycle(t)
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    skills: true,
+    hostCommands: ['grilling'],
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  harness.onCreateSession(() => { disposeHostCommand('grilling') })
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'vanished host name beside a live wrapper')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/grilling')),
+    `the live wrapper must not reclaim the vanished name: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the line is an ordinary submission')
+  const delivered = harness.host.followedUp[0] as { content: readonly { text?: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.text), ['/grilling args'],
+    'the MODEL receives the raw line, not a rewritten skill invocation')
+})
+
 test('a deferred session where the host name DISAPPEARS keeps the argued line an ordinary submission', async (t) => {
   // The execute-kind -> unresolved mutation. The standing catalog resolves
   // /deploy as EXECUTE-KIND, so `/deploy prod` is a known NON-invocation when
@@ -3362,10 +3467,10 @@ test('whole-PR F4: an argued SESSIONLESS name a genuine Host descriptor does not
     `it must never reach the command plane: ${JSON.stringify(harness.executed)}`)
 })
 
-test('whole-PR F4 control: the SAME argued name stays LOCAL when no genuine Host descriptor owns it', async (t) => {
-  // The gate must not disturb the normal sessionless route: without a Host
-  // collision `/model foo` is this surface's own client-command line, so it
-  // executes locally and is never delivered to the model.
+test('whole-PR F4/F5: an ARGUED line of a no-input TUI name is an ORDINARY submission (official matchEnter)', async (t) => {
+  // `/model` declares no `input` descriptor, so the official admission makes
+  // `/model foo` an ordinary submission even with NO Host collision — the
+  // static name list must not answer ownership.
   const life = testLifecycle(t)
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'queue',
@@ -3374,17 +3479,40 @@ test('whole-PR F4 control: the SAME argued name stays LOCAL when no genuine Host
   })
   mounted.app.setDraft('/model foo')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  await drainUntil(() => harness.executed.length > 0 || mounted.app.notifyTextForTest() !== '', 5_000)
-  // The discriminating observable is the SESSIONLESS LOCAL route itself: it runs
-  // the TUI handler with NO session and never delivers the line. (On Direct both
-  // the TUI-owned route and the Host route funnel through
-  // `commandPlane.execute`, so `executed` cannot separate them.)
-  assert.equal(harness.createdSessionIds.length, 0,
-    'a genuinely TUI-owned sessionless line runs locally without creating a session')
-  assert.equal(harness.host.followedUp.length, 0,
-    'and it is never delivered as a prompt')
+  await waitForDelivery(harness.host, 'argued no-input TUI name')
+  assert.equal(harness.createdSessionIds.length, 1, 'ordinary submissions create the session')
+  assert.equal(harness.host.followedUp.length, 1, 'and are delivered to the agent')
 })
 
+test('whole-PR F4/F5 control: the BARE token of the same name stays the LOCAL TUI command', async (t) => {
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  mounted.app.setDraft('/model')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.executed.length > 0 || mounted.app.notifyTextForTest() !== '', 5_000)
+  assert.equal(harness.createdSessionIds.length, 0,
+    'a sessionless local command runs without creating a session')
+  assert.equal(harness.host.followedUp.length, 0, 'and is never delivered as a prompt')
+})
+
+test('whole-PR F4/F5 control: an ARGUED line of an input-declaring TUI name stays LOCAL', async (t) => {
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  mounted.app.setDraft('/preset plan')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.executed.length > 0 || mounted.app.notifyTextForTest() !== '', 5_000)
+  assert.equal(harness.createdSessionIds.length, 0,
+    'the input-describing Client definition claims the argued line and runs locally')
+  assert.equal(harness.host.followedUp.length, 0, 'and it is not delivered as a prompt')
+})
 test('AC-2/R7-1: a genuine Host leading-input collision next to the Client `/export` runs the Host execution exactly once', async (t) => {
   // AC-2: given a real Host `/export` and this TUI's own Client `/export`, the
   // Host-ORIGIN name/line claim must decide the final command-plane ownership.

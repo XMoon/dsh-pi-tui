@@ -50,6 +50,14 @@ export const SESSIONLESS_COMMANDS = new Set([
  * live sources (the genuine Host-origin descriptors, the Client registry,
  * the extension registry, the skill-wrapper state) through
  * {@link classifyCommandLine}.
+ *
+ * `/kill` is the explicit example of the rule and its DISPOSITION is
+ * deliberate: it has NO live Client registration (and no handler anywhere in
+ * this surface), so it owns no production line under the exact-line contract.
+ * It stays in this set for reserved-name validation and the extension
+ * collision catalog only; a typed `/kill ...` is handed to the command plane
+ * as an unresolved name (the final catalog may still resolve a session-scoped
+ * command), which settles as a non-match — never as a TUI command.
  */
 export const LOCAL_COMMANDS = new Set([
   'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',

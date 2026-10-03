@@ -58,6 +58,14 @@ export interface ClientCommandRegistry {
   get(name: string): ClientCommandDefinition | undefined
   /** List the registered descriptors (name-sorted, like `commands.list`). */
   list(): readonly ClientCommandDefinition[]
+  /** Whether the LIVE registry owns THIS exact line (§1C-6): the definition
+   *  is registered AND claims the line — the BARE token, or an argued line
+   *  when the definition declares an `input` descriptor (the official
+   *  `matchEnter` semantics, where a contribution claims the bare token and a
+   *  descriptor without `input` never claims an argued line). This is the
+   *  ownership SOURCE the line classifier consumes; the static policy name
+   *  list is never asked who owns a production line. */
+  claimsLine(parsed: { readonly name: string; readonly rawInput?: string } | undefined): boolean
   /** Execute one Client-owned command line in the Client Context. Resolves
    *  `undefined` when the registry does not resolve the name or the line is
    *  not an invocation — the SAME admission vocabulary the official executor
@@ -75,7 +83,16 @@ export interface ClientCommandRegistry {
  */
 export function createClientCommandRegistry(parse: (line: string) => { name: string; rawInput: string } | undefined): ClientCommandRegistry {
   const definitions = new Map<string, ClientCommandDefinition>()
+  // ONE admission rule for both the ownership question above and the sink
+  // below, so a producer can never admit a line the registry would not run.
+  const claimsLineOf = (parsed: { readonly name: string; readonly rawInput?: string } | undefined): boolean => {
+    if (parsed === undefined) return false
+    const definition = definitions.get(parsed.name)
+    if (definition === undefined) return false
+    return (parsed.rawInput ?? '').trim() === '' || definition.input !== undefined
+  }
   return {
+    claimsLine: claimsLineOf,
     register(definition) {
       definitions.set(definition.name, definition)
       return () => {
@@ -93,6 +110,10 @@ export function createClientCommandRegistry(parse: (line: string) => { name: str
       if (parsed === undefined) return undefined
       const definition = definitions.get(parsed.name)
       if (definition === undefined) return undefined
+      // §1C-6 SINK INVARIANT: the same exact-line admission the classifier
+      // consumes — an argued line of a definition WITHOUT an `input`
+      // descriptor is not an invocation and falls through.
+      if (!claimsLineOf(parsed)) return undefined
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('client command aborted')
       const commandId = CommandId(`cmd-client-${randomUUID()}`)
       const invocation: ClientCommandInvocation = {

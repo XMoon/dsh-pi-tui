@@ -396,7 +396,12 @@ test('§1B-2 present-with-zero projections render as KNOWN zeros', async () => {
     'a present zero usage renders a KNOWN zero token group')
 })
 
-test('§1B-2 a truncated, insufficient recent window keeps the recent group ABSENT', async () => {
+// QUALIFICATION LABEL (whole-PR F5): this case pages a NEVER-satisfied window
+// to the HISTORY START, where the fold becomes authoritative and the recent
+// group is PRESENT. It is therefore NOT a bounded-window ABSENT proof — that
+// absence is encoded by the presentation-layer availability bit (Batch 1B,
+// `recent-performance-availability.test.ts`), not here.
+test('§1B-2 the composer pages a never-satisfied window to the history start, where the recent fold is AUTHORITATIVE', async () => {
   // One valid sample only; hasMore=true (older history exists) — the recent
   // evidence is NOT authoritative, so the group must be absent.
   const oneSample = validSampleTurn(1, 0)

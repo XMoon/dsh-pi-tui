@@ -553,6 +553,43 @@ test('an EXPLICIT stale permission clears the extension snapshot (no stale badge
   app.stop()
 })
 
+test('whole-PR F3: a known -> missing model CLEARS the extension session snapshot (both writers)', async (t) => {
+  // The extension snapshot merge is PER FIELD, so an OMITTED model kept the
+  // previous value alive: a session whose model projection became unavailable
+  // (or a switch to such a session) reported the OLD model as the new session's
+  // fact. Both production writers must therefore ALWAYS write the field —
+  // `undefined` clears it, exactly like `permission` above.
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  // Writer 1 (the live status sync): the model is known, then missing.
+  app.refreshChrome()
+  app.setStatus({ model: 'known-model', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  await settle()
+  assert.equal(host.state().session.model, 'known-model', 'the model must be set first')
+  app.setStatus({ model: '', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  await settle()
+  assert.equal(host.state().session.model, undefined,
+    'a missing model must not keep the previous value in the extension snapshot')
+  // Writer 2 (the welcome card / session identity mirror) across a SESSION
+  // SWITCH: session A is known, session B's model projection is unavailable.
+  app.refreshChrome()
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-a', model: 'model-a', version: '0.0.0' })
+  await settle()
+  assert.equal(host.state().session.sessionId, 'session-a')
+  assert.equal(host.state().session.model, 'model-a')
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-b', version: '0.0.0' })
+  await settle()
+  assert.equal(host.state().session.sessionId, 'session-b', 'the switch took effect')
+  assert.equal(host.state().session.model, undefined,
+    "session B must never inherit session A's model fact")
+  app.stop()
+})
+
 test('runner permission projection clears on service/agent absence (runner-level guard)', async () => {
   // The runner's refreshStatus decides the permission via the pure
   // deriveRunnerPermission: a missing permission service OR a missing

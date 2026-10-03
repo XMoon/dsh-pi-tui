@@ -3418,7 +3418,7 @@ matrix, the docs lane, and the updated deprecated-reader allowance (the
 Remote `currentWorkingFromLog` folds the official window; the Direct
 allowance text tracks the branch-guarded line) are all green.
 
-## M3-4 PR4 — Command / Action / Rewind / Tool / Permission (IN REVIEW — implementation landed, qualification matrix closing)
+## M3-4 PR4 — Command / Action / Rewind / Tool / Permission (DONE)
 
 Plan: `temp/m3/dsh-pi-tui-m3-4-pr4-command-action-rewind-tool-permission-plan-v1-20261002.md`.
 Direct remains the production default; the Remote path is reachable only
@@ -3561,7 +3561,7 @@ longer resolves the Host tools registry outside the Direct branch.
 - **Remote `!` / `!!` remain fail-closed** (M3-4 PR3 shell authority
   amendment, unchanged by PR4).
 
-## M3-4 status (DONE — PR1–PR5 landed)
+## M3-4 status (PR1–PR4 landed; PR5 IN REVIEW — not merged)
 
 M3-4 composes the main TUI application over the Remote Backend. The stage is
 a PR train; each PR closes its own slice with closure evidence.
@@ -3700,10 +3700,10 @@ implementation) is not Host origin. The v4 §1C origin-aware authority
 (mirror provenance + the origin map + `hostOriginClaimOf` + the one
 classifier) is the single implementation contract.
 
-### PR5 — Main TUI Remote Closure & Exit (COMPLETE)
+### PR5 — Main TUI Remote Closure & Exit (IN REVIEW — PR #211, unmerged)
 
 PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
-(`next @ 8b536b20`, DSH `0.2.0-rc.2`, source `639ed015`). What landed:
+(`next @ 8b536b20`, DSH `0.2.0-rc.2`, source `639ed015`). PR #211 is OPEN on `next`; `M3-4 = DONE` becomes authoritative on the MERGED HEAD only. What this PR closes:
 
 - **Required transcript capability** (plan §3.1): `transcriptExportAvailable`
   is a required `boolean` on `TuiCommandRunner`; `/transcript` refuses on

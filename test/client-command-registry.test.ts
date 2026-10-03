@@ -39,6 +39,9 @@ test('execute: a Client handler runs in-process with a Client-minted correlation
   registry.register({
     name: 'status',
     description: 'stats',
+    // An argued line is an invocation only when the definition DECLARES an
+    // input descriptor (the official `matchEnter` admission).
+    input: { hint: 'stats' },
     handler: (invocation) => {
       seen.push({ commandId: invocation.commandId, rawInput: invocation.rawInput })
       return { kind: 'success', text: 'ok' }
@@ -59,6 +62,43 @@ test('execute: an unresolved name or non-command line is the official admission 
   registry.register({ name: 'display', description: 'd', handler: () => ({ kind: 'success' as const }) })
   assert.equal(await registry.execute({ line: 'plain text', signal: new AbortController().signal }), undefined)
   assert.equal(await registry.execute({ line: '/unknown', signal: new AbortController().signal }), undefined)
+})
+
+test('claimsLine/execute: the exact-line admission is the official matchEnter rule (whole-PR F4/F5)', async () => {
+  const registry = createClientCommandRegistry(parseCommand)
+  let runs = 0
+  registry.register({
+    name: 'model',
+    description: 'switch model',
+    // NO input descriptor: the bare token only.
+    handler: () => { runs += 1; return { kind: 'success' as const } },
+  })
+  registry.register({
+    name: 'preset',
+    description: 'switch preset',
+    input: { hint: '<preset>' },
+    handler: () => { runs += 1; return { kind: 'success' as const } },
+  })
+  // Ownership: a registered definition claims the BARE token, and an argued
+  // line only when it declares `input` (a name-set membership is NOT a claim).
+  assert.equal(registry.claimsLine(parseCommand('/model')), true, 'a bare token is claimed')
+  assert.equal(registry.claimsLine(parseCommand('/model foo')), false,
+    'an argued line of a no-input definition is NOT claimed')
+  assert.equal(registry.claimsLine(parseCommand('/preset foo')), true,
+    'an argued line of an input-declaring definition IS claimed')
+  assert.equal(registry.claimsLine(parseCommand('/absent')), false, 'an unregistered name is never claimed')
+  assert.equal(registry.claimsLine(undefined), false)
+  // SINK INVARIANT: execute() answers the SAME admission, so an argued line of
+  // a no-input definition falls through instead of running a handler that
+  // never claimed it.
+  assert.equal(await registry.execute({ line: '/model foo', signal: new AbortController().signal }), undefined,
+    'the sink refuses the unclaimed argued line')
+  assert.equal(runs, 0, 'no handler may run for an unclaimed line')
+  assert.ok(await registry.execute({ line: '/model', signal: new AbortController().signal }) !== undefined,
+    'the claimed bare token still runs')
+  assert.ok(await registry.execute({ line: '/preset foo', signal: new AbortController().signal }) !== undefined,
+    'the claimed argued line still runs')
+  assert.equal(runs, 2)
 })
 
 test('execute: a throwing handler rejects (the caller owns the failure settlement)', async () => {
