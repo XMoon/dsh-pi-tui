@@ -948,7 +948,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       applyPermissionPreset: async (scope, presetId, presetSignal) => {
         // A stale scope BEFORE the dispatch proves nothing ran: report `refused`.
         if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }
-        agentForLiveScope(scope)
+        // PR5 v2 §1D: NO Direct-Agent prerequisite — the permission preset
+        // apply is transport-neutral (ConfigPort → the official
+        // /permission path); a Remote session must reach it without any
+        // in-process Agent resolution.
         const outcome = await deps.backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
         // The operation WAS dispatched. Losing the surface after the fact must NOT
         // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and

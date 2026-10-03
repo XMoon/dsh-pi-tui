@@ -109,8 +109,14 @@ export interface SessionRuntimeDeps {
  * the Host command package.
  */
 export type SessionForkOutcome =
-  | { readonly kind: 'success'; readonly text?: string }
+  | { readonly kind: 'success'; readonly text?: string; readonly adoptedNavigation?: RewindNavigationIdentity }
   | { readonly kind: 'error'; readonly text: string }
+/* PR5 v2 §3C: `adoptedNavigation` (above) is the POST-ADOPTION navigation
+ * identity minted by THIS runtime at the adoption commit (the only layer
+ * allowed to mint it). The final visible settlement ("rewound to turn N")
+ * may notify only while this identity is still current — a successful
+ * rewind's OWN adoption is not external supersession, but a LATER external
+ * navigation (A→B→A included) must suppress the stale toast. */
 
 /**
  * The fork-adoption ownership ledger (plan §8.5): tracks what adoption
@@ -852,7 +858,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       const adopted = await adoptFork(outcome.handle, expected, onAdopted, pin, adoption)
       if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
       deps.surface.clearUnpinnedDrafts()
-      return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
+      // §3C: the adoption commit just made THIS child the navigation subject
+      // — mint the post-adoption identity HERE (the navigation owner), so
+      // the caller's final notify can distinguish this operation's own
+      // adoption from a later external navigation.
+      const adoptedNavigation = core.captureNavigationIdentity()
+      return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}`, adoptedNavigation }
     } catch (error) {
       // An owner the adoption cleanup already released exactly once must not
       // be parked again (a disposed Direct handle in the pool would be

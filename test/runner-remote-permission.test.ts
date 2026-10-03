@@ -338,3 +338,101 @@ test('L6 §7.4-13 stale permission: apply A → switch B before settle → NO B 
     'B\'s durable log carries no /permission execution (zero contamination)')
   assert.notEqual(aPreset, undefined)
 })
+
+test('L6 PR5 §1D: /yolo on a Remote live session reaches the semantic permission apply with NO Direct-Agent prerequisite', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr5-yolo'
+  const presetId = 'm3-4-pr4-preset'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  host.ctx.provide('shell', { sandboxMode: 'workspace-write' } as never)
+  const { PermissionPresetService } = await import('@deepseek-ai/dsh-permission-presets')
+  await host.ctx.plugin(PermissionPresetService as never, undefined as never)
+  const approval = await import('@deepseek-ai/dsh-user-approval')
+  await host.ctx.plugin((approval as unknown as { default: new (ctx: never, config?: never) => unknown }).default as never, undefined as never)
+  const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+  await host.ctx.plugin(turnOutline)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+  life.defer(restoreTerminal)
+
+  const runnerCtx = host.ctx
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  runnerCtx.provide('appExit', (code: number) => { void code })
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+  }
+  const apps: unknown[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: unknown) {
+    apps.push(this)
+    return originalStart.call(this)
+  }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => { runnerFiber.dispose() })
+  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+
+  const app = await (async () => {
+    for (let i = 0; i < 600; i += 1) {
+      const candidate = apps.at(-1) as unknown as {
+        statusStore: { snapshot(): { access?: { permissionPreset?: { id?: string } } } }
+        setDraft(text: string): void
+        submitDraft(request?: string): void
+      } | undefined
+      if (candidate !== undefined && candidate.statusStore !== undefined) return candidate
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed the status store')
+  })()
+
+  await waitFor('the baseline preset rendered', () =>
+    app.statusStore.snapshot().access?.permissionPreset?.id !== undefined, 20_000)
+  const before = app.statusStore.snapshot().access!.permissionPreset!.id!
+  assert.notEqual(before, 'danger-full-access', 'the fixture starts OFF danger-full-access')
+
+  // THE REAL COMMAND: /yolo submits through the mounted editor. No Direct
+  // Agent exists on this branch — the removed `agentForLiveScope` gate was
+  // the only Direct-object prerequisite in the path.
+  app.setDraft('/yolo')
+  app.submitDraft()
+
+  // The committed permission projection owns the display.
+  await waitFor('the committed projection shows danger-full-access', () =>
+    app.statusStore.snapshot().access?.permissionPreset?.id === 'danger-full-access', 20_000)
+
+  // Exactly ONE official /permission execution (no retry, no duplicate) and
+  // no OTHER Host command rows for the line.
+  await waitFor('the official /permission lifecycle rows landed', () => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents().some(event => event.type === 'command/done')
+  }, 15_000)
+  const events = (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }).snapshotEvents()
+  assert.equal(events.filter(event => event.type === 'command/run').length, 1,
+    'exactly ONE official /permission command ran (never retried, never duplicated)')
+})

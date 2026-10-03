@@ -80,7 +80,7 @@ import { ModelPicker, type ModelApplyOutcome } from './model-picker.ts'
 import type { OperationOwnership, OperationResult } from './runtime/write-outcome.ts'
 import { LifecycleError } from './runtime/session-lifecycle-port.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
-import { formatStats, type SessionStats } from './stats.ts'
+import { formatStats, formatStatsFacts, type SessionStats, type SessionStatsFacts } from './stats.ts'
 import { textOf } from './transcript.ts'
 import {
   CONTENT_SEARCH_DEBOUNCE_MS,
@@ -733,7 +733,7 @@ export interface TuiCommandRunner {
    * official projections with bounded paging for the recent window. A stale
    * scope throws {@link SupersededReadError}.
    */
-  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
+  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
   /**
    * PR5 (plan §3.2): whether the CURRENT main window's recent-performance
    * figures are presentation-authoritative (Direct full log, or a Remote
@@ -5377,9 +5377,10 @@ export function registerTuiCommands(
           {
             id: 'session-stats',
             label: 'Stats',
-            description: stats === undefined
-              ? 'unmeasured'
-              : formatStats(stats, runner.recentPerformanceAvailable?.() ?? true),
+            // PR5 v2 §1B-2: the facts formatter renders KNOWN groups only —
+            // an absent authority group (a Remote projection gap) is
+            // omitted, and no known group reads `unmeasured`.
+            description: stats === undefined ? 'unmeasured' : formatStatsFacts(stats),
             currentValue: '',
           },
           {

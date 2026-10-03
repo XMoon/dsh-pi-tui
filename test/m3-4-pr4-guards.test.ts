@@ -305,3 +305,37 @@ test('PR5 §1C one classifier drives the submission siblings', () => {
   }
   assert.ok(policy.includes('hostNameReserved'), 'ordinary submissions can record a Host-reserved name')
 })
+
+/* ── PR5 v2 §3C: rewind final-notification currentness guards ──────────── */
+
+test('PR5 §3C the rewind final settlement is gated by the operation-owned navigation identity', () => {
+  const runtime = code('app/session/runtime.ts')
+  // The adoption commit mints the post-adoption identity.
+  assert.ok(runtime.includes('const adoptedNavigation = core.captureNavigationIdentity()'),
+    'the adopted success carries the runtime-minted post-adoption navigation identity')
+  assert.ok(runtime.includes('readonly adoptedNavigation?: RewindNavigationIdentity'),
+    'the success outcome can carry adoptedNavigation')
+  const events = code('app/surface/application-events.ts')
+  // The success toast consults the OWNED identity (not the old picker one).
+  const successGate = events.slice(events.indexOf('if (outcome.kind === \'success\' && adopted)'))
+  assert.ok(successGate.includes('outcome.adoptedNavigation')
+    && successGate.includes('!deps.rewind.isNavigationCurrent(owned)) return'),
+    'the success toast is suppressed once the operation-owned identity is superseded')
+  // Pre-adoption error/error paths consult the ORIGINAL picker identity.
+  assert.ok(events.includes('if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return'),
+    'pre-adoption error notices consult the original picker identity')
+})
+
+/* ── PR5 v2 §2.12: Ctrl+R main Session identity ─────────────────────────── */
+
+test('PR5 the Ctrl+R Current-session identity comes from the selected ownership authority', () => {
+  const bootstrap = code('app/bootstrap.ts')
+  const seam = bootstrap.slice(
+    bootstrap.indexOf('sessionId: () => ownership.currentSessionId()'),
+    bootstrap.indexOf('sessionId: () => ownership.currentSessionId()') + 200,
+  )
+  assert.ok(seam.length > 0, 'the identity seam exists')
+  assert.ok(bootstrap.includes('sessionId: () => agentNow()?.session.id') === false
+    || bootstrap.slice(0, bootstrap.indexOf('PR5 v2 §2.12')).includes('sessionId: () => agentNow()?.session.id'),
+    'no Direct-agent identity seam remains for the Ctrl+R scope')
+})

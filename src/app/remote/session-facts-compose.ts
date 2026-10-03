@@ -28,7 +28,7 @@
 
 import type { PresentationDurableEvent, PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
 import type { SessionStatusProjection } from '../../runtime/session-reader-port.ts'
-import type { SessionStats } from '../../stats.ts'
+import type { SessionStatsFacts } from '../../stats.ts'
 import { hasEnoughRecentPerformanceSamples, recentPerformanceOf } from '../../stats.ts'
 
 /** The whole-log projection facts the composition consumes (detached). */
@@ -96,7 +96,11 @@ function recentSamplesIncomplete(events: readonly PresentationDurableEvent[]): b
 }
 
 /**
- * Compose the Remote whole-log + recent stats for one session (§3.3).
+ * Compose the Remote whole-log + recent stats for one session (§3.3) as
+ * AUTHORITY-GROUPED facts (PR5 v2 §1B-2): the `sessionStats` projection owns
+ * `lifetime`, the `tokenUsage` projection owns `tokens`, the bounded window
+ * owns `recent` (present only when its evidence is authoritative), and an
+ * absent group means the source cannot answer — never a zero stand-in.
  * Superseded (generation/binding/scope replaced) settles `undefined`, never
  * a partial or stale figure.
  */
@@ -106,7 +110,7 @@ export async function composeRemoteSessionStats(input: {
   readonly fence: RemoteFactsFence
   readonly facts: RemoteStatsProjectionFacts
   readonly signal?: AbortSignal
-}): Promise<SessionStats | undefined> {
+}): Promise<SessionStatsFacts | undefined> {
   const { sessionId, reader, fence, facts, signal } = input
   signal?.throwIfAborted()
   // 1. The whole-log projection facts (turns/steps/llmMs + usage + window).
@@ -135,24 +139,30 @@ export async function composeRemoteSessionStats(input: {
   }
   if (!fence.isCurrent()) return undefined
   const recent = recentPerformanceOf(snapshot.durableEvents as never[])
-  // 3. Token totals + cache-hit from the official usage projection.
+  // PR5 v2 §1B-2: authority groups stay ABSENT when their source cannot
+  // answer — never a `?? 0` fabrication. The paging loop above ran until
+  // the recent-sample contract was proven OR the history start was reached;
+  // the `recent` group therefore rides the same availability rule
+  // (`hasMore === false` makes even a zero-sample fold authoritative).
+  const recentAuthoritative = !snapshot.hasMore
+    || hasEnoughRecentPerformanceSamples(snapshot.durableEvents as never[])
   const usage = facts.usage
-  const inputTokens = usage?.uncachedInputTokens ?? 0
-  const outputTokens = usage?.outputTokens ?? 0
-  const cacheReadTokens = usage?.cacheReadTokens ?? 0
-  const cacheWriteTokens = usage?.cacheWriteTokens ?? 0
-  const billedInput = inputTokens + cacheReadTokens + cacheWriteTokens
   return {
-    turns: totals.turns ?? 0,
-    steps: totals.steps ?? 0,
-    llmMs: totals.llmMs ?? 0,
-    firstTokenMsAvg: recent.firstTokenMsAvg,
-    tokensPerSec: recent.tokensPerSec,
-    cacheHitPct: billedInput > 0 ? (cacheReadTokens * 100) / billedInput : 0,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
+    ...(Object.keys(totals).length > 0 ? { lifetime: { ...totals } } : {}),
+    ...(usage === undefined ? {} : {
+      tokens: {
+        input: usage.uncachedInputTokens,
+        output: usage.outputTokens,
+        cacheRead: usage.cacheReadTokens,
+        cacheWrite: usage.cacheWriteTokens,
+        cacheHitPct: (usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens) > 0
+          ? (usage.cacheReadTokens * 100) / (usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)
+          : 0,
+      },
+    }),
+    ...(recentAuthoritative
+      ? { recent: { firstTokenMsAvg: recent.firstTokenMsAvg, tokensPerSec: recent.tokensPerSec } }
+      : {}),
     ...(facts.contextWindow === undefined ? {} : { contextWindow: facts.contextWindow }),
   }
 }
