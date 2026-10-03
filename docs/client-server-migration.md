@@ -27,7 +27,8 @@ M3-4 PR3 DONE      (submission/interaction/shell authority over the Remote main 
 M3-4 PR4 DONE      (main-session command/action plane: implementation landed — Client command registry (both branches), Host origin/claim authority, whole-log rewind, Client-derived tool cards, permission projection/cycle; its review loop closed)
 M3-4 PR5 DONE/MERGED (final main-application closure MERGED as PR #211 into `next @ e520c016`: command Host/Client ORIGIN authority, descriptor/attachment precedence, rewind picker/claimed/adopted/error identity lifecycle with the mounted stale-success L6, `/yolo` Remote reachability, `/status` unknown-vs-zero, Direct cache read/write parity, Ctrl+R identity, docs/contract reconciliation)
 M3-4 DONE          (PR1–PR5 landed and PR5 merged; the main TUI application + command runtime run on the experimental Remote backend — see the M3-4 status section)
-M3-5 NEXT / NOT STARTED (secondary surfaces + writer-held recovery; implementation not started — see the migration stage pointer)
+M3-5 PR4 DONE      (Remote Plugin Manager closure: lifecycle/qualification over an ALREADY backend-neutral surface — one invalidation hint on `PluginManagerPort`, Direct/Remote mappings, demand-aware controller rereads, latest-started read currentness, dispose hardening, real Remote `/plugins` + Settings dual-entry L6, external-change and reconnect invalidation L6 — see the M3-5 PR4 section)
+M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR4 landed, PR1/PR2/PR3/PR5/PR6 remain — see the migration stage pointer)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -58,7 +59,7 @@ Direct rollback:           available
 
 ```text
 M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
-M3-5 = NEXT / NOT STARTED   (secondary surfaces + writer-held recovery)
+M3-5 = IN PROGRESS          (PR4 Remote Plugin Manager closure landed; PR1/PR2/PR3/PR5/PR6 remain)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
@@ -4179,5 +4180,73 @@ recorded, no required row remains PARTIAL; the v2 additions
 currentness, Ctrl+R identity) are recorded above with their evidence. This
 closure state is authoritative at the MERGED HEAD (`next @ e520c016`, PR #211,
 v4 §19) — not only on the pre-merge branch. The next migration stage is M3-5
-(secondary surfaces + writer-held recovery), which is NEXT / NOT STARTED; no
-automatic "PR6" is created for historical unchecked checklist items.
+(secondary surfaces + writer-held recovery), which is IN PROGRESS; see the
+M3-5 PR4 section below. No automatic "PR6" is created for historical unchecked
+checklist items.
+
+## M3-5 PR4 — Remote Plugin Manager closure (DONE)
+
+Scope note: this section records **M3-5 PR4 only**. M3-5 as a stage is
+**IN PROGRESS** and must not be marked DONE from this PR (PR1/PR2/PR3/PR5/PR6
+remain).
+
+### Implemented authority
+
+- **The application composition was already Backend-neutral on entry.** The
+  production composition reads
+  `surface.attachPluginManager({ port: backend.pluginManager, diag })`
+  (`src/app/bootstrap.ts`), and `SurfaceRuntime.attachPluginManager()`
+  constructs the SAME `PluginManagerHostRegistry` / `PluginManagerController` /
+  `PluginManagerPanel` for whichever backend is selected. A Remote-selected
+  runner therefore already receives the ONE `RemotePluginManagerPort` over the
+  generated `pluginManager` Remote. PR4 adds **no** second application cutover,
+  **no** Remote-specific Plugin Manager UI, and **no** Host `ctx.pluginManager`
+  read outside the Direct adapter.
+- **ONE transport-neutral invalidation hint** on `PluginManagerPort`
+  (`src/runtime/plugin-manager-port.ts`): `subscribeInvalidation(listener)`.
+  It answers only "the cached snapshot may be stale"; it carries no business
+  truth and implies no polling. `snapshot()` remains the only inventory
+  authority.
+- **Direct mapping** (`src/runtime/direct/plugin-manager-direct.ts`): the
+  official `plugin-manager/changed` event maps to exactly one invalidation.
+- **Remote mapping** (`src/runtime/remote/plugin-manager-remote.ts`): the
+  forwarded `plugin-manager/changed` AND a new official Connection generation
+  each map to exactly ONE invalidation. A lost generation (`undefined`)
+  publishes nothing and starts no custom reconnect loop; the official
+  Connection owns reconnection.
+- **Demand-aware refreshes** (`src/plugin-manager/controller.ts`): the
+  controller subscribes once at construction but performs an authoritative
+  reread on invalidation only while a surface is showing the inventory. A
+  never-opened / closed manager starts no background read, and opening always
+  performs a fresh read.
+- **Latest-started read wins**: starting a newer inventory read invalidates
+  every older in-flight read, so an older read can neither repaint stale
+  inventory nor clear a newer failure; the last good snapshot survives a newest
+  read failure.
+- **Disposal hardening**: `dispose()` aborts an in-flight inspect, releases the
+  install-event and invalidation subscriptions, and drops late reads/settlements
+  — it never cancels a Host install. Install request identity (`requestId`),
+  `waitForInstall(requestId)` recovery, close/reopen-without-redispatch, and the
+  Current-TUI self-protection policy are unchanged.
+
+### Real reachability / qualification
+
+| Scenario | Level | Evidence |
+|---|---|---|
+| Remote `/plugins` positive read | L6 | `test/runner-remote-plugin-manager.test.ts` L6-A: real managed profile + real `@deepseek-ai/dsh-plugin-manager` Host service + official wire + real runner; the fixture bundle is rendered from the generated Remote, and `Backend.pluginManager` is the `RemotePluginManagerPort` |
+| Settings → Plugins uses the same owner | L6 | L6-B: `/settings` → Plugins Manage… → the same panel → Back returns to the SAME Settings surface |
+| One real mutation + authoritative reread | L6 | L6-C: the official `setBundleEnabled` through the panel writes the durable profile manifest, and the render comes from the authoritative reread (truthful `restart-required`); plus the Current-TUI negative control (no affordance, durable manifest bytes unchanged) |
+| External Host change invalidates an open panel | L6 | L6-D: a second Host actor's manager operation → forwarded `plugin-manager/changed` → invalidation → reread; no `R` key |
+| Reconnect invalidation | L6 | L6-E: a hand-edited profile truth (no event) stays cached; the official `connection.reconnect()` establishes a new generation → invalidation → authoritative reread, with no mutation replay |
+| Forwarded install events over the real wire | L5 | the `L5:` scenario in the same suite (real Host install events forwarded to the Remote adapter). The controller's exact-request-id filtering, close/reopen-without-redispatch and `waitForInstall` recovery remain covered by `test/plugin-manager-install.test.ts` and `test/plugin-manager-port.test.ts` |
+| Direct behaviour preserved | L3/L6 | `test/plugin-manager-direct.test.ts`, `test/plugin-manager-runner-integration.test.ts` and the controller suite remain green |
+
+**Honest gap:** the network/pnpm real package *installation* L6-F scenario is
+NOT claimed at L6. It is retained at the L5 Remote-event level above; no test
+in this PR is labelled L6 for installation.
+
+### Remaining M3-5 obligations
+
+PR1 (child display-subject status), PR2 (Remote Task Center + real child
+viewer), PR3 (Remote Job viewer), PR5 (writer-held recovery) and PR6 (stage
+closure) remain. `M3-5 DONE` is not claimed anywhere in this PR.

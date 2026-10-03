@@ -150,11 +150,11 @@ export class PluginManagerController {
   private busy: string | undefined
   private message: string | undefined
   private readEpoch = 0
-  private committedEpoch = 0
   private mutationToken = 0
   private install: ActiveInstall | undefined
   private installEpoch = 0
   private readonly unsubscribe: () => void
+  private readonly unsubscribeInvalidation: () => void
   private disposed = false
 
   constructor(port: PluginManagerPort, hooks: PluginManagerControllerHooks, options?: PluginManagerControllerOptions) {
@@ -162,6 +162,7 @@ export class PluginManagerController {
     this.hooks = hooks
     this.observationSource = options?.observations
     this.unsubscribe = port.subscribeInstall(event => this.onInstallEvent(event))
+    this.unsubscribeInvalidation = port.subscribeInvalidation(() => this.onInvalidation())
   }
 
   /** One owned detached task (AGENTS.md: never a bare `void` promise chain). */
@@ -194,11 +195,33 @@ export class PluginManagerController {
     this.run('plugin manager read', () => this.read())
   }
 
-  /** Release the install-event subscription (runner teardown). */
+  /**
+   * One transport-neutral invalidation hint arrived (external Host change or a
+   * new Remote Connection generation). It is NOT authority and NOT polling: it
+   * only marks the cached snapshot potentially stale.
+   *
+   * Demand-aware (plan §DECISION 3): the controller is profile-global and
+   * outlives a panel, so an invalidation while no surface is showing the
+   * inventory starts NO background read. A later `open()` always performs a
+   * fresh authoritative read. An active install is untouched — invalidation is
+   * never a reason to cancel or retry it.
+   */
+  private onInvalidation(): void {
+    if (this.disposed) return
+    if (!this.hooks.isOpen()) return
+    this.run('plugin manager read', () => this.read())
+  }
+
+  /** Release the install-event and invalidation subscriptions (runner teardown). */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // Drop the in-flight inspect before its late result could reach a disposed
+    // controller. Only the explicit user cancel action may call `cancelInstall`:
+    // disposing the surface never cancels a Host install.
+    this.install?.inspectAbort?.abort()
     this.unsubscribe()
+    this.unsubscribeInvalidation()
   }
 
   /** Current rendered rows for the panel. */
@@ -784,13 +807,15 @@ export class PluginManagerController {
 
   private async read(): Promise<void> {
     if (this.disposed) return
+    // Latest-started read wins (plan §DECISION 4): starting a newer read
+    // invalidates EVERY older in-flight read, so an older read can neither
+    // repaint stale inventory after it started nor clear a newer failure.
     const epoch = ++this.readEpoch
     this.state = 'loading'
     this.hooks.requestRender()
     try {
       const snapshot = await this.port.snapshot()
-      if (this.disposed || epoch < this.committedEpoch) return
-      this.committedEpoch = epoch
+      if (this.disposed || epoch !== this.readEpoch) return
       this.snapshot = snapshot
       this.model = this.buildModel(snapshot)
       this.state = 'ready'
@@ -803,8 +828,7 @@ export class PluginManagerController {
       this.clampSelection()
       this.hooks.requestRender()
     } catch (error) {
-      if (this.disposed || epoch < this.committedEpoch) return
-      this.committedEpoch = epoch
+      if (this.disposed || epoch !== this.readEpoch) return
       // A failed refresh keeps the last good snapshot (plan §A1.6).
       this.state = 'error'
       this.error = errorMessage(error)

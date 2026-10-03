@@ -20,6 +20,7 @@ import type {
   BundleInfo,
   ChangeResult,
   InstallBundleOptions,
+  PluginChange,
   PluginInfo,
   PluginInstallCancellation,
   PluginInstallLogChunk,
@@ -47,6 +48,7 @@ import {
   type PluginExemptionsValue,
 } from '../plugin-manager-mapping.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
+import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import { remoteFailureMessage } from './write-failure.ts'
 
 /**
@@ -79,6 +81,7 @@ export interface RemotePluginManagerNamespace {
  */
 export interface RemotePluginManagerSource {
   readonly pluginManager: RemotePluginManagerNamespace
+  $on(event: 'plugin-manager/changed', listener: (payload: PluginChange) => void): () => void
   $on(event: 'plugin-manager/install-state', listener: (payload: PluginInstallProgress) => void): () => void
   $on(event: 'plugin-manager/install-log', listener: (payload: PluginInstallLogChunk) => void): () => void
 }
@@ -92,9 +95,11 @@ function unwrapRemote<T>(result: RemoteResultLike<T>, operation: string): T {
 /** The experimental Remote Plugin Manager port over the generated Remote. */
 export class RemotePluginManagerPort implements PluginManagerPort {
   private readonly remote: RemotePluginManagerSource
+  private readonly generation: RemoteConnectionGenerationSource
 
-  constructor(remote: RemotePluginManagerSource) {
+  constructor(remote: RemotePluginManagerSource, generation: RemoteConnectionGenerationSource) {
     this.remote = remote
+    this.generation = generation
   }
 
   async snapshot(): Promise<PluginManagerSnapshot> {
@@ -172,6 +177,44 @@ export class RemotePluginManagerPort implements PluginManagerPort {
       // synchronously, and the earlier subscription must not leak. (The
       // forwarded-event allowlist is a compile-time constraint in the pinned
       // rc.2, not a runtime guarantee this adapter may rely on.)
+      for (const off of owned.splice(0)) off()
+      throw error
+    }
+    return () => {
+      for (const off of owned.splice(0)) off()
+    }
+  }
+
+  /**
+   * Two invalidation sources, one hint:
+   *  1. the forwarded official `plugin-manager/changed` (a Host-side manager
+   *     operation or an external profile change);
+   *  2. a NEW Connection generation (the official Connection owns reconnection;
+   *     this adapter only tells the consumer to reread).
+   *
+   * A disconnect (`undefined`) never fabricates inventory and never starts a
+   * custom reconnect loop. The listener carries no business truth; the
+   * consumer's `snapshot()` remains the only authority.
+   */
+  subscribeInvalidation(listener: () => void): () => void {
+    const owned: Array<() => void> = []
+    try {
+      owned.push(this.remote.$on('plugin-manager/changed', () => { listener() }))
+      let previous = this.generation.getSnapshot()
+      owned.push(this.generation.subscribe(() => {
+        const current = this.generation.getSnapshot()
+        if (current === undefined) {
+          // A lost generation withdraws whatever it carried: the next DEFINED
+          // generation is a new one to reread, not a duplicate of the lost one.
+          previous = undefined
+          return
+        }
+        if (previous !== undefined && previous.id === current.id) return
+        previous = current
+        listener()
+      }))
+    } catch (error) {
+      // The second subscription may fail synchronously; the first must not leak.
       for (const off of owned.splice(0)) off()
       throw error
     }

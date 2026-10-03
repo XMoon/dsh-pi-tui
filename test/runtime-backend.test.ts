@@ -181,6 +181,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' as const }),
     subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
   }
   const jobObservation = {
     open: () => () => {},

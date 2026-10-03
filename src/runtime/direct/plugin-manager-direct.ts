@@ -153,4 +153,12 @@ export class DirectPluginManagerPort implements PluginManagerPort {
       offLog()
     }
   }
+
+  subscribeInvalidation(listener: () => void): () => void {
+    // The Direct adapter owns the ONLY `ctx` coupling for this domain, so the
+    // official change notification is mapped here and never in the
+    // controller/application. The Host payload is not business truth: the
+    // consumer rereads `snapshot()`, which stays the only inventory authority.
+    return this.ctx.on('plugin-manager/changed', () => { listener() })
+  }
 }
