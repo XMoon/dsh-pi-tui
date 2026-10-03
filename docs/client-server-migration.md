@@ -3854,10 +3854,15 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   `isSkillInvocation` term that could outrank a genuine Host descriptor is
   gone. The rewind settlement owner is phase-specific: the successful
   settlement fences on the operation-owned adopted identity, an admitted
-  error fences on its own structured `notificationNavigation`, and a throw —
-  which can only escape the PRE-ADMISSION region, because `forkSession`
-  never throws — fences on the picker identity, whose currency decides the
-  VISIBLE notice (`runOwned` has already reported the throw to diagnostics).
+  error fences on its own structured `notificationNavigation`, and a throw
+  fences on the picker identity, whose currency decides the VISIBLE notice
+  (`runOwned` has already reported the throw to diagnostics) — a conservative
+  FAIL-CLOSED publication fence for an UNEXPECTED owned-task failure, NOT a
+  stage classifier: `runOwned` routes both a task rejection and an async
+  `onResult` failure to `onError`, so a post-adoption consumer bug can reach
+  it too and stays suppressed because the rewind's own adoption advanced the
+  navigation epoch. The ordinary pre-admission `loadThrough` read failure is
+  the common case and is owned by the still-current picker identity.
   Evidence: AC-2 mounted collision (a genuine Host leading-input `/export`
   beside the Client `/export` runs the Host execution exactly once), a
   genuine Host `/skill` refusing a staged image per ITS OWN declaration, a
@@ -3906,11 +3911,17 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   PRE-EXISTING fixture gap (both sides identical at the round-6 snapshot),
   fixed by matching the official optional shape. No product fallback was
   added for it.
-- **Rewind pre-admission failure authority (v4 §3C-4, review R7-4)**: a throw
-  can only escape the region BEFORE the fork dispatch (`forkSession` never
-  throws — it returns an error outcome), so the picker identity IS that
-  failure's owner, and it fences only the VISIBLE notice (`runOwned` has
-  already reported the throw to diagnostics). Evidence: a mounted positive
+- **Rewind failure authority (v4 §3C-4, review R7-4/R8-9)**: the picker
+  identity is a conservative FAIL-CLOSED publication fence for an UNEXPECTED
+  owned-task failure, and it fences only the VISIBLE notice (`runOwned` has
+  already reported the throw to diagnostics). It is NOT derived from
+  "`forkSession` never throws, therefore every escaping throw is
+  pre-admission": `runOwned`'s `handlerFailure` routes both a task rejection
+  AND an async `onResult` failure to `onError`, so a post-adoption consumer bug
+  can reach it as well — and such a failure naturally fails the fence because
+  the rewind's own adoption advances the navigation epoch, which is exactly the
+  desired suppression. The ordinary pre-admission `loadThrough` read failure is
+  the common case. Evidence: a mounted positive
   control (a rewind `loadThrough` failure still publishes while its picker
   identity is current) and a mounted stale negative on the REMOTE path, where
   the presentation read is a real async transport read — the test parks the
