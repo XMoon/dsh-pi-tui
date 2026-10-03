@@ -227,6 +227,31 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
    * navigation identity gates. Sessionless (deferred start) it notifies and
    * never creates a session.
    */
+  /**
+   * PR5 v2 §3C-4 (plan-owner ruling C): publish one PRE-ADMISSION
+   * cancellation/error under the navigation identity observed WHEN IT BECOMES
+   * AUTHORITATIVE.
+   *
+   * The picker identity is deliberately NOT reused here: it answers a different
+   * question ("is the original picker action still the same action"), and a
+   * cancellation detected after the surface moved is truthful against the state
+   * observed AT DETECTION (A→B→A lands on A/N+2) — the picker-open identity would
+   * already be stale and would swallow it.
+   *
+   * The three call sites below publish synchronously with detection, so the
+   * fence cannot fire today; it exists so the OWNER of the publication is
+   * explicit and so any future await before the notify can never leak a stale
+   * notice onto a replacement surface.
+   */
+  const publishDetectionNotice = (publish: () => void): void => {
+    const notificationNavigation: RewindNavigationIdentity = {
+      sessionId: deps.lifecycle.currentSessionId(),
+      navigationEpoch: deps.lifecycle.navigationEpoch(),
+    }
+    if (!deps.rewind.isNavigationCurrent(notificationNavigation)) return
+    publish()
+  }
+
   const openRewindPicker = (): void => {
     const app = deps.surface.app
     const source = deps.lifecycle.liveAgent()
@@ -280,16 +305,29 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           const loaded = await deps.rewind.loadThrough(sourceId, selectedSeq, deps.lifecycle.signal())
           if (deps.lifecycle.isCleanedUp()) return
           if (loaded === undefined) {
-            app.notify('the session changed while rewinding — try again', 'info')
+            // The cancellation becomes authoritative HERE (the official Remote
+            // read settles `undefined` on supersession): its owner is the
+            // navigation state observed at this point.
+            publishDetectionNotice(() => {
+              app.notify('the session changed while rewinding — try again', 'info')
+            })
             return
           }
           if (!deps.rewind.isSelectionCurrent(sourceId, selectionIdentity)) {
-            app.notify('the session changed while rewinding — try again', 'info')
+            // The TRANSPORT/selection supersession becomes authoritative here
+            // (its own `selectionIdentity` stays the binding owner; the
+            // NAVIGATION owner of the publication is the detection state).
+            publishDetectionNotice(() => {
+              app.notify('the session changed while rewinding — try again', 'info')
+            })
             return
           }
           const candidate = rewindCandidateOfLoadedWindow(loaded as never, selectedSeq)
           if (candidate === undefined) {
-            app.notify('the selected turn could not be resolved — try again', 'error')
+            // The resolution failure becomes authoritative here.
+            publishDetectionNotice(() => {
+              app.notify('the selected turn could not be resolved — try again', 'error')
+            })
             return
           }
           return deps.rewind.forkSession(
@@ -341,17 +379,19 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             }
           },
           onError: (error) => {
-            // §3C-4 (review R7-4): the notification owner follows the failure's
-            // STAGE. A throw can only escape the PRE-ADMISSION region of this
-            // owned body — the `loadThrough()` read above and the identity
-            // re-checks (a Remote reader legitimately propagates a plain read
-            // failure). `forkSession` itself never throws (it RETURNS an error
-            // outcome), so no rewind admission claim can exist on this path:
-            // the picker-open identity IS this failure's owner here, and
-            // fencing an ADMITTED failure on it would be the d529d464 defect.
-            // `runOwned` has already reported the throw to diagnostics before
-            // this callback (src/detached.ts), so once the surface has moved,
-            // suppressing the VISIBLE notice neither hides nor loses it.
+            // §3C-4 (review R7-4/R8): this is NOT a stage classifier — it is a
+            // conservative FAIL-CLOSED publication fence for an UNEXPECTED owned
+            // task failure. `runOwned` routes BOTH a task rejection and an async
+            // `onResult` failure here (src/detached.ts `handlerFailure`), so a
+            // post-adoption consumer bug can reach this callback too; such a
+            // failure naturally fails the fence, because the rewind's own
+            // adoption advances the navigation epoch. That is exactly right:
+            // an old operation's error must never surface on a replacement
+            // surface. The ordinary pre-admission `loadThrough` read failure
+            // (the common case) is owned by the picker identity, which is still
+            // current at that point. `runOwned` has already reported the throw to
+            // diagnostics before this callback, so suppressing the VISIBLE
+            // notice once the surface moved neither hides nor loses it.
             if (deps.lifecycle.isCleanedUp()) return
             if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return
             app.notify(safeErrorMessage(error), 'error')
