@@ -84,6 +84,33 @@ SPLIT                    one capability split across the Client gesture/
                          the `!` result handoff into Session)
 ```
 
+### Core vs optional-feature Remote composition (2026-10-03 clarification)
+
+The classes above describe the current M3 core graph; they do not turn the
+current composition owners into universal registries. Generated Remote
+availability is not sufficient evidence for `M3_ADDITIVE_HOST` ownership, and it
+does not imply `RemoteHostRuntime` must own the Host plugin.
+
+```text
+CORE GENERATED REMOTE
+  mounted/disposed by RemoteClientRuntime (the m3-entry-contract.md §2.4.2
+  current M3 core generated contribution closure)
+
+OPTIONAL FEATURE GENERATED REMOTE
+  may be mounted/disposed by that feature's Client owner when the feature is
+  adopted and the selected released DSH target actually provides the public
+  contract; it reuses the existing Connection/Gateway and duplicates no core
+  namespace/authority
+
+HOST FEATURE WITH REMOTE
+  remains feature-owned on Host unless an accepted contract explicitly
+  reclassifies it as base/common/core
+```
+
+No current row of this inventory is added, moved or reclassified by this
+clarification; update the rows only when a real coupling/composition change
+lands.
+
 ### Canonical M3-3B ownership rows
 
 | Domain/service | Locality | Class | Composition owner | Consumer | Wire/source | Mount rule | Evidence owner |
@@ -477,6 +504,22 @@ implementation:
   `!` / `!!` shell, `@file`, external editor, `/image`, `/export`, `/open`,
   working directory. Remote mode fails closed rather than silently running on
   the Client filesystem with Host semantics.
+
+Two UI ownership forms are legal (2026-10-03 clarification):
+
+```text
+CLIENT IMPERATIVE UI:
+  callbacks/components/renderers/editors/keybindings
+  remain Client-local (the existing PiTui extension API).
+
+HOST DECLARATIVE SURFACE:
+  Host state/callbacks remain Host-owned;
+  only serialized facts/tree/action identity cross an official Remote;
+  Client owns rendering and local input presentation.
+```
+
+No executable callback/component/renderer/editor object crosses the process
+boundary in either form, and neither form creates a current rc.2 capability.
 
 ### Direct command compatibility mirror vs Host-origin ownership (M3-4 PR5)
 
