@@ -617,3 +617,125 @@ test('L6 §27 remote cancel: a real cancel gesture stops the running official tu
     return hostUserRows(fixture, mainId).some(row => row.includes('wake after cancel mu'))
   }, 20_000)
 })
+
+test('L6 PR5 image resend: a SECOND submission citing the recalled durable image re-delivers the authorized bytes (mounted durable-image resend)', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr5-image-resend'
+  const presetId = 'm3-4-pr3-preset'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const host = await mountHost(life, presetId, { llmAdapter: llm })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const require = createRequire(import.meta.url)
+  const storeDir = dirname(require.resolve('@deepseek-ai/dsh-attachment-local/package.json'))
+  const sharpPath = require.resolve('sharp', { paths: [storeDir] })
+  const sharp = require(sharpPath) as { (input: unknown): { png(): { toBuffer(): Promise<Buffer> } } }
+  const pngBytes = new Uint8Array(await sharp({ create: { width: 1, height: 1, channels: 3, background: '#c0ffee' } }).png().toBuffer())
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string; setDraft(text: string): void; submitDraft(): void
+    draftImageStoreForTest?: import('../src/image/draft-store.ts').DraftImageStore
+  }
+  await waitFor('draft store exposed', () => app.draftImageStoreForTest !== undefined, 10_000)
+  const store = app.draftImageStoreForTest!
+  const sessionOf = (): { snapshotEvents(): Array<{ type: string; data: unknown }> } =>
+    fixture.host.ctx.sessions.get(SessionId(mainId)) as never
+  const officialRead = async (attachmentId: string): Promise<Uint8Array> => {
+    const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
+      session: { readAttachment(id: never): Promise<{ ok: true; value: { data: Uint8Array } } | { ok: false; error: unknown }> }
+    } | undefined
+    if (binding === undefined) throw new Error('no retained binding for the official attachment read')
+    const read = await binding.session.readAttachment(attachmentId as never)
+    if (!read.ok) throw new Error(`official readAttachment failed: ${JSON.stringify(read.error)}`)
+    return read.value.data
+  }
+  const imageEventCount = (): number =>
+    sessionOf().snapshotEvents().filter(event => event.type === 'user/message'
+      && JSON.stringify(event.data).includes('image')).length
+  const attachmentIdsOf = (): string[] => {
+    const ids: string[] = []
+    for (const event of sessionOf().snapshotEvents()) {
+      if (event.type !== 'user/message') continue
+      const blocks = ((event.data as { content?: unknown[] }).content ?? []) as
+        Array<{ type: string; attachment?: { attachmentId?: string } }>
+      for (const block of blocks) {
+        if (block.type === 'image' && block.attachment?.attachmentId !== undefined) ids.push(block.attachment.attachmentId)
+      }
+    }
+    return ids
+  }
+  // (1) FIRST submission: staged bytes → durable image → authorized read equality.
+  const staged = store.add({ bytes: pngBytes, mediaType: 'image/png', width: 1, height: 1, name: 'resend-proof.png' })
+  submitDraft(fixture, `resend first submit ${staged.placeholder}`)
+  await waitFor('first durable image row', () => imageEventCount() >= 1, 20_000)
+  const firstIds = attachmentIdsOf()
+  assert.equal(firstIds.length, 1, 'exactly one attachment after the first submission')
+  assert.deepEqual(
+    Buffer.from(await officialRead(firstIds[0]!)).toString('hex'),
+    Buffer.from(pngBytes).toString('hex'),
+    '(1) the FIRST submission durably stored the image; the authorized read returns the original bytes')
+  // The held stream keeps the turn officially RUNNING.
+  await waitFor('the session is running (held turn)', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+  // (2) A second image-bearing submission lands in the official QUEUE (the
+  // busyEnter default): its occurrence is an inbox SPLICE (next-turn),
+  // carrying the durable image block.
+  const staged2 = store.add({ bytes: pngBytes, mediaType: 'image/png', width: 1, height: 1, name: 'resend-second.png' })
+  submitDraft(fixture, `resend queued submit ${staged2.placeholder}`)
+  const queuedSpliceOf = (): { target: string; hasImage: boolean } | undefined => {
+    for (const event of sessionOf().snapshotEvents()) {
+      if (event.type !== 'agent/inbox/spliced') continue
+      if (!JSON.stringify(event.data).includes('resend queued submit')) continue
+      const parsed = event.data as { target: string; inserted?: Array<{ content?: Array<{ type: string }> }> }
+      const first = parsed.inserted?.[0]
+      const hasImage = first?.content?.some(block => block.type === 'image') === true
+      return { target: parsed.target, hasImage }
+    }
+    return undefined
+  }
+  await waitFor('the queued occurrence spliced with its image block', () => queuedSpliceOf()?.hasImage === true, 20_000)
+  assert.equal(queuedSpliceOf()!.target, 'next-turn', 'the busy submission QUEUED (next-turn splice)')
+  // (3) Alt+Up recall-all: pull the queued occurrence back as a RECALLED
+  // draft. The recalled draft carries NO local bytes (recalledRef only) —
+  // the second submission below cannot rely on any Client-local byte cache.
+  fixture.vt.sendInput('\x1b[1;3A')
+  await waitFor('the recalled placeholder is in the editor', () =>
+    app.getDraft().includes('[image #'), 10_000)
+  const draftImages = store.values()
+  const recalled = draftImages.find(entry => entry.placeholder === (app.getDraft().match(/\[image #\d+[^\]]*\]/)?.[0] ?? ''))
+  assert.ok(recalled !== undefined, 'the recalled draft is staged in the store')
+  assert.equal(recalled.bytes.length, 0,
+    'COUNTERFACTUAL: the recalled draft has NO local bytes (recalledRef only) — the resend must go through the official attachment read')
+  assert.ok(recalled.recalledRef !== undefined, 'the recalled draft cites the durable attachment ref')
+  // (4) SECOND submission: release the held turn first (an idle agent
+  // consumes the resent line as a prompt; while running it would merely
+  // queue again), then submit the recalled draft. The recalled durable
+  // image re-delivers the authorized bytes through a fresh durable user row.
+  release()
+  await waitFor('the held turn ended (idle)', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) !== true, 20_000)
+  const imageCountBeforeSecond = imageEventCount()
+  app.submitDraft()
+  await waitFor('the second durable image row lands', () => imageEventCount() > imageCountBeforeSecond, 20_000)
+  // The LocalAttachmentStore is CONTENT-ADDRESSED: the resent block may
+  // reuse the same attachment id (the acceptance is the delivered content
+  // and its authorized path, not the storage id policy).
+  const imageEvents = sessionOf().snapshotEvents().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes('image'))
+  assert.ok(imageEvents.length >= 2,
+    'the resent line produced its own durable user/message row')
+  const lastImageEvent = imageEvents[imageEvents.length - 1]!
+  const lastBlocks = ((lastImageEvent.data as { content?: unknown[] }).content ?? []) as
+    Array<{ type: string; attachment?: { attachmentId?: string } }>
+  const resentBlock = lastBlocks.find(block => block.type === 'image')
+  assert.ok(resentBlock?.attachment?.attachmentId !== undefined,
+    "the second submission's durable row carries an image attachment (the recalled durable image was re-delivered)")
+  assert.deepEqual(
+    Buffer.from(await officialRead(resentBlock!.attachment!.attachmentId!)).toString('hex'),
+    Buffer.from(pngBytes).toString('hex'),
+    'the SECOND submission (citing the recalled durable image) re-delivered the ORIGINAL authorized bytes through the official attachment read')
+  release()
+  await new Promise(resolve => setTimeout(resolve, 200))
+})

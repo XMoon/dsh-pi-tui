@@ -3723,20 +3723,30 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   switch — is not drivable in the real runner: a pending command settlement
   holds the single submit FIFO turn, so no later submit (the only user
   reachability for `/resume`/`/sessions` switches) can interleave. The
-  fences are therefore qualified at the unit layer (the command-runtime
-  scope-fence suite; the settlement stale/current pair) plus the mounted
-  pre-dispatch stale-capture L6 (PR3 §12, Connection-generation driven) and
-  the mounted teardown quiescence below. The SAME narrow FIFO constraint
-  applies to a `/preset` roster read pending across a switch (that await
-  lives INSIDE its command handler, which holds the submit turn); its
-  subject fence stays qualified by the existing Direct unit suites
-  (`preset-command`: the S1→S2 subject fence and the roster-drift
-  never-opens case) over the shared `commands.ts` path. The `/model`
-  directory read is NOT FIFO-bound (a detached owned workflow — the handler
-  returns immediately), and its pending-across-replacement race IS
-  mounted-qualified (`runner-remote-model-preset`: the parked official
-  directory read never paints the old subject current onto the replacement
-  surface).
+  fences are therefore DONE (unit-qualified; mounted subject replacement
+  unreachable under the single submit-FIFO product invariant — plan-owner
+  decision 2026-10-03, option 2 approved): the unit suites verify the
+  production stale fences DIRECTLY (the command-runtime scope-fence suite:
+  post-await original-scope rechecks settling as SupersededReadError; the
+  settlement stale/current pair: leak-prevention bookkeeping completes
+  while every visible commit is skipped), and the mounted layer proves the
+  complementary half (the real runner serializes submits through ONE FIFO;
+  the pre-dispatch stale-capture L6 PR3 §12; the observed teardown
+  boundaries below). SCOPE OF THE WAIVER (binding): it covers ONLY
+  in-handler awaits — the `/preset` roster await, the `/status` stats
+  await, the `/copy` paging await and the Host-command settlement await —
+  against SUBMIT-DRIVEN subject replacement (`/resume`, `/sessions`). It
+  explicitly EXCLUDES detached reads (the `/model` directory workflow,
+  which stays mounted-qualified in `runner-remote-model-preset`), official
+  reconnect / same-id binding rollover, teardown, any non-submit owner
+  replacement, and any future external navigation source. The waiver
+  auto-expires if the product gains a Session-navigation path that does
+  not go through the submit FIFO (mouse picker direct switch,
+  server-driven switch, plugin API switch): those reintroduce the race and
+  require mounted qualification. No test-only subject-switch hook was
+  added — a bypass a production user can never reach is not L6 evidence,
+  and a reconnect is a DIFFERENT currentness axis (transport identity, not
+  subject replacement).
 - **Selected-runtime teardown proof** (plan §3.9): with a pending main-path
   READ (a parked `/status` stats read) and, separately, a pending WRITE (a
   parked serializer), the runner fiber disposal is OBSERVED through real
@@ -3823,7 +3833,7 @@ row, with its disposition:
 | Remote local shell bypass | SUPERSEDED_BY_FAIL_CLOSED_POLICY | the original positive was retired by the Host-user-shell authority decision: Remote `!`/`!!` fail closed with zero spawn/zero write (`runner-remote-submission` §37 CARRIER_GAP L6); no Remote positive exists or is claimed |
 | Remote image prompt | DONE_WITH_EVIDENCE | PR3 L6 §37 (staged bytes → PromptContentPart → durable attachment) |
 | Remote durable image read | DONE_WITH_EVIDENCE | PR3 L6 (`runner-remote-submission` §37: staged bytes → durable attachment → official readAttachment byte equality) |
-| Remote durable image resend (a second submission citing a recalled durable image) | PARTIAL — unit-only evidence, mounted gap escalated | `remote-prompt-serializer` unit: a recalled durable image serializes its AUTHORIZED bytes through the official attachment read (never cites the Host-private ref); a mounted second-submission resend L6 was not produced in M3-4 and is escalated to the plan owner with this matrix |
+| Remote durable image resend (a second submission citing a recalled durable image) | DONE_WITH_EVIDENCE (mounted L6 qualified) | PR5 mounted L6 (`runner-remote-submission` "image resend"): first submit → durable image → authorized byte equality; a busy-queued image occurrence is recalled via the REAL Alt+Up pull-back (the recalled draft carries NO local bytes — recalledRef only, asserted); the second submission re-delivers the ORIGINAL authorized bytes through the official attachment read into a fresh durable user/message row (content-addressed ids may repeat; the acceptance is the delivered content and the authorized path). Plus the `remote-prompt-serializer` unit (the durable ref never crosses the wire). Plan-owner decision 2026-10-03: mounted closure required (option 1a) — landed |
 | Remote Session export through the selected backend | DONE_WITH_EVIDENCE | PR4 L6 (Host `/export` claim + SessionArchivePort authority) |
 
 Original M3-4 overall plan §14 (required negative / fail-closed evidence) —
@@ -3846,10 +3856,15 @@ every row:
 | Turn-end Remote path → never Host sessions.flush | DONE_WITH_EVIDENCE | PR3 turn-end settlement (official flush contract; no TUI-side sessions.flush anywhere in `runtime/remote`) |
 
 M3-4 closure state: every §13/§14 row above carries its disposition; the
-two rows marked PARTIAL/SUPERSEDED_BY_FAIL_CLOSED_POLICY record precisely
-what is evidenced and what is not. The durable-image-resend mounted gap and
-the reviewer-narrowed FIFO-bound mounted scenarios (see the qualification
-note) are escalated to the plan owner for an explicit acceptance decision
-before the stage line flips to DONE. The next stage remains M3-5
+row marked SUPERSEDED_BY_FAIL_CLOSED_POLICY records the retired shell
+positive precisely. The two escalated acceptance decisions were ruled by
+the plan owner on 2026-10-03: (1) durable-image-resend — mounted closure
+REQUIRED and LANDED (option 1a; see the resend row); (2) the in-handler
+FIFO-bound mounted scenarios — unit-qualified acceptance APPROVED with the
+binding scope recorded in the qualification note above (mounted
+counterpart unreachable by the single submit-FIFO product invariant; the
+waiver does not extend to detached `/model`, reconnect or teardown, and
+auto-expires if a non-submit navigation path appears). With both decisions
+recorded, no required row remains PARTIAL. The next stage is M3-5
 (secondary surfaces); no automatic "PR6" is created for historical
 unchecked checklist items.
