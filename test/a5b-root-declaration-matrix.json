@@ -1,6 +1,6 @@
 {
   "generatedFrom": "src/app/bootstrap.ts",
-  "sourceHash": "sha256:b48e1173569c8170",
+  "sourceHash": "sha256:9a9041dd90b04214",
   "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
   "total": 93,
   "rows": [
@@ -30,8 +30,8 @@
         "viewer",
         "root-statement@369",
         "root-statement@847",
-        "root-statement@2451",
-        "root-statement@2610"
+        "root-statement@2456",
+        "root-statement@2615"
       ]
     },
     {
@@ -43,10 +43,10 @@
       "hostDependency": true,
       "head": "const defaultModel = ctx.get('agentDefaultModel')",
       "tests": [
+        "direct-command-origin.test.ts",
         "export-command.test.ts",
         "runner-session-bootstrap.test.ts",
-        "runner-session-retirement.test.ts",
-        "submit-hot-path.test.ts"
+        "runner-session-retirement.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
@@ -71,8 +71,8 @@
       "tests": [
         "application-runtime-selection.test.ts",
         "busy-enter.test.ts",
-        "export-command.test.ts",
-        "extension-registry-m5.test.ts"
+        "direct-command-origin.test.ts",
+        "export-command.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
@@ -84,8 +84,8 @@
         "viewer",
         "flushTurn",
         "root-statement@369",
-        "root-statement@2323",
-        "root-statement@2451"
+        "root-statement@2326",
+        "root-statement@2456"
       ]
     },
     {
@@ -93,7 +93,7 @@
       "kind": "const",
       "mutable": false,
       "lines": "379-391",
-      "refs": 88,
+      "refs": 89,
       "hostDependency": false,
       "head": "const ownership = createSessionOwnershipCore({",
       "tests": [
@@ -148,7 +148,7 @@
         "status",
         "localShell",
         "submission",
-        "root-statement@2693"
+        "root-statement@2698"
       ]
     },
     {
@@ -173,7 +173,7 @@
         "sessionRuntime",
         "command",
         "submission",
-        "root-statement@2693"
+        "root-statement@2698"
       ]
     },
     {
@@ -194,7 +194,7 @@
       "callers": [
         "localShell",
         "submission",
-        "root-statement@2610"
+        "root-statement@2615"
       ]
     },
     {
@@ -250,7 +250,7 @@
         "localShell",
         "submission",
         "root-statement@823",
-        "root-statement@2323"
+        "root-statement@2326"
       ]
     },
     {
@@ -319,7 +319,7 @@
         "createDirectApplication",
         "command",
         "root-statement@823",
-        "root-statement@2323"
+        "root-statement@2326"
       ]
     },
     {
@@ -500,7 +500,7 @@
         "directAssistantRuntime",
         "root-statement@2003",
         "root-statement@2244",
-        "root-statement@2451"
+        "root-statement@2456"
       ]
     },
     {
@@ -636,7 +636,7 @@
         "a2-ownership-cutover.test.ts",
         "a3-command-identity.test.ts",
         "a5b-bootstrap-closure.test.ts",
-        "session-scope.test.ts"
+        "m3-4-pr4-guards.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:owner-connector",
       "owner": "bootstrap",
@@ -714,7 +714,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "scope-checked projection read for the echo install fence; no Host service lookup.",
       "callers": [
-        "root-statement@2693"
+        "root-statement@2698"
       ]
     },
     {
@@ -736,7 +736,7 @@
       "sweepNote": "ownership.owner/isSubjectCurrent — ownership subject fence connector.",
       "callers": [
         "submission",
-        "root-statement@2610"
+        "root-statement@2615"
       ]
     },
     {
@@ -757,7 +757,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "ownership.owner plus directRuntime attachmentOf — exact identity connector.",
       "callers": [
-        "root-statement@2451"
+        "root-statement@2456"
       ]
     },
     {
@@ -806,7 +806,7 @@
         "command",
         "status",
         "submission",
-        "root-statement@2451"
+        "root-statement@2456"
       ]
     },
     {
@@ -814,7 +814,7 @@
       "kind": "const",
       "mutable": false,
       "lines": "691-785",
-      "refs": 21,
+      "refs": 22,
       "hostDependency": true,
       "head": "const sessionRuntime = bindSessionRuntime(ownership, {",
       "tests": [
@@ -836,8 +836,8 @@
         "root-statement@789",
         "root-statement@2003",
         "root-statement@2244",
-        "root-statement@2610",
-        "root-statement@2693"
+        "root-statement@2615",
+        "root-statement@2698"
       ]
     },
     {
@@ -904,10 +904,10 @@
         "root-statement@823",
         "root-statement@847",
         "root-statement@2244",
-        "root-statement@2323",
-        "root-statement@2380",
-        "root-statement@2381",
-        "root-statement@2435"
+        "root-statement@2326",
+        "root-statement@2385",
+        "root-statement@2386",
+        "root-statement@2440"
       ]
     },
     {
@@ -1043,7 +1043,7 @@
         "sessionRuntime",
         "root-statement@929",
         "root-statement@1112",
-        "root-statement@2793"
+        "root-statement@2798"
       ]
     },
     {
@@ -1134,7 +1134,7 @@
       "callers": [
         "presentation",
         "root-statement@1112",
-        "root-statement@2770"
+        "root-statement@2775"
       ]
     },
     {
@@ -1157,7 +1157,7 @@
       "callers": [
         "presentation",
         "root-statement@1112",
-        "root-statement@2770"
+        "root-statement@2775"
       ]
     },
     {
@@ -1177,7 +1177,7 @@
       "sweepNote": "deferred startup notice shown once post-mount then cleared; startup prerequisite.",
       "callers": [
         "root-statement@1112",
-        "root-statement@2789"
+        "root-statement@2794"
       ]
     },
     {
@@ -1284,8 +1284,8 @@
         "status",
         "viewer",
         "currentWorkingFromLog",
-        "root-statement@2451",
-        "root-statement@2750"
+        "root-statement@2456",
+        "root-statement@2755"
       ]
     },
     {
@@ -1346,7 +1346,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "loadOlder in-flight latch for the history-extension seam; coalescing flag scoped to one subject.",
       "callers": [
-        "root-statement@2451"
+        "root-statement@2456"
       ]
     },
     {
@@ -1409,7 +1409,7 @@
       "sweepNote": "Remote cold-hydrate + ingress subscribe connector invoked by the session runtime seam; branch connector.",
       "callers": [
         "sessionRuntime",
-        "root-statement@2750"
+        "root-statement@2755"
       ]
     },
     {
@@ -1440,7 +1440,7 @@
         "history",
         "artifacts",
         "root-statement@847",
-        "root-statement@2323"
+        "root-statement@2326"
       ]
     },
     {
@@ -1461,7 +1461,7 @@
       "callers": [
         "command",
         "root-statement@2244",
-        "root-statement@2323"
+        "root-statement@2326"
       ]
     },
     {
@@ -1482,7 +1482,7 @@
       "callers": [
         "command",
         "root-statement@2244",
-        "root-statement@2323"
+        "root-statement@2326"
       ]
     },
     {
@@ -1591,9 +1591,9 @@
         "requestExit",
         "submission",
         "root-statement@929",
-        "root-statement@2323",
-        "root-statement@2411",
-        "root-statement@2668"
+        "root-statement@2326",
+        "root-statement@2416",
+        "root-statement@2673"
       ]
     },
     {
@@ -1655,9 +1655,9 @@
         "presentation",
         "command",
         "submission",
-        "root-statement@2323",
-        "root-statement@2448",
-        "root-statement@2451"
+        "root-statement@2326",
+        "root-statement@2453",
+        "root-statement@2456"
       ]
     },
     {
@@ -1723,8 +1723,8 @@
         "submission",
         "artifacts",
         "flushTurn",
-        "root-statement@2323",
-        "root-statement@2379"
+        "root-statement@2326",
+        "root-statement@2384"
       ]
     },
     {
@@ -1773,7 +1773,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "toolPresenterFrom over the live Agent plus the tools registry; narrow Host read for presentation.",
       "callers": [
-        "root-statement@2323"
+        "root-statement@2326"
       ]
     },
     {
@@ -1836,8 +1836,8 @@
         "submission",
         "prepareRemotePrompt",
         "root-statement@2244",
-        "root-statement@2323",
-        "root-statement@2693"
+        "root-statement@2326",
+        "root-statement@2698"
       ]
     },
     {
@@ -1862,7 +1862,7 @@
         "submission",
         "prepareRemotePrompt",
         "root-statement@2244",
-        "root-statement@2693"
+        "root-statement@2698"
       ]
     },
     {
@@ -2017,7 +2017,7 @@
         "directPresentationReader",
         "presentation",
         "viewer",
-        "root-statement@2902"
+        "root-statement@2907"
       ]
     },
     {
@@ -2048,8 +2048,8 @@
         "submission",
         "root-statement@2087",
         "root-statement@2244",
-        "root-statement@2451",
-        "root-statement@2610"
+        "root-statement@2456",
+        "root-statement@2615"
       ]
     },
     {
@@ -2080,9 +2080,9 @@
         "localShell",
         "prepareRemotePrompt",
         "root-statement@2244",
-        "root-statement@2451",
-        "root-statement@2610",
-        "root-statement@2693"
+        "root-statement@2456",
+        "root-statement@2615",
+        "root-statement@2698"
       ]
     },
     {
@@ -2137,7 +2137,7 @@
       "name": "jobs",
       "kind": "const",
       "mutable": false,
-      "lines": "2608-2608",
+      "lines": "2613-2613",
       "refs": 14,
       "hostDependency": true,
       "head": "const jobs = ctx.get('jobs')",
@@ -2155,14 +2155,14 @@
       "sweepNote": "ctx.get(jobs) Host job registry forwarded to surface.attachTasks; narrow list/get/kill reads only.",
       "callers": [
         "disposeSurface",
-        "root-statement@2610"
+        "root-statement@2615"
       ]
     },
     {
       "name": "subagents",
       "kind": "const",
       "mutable": false,
-      "lines": "2609-2609",
+      "lines": "2614-2614",
       "refs": 4,
       "hostDependency": true,
       "head": "const subagents = ctx.get('subagents')",
@@ -2179,14 +2179,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "ctx.get(subagents) Host subagent registry forwarded to surface.attachTasks; narrow descendant reads only.",
       "callers": [
-        "root-statement@2610"
+        "root-statement@2615"
       ]
     },
     {
       "name": "prepareRemotePrompt",
       "kind": "const",
       "mutable": false,
-      "lines": "2676-2686",
+      "lines": "2681-2691",
       "refs": 4,
       "hostDependency": false,
       "head": "const prepareRemotePrompt = async (text: string, requestId: string): Promise<unknown> => {",
@@ -2200,14 +2200,14 @@
       "callers": [
         "command",
         "submission",
-        "root-statement@2693"
+        "root-statement@2698"
       ]
     },
     {
       "name": "startupAgent",
       "kind": "const",
       "mutable": false,
-      "lines": "2749-2749",
+      "lines": "2754-2754",
       "refs": 3,
       "hostDependency": false,
       "head": "const startupAgent = agentNow()",
@@ -2219,14 +2219,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "agentNow() snapshot deciding the resume vs deferred startup surface; startup orchestration.",
       "callers": [
-        "root-statement@2750"
+        "root-statement@2755"
       ]
     },
     {
       "name": "currentWorkingFromLog",
       "kind": "const",
       "mutable": false,
-      "lines": "2805-2859",
+      "lines": "2810-2864",
       "refs": 4,
       "hostDependency": false,
       "head": "const currentWorkingFromLog = (): boolean => {",
@@ -2238,14 +2238,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "workingFromLog(snapshotEvents()) read for the compaction settle; runner-owned log read.",
       "callers": [
-        "root-statement@2451"
+        "root-statement@2456"
       ]
     },
     {
       "name": "flushTurn",
       "kind": "const",
       "mutable": false,
-      "lines": "2864-2878",
+      "lines": "2869-2883",
       "refs": 3,
       "hostDependency": false,
       "head": "const flushTurn = (): void => {",
@@ -2257,14 +2257,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "turn-persistence hook invoked by the surface routing; Direct/domain persistence seam.",
       "callers": [
-        "root-statement@2451"
+        "root-statement@2456"
       ]
     },
     {
       "name": "directAssistantRuntime",
       "kind": "const",
       "mutable": false,
-      "lines": "2901-2901",
+      "lines": "2906-2906",
       "refs": 3,
       "hostDependency": true,
       "head": "const directAssistantRuntime = directRuntime()",
@@ -2278,14 +2278,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "transitional local for the Direct assistant-stream install; no state.",
       "callers": [
-        "root-statement@2902"
+        "root-statement@2907"
       ]
     },
     {
       "name": "disposeCredentialSubscription",
       "kind": "const",
       "mutable": false,
-      "lines": "2946-2946",
+      "lines": "2951-2951",
       "refs": 2,
       "hostDependency": false,
       "head": "const disposeCredentialSubscription = backend.config.credentials.onChanged(() => surface.routeProviderRefresh())",
@@ -2299,7 +2299,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "credentials.onChanged subscription handle disposed on abort; Host event wiring (thin delegation).",
       "callers": [
-        "root-statement@2947"
+        "root-statement@2952"
       ]
     }
   ]
