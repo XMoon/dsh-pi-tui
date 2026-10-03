@@ -3307,6 +3307,44 @@ test('a DISAPPEARED host name never turns an attachment-bearing line into a loca
     'the model receives the multimodal prompt')
 })
 
+// QUALIFICATION (whole-PR R15-1, recorded honestly): this case documents the
+// INTENDED policy but is NOT a discriminating witness. Restoring the indirect
+// static-list clause in `lateAttachmentRefusal` still passes it — in this
+// fixture the deferred refusal does not surface a notice for the plane-owned
+// line under EITHER implementation, so the mounted observable cannot separate
+// them. R15-1's evidence is the authority-source fix (the classifier term is the
+// live Client claim only) plus the structural guard that forbids the indirect
+// call shape; the reviewer did not claim a mounted bare-`/kill` refusal either.
+test('whole-PR R15-1: a bare static-only name (/kill) keeps its ORDINARY attachment policy through the deferred classifier', async (t) => {
+  // `/kill` lives in the STATIC policy set (reserved-name validation + the
+  // collision catalog) with NO live Client registration and NO handler. The
+  // deferred attachment classifier used to reach the static list indirectly
+  // (`extensions.isLocal(..., LOCAL_COMMANDS)` -> `CommandBridge.isLocal`'s
+  // `staticLocal.has(name)` first statement), so a bare `/kill` re-entered the
+  // TUI family and REFUSED an attachment the submit-time classification had
+  // already allowed as an ordinary multimodal submission. The classifier now
+  // reads the live Client claim only.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-r15-1-kill-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+  })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/kill ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.host.followedUp.length > 0
+    || mounted.app.notifyTextForTest() !== ''
+    || harness.executed.length > 0, 10_000)
+  assert.doesNotMatch(mounted.app.notifyTextForTest(), /Attachments cannot be included/,
+    'a static-only name must never be re-classified as a TUI command by the deferred classifier')
+})
+
 test('whole-PR F1: a vanished SAME-NAME TUI Host command keeps the argued line ordinary WITH its attachment', async (t) => {
   // The static TUI name list used to absorb this line after the disappearance:
   // `/model` is in LOCAL_COMMANDS, so the final attachment classification
