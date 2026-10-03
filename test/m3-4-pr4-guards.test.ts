@@ -70,8 +70,8 @@ test('§D2 (review round 3 ruling): Direct keeps the Host compatibility MIRROR; 
   )
   assert.ok(oneBody.includes('clientCommands.register(definition)'),
     'the Client registry is the FIRST registration (the definition owner)')
-  assert.ok(oneBody.includes('commands.register(definition)'),
-    'the Direct compatibility mirror registers the SAME definition into the Host registry')
+  assert.ok(oneBody.includes('commands.register({'),
+    'the Direct compatibility mirror registers into the Host registry (carrying the provenance definitionId beside the same definition)')
   assert.ok(oneBody.includes('if (commands === undefined) return disposeClient'),
     'the mirror is Direct-only (Remote registers nothing into the Host service)')
   // The REMOTE half of the submission route stays Client-only: the projected
@@ -260,7 +260,7 @@ test('PR5 the transcript-export capability is REQUIRED and refused unless exactl
 test('PR5 §1C the Direct compatibility mirror is NOT Host origin (registry membership ≠ ownership)', () => {
   const commands = code('commands.ts')
   // §1C-2: the provenance set exists and marks ONLY successful mirrors.
-  assert.ok(commands.includes('directCompatibilityMirrors'), 'the mirror-provenance set exists')
+  assert.ok(commands.includes('mirrorDefinitionIds'), 'the mirror-provenance set holds the EXACT stamped definitionIds (review R6-1)')
   // §1C-4: the genuine Host-origin line authority exists and reads the
   // origin-filtered descriptors, never the union claims or raw membership.
   assert.ok(commands.includes('const hostOriginClaimOf'), 'the hostOriginClaimOf primitive exists')
@@ -275,7 +275,7 @@ test('PR5 §1C the Direct compatibility mirror is NOT Host origin (registry memb
     commands.indexOf('const deriveHostOriginDescriptors'),
     commands.indexOf('const deriveHostOriginDescriptors') + 600,
   )
-  assert.ok(derive.includes('directCompatibilityMirrors.has'), 'the derivation subtracts the live mirrors')
+  assert.ok(derive.includes('mirrorDefinitionIds.has(command.definitionId)'), 'the derivation subtracts ONLY winners that ARE our stamped mirror definitions')
   // hostCatalogResolves answers from the ORIGIN map, not raw registry
   // membership.
   const resolves = commands.slice(
@@ -311,8 +311,19 @@ test('PR5 §1C one classifier drives the submission siblings', () => {
 test('PR5 §3C the rewind final settlement is gated by the operation-owned navigation identity', () => {
   const runtime = code('app/session/runtime.ts')
   // The adoption commit mints the post-adoption identity.
-  assert.ok(runtime.includes('const adoptedNavigation = core.captureNavigationIdentity()'),
-    'the adopted success carries the runtime-minted post-adoption navigation identity')
+  assert.ok(runtime.includes('committedNavigation = claimedEpoch === undefined'),
+    'the settlement identity composes the PUBLISHED child + the CLAIMED admission epoch (never a counter re-read)')
+  assert.ok(runtime.includes('export type SessionForkErrorReason'),
+    'the error reason vocabulary is a structured type (reason controls wording; identity controls currentness)')
+  for (const reason of ["'navigation-changed-before-dispatch'", "'host-refused'", "'adoption-failed'", "'fork-failed'"]) {
+    assert.ok(runtime.includes(reason), `the ${reason} reason exists`)
+  }
+  assert.ok(runtime.includes('readonly notificationNavigation: RewindNavigationIdentity'),
+    'EVERY error outcome carries a REQUIRED notification fence (no branch may omit it)')
+  assert.ok(runtime.includes('notificationNavigation: before'),
+    'the pre-admission stale detection carries the LIVE identity observed at detection')
+  assert.ok(runtime.includes("reason: 'host-refused'"),
+    'a dispatched-fork refusal carries the ADMISSION identity as its fence')
   assert.ok(runtime.includes('readonly adoptedNavigation?: RewindNavigationIdentity'),
     'the success outcome can carry adoptedNavigation')
   const events = code('app/surface/application-events.ts')
@@ -321,9 +332,10 @@ test('PR5 §3C the rewind final settlement is gated by the operation-owned navig
   assert.ok(successGate.includes('outcome.adoptedNavigation')
     && successGate.includes('!deps.rewind.isNavigationCurrent(owned)) return'),
     'the success toast is suppressed once the operation-owned identity is superseded')
-  // Pre-adoption error/error paths consult the ORIGINAL picker identity.
-  assert.ok(events.includes('if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return'),
-    'pre-adoption error notices consult the original picker identity')
+  // NO error path consults the picker-open identity anymore (the d529d464
+  // defect): every error fences on its OWN notificationNavigation.
+  assert.equal(events.slice(events.indexOf("if (outcome.kind === 'error')")).includes('pickerIdentity'), false,
+    'no error settlement consults the picker-open identity')
 })
 
 /* ── PR5 v2 §2.12: Ctrl+R main Session identity ─────────────────────────── */

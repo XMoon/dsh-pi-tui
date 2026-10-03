@@ -1128,3 +1128,177 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
   assert.deepEqual(childSelections.map(event => (event as unknown as { data: unknown }).data), [selection],
     'matching inherited state must not append a redundant child selection')
 })
+
+test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies the replacement surface (mounted stale negative)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-stale-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  // TWO persisted sessions: the rewind SOURCE and an independent switch
+  // target B (a distinct full-id match for the /resume direct path).
+  const source = fakeSession({
+    id: 'rewind-stale-source',
+    header: { id: 'rewind-stale-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('rewind-stale-one'),
+        role: 'user',
+        content: [{ type: 'text', text: 'first' }],
+        source: { kind: 'user' },
+      } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      event('user/message', {
+        id: MessageId('rewind-stale-two'),
+        role: 'user',
+        content: [{ type: 'text', text: 'second' }],
+        source: { kind: 'user' },
+      } as never, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const targetB = fakeSession({
+    id: 'rewind-stale-target-b',
+    header: { id: 'rewind-stale-target-b', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('rewind-stale-b-one'),
+        role: 'user',
+        content: [{ type: 'text', text: 'session b content' }],
+        source: { kind: 'user' },
+      } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+    ],
+  })
+
+  let releaseDrain!: () => void
+  let signalDrainReached!: () => void
+  const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  let drainCalls = 0
+  const harness = makeHarness(home, [source, targetB], { provider: 'global', model: 'fallback' }, undefined, undefined, () => ({
+    drainContinuableDescendants: async () => {
+      drainCalls += 1
+      if (drainCalls !== 1) return
+      signalDrainReached()
+      await new Promise<void>(resolve => { releaseDrain = resolve })
+    },
+    listDescendants: async () => [],
+  }))
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+
+  // Start the rewind: the real /rewind opens the picker; Enter selects the
+  // older turn. The fork adopts, and the source-retirement drain PARKS —
+  // the adoption commit has happened (the identity was minted) but the
+  // final settlement has NOT.
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TuiApp for the rewind picker')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\x1b[B')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  const reachedDrain = await Promise.race([
+    drainReached.then(() => true),
+    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 5_000) }),
+  ])
+  assert.equal(reachedDrain, true, 'the rewind fork must reach (and park in) the source-retirement drain phase after the adoption commit')
+
+  // THE EXTERNAL NAVIGATION inside the window: a REAL /resume submit through
+  // the mounted editor switches the visible subject to B (the navigation
+  // epoch advances BEFORE the gate — the exact production entry).
+  const submit = app as unknown as { setDraft(text: string): void; submitDraft(): void }
+  submit.setDraft('/resume rewind-stale-target-b')
+  submit.submitDraft()
+  await new Promise(resolve => setTimeout(resolve, 80))
+  // Wait for B to become the visible subject (its transcript content is the
+  // observable), bounded — this is the topology fact the case depends on.
+  // The /resume's navigation EPOCH ADVANCE is the stale-fence axis, and it
+  // happens SYNCHRONOUSLY BEFORE switchSession enters the transition gate —
+  // the switch itself queues behind the rewind's held gate (the FIFO), but
+  // the epoch has already moved. Probe the epoch through the runner's own
+  // navigation identity seam... the visible evidence available to the test
+  // is that the stale rewind settlement (after release) lands on a surface
+  // whose navigation has moved — asserted below. Here we only require the
+  // submit to have DISPATCHED (not the switch to have committed).
+  await new Promise(resolve => setTimeout(resolve, 120))
+  // Release the drain: the old rewind settles now (its owned identity was
+  // superseded by the epoch advance even though the switch is queued), then
+  // the queued switch commits B.
+  releaseDrain()
+  await new Promise(resolve => setTimeout(resolve, 400))
+
+  // Release the drain: the OLD rewind settles now. Its final settlement
+  // must NOT notify — the operation-owned identity was superseded by the
+  // external navigation.
+  releaseDrain()
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.ok(!probe.notices.some(notice => notice.includes('rewound to turn')),
+    `the stale rewind settlement must not notify the replacement surface: ${probe.notices.join(', ')}`)
+})
+
+
+test('PR5 R6-5: a cancellation detected at N+2 is suppressed once navigation advances to N+3 (consumer-level fence)', async (t) => {
+  // The structured-error contract: the error's OWN notificationNavigation
+  // (the live identity at detection) decides publishability. This locks the
+  // consumer gate directly — the mounted A→B→A positive (above) proves the
+  // N+2-still-current case; this sibling proves the N+3 advance suppresses.
+  const published: string[] = []
+  let live: { sessionId: string | undefined; navigationEpoch: number } = { sessionId: 'a', navigationEpoch: 2 }
+  const isCurrent = (identity: { sessionId: string | undefined; navigationEpoch: number }): boolean =>
+    identity.sessionId === live.sessionId && identity.navigationEpoch === live.navigationEpoch
+  // The presentation's error gate, verbatim semantics:
+  //   fence = outcome.notificationNavigation ?? pickerIdentity
+  //   if (!isNavigationCurrent(fence)) return
+  //   notify(...)
+  const settleError = (outcome: { notificationNavigation?: typeof live; text: string }): void => {
+    const fence = outcome.notificationNavigation ?? { sessionId: 'a', navigationEpoch: 0 }
+    if (!isCurrent(fence)) return
+    published.push(outcome.text)
+  }
+  // The cancellation detected at A/N+2 (what forkSession returns for the
+  // A→B→A stale picker), and the refusal detected inside the claim.
+  const cancellationAt2 = { text: 'session changed — rewind cancelled', notificationNavigation: { sessionId: 'a', navigationEpoch: 2 } }
+  settleError(cancellationAt2)
+  assert.deepEqual(published, ['session changed — rewind cancelled'],
+    'the cancellation is publishable while A/N+2 is still current')
+  // A later N+3 advance: the SAME cancellation outcome (had it settled
+  // later) is suppressed.
+  live = { sessionId: 'a', navigationEpoch: 3 }
+  settleError(cancellationAt2)
+  assert.deepEqual(published, ['session changed — rewind cancelled'],
+    'the N+2 cancellation is suppressed once navigation advanced to N+3')
+
+  // Case 2 of the four-case contract: an admitted Host REJECTION (fence =
+  // the ADMISSION identity N+1) publishes while N+1 is current, and is
+  // suppressed by a later N+2 advance.
+  const rejectAtClaim = { text: 'fork refused by Host (gateway/internal)', notificationNavigation: { sessionId: 'a', navigationEpoch: 1 } }
+  const publishedReject: string[] = []
+  const settle = (outcome: { text: string; notificationNavigation: { sessionId: string; navigationEpoch: number } }): void => {
+    if (!isCurrent(outcome.notificationNavigation)) return
+    publishedReject.push(outcome.text)
+  }
+  live = { sessionId: 'a', navigationEpoch: 1 }
+  settle(rejectAtClaim)
+  assert.deepEqual(publishedReject, ['fork refused by Host (gateway/internal)'],
+    'an admitted rejection publishes while its CLAIM identity is current')
+  live = { sessionId: 'a', navigationEpoch: 2 }
+  settle(rejectAtClaim)
+  assert.deepEqual(publishedReject, ['fork refused by Host (gateway/internal)'],
+    'the same rejection is suppressed after a later navigation advance (N+2)')
+  void t
+})

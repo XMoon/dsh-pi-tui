@@ -29,7 +29,7 @@ import { runReservedSubmit } from '../../image/submit-flow.ts'
 import type { DraftImageStore } from '../../image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments, prepareUserMessage, type PrepareInputDeps } from '../../image/submit.ts'
 import { expandImagePlaceholders } from '../../image/placeholder.ts'
-import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
+import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
@@ -345,11 +345,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const attachmentRefusal = (
     parsed: { name: string; rawInput?: string },
     draft: string,
-    // Whether THIS LINE is a local command line — the dispatch's ONE
-    // classification (`commandIsLocalForAttachments`), computed by the
-    // caller because it must be re-readable against the FINAL catalog for a
-    // deferred start.
-    isLocal: boolean,
+    // The caller's classification of THIS LINE (PR5 v2 §1C-7): a Client
+    // command (TUI or extension) refuses staged attachments; a genuine
+    // Host command follows the HOST descriptor's own `attachments`
+    // declaration carried by the classification; skills and ordinary
+    // submissions are multimodal. Never re-derived from the advertised
+    // union here (review R6-3: the union lets a same-name Client
+    // descriptor overwrite the winning Host declaration).
+    classification: CommandLineClassification,
     // The ONE skill-invocation predicate (`isSkillInvocation`: an explicit
     // `/skill <name> ...` or a live skill wrapper) — TUI-owned agent-facing
     // input that loadSkill owns. It is supplied rather than re-derived: the
@@ -360,19 +363,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   ): string | undefined => {
     if (!draftHasAttachments(draft, deps.drafts.images, deps.drafts.files)) return undefined
     if (skillInvocation) return undefined
-    if (!isLocal) {
-      const claim = deps.command.hostClaimOf(parsed)
-      if (claim?.claimed === true) {
-        if (claim.attachments !== true) {
-          return `/${parsed.name} does not accept attachments; remove them first`
-        }
-        if (draftHasFiles(draft, deps.drafts.images, deps.drafts.files)) {
-          return `/${parsed.name} cannot receive file attachments in this client; remove them first`
-        }
-      }
-      return undefined
+    if (classification.kind === 'client-command') {
+      return 'Attachments cannot be included in a user-shell command.'
     }
-    return 'Attachments cannot be included in a user-shell command.'
+    if (classification.kind === 'host-command') {
+      if (classification.attachments !== true) {
+        return `/${parsed.name} does not accept attachments; remove them first`
+      }
+      if (draftHasFiles(draft, deps.drafts.images, deps.drafts.files)) {
+        return `/${parsed.name} cannot receive file attachments in this client; remove them first`
+      }
+    }
+    return undefined
   }
 
   /** The encoded images ONE command invocation carries (DSH
@@ -951,32 +953,45 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // the attachment policy from that final classification (the
           // dynamic contribution term stays STICKY to the submit-time
           // route, exactly as the sticky-rules note in §1C-8 records).
+          //
+          // §1C-5 (review R6-4): the facts come from ONE helper so the
+          // deferred sites can never drift from the submit-time decision —
+          // in particular the skill-invocation FIRST rule (an argued
+          // `/skill <name>` is never absorbed into a Client command by the
+          // BARE picker's LOCAL_COMMANDS membership) and the wrapper-outranks-
+          // contribution precedence.
           lateAttachmentRefusal: () => {
             if (parsed === undefined) return undefined
+            const finalSkillInvocation = deps.command.isSkillInvocation(parsed, text)
             const finalClassification = classifyCommandLine({
               hostOriginClaim: deps.command.hostOriginClaimOf(parsed),
-              tuiCommand: isLocalCommandLine(
+              // §1C-5 (review R6-4): the skill-invocation rule comes FIRST —
+              // the static `LOCAL_COMMANDS` membership of `skill` must never
+              // absorb an argued `/skill <name>` into a Client command.
+              tuiCommand: !finalSkillInvocation && isLocalCommandLine(
                 parsed.name,
                 deps.command.isSkillWrapperName,
                 isBareCommandLine(parsed) ? (name => deps.extensions.isLocal(name, LOCAL_COMMANDS)) : undefined,
                 false,
               ),
-              extensionCommand: clientLocalAtSubmit && isBareCommandLine(parsed)
+              // The wrapper-outranks-contribution precedence (§1C-5).
+              extensionCommand: clientLocalAtSubmit && !finalSkillInvocation
+                && isBareCommandLine(parsed)
+                && deps.command.isSkillWrapperName(parsed.name) !== true
                 && deps.extensions.findContribution(parsed.name) !== undefined,
-              skillInvocation: deps.command.isSkillInvocation(parsed, text),
+              skillInvocation: finalSkillInvocation,
             })
-            return attachmentRefusal(
-              parsed,
-              text,
-              finalClassification.kind === 'client-command',
-              deps.command.isSkillInvocation(parsed, text),
-            )
+            return attachmentRefusal(parsed, text, finalClassification, finalSkillInvocation)
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: () => parsedAtSubmit !== undefined
             // §1C-7: the TUI-owned route is the classifier's client-command
             // (tui) family evaluated against the FINAL catalog — a genuine
             // Host-origin name (mirrors excluded) disqualifies it first.
+            // (Distinct question from the line classification: a skill
+            // invocation is agent-facing INPUT yet its handler still lives in
+            // the TUI's own registry, so the skill/wrapper terms stay OUT of
+            // this predicate.)
             && classifyCommandLine({
               hostOriginClaim: deps.command.hostOriginClaimOf(parsedAtSubmit),
               tuiCommand: LOCAL_COMMANDS.has(parsedAtSubmit.name)
@@ -1435,24 +1450,33 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // its Client terms come from the LIVE sources (the Client registry
     // seam, the extension contribution of a bare line, the skill-wrapper
     // state), never from a reconstructed name list.
+    // §1C-5 line semantics FIRST (review R6-4): an argued `/skill <name>
+    // ...` and a live dynamic wrapper are SKILL invocations — the static
+    // LOCAL_COMMANDS membership of `skill` (the BARE picker) must never
+    // absorb the argued form into a Client command.
+    const skillInvocation = deps.command.isSkillInvocation(parsed, text)
     const classification = classifyCommandLine({
       hostOriginClaim: parsed === undefined ? undefined : deps.command.hostOriginClaimOf(parsed),
       // §1C-5 source fidelity: the TUI term covers THIS surface's OWN
-      // registrations (built-ins via LOCAL_COMMANDS + live wrappers); a
-      // bare-line EXTENSION contribution is its own source kind and must
-      // not be absorbed into the TUI term (the run paths differ: the
-      // extension bridge vs the Client registry).
+      // registrations (built-ins via LOCAL_COMMANDS + live wrappers), and
+      // only for a line that is NOT a skill invocation.
       tuiCommand: parsed !== undefined
+        && !skillInvocation
         && isLocalCommandLine(
           parsed.name,
           deps.command.isSkillWrapperName,
           isBareCommandLine(parsed) ? (name => LOCAL_COMMANDS.has(name)) : undefined,
           false,
         ),
+      // A live skill wrapper outranks a same-name extension contribution
+      // (the wrapper route wins everywhere) — the extension term excludes
+      // wrapper names.
       extensionCommand: parsed !== undefined
+        && !skillInvocation
         && isBareCommandLine(parsed)
+        && deps.command.isSkillWrapperName(parsed.name) !== true
         && deps.extensions.findContribution(parsed.name) !== undefined,
-      skillInvocation: deps.command.isSkillInvocation(parsed, text),
+      skillInvocation,
     })
     // The advertised union claim view (§1C-1): kept ONLY for the advertised
     // -miss semantics below — never a routing authority.
@@ -1479,7 +1503,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       const refusal = attachmentRefusal(
         parsed,
         text,
-        classification.kind === 'client-command',
+        classification,
         deps.command.isSkillInvocation(parsed, text),
       )
       if (refusal !== undefined) {

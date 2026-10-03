@@ -1577,20 +1577,34 @@ export function registerTuiCommands(
   //     skill wrappers and the revalidating transitions all pass through),
   //     so provenance cannot drift for any registration kind.
   // Remote never populates this set (no Host registration happens there).
-  const directCompatibilityMirrors = new Set<string>()
+  // PR5 v2 §1C-2/§1C-3 (review R6-1): the provenance is the EXACT
+  // official `definitionId` this surface stamped onto its own Direct Host
+  // registration (created with the official `CommandDefinitionId`
+  // constructor — never a string-prefix convention; identity, not
+  // authorization). The origin derivation compares the EFFECTIVE WINNER's
+  // definitionId against this set: a genuine Agent-scoped Host shadow that
+  // overrides our global mirror has its own (or no) definitionId and is
+  // therefore genuine Host authority — a name alone never subtracts it.
+  const mirrorDefinitionIds = new Set<string>()
   const registerOne = (definition: Parameters<typeof clientCommands.register>[0]): (() => void) => {
     // The CLIENT registration is unconditional (PR4 §D2): the definition is
     // owned here on BOTH branches. A same-name overwrite inside the Client
     // registry is this surface's OWN replace semantics (skill wrappers
-    // dispose before re-registering), so it is never a "collision".
+    // dispose before re-registering), so it is never a "collision". The
+    // Client registration keeps the ORIGINAL identity — only the Direct
+    // Host compatibility mirror carries the provenance id.
     const disposeClient = clientCommands.register(definition)
     if (commands === undefined) return disposeClient
     const mirrorName = String((definition as { name?: unknown }).name)
+    const mirrorId = CommandDefinitionId(`@xmoon76/dsh-pi-tui/mirror/${mirrorName}`)
     try {
-      const disposeHost = commands.register(definition)
-      directCompatibilityMirrors.add(mirrorName)
+      const disposeHost = commands.register({
+        ...definition,
+        definitionId: mirrorId,
+      })
+      mirrorDefinitionIds.add(mirrorId)
       return () => {
-        directCompatibilityMirrors.delete(mirrorName)
+        mirrorDefinitionIds.delete(mirrorId)
         disposeHost()
         disposeClient()
       }
@@ -2000,13 +2014,18 @@ export function registerTuiCommands(
    * same-name Client definition never masquerades as Host origin.
    */
   let hostOriginDescriptors = new Map<string, { leadingInput: boolean; attachments: boolean }>()
-  /** Derive the Host-origin map from a Host catalog view (§1C-3): subtract
-   *  the live compatibility mirrors (Direct only; the set is empty on
-   *  Remote) and keep the WINNING descriptor facts of what remains. */
+  /** Derive the Host-origin map from a Host catalog view (§1C-3): the
+   *  entries whose EFFECTIVE WINNER is one of THIS surface's own Direct
+   *  compatibility mirrors (exact `definitionId` membership — the winner
+   *  IS our registered mirror definition) are excluded; every other
+   *  winner — including a genuine Agent-scoped Host shadow that overrides
+   *  our global mirror — is genuine Host authority and keeps its WINNING
+   *  descriptor facts. Remote never sees a mirror id (its Host snapshot
+   *  is mirror-free by construction), so the set stays empty there. */
   const deriveHostOriginDescriptors = (hostCatalog: readonly SurfaceCommandSummary[]): void => {
     const derived = new Map<string, { leadingInput: boolean; attachments: boolean }>()
     for (const command of hostCatalog) {
-      if (directCompatibilityMirrors.has(command.name)) continue
+      if (command.definitionId !== undefined && mirrorDefinitionIds.has(command.definitionId)) continue
       derived.set(command.name, {
         leadingInput: command.input !== undefined,
         attachments: command.input?.attachments === true,
@@ -2110,8 +2129,23 @@ export function registerTuiCommands(
     if (runner.currentSessionId === undefined) {
       const entries = mergeGlobalAndSavedScoped()
       if (commands !== undefined) {
+        // PR5 v2 §1C-3 (review R6-2): the SESSIONLESS Host authority is the
+        // pure Host view — the global layer plus the SAVED SCOPED overrides
+        // (both Host-sourced) — NEVER the Client-synthesized display merge
+        // (whose by-name Client definitions would overwrite a genuine Host
+        // descriptor such as the rc.2 Host `/export`). The display list and
+        // the advertised claims keep the merged `entries`.
+        const hostView = [...listGlobalCommands(commands).map(commandSummaryOf).reduce(
+          (byName, descriptor) => { byName.set(descriptor.name, descriptor); return byName },
+          new Map<string, SurfaceCommandSummary>(),
+        ).values()]
+        for (const scoped of savedScopedCommands) {
+          const idx = hostView.findIndex(row => row.name === scoped.name)
+          if (idx >= 0) hostView[idx] = scoped
+          else hostView.push(scoped)
+        }
         authoritativeHostCatalog = entries
-        deriveHostOriginDescriptors(entries)
+        deriveHostOriginDescriptors(hostView)
       }
       installCompletionsContained(entries, commands === undefined
         ? { claimsFrom: authoritativeHostCatalog }

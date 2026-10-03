@@ -383,6 +383,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     name: string
     description?: string
     input?: { hint: string; attachments?: boolean }
+    definitionId?: string
     handler: (...args: never[]) => unknown
   }>()
   const executed: { line: string; attachments: readonly unknown[]; outcome: 'executed' | 'rejected' }[] = []
@@ -392,6 +393,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
       handler: (...args: never[]) => unknown
       description?: string
       input?: { hint: string; attachments?: boolean }
+      definitionId?: string
     }): (() => void) => {
       definitions.set(definition.name, definition)
       return () => {
@@ -403,9 +405,15 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // `leadingInput` command (`/goal <objective>`) and an execute-kind one
     // (`/compact`). Fabricating an `input` for every row would erase the
     // command KIND and let a name-level routing bug pass.
-    list: () => [...definitions.values()].map(({ name, description, input }) => ({
+    list: () => [...definitions.values()].map(({ name, description, input, definitionId }) => ({
       name,
       description: description ?? '',
+      // The official descriptor carries the registration's own
+      // `definitionId` (PR5 v2 §1C): the Host-origin derivation compares the
+      // EFFECTIVE WINNER's id against this surface's stamped Direct
+      // compatibility mirrors. Dropping it here would make every mirror look
+      // like a genuine Host command and let the R6-1/R6-2 authority bugs pass.
+      ...(definitionId === undefined ? {} : { definitionId }),
       ...(input === undefined ? {} : { input }),
     })),
     // The real commands service resolves a definition by name for the

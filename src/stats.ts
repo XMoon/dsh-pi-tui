@@ -146,8 +146,15 @@ export function formatStatsFacts(facts: SessionStatsFacts): string {
   }
   const tokens = facts.tokens
   if (tokens !== undefined) {
-    parts.push(`↑${formatTokens(tokens.input)} ↓${formatTokens(tokens.output)}`
-      + (tokens.cacheRead > 0 || tokens.cacheWrite > 0 ? ` CH${tokens.cacheHitPct.toFixed(1)}%` : ''))
+    // Direct display parity: the legacy formatter's R…/W… cache token
+    // columns ride the SAME tokens group (no second stat source; an absent
+    // Remote tokenUsage group omits the whole segment).
+    const cacheParts = [
+      tokens.cacheRead > 0 ? `R${formatTokens(tokens.cacheRead)}` : '',
+      tokens.cacheWrite > 0 ? `W${formatTokens(tokens.cacheWrite)}` : '',
+      tokens.cacheRead > 0 || tokens.cacheWrite > 0 ? `CH${tokens.cacheHitPct.toFixed(1)}%` : '',
+    ].filter(part => part !== '')
+    parts.push([`↑${formatTokens(tokens.input)} ↓${formatTokens(tokens.output)}`, ...cacheParts].join(' '))
   }
   const recent = facts.recent
   if (recent !== undefined) {
