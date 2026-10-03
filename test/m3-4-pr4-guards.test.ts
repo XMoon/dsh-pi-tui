@@ -444,9 +444,26 @@ test('PR5 §3.2 (F1): the live ingress re-answers availability off the SAME fold
     false, 'the live flip must not run a second event scan')
   assert.ok(refresh.includes('deps.refreshStatusCheap()'),
     'the flip re-derives the status so the footer stops omitting the figures')
-  // Monotonic within a generation.
-  assert.ok(refresh.includes('if (recentPerformanceAvailable) return'),
-    'the bit only moves false -> true inside a generation')
+  // BOTH directions, off the SAME fold: the fold's evidence is not monotonic
+  // (a route change clears both windows; a late replacement can drop a
+  // candidate), and a history-start window stays available regardless.
+  assert.ok(refresh.includes('recentHistoryComplete || statsFolder.hasEnoughRecentEvidence()'),
+    'the answer is recomputed from the committed history-start fact OR the live fold')
+  assert.ok(refresh.includes('if (next === recentPerformanceAvailable) return'),
+    'the status is re-derived only when the answered value actually changes')
+  assert.equal(refresh.includes('if (recentPerformanceAvailable) return'),
+    false, 'the bit must NOT be monotonic-only: a shrink must be able to flip it back')
+  // The history-start fact commits with the fold and resets with the generation.
+  assert.ok(presentation.includes('recentHistoryComplete = input.recentHistoryComplete ?? false'),
+    'the history-start fact commits inside the same fenced hydrate block')
+  assert.ok(presentation.includes('recentHistoryComplete = !snapshot.hasMore'),
+    'the widened window re-proves the history-start fact in its own fenced commit')
+  const reset = presentation.slice(
+    presentation.indexOf('const resetForGeneration = ('),
+    presentation.indexOf('const resetForGeneration = (') + 700,
+  )
+  assert.ok(reset.includes('recentHistoryComplete = false'),
+    'the generation reset clears the history-start fact with the bit')
   // The live ingress performs the pair on the same fold, at BOTH append sites.
   const routing = code('app/surface/runtime.ts')
   const pairs = routing.split('main.stats.apply([event])').length - 1

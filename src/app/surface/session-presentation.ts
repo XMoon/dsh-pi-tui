@@ -346,6 +346,15 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * inside the SAME fenced hydrate commits that replace `statsFolder`.
    */
   let recentPerformanceAvailable = false
+  /**
+   * F1 (PR5 §3.2): the LAST COMMITTED window's "history start proven" fact
+   * (`!hasMore`). It is the second, independent authority over availability: a
+   * window that reaches the history start is authoritative even with zero valid
+   * samples, so the bit must stay available there no matter how the retained
+   * evidence moves. Updated in the SAME fenced hydrate commit that replaces the
+   * fold, and cleared by the generation reset — exactly like the fold itself.
+   */
+  let recentHistoryComplete = false
 
   // Coalesced repaint is surface-owned (A4-8): the runner no longer owns
   // the flush timer; the surface routing schedules its own repaint.
@@ -398,6 +407,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // the new subject's own fenced hydrate proves otherwise (the old
     // subject's `true` must not leak into the hydrate-pending window).
     recentPerformanceAvailable = false
+    recentHistoryComplete = false
     // The new session's subagent delegations are a fresh namespace: stale
     // pending calls from the old session would consume viewer match slots,
     // and dead callId→child maps would silently disable the auto-pop.
@@ -473,6 +483,14 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
      */
     readonly recentPerformanceAvailable?: boolean
     /**
+     * F1 (PR5 §3.2): whether THIS window provably reaches the history start
+     * (`!hasMore`). Committed with the fold for the same reason: it is the
+     * authority that keeps availability true on a history-start window even
+     * when its retained evidence later shrinks (a route change clears both
+     * recent windows — the fold's evidence is NOT monotonic).
+     */
+    readonly recentHistoryComplete?: boolean
+    /**
      * The official CURRENT-VALUE facts (M3-4 PR2). Present on the Remote
      * branch, where `events` is only a BOUNDED window: the title/goal/todos of
      * a long session may have been written before the window and must come
@@ -495,6 +513,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // replacement subject's bit because the §6.5 fences above already
     // dropped it before reaching this line).
     recentPerformanceAvailable = input.recentPerformanceAvailable ?? true
+    recentHistoryComplete = input.recentHistoryComplete ?? false
     for (const liveInput of input.liveBaseline) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput)
     }
@@ -655,6 +674,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // OMITTED (unknown), never a numeric zero stand-in.
     const recentPerformanceAvailable = foldProven
       || hasEnoughRecentPerformanceSamples(snapshot.durableEvents as never[])
+    const recentHistoryCompleteForCommit = foldProven
     // The official CURRENT-VALUE facts (title/goal/todos/cwd) — their source
     // events may precede this bounded window, so the projection owns them.
     const facts = deps.remote.facts?.(sessionId)
@@ -672,6 +692,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       working,
       // PR5: the window's recent-performance proof travels with the fold.
       recentPerformanceAvailable,
+      recentHistoryComplete: recentHistoryCompleteForCommit,
     })
     // The committed window revision: the caller feeds it to the live ingress
     // so the hydrate→subscribe gap is detected and recovered (never lost).
@@ -720,8 +741,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // evidence in the SAME fenced commit that replaced the fold — a
     // `loadOlder` that reaches enough samples (or the history start) flips
     // the footer's omitted metrics on with the new fold, never after it.
-    recentPerformanceAvailable = !snapshot.hasMore
-      || hasEnoughRecentPerformanceSamples(snapshot.durableEvents as never[])
+    recentHistoryComplete = !snapshot.hasMore
+    recentPerformanceAvailable = recentHistoryComplete
+      || statsFolder.hasEnoughRecentEvidence()
     for (const liveInput of snapshot.liveInputs) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput)
     }
@@ -751,9 +773,15 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * re-proves it (or disproves it) as before.
    */
   const refreshRecentPerformanceAvailability = (): void => {
-    if (recentPerformanceAvailable) return
-    if (!statsFolder.hasEnoughRecentEvidence()) return
-    recentPerformanceAvailable = true
+    // The fold's evidence is NOT monotonic: a route change clears BOTH recent
+    // windows, and a late authoritative message replacement can drop a
+    // throughput candidate. So the answer is re-answered in BOTH directions off
+    // the SAME fold (`recentHistoryComplete` still keeps a history-start window
+    // available, as v4 requires), and the status is re-derived whenever the bit
+    // actually changes — never only on the way up.
+    const next = recentHistoryComplete || statsFolder.hasEnoughRecentEvidence()
+    if (next === recentPerformanceAvailable) return
+    recentPerformanceAvailable = next
     deps.refreshStatusCheap()
   }
   const mainWindow = (): TranscriptWindowController => windowController
