@@ -17,6 +17,7 @@ import { apply as applyExtensionHost } from '../src/extensions.ts'
 import type { FooterItemContribution } from '../src/extension/public-types.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { enterChildDisplaySubject, exitChildDisplaySubject } from './support/display-subject.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -470,16 +471,9 @@ test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subag
     // Enter the subagent viewer: the data source switches to the CHILD,
     // and a static plugin contribution (which has no snapshot access to
     // self-gate) must not describe the viewed child.
-    app.setViewerFooter({
-      label: 'child',
-      childSessionId: 'child-1',
-      mode: 'one-shot',
-      activity: 'inactive',
-      cwd: '/child-ws',
-      turns: 1,
-      steps: 1,
-      usage: undefined,
-      statsLine: '',
+    enterChildDisplaySubject(app, {
+      id: 'child-1', label: 'child', mode: 'one-shot', activity: 'inactive',
+      cwd: '/child-ws', turns: 1, steps: 1,
     })
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
@@ -487,7 +481,7 @@ test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subag
     assert.ok(!view.includes('[LEGACY]'), `the legacy ext:* bridge must hide while viewing too:\n${view}`)
     assert.ok(view.includes('child-ws'), `the child workspace must show:\n${view}`)
     // Leaving the viewer restores it.
-    app.setViewerFooter(undefined)
+    exitChildDisplaySubject(app, { model: 'm', cwd: 'c' })
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
     assert.ok(view.includes('quota 82%'), `the item must return after the viewer closes:\n${view}`)

@@ -27,7 +27,7 @@
  */
 
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import { formatStats, StatsFolder } from '../../stats.ts'
+import { StatsFolder } from '../../stats.ts'
 import { childOwnEvents, TranscriptFolder } from '../../transcript.ts'
 import { TranscriptWindowController } from '../../transcript-window.ts'
 import { applyStreamingToolPreviewEvent } from '../../streaming-tool-preparing.ts'
@@ -39,7 +39,6 @@ import {
   type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from '../../subagent-viewer-submit.ts'
-import { usageFromStats } from '../../status/derive-usage.ts'
 import { mergeDraft } from '../../steer.ts'
 import type { ViewerAccess } from '../../tasks-browser.ts'
 import type { StreamingToolPreview } from '../../tui-app.ts'
@@ -293,31 +292,11 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
   
   let viewerSessionAbort: AbortController | undefined
 
-  /** Push the viewed child's OWN identity into the footer (label/mode/
-   * activity/cwd + the child's own turns/steps/stats line) — the parent
-   * session's status describes a session the user is not looking at.
-   * M1: the unified status store follows the same display subject — the
-   * view/workspace/usage sections switch to the child's facts. */
-  
-  const refreshViewerFooter = (): void => {
-    if (deps.isCleanedUp() || viewing === undefined) return
-    const stats = viewing.stats.snapshot()
-    // setViewerFooter projects the display-subject sections (view/
-    // workspace/usage) BEFORE its paint — the first frame after
-    // entering (or leaving) the viewer already shows the new subject.
-    deps.surface.app.setViewerFooter({
-      label: viewing.label,
-      childSessionId: viewing.id,
-      mode: viewing.mode,
-      activity: viewing.activity,
-      cwd: viewing.cwd,
-      turns: stats.turns,
-      steps: stats.steps,
-      statsLine: formatStats(stats),
-      usage: usageFromStats(stats),
-    })
-  }
-
+  /** Enter the subagent viewer for one session (live or persisted). M3-5 PR1
+   * §9.7: the viewer publishes the viewed IDENTITY only — `StatusRuntime`
+   * resolves the child's own `SessionStatus(childId)` and commits the whole
+   * display-subject projection (view + Session-owned sections) in ONE
+   * StatusStore update; the viewer fabricates no Session-owned status fact. */
   const enterView = async (
     childId: string,
     label: string | undefined,
@@ -446,9 +425,14 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     // The viewer bar covers the editor (a read-only placeholder for
     // one-shot, the child's own draft for continuable) and the header
     // badges the mode — the transient notify is no longer the only "you
-    // are elsewhere" signal. The FOOTER switches to the child's own
-    // identity at the same time.
+    // are elsewhere" signal.
     deps.surface.app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: childActivity, access })
+    // M3-5 PR1 §9.7: the display-subject commit. StatusRuntime selects THIS
+    // child as the display subject and publishes the child's own
+    // SessionStatus facts (view/composition/access/workspace/usage) in ONE
+    // StatusStore update — before the first frame of the new subject can be
+    // painted (the enter is synchronous from `viewing =` onward).
+    deps.refreshStatus()
     // The queue pane follows the child only after the viewer and its exact
     // queue authority are both published.
     deps.surface.refreshPendingInput()
@@ -456,7 +440,6 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
      } finally {
        if (openingViewer === opening) openingViewer = undefined
      }
-    refreshViewerFooter()
   }
 
   /** Leave the subagent viewer (single Esc). Returns whether it exited.
@@ -478,10 +461,11 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     deps.surface.app.clearLocalMessages()
     deps.surface.app.clearNotify() // a viewer notify (if any) is stale now
     deps.surface.app.setViewerMode(undefined)
-    // setViewerFooter(undefined) returns the display subject to main
-    // (projected BEFORE its paint); the parent's facts follow on the
-    // refreshStatus below.
-    deps.surface.app.setViewerFooter(undefined)
+    // M3-5 PR1 §9.7: the display subject returns to MAIN. StatusRuntime
+    // re-derives the main Session's own facts and commits the whole
+    // return-to-main projection (view + Session-owned sections) in ONE
+    // synchronous StatusStore update, before the repaint below.
+    deps.refreshStatus()
     // Restore the parent's Focus disclosures BEFORE the repaint so the
     // projection uses them (plan §26).
     deps.surface.app.exitFocusViewerScope()
@@ -490,7 +474,6 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     // child's result, the parent's streaming): restore the parent's semantic latest/history position
     // so the pop never loses an intentional history anchor.
     deps.restoreMainTranscriptAnchor()
-    deps.refreshStatus()
     deps.surface.refreshPendingInput()
     return true
   }
@@ -512,7 +495,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
       setViewedQueueAgent(current)
     },
     endTurn: () => { viewing!.activity = 'inactive' },
-    refreshFooter: () => refreshViewerFooter(),
+    refreshFooter: () => deps.refreshStatus(),
   }
 
   /**
@@ -685,20 +668,17 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
       deps.surface.app.clearLocalMessages()
       deps.surface.app.clearNotify()
       deps.surface.app.setViewerMode(undefined)
-      // setViewerFooter(undefined) returns the display subject to main
-      // (projected BEFORE its paint).
-      deps.surface.app.setViewerFooter(undefined)
       // Session swap: the OLD parent session is gone — its parked Focus
       // disclosures must be DISCARDED, never restored into the new session
       // (clearSessionOverrides already dropped the stack; this keeps the
       // teardown's intent explicit and ordering-safe). The Esc path uses
       // exitFocusViewerScope instead (restore).
       deps.surface.app.discardFocusViewerScope()
+      // M3-5 PR1 §9.7: the display subject returns to the NEW main session in
+      // ONE atomic StatusStore update before the repaint.
+      deps.refreshStatus()
       deps.surface.repaint()
       deps.restoreMainTranscriptAnchor()
-      // The new session's own measurement comes from its initLiveSession
-      // deferred path — the teardown refresh is UI-only.
-      deps.refreshStatus()
     })
   }
 

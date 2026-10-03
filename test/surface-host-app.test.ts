@@ -18,6 +18,7 @@ import { apply as applyExtensionHost } from '../src/extensions.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
+import { enterChildDisplaySubject, exitChildDisplaySubject } from './support/display-subject.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -685,4 +686,125 @@ test('runner permission projection clears on service/agent absence (runner-level
     'a missing permission service must yield undefined (clear)')
   assert.equal(deriveRunnerPermission(presets, undefined), undefined,
     'a missing live agent must yield undefined (clear)')
+})
+
+test('M3-5 PR1: the extension snapshot follows the display subject across main → A → B → main (no mixed publish)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  const published: ReturnType<typeof host.state>[] = []
+  host.subscribeState(state => { published.push(state) })
+
+  app.refreshChrome()
+  app.setStatus({ model: 'parent-model', cwd: '/parent', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: 'danger-full-access' })
+  app.setTodoSummary([{ content: 'parent todo', status: 'in_progress' }])
+  app.setSessionTitle('parent title')
+  app.setWelcomeCard({ cwd: '/parent', sessionId: 'session-main', model: 'parent-model', version: '0.0.0' })
+  // The todo panel is opened on the MAIN subject BEFORE the viewer transition
+  // (the production-reachable order the display-subject commit must handle).
+  app.toggleTodoPanel()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(host.state().session.sessionId, 'session-main')
+  assert.equal(host.state().activity.todoCount, 1)
+  assert.ok(vt.getViewport().join('\n').includes('parent todo'), 'the open panel shows the main list first')
+
+  // CHILD A: the extension SessionSnapshot describes the CHILD — identity
+  // (sessionId/workspaceRoot/title) AND every Session-owned status field.
+  enterChildDisplaySubject(app, {
+    id: 'child-a', label: 'a', mode: 'continuable', activity: 'running',
+    cwd: '/child-a', turns: 5, steps: 7,
+    model: { provider: 'deepseek', model: 'child-a-model' },
+    permission: 'read-only',
+    todos: [{ content: 'child-a todo', status: 'in_progress' }],
+    title: 'child-a title',
+  })
+  await settle()
+  await vt.waitForRender()
+  const a = host.state()
+  assert.equal(a.session.viewerMode, true)
+  assert.equal(a.session.sessionId, 'child-a')
+  assert.equal(a.session.workspaceRoot, '/child-a')
+  assert.equal(a.session.cwd, '/child-a')
+  assert.equal(a.session.model, 'deepseek/child-a-model')
+  assert.equal(a.session.permission, 'read-only')
+  assert.equal(a.session.turns, 5)
+  assert.equal(a.session.steps, 7)
+  assert.equal(a.session.title, 'child-a title')
+  assert.equal(a.activity.todoCount, 1)
+  // The panel is open, so the host-provided dock SUMMARY is deliberately empty
+  // (the panel replaces it) — the count and the panel text are the visible facts.
+  assert.equal(a.activity.todoSummary, '', 'the dock summary hides while the panel is open')
+  // The ALREADY-OPEN todo panel follows the same display-subject list (it must
+  // not keep rendering the parent list until an unrelated event).
+  const panelA = vt.getViewport().join('\n')
+  assert.ok(panelA.includes('child-a todo'), `the open child todo panel must render the child list:\n${panelA}`)
+  assert.ok(!panelA.includes('parent todo'), `the parent todo list must not render while viewing:\n${panelA}`)
+
+  // The MAIN todo list keeps updating behind the child — the child projection
+  // must not follow it.
+  app.setTodoSummary([{ content: 'parent todo v2', status: 'pending' }])
+  await settle()
+  await vt.waitForRender()
+  assert.equal(host.state().activity.todoCount, 1, 'the hidden main write must not replace the child count')
+  assert.ok(vt.getViewport().join('\n').includes('child-a todo'),
+    'the open panel must keep the child list after the hidden main write')
+
+  // CHILD B: no A residue anywhere.
+  enterChildDisplaySubject(app, {
+    id: 'child-b', label: 'b', mode: 'one-shot', activity: 'inactive',
+    cwd: '/child-b', turns: 1, steps: 1,
+    model: { provider: 'deepseek', model: 'child-b-model' },
+    todos: [{ content: 'child-b todo', status: 'pending' }],
+    title: 'child-b title',
+  })
+  await settle()
+  await vt.waitForRender()
+  const b = host.state()
+  assert.equal(b.session.sessionId, 'child-b')
+  assert.equal(b.session.model, 'deepseek/child-b-model')
+  assert.equal(b.session.permission, undefined, 'B has no permission — A’s must not survive')
+  assert.equal(b.session.title, 'child-b title')
+  assert.equal(b.session.cwd, '/child-b')
+  assert.equal(b.activity.todoCount, 1)
+  const panelB = vt.getViewport().join('\n')
+  assert.ok(panelB.includes('child-b todo'), `B's todo list must render in the open panel:\n${panelB}`)
+  assert.ok(!panelB.includes('child-a todo'), `A's todo list must not survive into B:\n${panelB}`)
+
+  // EXIT: the LATEST main state returns (the todo write that landed while the
+  // child was displayed — never an enter-time copy).
+  exitChildDisplaySubject(app, { model: 'parent-model', cwd: '/parent', branch: 'main', turns: 2, steps: 3, permission: 'danger-full-access' })
+  await settle()
+  await vt.waitForRender()
+  const main = host.state()
+  assert.equal(main.session.viewerMode, false)
+  assert.equal(main.session.sessionId, 'session-main')
+  assert.equal(main.session.cwd, '/parent')
+  assert.equal(main.session.model, 'parent-model')
+  assert.equal(main.session.permission, 'danger-full-access')
+  assert.equal(main.session.title, 'parent title')
+  assert.equal(main.activity.todoCount, 1, 'the LATEST main todo count must return')
+  const panelMain = vt.getViewport().join('\n')
+  assert.ok(panelMain.includes('parent todo v2'), `the LATEST main todo list must return in the open panel:\n${panelMain}`)
+
+  // Every published snapshot is subject-consistent: a viewing snapshot never
+  // carries a main identity, and a main snapshot never carries a child one.
+  for (const state of published) {
+    if (state.session.viewerMode) {
+      assert.ok((state.session.sessionId ?? '').startsWith('child-'),
+        `a viewing snapshot must name a child session: ${JSON.stringify(state.session)}`)
+      assert.ok(state.session.cwd.startsWith('/child-'),
+        `a viewing snapshot must carry the child workspace: ${JSON.stringify(state.session)}`)
+      assert.notEqual(state.session.model, 'parent-model',
+        `a viewing snapshot must never carry the parent model: ${JSON.stringify(state.session)}`)
+    } else {
+      assert.ok(!(state.session.sessionId ?? '').startsWith('child-'),
+        `a main snapshot must never name a child session: ${JSON.stringify(state.session)}`)
+    }
+  }
+  app.stop()
 })

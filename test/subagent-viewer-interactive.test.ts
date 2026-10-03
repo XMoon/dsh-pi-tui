@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { isEmptyAcceleratedViewerSubmit, TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { mergeDraft } from '../src/steer.ts'
+import { enterChildDisplaySubject, exitChildDisplaySubject } from './support/display-subject.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -607,17 +608,11 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   await vt.waitForRender()
   app.setViewerMode(continuable())
   await vt.waitForRender()
-  app.setViewerFooter({
-    label: 'research',
-    childSessionId: 'child-1',
-    mode: 'continuable',
-    activity: 'running',
-    cwd: '/child-workspace',
-    turns: 3,
-    steps: 5,
-    statsLine: 'child stats line',
-    // M1: the footer composes the child's stats line from the structured
-    // usage facts.
+  // M1: the footer composes the child's stats line from the structured usage
+  // facts of the display subject's own commit.
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'research', mode: 'continuable', activity: 'running',
+    cwd: '/child-workspace', turns: 3, steps: 5,
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
@@ -632,10 +627,9 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   assert.ok(view.includes('t3/s5'), `child turn/step counters missing:\n${view}`)
   assert.ok(view.includes('TTFB 12.3s'), `child stats line missing:\n${view}`)
   assert.ok(!view.includes('parent-model'), `the parent model must not leak into the viewer footer:\n${view}`)
-  // Clearing restores the parent footer (the runner's exitView calls BOTH
-  // setters — the view subject and the footer payload return together).
-  app.setViewerMode(undefined)
-  app.setViewerFooter(undefined)
+  // Clearing restores the parent footer (the runner's exitView commits the
+  // main display subject atomically).
+  exitChildDisplaySubject(app, { model: 'parent-model', cwd: '/parent', turns: 9, steps: 9 })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('parent-model'), `the parent footer must return:\n${view}`)
@@ -649,15 +643,9 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   await vt.waitForRender()
   app.setViewerMode(oneShot())
   await vt.waitForRender()
-  app.setViewerFooter({
-    label: 'audit',
-    childSessionId: 'child-1',
-    mode: 'one-shot',
-    activity: 'inactive',
-    cwd: '',
-    turns: 1,
-    steps: 2,
-    statsLine: 'child stats',
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'audit', mode: 'one-shot', activity: 'inactive',
+    cwd: '', turns: 1, steps: 2,
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
@@ -669,8 +657,7 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('[subagent · one-shot]'), `one-shot badge missing:\n${view}`)
   assert.ok(!view.includes('TTFB 12.3s'), `compact preset must drop the stats line:\n${view}`)
-  app.setViewerFooter(undefined)
-  app.setViewerMode(undefined)
+  exitChildDisplaySubject(app)
   app.stop()
 })
 
@@ -685,15 +672,9 @@ test('the viewer footer never shows the parent keyboard exit hint (round-1 findi
   await vt.waitForRender()
   app.setViewerMode(continuable())
   await vt.waitForRender()
-  app.setViewerFooter({
-    label: 'research',
-    childSessionId: 'child-1',
-    mode: 'continuable',
-    activity: 'running',
-    cwd: '',
-    turns: 1,
-    steps: 1,
-    statsLine: 'child stats line',
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'research', mode: 'continuable', activity: 'running',
+    cwd: '', turns: 1, steps: 1,
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       performance: { llmMs: 12300, firstTokenMs: 12_300, tokensPerSec: 0 },
@@ -705,8 +686,7 @@ test('the viewer footer never shows the parent keyboard exit hint (round-1 findi
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('again to exit'), `the parent exit hint must never leak into the viewer footer:\n${view}`)
   assert.ok(view.includes('TTFB 12.3s'), `the child stats line must show instead:\n${view}`)
-  app.setViewerFooter(undefined)
-  app.setViewerMode(undefined)
+  exitChildDisplaySubject(app)
   app.stop()
 })
 
