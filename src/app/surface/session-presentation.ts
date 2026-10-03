@@ -340,10 +340,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   let statsFolder = new StatsFolder()
 
   /**
-   * PR5 (plan §3.2): the presentation-owned recent-performance availability
-   * of the CURRENT main stats fold (see `mainRecentPerformanceAvailable`).
-   * Starts `false` (no authoritative window is committed yet) and flips only
-   * inside the SAME fenced hydrate commits that replace `statsFolder`.
+   * PR5 (plan §3.2): the presentation-owned recent-performance availability of
+   * the CURRENT main stats fold (see `mainRecentPerformanceAvailable`). Starts
+   * `false` (no authoritative window is committed yet), is answered inside every
+   * fenced hydrate commit that replaces `statsFolder`, and is re-answered in
+   * BOTH directions by the live refresh as the SAME fold's evidence moves.
    */
   let recentPerformanceAvailable = false
   /**
@@ -479,14 +480,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     readonly liveBaseline: readonly AssistantLiveInput[]
     readonly planActive: boolean
     readonly working: boolean
-    /**
-     * PR5 (plan §3.2): whether `events` may PROVE the recent-performance
-     * sample evidence. Present on the Remote branch: `false` while the
-     * bounded window has neither reached the history start nor retained
-     * enough valid recent samples (the footer then omits the recent
-     * metrics). Absent on Direct, whose `events` is the COMPLETE log (the
-     * fold's own figures are authoritative by construction).
-     */
     /**
      * F1 (PR5 §3.2): whether the event set being committed provably COVERS the
      * whole session — Direct's complete log, or a Remote window that reached

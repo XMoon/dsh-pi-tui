@@ -365,7 +365,7 @@ test('F1/PR5 §3.2: a bounded insufficient window becomes AVAILABLE through live
     'the availability flip must re-derive the status')
 })
 
-test('F1/PR5 §3.2: the live flip is monotonic and never fires before the evidence is complete', async () => {
+test('F1/PR5 §3.2: the live refresh re-answers BOTH ways and never fires while the evidence is unchanged', async () => {
   const h = harness()
   h.setWindow(validSampleTurn(1, 0), true)
   await h.coldHydrate()
@@ -380,7 +380,7 @@ test('F1/PR5 §3.2: the live flip is monotonic and never fires before the eviden
   h.applyLive(validSampleTurn(10, 90))
   assert.equal(h.available(), true)
   h.applyLive(validSampleTurn(11, 100))
-  assert.equal(h.available(), true, 'the bit is monotonic within a generation')
+  assert.equal(h.available(), true, 'a further sample keeps it available')
   assert.equal(h.statusRefreshes(), before + 1,
     'exactly one status re-derivation, on the flip')
 })
