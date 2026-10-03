@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionPresentation, type SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
+import { createOpeningJournal } from '../src/app/surface/opening-journal.ts'
 import { hasEnoughRecentPerformanceSamples, RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../src/stats.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
@@ -78,6 +79,13 @@ interface Harness {
    *  not leak into a read that already begun). */
   parkNextRead(): { release(): void }
   available(): boolean | undefined
+  /** The DIRECT cold hydrate (the complete-log branch). */
+  directHydrate(): Promise<void>
+  /** Begin a Remote opening journal for `sid` (pre-commit durable events that
+   *  reach the runner during the read, merged into the committed fold). */
+  beginOpening(sid: string): void
+  /** Record one event into the open journal (a no-op when none is open). */
+  recordOpening(sid: string, event: Record<string, unknown>): void
   /** The LIVE append pair (what the live ingress performs): apply the newly
    *  appended events to the SAME main stats fold, then re-answer the
    *  availability predicate off that fold. No `loadOlder`/rehydrate involved. */
@@ -106,8 +114,9 @@ function harness(): Harness {
     clearNotify: () => {}, clearExitConfirmation: () => {}, setSearchResult: () => {},
     clearSessionOverrides: () => {}, resetInputHistory: () => {},
   }
+  const journal = createOpeningJournal<Record<string, unknown>>()
   const surface = {
-    app, openingJournal: { cut: () => undefined },
+    app, openingJournal: journal,
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
     applyResumedCompaction: () => {}, repaint: () => {}, refreshPendingInput: () => {},
     refreshTasks: () => {}, refreshAgents: () => {},
@@ -184,6 +193,16 @@ function harness(): Harness {
       return gate
     },
     available: () => presentation.mainRecentPerformanceAvailable(),
+    directHydrate: () => presentation.initLiveSession({
+      session: {
+        id: 's',
+        header: { cwd: '/c', id: 's' },
+        snapshotEvents: () => [],
+      },
+      options: { provider: 'p', model: 'm' },
+    } as never),
+    beginOpening: sid => { journal.begin(sid) },
+    recordOpening: (sid, event) => { journal.record(sid, event as never) },
     applyLive: events => {
       presentation.mainStats().apply(events as never)
       presentation.main.refreshRecentPerformanceAvailability()
@@ -420,4 +439,57 @@ test('F1/PR5 §3.2: a history-start window (hasMore=false) STAYS available while
     'the committed history-start fact keeps availability true regardless of retained evidence')
   assert.equal(h.statusRefreshes(), before,
     'no status churn when the answered value does not change')
+})
+
+
+test('F1/PR5 §3.2: DIRECT availability is TRUE by construction and cannot be revoked by a fold-local shrink', async () => {
+  // v4: on Direct, availability is unconditionally true — its fold reads the
+  // COMPLETE in-process log, so there is no bounded-window completeness question
+  // to answer. Committing only the Remote completeness rule (leaving Direct's
+  // coverage fact false) let a route change — which clears the retained recent
+  // windows — flip Direct availability true -> false through the shared live
+  // refresh, hiding TTFT/TPS from the Direct footer and `/status`.
+  const h = harness()
+  await h.directHydrate()
+  assert.equal(h.available(), true, 'Direct is available by construction')
+  const before = h.statusRefreshes()
+  // A model/provider route change clears the fold's retained windows.
+  h.applyLive(routeChangeTurn(1, 0, 'other-provider', 'other-model') as Array<Record<string, unknown>>)
+  assert.equal(h.available(), true,
+    'a Direct fold-local shrink must never revoke availability')
+  assert.equal(h.statusRefreshes(), before,
+    'and it must not churn the status: the answered value did not change')
+})
+
+test('F1/PR5 §3.2: the Remote availability answer comes from the COMMITTED fold, not the pre-merge snapshot', async () => {
+  // The committed fold is built from `snapshot.durableEvents` MERGED with the
+  // opening journal's durable events. Answering availability from the pre-merge
+  // snapshot (as the earlier implementation did) drifts in BOTH directions: a
+  // snapshot that looks complete can be reset by an opening-journal route change
+  // that lands in the real fold.
+  const h = harness()
+  // Ten valid turns in the snapshot: "enough" by the pre-merge view.
+  const events: Array<Record<string, unknown>> = []
+  for (let turn = 1; turn <= 10; turn += 1) events.push(...validSampleTurn(turn, (turn - 1) * 10))
+  h.setWindow(events, true)
+  assert.equal(hasEnoughRecentPerformanceSamples(events as never), true,
+    'fixture check: the PRE-MERGE snapshot alone looks complete')
+  // While the read is parked, the opening journal records a NEW route: after the
+  // merge the committed fold has its windows cleared.
+  const park = h.parkNextRead()
+  const hydrating = h.coldHydrate()
+  h.beginOpening('s')
+  // A COMPLETE turn for the new route: the route observation only runs on a
+  // settled step, so the journal must carry the step's own boundaries.
+  for (const event of routeChangeTurn(11, 100, 'other-provider', 'other-model')) {
+    h.recordOpening('s', event as Record<string, unknown>)
+  }
+  park.release()
+  await hydrating
+  assert.equal(h.available(), false,
+    'the answer must come from the COMMITTED (merged) fold, never the pre-merge snapshot')
+  // And the reverse direction of the same root cause: after the committed fold
+  // really shrinks, an append that cannot restore the window keeps it down.
+  h.applyLive(validSampleTurn(12, 200))
+  assert.equal(h.available(), false, 'a single further sample cannot re-complete a cleared window')
 })
