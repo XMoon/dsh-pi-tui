@@ -478,6 +478,41 @@ implementation:
   working directory. Remote mode fails closed rather than silently running on
   the Client filesystem with Host semantics.
 
+### Direct command compatibility mirror vs Host-origin ownership (M3-4 PR5)
+
+The one command-registry seam where Direct couples to the Host, and the exact
+boundary of that coupling:
+
+```text
+Direct commands.register(TUI definition)
+  = compatibility EXECUTION mirror
+  != semantic Host-origin ownership
+
+effective winner's exact registered `definitionId`
+  = mirror provenance discriminator
+
+Host-only catalog source
+  != display/completion synthesis
+```
+
+- A successful Direct Host registration of a TUI definition is a mirror: it
+  exists so in-process Host dispatch keeps working, and this surface records the
+  exact `definitionId` it stamped on that registration. Host ORIGIN is the
+  effective winner view with those stamped mirrors SUBTRACTED; raw registry
+  membership is never origin.
+- A same-name **Agent-scoped** genuine Host definition SHADOWS the global mirror
+  as the complete effective descriptor (official `ScopedLayers` winner rule), so
+  it keeps its own identity — including no identity at all — and must not be
+  subtracted by name.
+- The origin map's inputs are pure Host rows on every path (Host global layer +
+  Host-derived scoped overrides on Direct sessionless; the effective
+  `commands.list(agent)` view on Direct live; the Host-derived surface snapshot
+  on Remote). Client registrations, extension contributions and completion
+  synthesis join only the DISPLAY list and the advertised-claim view, and never
+  flow back into origin authority.
+- `definitionId` is provenance/discovery metadata ONLY — never authorization,
+  trust, or a capability grant.
+
 ## How to update this file
 
 1. A migration phase moves coupling into a semantic port: move the entry to

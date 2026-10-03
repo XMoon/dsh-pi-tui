@@ -3801,6 +3801,17 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   picker callback is a DETACHED owned task (it does NOT hold the submit
   FIFO), `/resume`'s epoch advance happens synchronously BEFORE the
   transition gate queues it — the stale race is REACHABLE and fenced.
+- **Host-authority sources are Host-only** (PR5 v4 §2.3/§2.4): the
+  `deriveHostOriginDescriptors` inputs are, on every path, pure Host rows —
+  Direct sessionless reads the Host global layer plus `savedScopedCommands`,
+  Direct live reads the effective `commands.list(agent)` view, and Remote
+  reads the Host-derived `SurfaceCatalogSnapshot.commands`. `savedScopedCommands`
+  is Host-derived SCOPED OVERRIDE state (the effective catalog minus the
+  identical global baseline), never Client pollution, and `commandSummaryOf`
+  preserves `definitionId` through it. Display/completion synthesis
+  (`clientCommands.list()`, extension contributions, the completion merge) is
+  joined only for the DISPLAY list and the advertised-claim view; it never
+  flows back into the origin map.
 - **Origin-aware command authority** (PR5 v2 §1C): a successful Direct
   Host-registry registration of a TUI definition is a COMPATIBILITY
   MIRROR, never Host origin — `registerTuiCommands` tracks the mirrors in
@@ -3975,7 +3986,10 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
 
 ### M3-4 exit closure matrix (original-plan reconciliation)
 
-Every original M3-4 acceptance item, with its disposition:
+Every original M3-4 acceptance item, with its disposition (the v4 §20 canonical
+set, plus the two qualified forms this ledger uses where a SUB-case is
+unreachable — `N/A_WITH_REASON` with a topology enumeration — or where a whole
+stage is split out — the `SUPERSEDED*` / `DEFERRED_TO_M3_*` rows below):
 
 | Original item | Disposition | Evidence |
 |---|---|---|
@@ -4002,6 +4016,7 @@ Every original M3-4 acceptance item, with its disposition:
 | Ctrl+R Remote Session identity | DONE_WITH_EVIDENCE | PR5 v2 §2.12 (selected-ownership seam + guard) |
 | Task Center Remote semantics | DEFERRED_WITH_OWNER = M3-5 | v2 §2.13 (not touched by PR5; `/tasks` not used as a routing proof) |
 | Selected-runtime teardown | DONE_WITH_EVIDENCE | PR5 (`runner-remote-races` §3.9) |
+| In-handler submit-FIFO mounted scenarios | DONE_UNIT_QUALIFIED | PR5 §15 waiver (plan-owner APPROVED): unit-qualified; mounted subject replacement unreachable under the single submit-FIFO product invariant. Scope = in-handler awaits only (`/preset` roster, `/status` stats, `/copy` paging, Host-command settlement), EXCLUDING detached `/model`, reconnect/rollover and teardown; auto-expires if any non-submit navigation path appears. Detached `/model` and the rewind stale-success race are mounted-qualified, NOT waived. |
 | Remote sessionless `/model` default write | INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX | adapter `unsupported`; docs corrected (entry-contract §2.2) |
 | Old giant PR5 race cross-product | SUPERSEDED | four representative classes + currentness invariants (PR2–PR5) |
 | Remote local shell positive path | SUPERSEDED | Host-user-shell authority: Remote stays fail-closed |
@@ -4071,6 +4086,6 @@ recorded, no required row remains PARTIAL; the v2 additions
 currentness with the plan-owner N/A amendment, Ctrl+R identity) are
 recorded above with their evidence. This branch's state satisfies the
 closure criteria; the `M3-4 = DONE` line becomes authoritative on the
-MERGED HEAD (v2 §19), not on this branch alone. The next stage is M3-5
+MERGED HEAD (v4 §19), not on this branch alone. The next stage is M3-5
 (secondary surfaces); no automatic "PR6" is created for historical
 unchecked checklist items.
