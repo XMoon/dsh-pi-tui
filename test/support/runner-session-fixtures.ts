@@ -8,8 +8,10 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { StatsFolder } from '../../src/stats.ts'
+import { StatusStore } from '../../src/status/store.ts'
+import type { StatusSnapshot } from '../../src/status/types.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
-import { TuiApp, type StreamingToolPreview } from '../../src/tui-app.ts'
+import { TuiApp, type DisplaySubjectPresentation, type StatusData, type StreamingToolPreview } from '../../src/tui-app.ts'
 import type { RunnerHarness } from './runner-harness.ts'
 
 /** One Session v2 live assistant-stream frame (the transient plane
@@ -89,7 +91,16 @@ export interface RunnerProbe {
   capturedMessages: readonly { kind: string; text?: string }[] | undefined
   capturedActivities: ReadonlyMap<number, unknown> | undefined
   capturedStreamingToolPreviews: readonly StreamingToolPreview[] | undefined
+  /** The COMMITTED StatusStore usage of the most recent subagent display
+   *  subject (the authoritative child usage the footer composes from). */
   capturedViewerUsage: unknown
+  /** The most recent subagent display-subject StatusStore snapshot. */
+  capturedChildStatus: StatusSnapshot | undefined
+  /** The most recent subagent display-subject commit payload. */
+  capturedDisplaySubject: {
+    readonly legacy: Partial<StatusData>
+    readonly presentation: DisplaySubjectPresentation | undefined
+  } | undefined
   capturedViewerMode: unknown
   capturedApproval: { toolName?: string; arguments?: string; danger?: boolean } | undefined
   scrollToBottomCount: number
@@ -112,6 +123,8 @@ export function installProbe(): RunnerProbe {
     capturedActivities: undefined,
     capturedStreamingToolPreviews: undefined,
     capturedViewerUsage: undefined,
+    capturedChildStatus: undefined,
+    capturedDisplaySubject: undefined,
     capturedViewerMode: undefined,
     capturedApproval: undefined,
     scrollToBottomCount: 0,
@@ -126,7 +139,8 @@ export function installProbe(): RunnerProbe {
   const originalTranscriptHydrate = TranscriptFolder.prototype.hydrate
   const originalStatsHydrate = StatsFolder.prototype.hydrate
   const originalSetTranscript = TuiApp.prototype.setTranscript
-  const originalSetViewerFooter = TuiApp.prototype.setViewerFooter
+  const originalCommitDisplaySubject = TuiApp.prototype.commitDisplaySubject
+  const originalStatusUpdate = StatusStore.prototype.update
   const originalSetViewerMode = TuiApp.prototype.setViewerMode
   const originalShowApprovalPrompt = TuiApp.prototype.showApprovalPrompt
   const originalSetStatus = TuiApp.prototype.setStatus
@@ -156,9 +170,22 @@ export function installProbe(): RunnerProbe {
     probe.capturedStreamingToolPreviews = streamingToolPreviews
     return originalSetTranscript.call(this, messages, activities, window, streamingToolPreviews, searchPresentation)
   }
-  TuiApp.prototype.setViewerFooter = function (footer) {
-    probe.capturedViewerUsage = footer?.usage
-    return originalSetViewerFooter.call(this, footer)
+  StatusStore.prototype.update = function (patch) {
+    const result = originalStatusUpdate.call(this, patch)
+    const snapshot = this.snapshot()
+    if (snapshot.view.subject.kind === 'subagent') {
+      // The COMMITTED child usage — the exact facts the footer consumes.
+      probe.capturedViewerUsage = snapshot.usage
+      probe.capturedChildStatus = snapshot
+    }
+    return result
+  }
+  TuiApp.prototype.commitDisplaySubject = function (patch, legacy, presentation) {
+    // Every SUBAGENT commit carries a presentation projection; a main commit
+    // never does. Recording on the projection (not on `patch.view`, which is
+    // omitted while the subject is unchanged) keeps the LATEST child commit.
+    if (presentation !== undefined) probe.capturedDisplaySubject = { legacy, presentation }
+    return originalCommitDisplaySubject.call(this, patch, legacy, presentation)
   }
   TuiApp.prototype.setViewerMode = function (mode) {
     probe.capturedViewerMode = mode
@@ -194,7 +221,8 @@ export function installProbe(): RunnerProbe {
     TranscriptFolder.prototype.hydrate = originalTranscriptHydrate
     StatsFolder.prototype.hydrate = originalStatsHydrate
     TuiApp.prototype.setTranscript = originalSetTranscript
-    TuiApp.prototype.setViewerFooter = originalSetViewerFooter
+    TuiApp.prototype.commitDisplaySubject = originalCommitDisplaySubject
+    StatusStore.prototype.update = originalStatusUpdate
     TuiApp.prototype.setViewerMode = originalSetViewerMode
     TuiApp.prototype.showApprovalPrompt = originalShowApprovalPrompt
     TuiApp.prototype.setStatus = originalSetStatus

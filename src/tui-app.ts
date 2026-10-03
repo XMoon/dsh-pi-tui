@@ -84,9 +84,8 @@ import type { TaskBrowserSummary } from './task-browser-runtime.ts'
 import type { StatusStore } from './status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './display-preset.ts'
 import { displayPolicyFor, isDisplayPresetAvailable, isFocusDisplayPreset } from './display-preset.ts'
-import type { AccessStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
+import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
-import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
 import { StatusStore as StatusStoreImpl } from './status/store.ts'
 import { FooterComposer, mergeCommandSurface } from './footer/composer.ts'
@@ -1004,6 +1003,10 @@ const WELCOME_FACT_LABEL_WIDTH = 9
 class WelcomeCard implements Component {
   private facts: { cwd: string; sessionId: string; model?: string; version: string; preset?: string } | undefined
   private idle = false
+  /** M3-5 PR1: hidden while the display subject is a viewed child (the main
+   *  session's head must never describe the parent session on a child
+   *  surface). The facts stay untouched and reappear on the main subject. */
+  private hidden = false
   private lastWidth = -1
   private cached: string[] = []
   /** The height of the LAST render — the frame's layout measurement (the
@@ -1037,7 +1040,28 @@ class WelcomeCard implements Component {
     this.cached = []
   }
 
+  /**
+   * M3-5 PR1: hide the card WITHOUT touching its facts. The main session's
+   * head names the main session's model/workspace/session id — none of which
+   * may stay visible while the display subject is a viewed child. The facts
+   * are kept verbatim, so showing the card again restores the latest main
+   * identity with no parked copy.
+   * @returns whether the visibility changed (the caller re-measures).
+   */
+  setHidden(hidden: boolean): boolean {
+    if (this.hidden === hidden) return false
+    this.hidden = hidden
+    this.cached = []
+    this.lastRenderedHeight = 0
+    return true
+  }
+
   render(width: number): string[] {
+    if (this.hidden) {
+      this.cached = []
+      this.lastRenderedHeight = 0
+      return []
+    }
     if (this.lastWidth === width && this.cached.length > 0) {
       this.lastRenderedHeight = this.cached.length
       return this.cached
@@ -2248,31 +2272,22 @@ export type WorkflowAction =
   }
   | { readonly kind: 'open-run-agents'; readonly runId: string; readonly name: string; readonly childIds: readonly string[] }
 
-/** The footer override while the subagent viewer is open: the footer shows
- * the VIEWED child's own identity instead of the parent session's (the
- * parent's permission/model/plan/task badges describe a session the user
- * is not looking at). The runner sets this on viewer open, refreshes it as
- * the child's own events fold (turns/steps/stats), and clears it on exit. */
-export interface SubagentViewerFooter {
-  /** The child's durable creation label. */
-  readonly label: string
-  /** The viewed child session's durable id (the display-subject key). */
-  readonly childSessionId: string
-  /** Catalog classification (the viewer's interactivity). */
-  readonly mode: 'one-shot' | 'continuable'
-  /** Store snapshot activity (running / inactive). */
-  readonly activity: 'running' | 'inactive'
-  /** The child session's workspace ('' when unknown, e.g. a cold child). */
-  readonly cwd: string
-  /** Completed child turns (from the child's OWN event log). */
-  readonly turns: number
-  /** Child model requests (steps). */
-  readonly steps: number
-  /** The child's own stats line (formatStats of its event log). */
-  readonly statsLine: string
-  /** M1: the child's structured usage facts (the footer's stats source
-   * while viewing). Absent = the legacy statsLine remains for /status. */
-  readonly usage?: UsageStatus
+/** The display-subject PRESENTATION projection (M3-5 PR1): the
+ * Session-owned presentation facts that are otherwise durable MAIN state,
+ * re-projected from the resolved child `SessionStatus` while the child viewer
+ * is the display subject. It is a DISPOSABLE projection of the committed
+ * StatusSnapshot, never an independent authority: clearing it restores the
+ * untouched main state with its latest values. */
+export interface DisplaySubjectPresentation {
+  /** The display subject's session id (the child session identity). */
+  readonly sessionId: string
+  /** The display subject's workspace root. */
+  readonly workspaceRoot: string
+  /** The display subject's durable session title ('' = unknown). */
+  readonly title: string
+  /** The display subject's todo list ([] = nothing known here — the main
+   *  durable list is never a stand-in). */
+  readonly todos: readonly TodoItem[]
 }
 
 /** Base callbacks every TuiApp host must provide; the external-editor
@@ -4465,18 +4480,17 @@ export class TuiApp {
    * bound work (follow-up sends) captures it at start and refuses to
    * touch the surface once it changed. */
   private viewerGeneration = 0
-  /** While the subagent viewer is up, the footer shows the viewed child's
-   * own identity (label/mode/activity/turns/stats) instead of the parent
-   * session's status — set/cleared by the runner on viewer open/close.
-   * Viewer mode is host-owned chrome: extension footer segments (main-
-   * session semantics) do not render while it is set. */
-  private viewerFooter: SubagentViewerFooter | undefined
-  /** The parent's workspace section, captured when the subagent viewer
-   * opens and restored by the ATOMIC exit update in setViewerFooter
-   * (undefined): the exit commits view + workspace + usage together, so a
-   * synchronous store observer never reads `main` + the child's facts
-   * (the review's P2). */
-  private mainWorkspaceBeforeViewer: WorkspaceStatus | undefined
+  /** The display-subject PRESENTATION projection (M3-5 PR1): while a child
+   * viewer is the display subject, the Session-owned presentation facts that
+   * are otherwise durable MAIN state (todo list, session title, session
+   * identity) are projected from the resolved child SessionStatus. The main
+   * durable state stays untouched behind the projection and reappears with
+   * its LATEST values when the projection is cleared. */
+  private displaySubjectPresentation: DisplaySubjectPresentation | undefined
+  /** The MAIN session identity the welcome card committed (restored as the
+   * effective extension identity when no display-subject projection is set). */
+  private mainSessionIdText: string | undefined
+  private mainWorkspaceRootText: string | undefined
 
   constructor(terminal: Terminal, events: TuiAppEvents, options: TuiAppOptions = {}) {
     // The external-editor capability is a BOUND pair: the external-editor
@@ -10983,7 +10997,10 @@ export class TuiApp {
   setSessionTitle(title: string | undefined): void {
     this.sessionTitleText = title ?? ''
     this.renderHeader()
-    this.extensionHost?.updateSession({ title: title ?? '' })
+    // The extension snapshot's title belongs to the DISPLAY SUBJECT: while a
+    // child viewer is mounted the child's own title stays published, never the
+    // main session's (M3-5 PR1 §9.8).
+    this.extensionHost?.updateSession({ title: this.displayTitle() })
     this.events.onTitleChanged?.()
   }
 
@@ -12673,11 +12690,11 @@ export class TuiApp {
       this.renderHeader()
       this.requestRender()
       this.syncExtensionState()
-      // M0: the display subject returns to main — through the ATOMIC
-      // setViewerFooter(undefined) update below (the runner pairs the two
-      // calls in the same synchronous tick), never as a standalone patch:
-      // a store observer (the footer command runner's refresh) must never
-      // observe `main` + the child's workspace/usage (the review's P2).
+      // M3-5 PR1: the display subject returns to main through the runner's
+      // OWN atomic commitDisplaySubject call in the same synchronous tick —
+      // never as a standalone patch here, so a store observer (the footer
+      // command runner's refresh) can never read `main` + the child's
+      // workspace/usage (the review's P2).
       return
     }
     if (this.viewerMode === undefined) {
@@ -12697,11 +12714,11 @@ export class TuiApp {
     }
     this.viewerMode = mode
     this.viewerGeneration += 1
-    // M0: the display subject follows the viewer — projected by the
-    // runner's setViewerFooter call together with the child's
-    // workspace/usage in ONE atomic store update (never a standalone view
-    // patch here: `subagent` + the parent's facts would be a mixed
-    // snapshot an observer can read — the review's P2).
+    // M3-5 PR1: the display subject follows the viewer — StatusRuntime
+    // resolves the child and commits the view section together with the
+    // child's Session-owned sections in ONE atomic `commitDisplaySubject`
+    // update (never a standalone view patch here: `subagent` + the parent's
+    // facts would be a mixed snapshot an observer can read — the review's P2).
     // M9: cover the CURRENT seat occupant (a plugin editor's component
     // receives the child draft / placeholder; the preserved drafts stay
     // in their own slots).
@@ -12737,74 +12754,69 @@ export class TuiApp {
     return this.viewerGeneration
   }
 
-  /** Replace the footer while the subagent viewer is open: the footer
-   * shows the VIEWED child's own identity (label/mode/activity/turns/
-   * stats) instead of the parent session's status. Pass `undefined` to
-   * restore the parent footer. The runner sets it on viewer open,
-   * refreshes it as the child's own events fold, and clears it on exit.
-   * The DISPLAY SUBJECT (view section) is projected HERE, before the
-   * paint — the very first frame after entering (or leaving) the viewer
-   * must already show the new subject, never the old one. */
-  setViewerFooter(footer: SubagentViewerFooter | undefined): void {
-    // Capture the parent's workspace BEFORE the assignment below flips the
-    // viewing state (the enter transition's exit-restoration capture).
-    if (footer !== undefined && this.viewerFooter === undefined) {
-      this.mainWorkspaceBeforeViewer = this.statusStore.snapshot().workspace
+  /**
+   * ONE atomic display-subject commit (M3-5 PR1 §9.7): the presentation
+   * projection, the StatusStore sections (including the `view` subject) and
+   * the legacy display fields all describe the SAME subject, and every piece
+   * is installed BEFORE any notification. The projection is a plain local
+   * assignment, the StatusStore publishes the whole subject in a single
+   * `update()` (its subscribers read the committed snapshot synchronously),
+   * and only then does the legacy merge publish the extension snapshot and the
+   * chrome renders. No observer can therefore read `view=child` beside the
+   * parent's sections, or the reverse.
+   */
+  commitDisplaySubject(
+    patch: StatusPatch,
+    legacy: Partial<StatusData>,
+    presentation: DisplaySubjectPresentation | undefined,
+  ): void {
+    this.displaySubjectPresentation = presentation
+    // The ACTIVITY section is display-subject-scoped too (its `todoCount` is
+    // the display-subject list length): it must travel in the SAME store
+    // update, or an observer reads `view=child` beside the parent's todo
+    // count — and a visible todo panel/extension count would keep rendering
+    // the previous subject until an unrelated event.
+    this.projectStatus({ ...patch, activity: this.activityStatus() })
+    this.setStatus(legacy)
+    // A VISIBLE todo panel renders the projection that just changed: refresh
+    // it inside the same commit (plain text — this publishes nothing), so the
+    // open panel follows enter / child A→B / child todo changes / exit instead
+    // of waiting for an unrelated event.
+    if (this.todoPanelVisible) this.renderTodoPanel()
+    // The MAIN session's welcome card (model/workspace/session identity) must
+    // not stay visible on the child surface: hide it while the display subject
+    // is a viewed child and show it again for main. Its facts are untouched.
+    // A visibility change re-measures the transcript rows (the card lives
+    // inside the scroll content: `transcriptWelcomeHeight`, the fullscreen row
+    // map and the scroll anchor all ride the measurement).
+    if (this.welcomeCard.setHidden(presentation !== undefined)) {
+      this.refreshMessageRows()
+      this.requestRender()
     }
-    this.viewerFooter = footer
-    // M1: the display subject's facts follow the viewer (the layout never
-    // changes — only the data source). The transition is ATOMIC: view +
-    // workspace + usage are committed in ONE store update, because the
-    // store notifies its subscribers SYNCHRONOUSLY inside update() — the
-    // footer command runner's refresh (and every other observer) can read
-    // the snapshot the moment it is published, so a two-step transition
-    // would expose `main` + the child workspace (or `subagent` + the
-    // parent facts) as a REAL observation, not just a paint window (the
-    // review's P2).
-    if (footer === undefined) {
-      // The exit commits the WHOLE return-to-main transition at once: the
-      // parent's workspace is the snapshot captured at enter (the runner's
-      // refreshStatus right after re-derives the same facts — same-value
-      // sections do not re-notify; a git-branch change DURING viewing is
-      // corrected by that same refresh in the same tick).
-      this.projectStatus({
-        usage: this.usageFromStatus(),
-        workspace: this.mainWorkspaceBeforeViewer,
-        view: { subject: { kind: 'main' } },
-      })
-      this.mainWorkspaceBeforeViewer = undefined
-    } else {
-      this.projectStatus({
-        usage: {
-          // Absent structured usage = NO usage facts (the child's stats
-          // line then has nothing to show): the PARENT's token figures
-          // must never leak into the child's stats line. Only the
-          // runner's refreshStatus projection (the child's own
-          // usageFromStats) supplies the child's tokens while viewing.
-          ...footer.usage === undefined
-            ? { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, performance: { llmMs: 0, firstTokenMs: 0, tokensPerSec: 0 } }
-            : {
-                tokens: footer.usage.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                performance: footer.usage.performance,
-              },
-          ...footer.usage?.cacheHitPct !== undefined ? { cacheHitPct: footer.usage.cacheHitPct } : {},
-          ...footer.usage?.context !== undefined ? { context: footer.usage.context } : {},
-          turns: footer.turns,
-          steps: footer.steps,
-        },
-        workspace: {
-          cwd: footer.cwd,
-          ...footer.cwd === '' ? {} : { project: footer.cwd.split('/').filter(Boolean).at(-1) ?? footer.cwd },
-        },
-        view: resolveDisplaySubject({
-          childSessionId: footer.childSessionId,
-          label: footer.label,
-          mode: footer.mode,
-          activity: footer.activity,
-        }),
-      })
+  }
+
+  /** The display subject's todo list: the child projection while a child
+   *  viewer is mounted, else the durable MAIN list. */
+  private displayTodos(): readonly TodoItem[] {
+    return this.displaySubjectPresentation?.todos ?? this.todoItems
+  }
+
+  /** The display subject's session title: the child projection while a child
+   *  viewer is mounted, else the durable MAIN title. */
+  private displayTitle(): string {
+    return this.displaySubjectPresentation?.title ?? this.sessionTitleText
+  }
+
+  /** The display subject's extension identity (session id / workspace root /
+   *  title): the child projection while a child viewer is mounted, else the
+   *  MAIN session's committed identity. */
+  private displaySessionIdentity(): { sessionId?: string; workspaceRoot: string; title: string } {
+    const projection = this.displaySubjectPresentation
+    return {
+      sessionId: projection?.sessionId ?? this.mainSessionIdText,
+      workspaceRoot: projection?.workspaceRoot ?? this.mainWorkspaceRootText ?? '',
+      title: projection?.title ?? this.sessionTitleText,
     }
-    this.renderFooter()
   }
 
   /** Park one child's unsent draft when its viewer session ends (exit or
@@ -12957,11 +12969,17 @@ export class TuiApp {
     // with an explicit `undefined` when a fact is absent) FOLLOWED by this
     // identity commit — so a switch-clear here would overwrite a KNOWN branch
     // the new subject just wrote. `branch` is therefore never touched here.
+    this.mainSessionIdText = facts.sessionId
+    this.mainWorkspaceRootText = facts.cwd
     this.extensionHost?.updateSession({
-      sessionId: facts.sessionId,
-      workspaceRoot: facts.cwd,
-      cwd: facts.cwd,
-      model: facts.model === '' ? undefined : facts.model,
+      ...this.displaySessionIdentity(),
+      // The Session-owned STATUS fields (cwd/model) are only this identity
+      // writer's to commit while the MAIN session is the display subject:
+      // during a child viewer the status owner has already published the
+      // child's facts and this commit must not overwrite them.
+      ...this.displaySubjectPresentation === undefined
+        ? { cwd: facts.cwd, model: facts.model === '' ? undefined : facts.model }
+        : {},
     })
   }
 
@@ -16761,7 +16779,7 @@ export class TuiApp {
    * state would actually differ from the compact list). All todos enter the
    * ordered render list, so the raw length is the renderable count. */
   private hasTodoOverflow(): boolean {
-    return this.todoItems.length > this.effectiveTodoCompactLimit()
+    return this.displayTodos().length > this.effectiveTodoCompactLimit()
   }
 
   /** The compact cap for the CURRENT terminal height: 3 on a short
@@ -16815,10 +16833,11 @@ export class TuiApp {
     const mark = (todo: TodoItem): string => todo.status === 'in_progress'
       ? color.primary('●')
       : todo.status === 'completed' ? color.success('✓') : color.textDim('○')
+    const todos = this.displayTodos()
     const ordered = [
-      ...this.todoItems.filter(todo => todo.status === 'in_progress'),
-      ...this.todoItems.filter(todo => todo.status === 'pending'),
-      ...this.todoItems.filter(todo => todo.status === 'completed'),
+      ...todos.filter(todo => todo.status === 'in_progress'),
+      ...todos.filter(todo => todo.status === 'pending'),
+      ...todos.filter(todo => todo.status === 'completed'),
     ]
     const shown = this.todoExpanded ? ordered : ordered.slice(0, this.effectiveTodoCompactLimit())
     const safeWidth = Math.max(1, Math.floor(width))
@@ -16905,9 +16924,10 @@ export class TuiApp {
    * full list). Shared by renderDock and the extension state mirror
    * (P1-5). */
   private todoSummaryText(): string {
-    if (this.todoPanelVisible || this.todoItems.length === 0) return ''
-    const active = this.todoItems.filter(todo => todo.status !== 'completed')
-    const done = this.todoItems.length - active.length
+    const todos = this.displayTodos()
+    if (this.todoPanelVisible || todos.length === 0) return ''
+    const active = todos.filter(todo => todo.status !== 'completed')
+    const done = todos.length - active.length
     const first = active[0]
     const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
     return [
@@ -16926,11 +16946,12 @@ export class TuiApp {
     this.statusStore.update(patch)
   }
 
-  /** M0: project the activity section from the CURRENT machine facts
-   * (phase precedence lives in the pure derive — the app never re-derives
-   * it in the footer). */
-  private projectActivity(): void {
-    const activity = deriveActivityStatus(
+  /** M0: the activity section from the CURRENT machine facts (phase
+   * precedence lives in the pure derive — the app never re-derives it in the
+   * footer). Its `todoCount` is the DISPLAY SUBJECT's list length, so the
+   * display-subject commit carries it in the SAME store patch (M3-5 PR1). */
+  private activityStatus(): ActivityStatus {
+    return deriveActivityStatus(
       {
         working: this.workingActive,
         compacting: this.compactionPhase === 'summarizing',
@@ -16952,9 +16973,13 @@ export class TuiApp {
         // thing on screen (a Questions-only session has no TaskBrowserRuntime
         // commit at all), so it is published unconditionally.
         questionAttentionCount: this.questionAttentionCount,
-        todoCount: this.todoItems.length,
+        todoCount: this.displayTodos().length,
       },
     )
+  }
+
+  private projectActivity(): void {
+    const activity = this.activityStatus()
     this.projectStatus({ activity })
     // Focus timer: observe the authoritative phase HERE, not only from the
     // renderer. A capturing approval/question modal owns the screen and may
@@ -17025,7 +17050,11 @@ export class TuiApp {
       queuedCount: this.queueItems.length,
       taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
       childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
-      todoCount: this.todoItems.length,
+      // The todo count/summary follow the DISPLAY SUBJECT (M3-5 PR1): while a
+      // child viewer is mounted the child's own SessionStatus todo list is
+      // published — never the parent session's, which stays behind the
+      // projection.
+      todoCount: this.displayTodos().length,
       // The rendered todo summary (P1-5: the first-party builtin dock item
       // renders it through the public slot API; the host provides the
       // TEXT, the extension owns the presentation). Always written — an
@@ -17033,15 +17062,21 @@ export class TuiApp {
       // per-field monotonic, so omitting it would leave the stale text).
       todoSummary: this.todoSummaryText(),
     })
+    // The extension SessionSnapshot describes the CURRENT DISPLAY SUBJECT
+    // (M3-5 PR1 §9.8): the identity fields (sessionId/workspaceRoot/title)
+    // and the Session-owned status fields all follow the same committed
+    // subject as the host surface — never a main identity with child facts or
+    // the reverse.
     host.updateSession({
       planMode: this.planMode,
-      viewerMode: this.viewerMode !== undefined,
+      viewerMode: this.statusStore.snapshot().view.subject.kind === 'subagent',
       // The BUSY flag is the machine fact the runner pushes (setBusy), NOT
       // the working-row indicator (which compaction also drives): the
       // extension snapshot must report the same busy truth the runner
       // sees. `working.isActive()` conflates compaction with busy, so the
       // dedicated field is used.
       busy: this.busy,
+      ...this.displaySessionIdentity(),
       turns: this.status.turns,
       steps: this.status.steps,
       // ALWAYS written (the `permission` rule below): an omitted field keeps
@@ -17127,12 +17162,14 @@ export class TuiApp {
     // them). The owned fields are ALWAYS set — a disappearing model, an
     // empty cwd (which clears the derived project) or an emptied branch
     // must not leave a stale fact behind.
-    // While the subagent viewer is open the DISPLAY SUBJECT is the viewed
-    // CHILD: the runner projects its workspace/usage and setViewerFooter
-    // owns the view section, so a legacy parent-status update must not
-    // clobber the child's facts (the composer's data-source items follow
-    // the display subject; the parent-only items gate on view.subject).
-    if (this.viewerFooter === undefined) {
+    // While the COMMITTED display subject is the viewed CHILD, the semantic
+    // owner (StatusRuntime) has already projected the child's Session-owned
+    // sections into the store; this legacy writer must not clobber them. The
+    // gate rides the store's own `view` section — the ONE committed display
+    // subject — so it can never disagree with the facts the same commit
+    // published (the composer's data-source items follow the display subject;
+    // the parent-only items gate on view.subject).
+    if (this.statusStore.snapshot().view.subject.kind === 'main') {
       const current = this.statusStore.snapshot()
       const model = modelFromLabel(this.status.model)
       // The full cwd lands in the STRUCTURED workspace section (the
@@ -17771,7 +17808,7 @@ export class TuiApp {
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
       exitConfirmKeyLabel: this.exitConfirmTrigger?.label,
-      viewing: this.viewerFooter !== undefined,
+      viewing: this.viewerMode !== undefined,
       leaderHint: leader !== undefined && leader.pending ? this.leaderHint(leader) : undefined,
     })
     let text: string

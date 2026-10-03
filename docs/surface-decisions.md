@@ -357,12 +357,61 @@ future change must not silently reverse:
   draft store is deliberately never shared with the child (a per-child
   image store is a later milestone).
 - **The footer switches to the VIEWED child while a subagent viewer is
-  open.** The parent session's status (permission/model/plan/task badges,
-  extension footer segments) describes a session the user is not looking
-  at, so the runner pushes a `SubagentViewerFooter` (label, mode badge
-  `[subagent · continuable]` / `[subagent · one-shot]`, activity, cwd,
-  the child's OWN turns/steps and stats line from a per-viewer StatsFolder
-  fed only the child's own events) and clears it on exit / session swap.
+  open** (M3-5 PR1: the child is a first-class DISPLAY SUBJECT). The parent
+  session's status (permission/model/plan/task badges, extension footer
+  segments) describes a session the user is not looking at. The split is:
+  - **Viewer-owned identity + presentation folds.** `ViewerRuntime` supplies
+    the child id/label/mode/activity/access and the child transcript fold
+    (its own `StatsFolder`: turn/step counters, recent presentation
+    performance, the stats line). These never become authority for the
+    child's Session-scoped facts.
+  - **Session-owned facts come from `SessionReader.sessionStatus(childId)`.**
+    `StatusRuntime`'s ONE display-subject selector resolves the main Session
+    or the viewed child, reads ONE `SessionStatus(childId)` cut, and derives
+    the child's composition (model/preset), access (projection-authoritative
+    permission), workspace (its own cwd — a Remote child's Host cwd never
+    implies a local branch), cumulative tokens and context
+    (numerator = `projectedTokens ?? pressureTokens`, window = the projection's)
+    and the todo/title/goal presentation. An absent child fact stays ABSENT —
+    the parent's value, the sessionless default and the bounded fold's total
+    are never stand-ins.
+  - **One atomic commit.** The view subject, the Session-owned sections, the
+    activity section (its `todoCount` is the display-subject list length), the
+    legacy display fields and a disposable display-subject PRESENTATION
+    projection (todo list / session title / session identity, which otherwise
+    live as durable MAIN state) travel in ONE `TuiApp.commitDisplaySubject`
+    call; the StatusStore publishes them in a single synchronous `update()`
+    before any notification, so no observer reads `view=child` beside the
+    parent's facts (or the reverse). An ALREADY-OPEN todo panel is re-rendered
+    from the same committed projection (enter, child A→B, a child todo change
+    and exit alike — it never waits for an unrelated event). The main durable
+    presentation state is never overwritten — clearing the projection restores
+    its LATEST values.
+  - **The main session's welcome card (head) is hidden while a child is the
+    display subject.** That card names the main session's model/workspace/
+    session id; leaving it up would show two different sessions at once. Its
+    facts are never overwritten, so the LATEST main identity reappears on exit.
+    Hiding re-measures the transcript rows (`transcriptWelcomeHeight`, the
+    fullscreen row map and the scroll anchor ride the same measurement), so
+    regular and fullscreen geometry stay consistent.
+  - **The existing footer consumers render the display subject's own facts.**
+    The `model`, `agent-preset`, `permission-preset`, `context`, `git-branch`
+    and `todo` items read the section the commit just published, so a viewed
+    child's model/provider, configured preset, available permission,
+    context pressure/window, branch and todo count are displayed where the user
+    configured them (the default preset shows model/permission/cwd/context/
+    tokens/branch; `agent-preset` and the separate `todo` count appear in custom
+    layouts). An absent child fact renders nothing — never the parent's value.
+    Genuinely MAIN-only chrome keeps its subject gate and stays hidden while
+    viewing: the Task Center badge, plan state, the `ext:*` extension bridge,
+    queue, agents and run-state.
+  - **Extension snapshot parity.** The extension `SessionSnapshot` describes
+    the same display subject: `viewerMode`, `sessionId`/`workspaceRoot`/
+    `title`, `model`/`cwd`/`branch`/`permission`/`turns`/`steps` and the
+    activity `todoCount`/`todoSummary` all follow the committed subject — a
+    main identity with child facts (or the reverse) is never published.
+    Direct/current viewer composition is qualified by PR1; the Remote child
+    viewer stays PR2 (no Remote child-viewer L6 is claimed here).
   The footer is refreshed at step/end and turn/end (never on streaming
   deltas). **Extension footer segments do not render while viewing**:
   viewer mode is host-owned chrome, the extension surface already exposes

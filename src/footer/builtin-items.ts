@@ -62,7 +62,10 @@ const permissionPresetItem: FooterItemDefinition = {
   formats: ['badge', 'plain', 'compact'],
   defaultFormat: 'badge',
   render(snapshot: StatusSnapshot, ref, density) {
-    if (snapshot.view.subject.kind !== 'main') return null
+    // The access section always carries the DISPLAY SUBJECT's own permission
+    // (M3-5 PR1): the viewed child's projection value while a child viewer is
+    // mounted, the live session's otherwise. An absent value renders nothing —
+    // never the other subject's.
     const preset = snapshot.access.permissionPreset
     if (preset === undefined) return null
     // Density compact reuses the persisted 'compact' style (ww/ro/yolo);
@@ -111,7 +114,8 @@ const modelItem: FooterItemDefinition = {
   formats: ['badge', 'plain', 'compact'],
   defaultFormat: 'badge',
   render(snapshot: StatusSnapshot, ref, density) {
-    if (snapshot.view.subject.kind !== 'main') return null
+    // The composition section always carries the DISPLAY SUBJECT's own model
+    // (M3-5 PR1). An absent value renders nothing.
     const model = snapshot.composition.model
     if (model === undefined) return null
     // Density compact reuses the persisted 'compact' style (model id
@@ -239,7 +243,9 @@ const gitBranchItem: FooterItemDefinition = {
   formats: ['plain', 'label'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot, ref, density) {
-    if (snapshot.view.subject.kind !== 'main') return null
+    // The workspace section always carries the DISPLAY SUBJECT's own branch
+    // (M3-5 PR1) — a Remote child's Host cwd has no client-local branch, so the
+    // section omits it and this renders nothing.
     const branch = snapshot.workspace.branch
     if (branch === undefined || branch === '') return null
     // Density compact reuses the persisted 'plain' style (a 'label' ref
@@ -261,7 +267,8 @@ const contextItem: FooterItemDefinition = {
   formats: ['bar', 'percent', 'full'],
   defaultFormat: 'bar',
   render(snapshot: StatusSnapshot, ref, density) {
-    if (snapshot.view.subject.kind !== 'main') return null
+    // The usage section's context is the DISPLAY SUBJECT's own official
+    // numerator/window (M3-5 PR1). An unavailable child fact renders nothing.
     const context = snapshot.usage.context
     if (context === undefined || context.windowTokens === undefined || context.windowTokens <= 0) return null
     const used = context.usedTokens ?? 0
@@ -416,7 +423,8 @@ const agentPresetItem: FooterItemDefinition = {
   formats: ['badge', 'compact'],
   defaultFormat: 'badge',
   render(snapshot: StatusSnapshot, ref, density) {
-    if (snapshot.view.subject.kind !== 'main') return null
+    // The composition section always carries the DISPLAY SUBJECT's own preset
+    // (M3-5 PR1). An absent/recording-less child preset renders nothing.
     const preset = snapshot.composition.agentPreset
     if (preset === undefined) return null
     // Density compact reuses the persisted 'compact' style (the short
@@ -612,7 +620,8 @@ const todoItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot, _ref, density) {
-    if (snapshot.view.subject.kind !== 'main') return null
+    // The activity count is the DISPLAY SUBJECT's own list length (M3-5 PR1),
+    // committed in the same store patch as the subject.
     const count = snapshot.activity.todoCount
     if (count <= 0) return null
     // `tdN` — deliberately NOT `tN`, which would collide with the
