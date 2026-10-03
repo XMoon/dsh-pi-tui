@@ -1001,9 +1001,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
               // `/skill <name>` into a Client command. §1C-6 (whole-PR F4):
               // the TUI term is the LIVE Client registry claim plus the
               // BARE-line contribution, never a static name list.
-              tuiCommand: !finalSkillInvocation
-                && (deps.command.clientClaimsLine(parsed)
-                  || (isBareCommandLine(parsed) && deps.extensions.isLocal(parsed.name, LOCAL_COMMANDS) === true)),
+              // §1C-6 (whole-PR R15-1): the TUI term is the LIVE Client
+              // claim ONLY. It must never consult `extensions.isLocal(...,
+              // LOCAL_COMMANDS)`: that path ends in `CommandBridge.isLocal`'s
+              // `staticLocal.has(name)` first statement, so a BARE name with no
+              // live Client definition (`/kill`) re-entered the TUI family from
+              // the static list. A live bare-line CONTRIBUTION is the
+              // `extensionCommand` term below, not this one.
+              tuiCommand: !finalSkillInvocation && deps.command.clientClaimsLine(parsed),
               // The wrapper-outranks-contribution precedence (§1C-5).
               extensionCommand: clientLocalAtSubmit && !finalSkillInvocation
                 && isBareCommandLine(parsed)

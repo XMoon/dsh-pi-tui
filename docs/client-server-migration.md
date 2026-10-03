@@ -3990,8 +3990,11 @@ Every original M3-4 acceptance item, with its disposition. The Disposition
 column uses the v4 §20 canonical vocabulary and NOTHING else — `DONE_WITH_EVIDENCE`,
 `DONE_UNIT_QUALIFIED`, `SUPERSEDED_BY_CURRENT_CONTRACT`,
 `INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX`, `DEFERRED_WITH_OWNER`,
-`OUT_OF_SCOPE_LATER_STAGE`, `BLOCKER`. A qualified or reachability-specific
-reason is never a new disposition: it belongs in the Evidence column.
+`OUT_OF_SCOPE_LATER_STAGE`, `BLOCKER`. `DEFERRED_WITH_OWNER` carries its owner
+inline (`DEFERRED_WITH_OWNER = M3-N`) exactly as v4 writes it — that owner form
+IS the canonical token, not a new disposition. A qualified or
+reachability-specific reason is never a new disposition: it belongs in the
+Evidence column.
 
 | Original item | Disposition | Evidence |
 |---|---|---|

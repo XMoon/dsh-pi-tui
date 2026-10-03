@@ -4080,11 +4080,6 @@ export class TuiApp {
   private exitConfirmTimer: NodeJS.Timeout | undefined
   /** Session workspace root for path relativization (Web relativizeToCwd). */
   private workspaceRoot: string | undefined
-  /** The session id the extension snapshot last mirrored through the welcome
-   *  card — the SUBJECT-SWITCH detector (a switch must clear subject fields the
-   *  identity commit cannot answer, instead of leaving the previous session's
-   *  values behind). */
-  private extensionMirrorSessionId: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
   private readonly present: ToolPresenter | undefined
   /**
@@ -12955,23 +12950,18 @@ export class TuiApp {
     // `undefined` clears it; an unavailable fact must never masquerade as a
     // stale one. `cwd` is authoritative HERE (the identity commit carries the
     // session's own workspace), so it is written unconditionally too.
-    // A REAL subject switch (a previous identity exists and differs). The FIRST
-    // identity commit is not a switch: clearing there would drop the branch the
-    // status sync may already have written for this same session.
-    const switchedSubject = this.extensionMirrorSessionId !== undefined
-      && this.extensionMirrorSessionId !== facts.sessionId
-    this.extensionMirrorSessionId = facts.sessionId
+    //
+    // ORDERING (whole-PR R15-2): this commit must NOT clear fields the
+    // subject's STATUS commit has already proved. The production order is
+    // `status.refresh()` (which writes model/cwd/branch for the NEW session,
+    // with an explicit `undefined` when a fact is absent) FOLLOWED by this
+    // identity commit — so a switch-clear here would overwrite a KNOWN branch
+    // the new subject just wrote. `branch` is therefore never touched here.
     this.extensionHost?.updateSession({
       sessionId: facts.sessionId,
       workspaceRoot: facts.cwd,
       cwd: facts.cwd,
       model: facts.model === '' ? undefined : facts.model,
-      // `branch` is NOT answered here. The welcome card is also refreshed on
-      // ordinary `/model` // `/preset` updates, where an unconditional clear
-      // would flap a live fact; only a SUBJECT SWITCH proves the previous
-      // session's branch must not survive, and the following status sync then
-      // writes the real value for the new subject.
-      ...switchedSubject ? { branch: undefined } : {},
     })
   }
 
