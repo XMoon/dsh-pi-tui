@@ -3718,7 +3718,9 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   bookkeeping unconditionally but skips every visible mutation once the
   captured scope is superseded (draft restore/consume, acks, notices,
   health repaint, artifact save, fallback dispatch). QUALIFICATION NOTE
-  (technical FIFO constraint acknowledged by the reviewer; the required-acceptance change itself is PENDING the plan owner's decision): the mounted variant of these two
+  (technical FIFO constraint acknowledged by the reviewer; the
+  required-acceptance change is APPROVED by the plan owner — 2026-10-03,
+  option 2, scope below): the mounted variant of these two
   fences — a parked command read/settlement ACROSS a submit-driven session
   switch — is not drivable in the real runner: a pending command settlement
   holds the single submit FIFO turn, so no later submit (the only user
