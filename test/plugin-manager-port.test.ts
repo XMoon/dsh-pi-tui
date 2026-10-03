@@ -68,10 +68,14 @@ function fakePort(state: Partial<FakeState> = {}): {
   state: FakeState
   emit: (event: PluginInstallEvent) => void
   invalidate: () => void
+  /** How many times each subscription's disposer was actually invoked. */
+  offCalls: { install: number; invalidation: number }
+  installSubscriptions: () => number
   invalidationSubscriptions: () => number
 } {
   const listeners = new Set<(event: PluginInstallEvent) => void>()
   const invalidationListeners = new Set<() => void>()
+  const offCalls = { install: 0, invalidation: 0 }
   const full: FakeState = {
     snapshotCalls: 0,
     setBundle: [],
@@ -106,10 +110,13 @@ function fakePort(state: Partial<FakeState> = {}): {
     startInstall: async (request) => { full.installCalls.push(request); return full.installImpl(request) },
     waitForInstall: async (requestId) => { full.waitCalls.push(requestId); return full.waitImpl(requestId) },
     cancelInstall: async (requestId) => { full.cancelCalls.push(requestId); return full.cancelImpl(requestId) },
-    subscribeInstall: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    subscribeInstall: (listener) => {
+      listeners.add(listener)
+      return () => { offCalls.install += 1; listeners.delete(listener) }
+    },
     subscribeInvalidation: (listener) => {
       invalidationListeners.add(listener)
-      return () => invalidationListeners.delete(listener)
+      return () => { offCalls.invalidation += 1; invalidationListeners.delete(listener) }
     },
   }
   return {
@@ -117,6 +124,8 @@ function fakePort(state: Partial<FakeState> = {}): {
     state: full,
     emit: event => { for (const listener of listeners) listener(event) },
     invalidate: () => { for (const listener of [...invalidationListeners]) listener() },
+    offCalls,
+    installSubscriptions: () => listeners.size,
     invalidationSubscriptions: () => invalidationListeners.size,
   }
 }
@@ -659,50 +668,112 @@ test('invalidation reads only while a surface is showing the inventory', async (
   assert.equal(state.snapshotCalls, 3, 'reopening always performs a fresh read')
 })
 
+test('a throwing invalidation subscription releases the install subscription and rethrows', () => {
+  const { port, offCalls } = fakePort()
+  port.subscribeInvalidation = () => { throw new Error('invalidation subscription refused') }
+  assert.throws(() => controllerOf(port), /invalidation subscription refused/)
+  assert.equal(offCalls.install, 1, 'the already-installed install subscription is released exactly once')
+})
+
+test('dispose releases BOTH subscriptions exactly once and is idempotent', () => {
+  const { port, invalidate, offCalls, installSubscriptions, invalidationSubscriptions } = fakePort()
+  const { controller } = controllerOf(port)
+  assert.equal(installSubscriptions(), 1)
+  assert.equal(invalidationSubscriptions(), 1)
+
+  controller.dispose()
+  controller.dispose()
+  assert.equal(installSubscriptions(), 0, 'the install-event subscription is released')
+  assert.equal(invalidationSubscriptions(), 0, 'the invalidation subscription is released')
+  assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'each subscription disposer runs exactly once')
+  invalidate()
+  assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'a disposed controller never re-subscribes or re-releases')
+})
+
+test('a held inventory read settled after dispose never commits nor repaints (success and failure)', async () => {
+  for (const settlement of ['success', 'failure'] as const) {
+    const readGate = deferred<PluginManagerSnapshot>()
+    const { port, state } = fakePort({ snapshotImpl: () => readGate.promise })
+    const { controller, renders } = controllerOf(port)
+    controller.open('direct-command')
+    await tick()
+    assert.equal(state.snapshotCalls, 1, 'the inventory read is genuinely in flight')
+    const rendersAtDispose = renders()
+
+    controller.dispose()
+    controller.dispose()
+    if (settlement === 'success') readGate.resolve(bundleOnly('late-read'))
+    else readGate.reject(new Error('carrier offline'))
+    await tick()
+
+    assert.equal(renders(), rendersAtDispose, `a late ${settlement} settlement must not repaint`)
+    assert.equal(controller.status().state, 'loading', 'a late settlement never commits a state')
+    assert.ok(!controller.rows().some(row => row.value === bundleValue('late-read')))
+  }
+})
+
 test('dispose aborts an in-flight inspect, releases both subscriptions and never cancels an install', async () => {
   const inspectGate = deferred<PluginSpecInspectionFact>()
   let inspectSignal: AbortSignal | undefined
-  const { port, state, invalidate, invalidationSubscriptions } = fakePort({
+  const { port, state, invalidate, offCalls, installSubscriptions, invalidationSubscriptions } = fakePort({
     inspectImpl: (_spec, _registry, signal) => {
       inspectSignal = signal
       return inspectGate.promise
     },
   })
-  const { controller } = controllerOf(port)
+  const { controller, renders } = controllerOf(port)
   controller.openInstall()
   controller.inspect('pkg', null)
   await tick()
   assert.ok(inspectSignal !== undefined, 'the inspect was dispatched')
   assert.equal(inspectSignal.aborted, false)
+  assert.equal(installSubscriptions(), 1)
   assert.equal(invalidationSubscriptions(), 1, 'the controller owns one invalidation subscription')
+  const rendersAtDispose = renders()
 
   controller.dispose()
   assert.equal(inspectSignal.aborted, true, 'dispose aborts the in-flight inspect')
+  assert.equal(installSubscriptions(), 0, 'dispose releases the install-event subscription')
   assert.equal(invalidationSubscriptions(), 0, 'dispose releases the invalidation subscription')
+  assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'neither subscription is released twice')
 
   invalidate()
   inspectGate.resolve({ status: 'accepted', kind: 'registry', name: 'pkg', version: '1', bundle: true, registry: null })
   await tick()
   assert.equal(state.snapshotCalls, 0, 'a disposed controller performs no read')
   assert.equal(state.cancelCalls.length, 0, 'dispose must never cancel a Host install')
+  assert.equal(controller.installView()?.phase, 'inspecting', 'a late inspect result never advances the phase')
+  assert.equal(renders(), rendersAtDispose, 'a late inspect result never repaints a disposed controller')
 })
 
-test('dispose during a Host install neither cancels nor retries it', async () => {
+test('dispose during a Host install neither cancels nor retries it and ignores a late install event', async () => {
   const gate = deferred<PluginChangeFact>()
-  const { port, state } = fakePort({ installImpl: () => gate.promise })
-  const { controller } = controllerOf(port)
+  const { port, state, emit, installSubscriptions } = fakePort({ installImpl: () => gate.promise })
+  const { controller, renders } = controllerOf(port)
   controller.openInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
   await tick()
   assert.equal(state.installCalls.length, 1)
+  const requestId = (state.installCalls[0] as { requestId: string }).requestId
+  const rendersAtDispose = renders()
 
   controller.dispose()
+  // The DECISIVE mechanism for "no later install event reaches the controller"
+  // is the released subscription itself: once disposed there is no listener to
+  // deliver to (releasing it is proven by the off-call counts).
+  assert.equal(installSubscriptions(), 0, 'dispose released the install-event subscription')
+  emit({ kind: 'phase', phase: { requestId, phase: 'applying' } })
+  assert.equal(controller.installView()?.phase, 'starting', 'a late install event cannot be delivered')
+
+  // The late SETTLEMENT is an async continuation that does resume after
+  // disposal, so its own disposed fence is what this assertion discriminates.
   gate.resolve(change({ stage: 'install' }))
   await tick()
   assert.equal(state.cancelCalls.length, 0, 'dispose must never cancel a Host install')
   assert.equal(state.waitCalls.length, 0, 'dispose must never retry/recover an install')
   assert.equal(state.snapshotCalls, 0, 'a late install settlement cannot mutate a disposed controller')
-  assert.equal(controller.installView()?.phase, 'starting', 'the disposed controller never settles the install')
+  assert.equal(controller.installView()?.phase, 'starting', 'the disposed controller never settles and never advances the install')
+  assert.equal(renders(), rendersAtDispose, 'a disposed controller never repaints')
 })

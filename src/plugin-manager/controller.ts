@@ -154,7 +154,7 @@ export class PluginManagerController {
   private install: ActiveInstall | undefined
   private installEpoch = 0
   private readonly unsubscribe: () => void
-  private readonly unsubscribeInvalidation: () => void
+  private readonly unsubscribeInvalidation!: () => void
   private disposed = false
 
   constructor(port: PluginManagerPort, hooks: PluginManagerControllerHooks, options?: PluginManagerControllerOptions) {
@@ -162,7 +162,16 @@ export class PluginManagerController {
     this.hooks = hooks
     this.observationSource = options?.observations
     this.unsubscribe = port.subscribeInstall(event => this.onInstallEvent(event))
-    this.unsubscribeInvalidation = port.subscribeInvalidation(() => this.onInvalidation())
+    try {
+      this.unsubscribeInvalidation = port.subscribeInvalidation(() => this.onInvalidation())
+    } catch (error) {
+      // Transactional acquisition, symmetric with the adapters: a synchronously
+      // throwing SECOND subscription must not leave the install subscription
+      // owned by a controller the caller never receives (and can therefore
+      // never dispose). The original error is preserved.
+      this.unsubscribe()
+      throw error
+    }
   }
 
   /** One owned detached task (AGENTS.md: never a bare `void` promise chain). */

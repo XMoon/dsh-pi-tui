@@ -67,6 +67,8 @@ const refused = (message: string): { readonly ok: false; readonly error: unknown
 interface RemotePluginManagerFixture extends RemotePluginManagerSource {
   readonly calls: string[]
   readonly installOptions: InstallBundleOptions[]
+  /** How many times each forwarded-event disposer was actually invoked. */
+  readonly offCalls: { readonly installState: number; readonly installLog: number; readonly changed: number }
   emitState(progress: PluginInstallProgress): void
   emitLog(chunk: PluginInstallLogChunk): void
   emitChanged(): void
@@ -79,17 +81,20 @@ interface RemotePluginManagerFixture extends RemotePluginManagerSource {
  *  identity itself, but the adapter must not double-fire either. */
 interface GenerationFixture extends RemoteConnectionGenerationSource {
   set(id: number | undefined): void
+  /** How many times the subscription's disposer was actually invoked. */
+  readonly offCalls: number
   readonly subscriptions: number
 }
 
 function generationFixture(initial?: number): GenerationFixture {
   let current: { readonly id: number } | undefined = initial === undefined ? undefined : { id: initial }
   const listeners = new Set<() => void>()
+  let offCalls = 0
   return {
     getSnapshot: () => current,
     subscribe: (listener) => {
       listeners.add(listener)
-      return () => { listeners.delete(listener) }
+      return () => { offCalls += 1; listeners.delete(listener) }
     },
     set(id) {
       // The real store returns a NEW object per established generation and
@@ -99,6 +104,7 @@ function generationFixture(initial?: number): GenerationFixture {
       current = next
       for (const listener of [...listeners]) listener()
     },
+    get offCalls() { return offCalls },
     get subscriptions() { return listeners.size },
   }
 }
@@ -118,6 +124,7 @@ function remoteFixture(): RemotePluginManagerFixture {
   const logListeners = new Set<(payload: PluginInstallLogChunk) => void>()
   const changedListeners = new Set<() => void>()
   const eventFailures = new Map<string, unknown>()
+  const offCalls = { installState: 0, installLog: 0, changed: 0 }
   /** Record the call and fold a scripted refusal into the official result. */
   const settle = <T>(operation: string, value: T): { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown } => {
     calls.push(operation)
@@ -179,19 +186,20 @@ function remoteFixture(): RemotePluginManagerFixture {
       if (event === 'plugin-manager/install-state') {
         const typed = listener as (payload: PluginInstallProgress) => void
         stateListeners.add(typed)
-        return () => { stateListeners.delete(typed) }
+        return () => { offCalls.installState += 1; stateListeners.delete(typed) }
       }
       if (event === 'plugin-manager/changed') {
         const typed = listener as () => void
         changedListeners.add(typed)
-        return () => { changedListeners.delete(typed) }
+        return () => { offCalls.changed += 1; changedListeners.delete(typed) }
       }
       const typed = listener as (payload: PluginInstallLogChunk) => void
       logListeners.add(typed)
-      return () => { logListeners.delete(typed) }
+      return () => { offCalls.installLog += 1; logListeners.delete(typed) }
     },
     get calls() { return calls },
     get installOptions() { return installOptions },
+    get offCalls() { return offCalls },
     get subscriptions() { return stateListeners.size + logListeners.size + changedListeners.size },
     emitState(progress) { for (const listener of [...stateListeners]) listener(progress) },
     emitLog(chunk) { for (const listener of [...logListeners]) listener(chunk) },
@@ -346,10 +354,14 @@ test('subscribeInstall maps both forwarded install events and releases both on d
     { kind: 'log', log: { jobId: 'job-1', stream: 'stdout', text: 'added 1 package' } },
   ])
   dispose()
+  dispose()
   assert.equal(remote.subscriptions, 0)
+  assert.deepEqual(remote.offCalls, { installState: 1, installLog: 1, changed: 0 },
+    'each install-event disposer runs EXACTLY once, even when dispose is repeated')
   remote.emitState({ requestId: pluginInstallRequestId('req-2'), phase: 'applying' })
   remote.emitLog({ jobId: 'job-2', argv: [], cwd: '/tmp', stream: 'stderr', text: 'late' })
   assert.equal(events.length, 2, 'a disposed subscription must not deliver later events')
+  assert.deepEqual(remote.offCalls, { installState: 1, installLog: 1, changed: 0 })
 })
 
 test('a refused Remote call surfaces as one thrown Error (never application: failed)', async () => {
@@ -392,11 +404,17 @@ test('a forwarded plugin-manager/changed maps to exactly one invalidation and di
   remote.emitChanged()
   assert.equal(invalidations, 1, 'the forwarded Host change is an invalidation hint')
   dispose()
+  dispose()
   assert.equal(remote.subscriptions, 0, 'the changed subscription is released')
   assert.equal(generation.subscriptions, 0, 'the generation subscription is released')
+  assert.deepEqual(remote.offCalls, { installState: 0, installLog: 0, changed: 1 },
+    'the changed disposer runs EXACTLY once, even when dispose is repeated')
+  assert.equal(generation.offCalls, 1, 'the generation disposer runs EXACTLY once')
   remote.emitChanged()
   generation.set(2)
   assert.equal(invalidations, 1, 'a disposed subscription must not deliver later invalidations')
+  assert.deepEqual(remote.offCalls, { installState: 0, installLog: 0, changed: 1 })
+  assert.equal(generation.offCalls, 1)
 })
 
 test('a new Connection generation invalidates once; a lost generation does not', () => {
@@ -420,10 +438,13 @@ test('a new Connection generation invalidates once; a lost generation does not',
   generation.set(3)
   assert.equal(invalidations, 2, 'a replaced generation rereads once')
   dispose()
+  dispose()
   assert.equal(remote.subscriptions, 0)
   assert.equal(generation.subscriptions, 0)
+  assert.equal(generation.offCalls, 1, 'the generation disposer runs EXACTLY once, even when dispose is repeated')
   generation.set(4)
   assert.equal(invalidations, 2, 'a disposed subscription must not deliver later invalidations')
+  assert.equal(generation.offCalls, 1)
 })
 
 test('a failed invalidation subscription releases the already-installed listener', () => {
@@ -437,6 +458,7 @@ test('a failed invalidation subscription releases the already-installed listener
   generation.subscribe = () => { throw new Error('generation subscription refused') }
   assert.throws(() => port.subscribeInvalidation(() => { invalidations += 1 }), /generation subscription refused/)
   assert.equal(remote.subscriptions, 0, 'the changed subscription must be rolled back')
+  assert.equal(remote.offCalls.changed, 1, 'the rollback releases the changed subscription exactly once')
   generation.subscribe = originalSubscribe
   remote.emitChanged()
   generation.set(2)
