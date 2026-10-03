@@ -39,6 +39,32 @@ function validSampleTurn(turn: number, seqBase: number) {
   ]
 }
 
+/** The SAME turn as {@link validSampleTurn}, but with a DIFFERENT route
+ *  (provider/model): a completed step whose route key changed CLEARS both
+ *  recent windows (`RecentPerformanceWindow.observeRoute`). */
+function routeChangeTurn(turn: number, seqBase: number, provider: string, model: string) {
+  const base = validSampleTurn(turn, seqBase)
+  return base.map(event => event.type === 'assistant/message'
+    ? { ...event, data: { ...(event.data as Record<string, unknown>), message: { id: `m-${turn}`, role: 'assistant', content: [], source: { kind: 'model', provider, model } } } }
+    : event)
+}
+
+/** A late authoritative REPLACEMENT of an already-settled step whose decode
+ *  range is no longer observable (a single delta): the step's throughput
+ *  CANDIDATE leaves the window (`recent.removeThroughput`), so the SAME fold's
+ *  evidence shrinks. */
+function invalidatingReplacement(turn: number, seqBase: number) {
+  return [{
+    type: 'assistant/message', seq: seqBase, time: 2_000,
+    data: {
+      turn, step: 1,
+      message: { id: `m-${turn}`, role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
+      usage: { inputTokens: 1, outputTokens: 100 },
+      stream: [{ type: 'chunk', time: 500, chunk: { type: 'text-delta', index: 0, text: 'a' } }],
+    },
+  }]
+}
+
 interface Harness {
   setWindow(events: Array<Record<string, unknown>>, hasMore: boolean): void
   /** Force every fence stale (the old subject's reads all drop). */
@@ -338,4 +364,60 @@ test('F1/PR5 §3.2: the live flip is monotonic and never fires before the eviden
   assert.equal(h.available(), true, 'the bit is monotonic within a generation')
   assert.equal(h.statusRefreshes(), before + 1,
     'exactly one status re-derivation, on the flip')
+})
+
+
+test('F1/PR5 §3.2: an authoritative replacement that invalidates a candidate flips availability BACK to false (true→false in one generation)', async () => {
+  // The fold's evidence is NOT monotonic: a late authoritative replacement can
+  // remove a throughput candidate (`recent.removeThroughput`), so the SAME fold
+  // that proved the window complete can stop proving it. The presentation bit is
+  // shadow state for that fold and must follow it in BOTH directions.
+  const h = harness()
+  h.setWindow(validSampleTurn(1, 0), true)
+  await h.coldHydrate()
+  // Turns 2..9 close normally (nine candidates).
+  for (let turn = 2; turn <= 9; turn += 1) h.applyLive(validSampleTurn(turn, (turn - 1) * 10))
+  // Turn 10 settles its message but STAYS OPEN (no turn/end): the fold retains a
+  // settled step's sample only until its turn closes, which is exactly the
+  // window in which a late authoritative replacement can invalidate it.
+  h.applyLive(validSampleTurn(10, 90).slice(0, 3) as Array<Record<string, unknown>>)
+  assert.equal(h.available(), true, 'fixture check: the window is complete')
+  const before = h.statusRefreshes()
+  // Turn 10's candidate is invalidated while it is still open.
+  h.applyLive(invalidatingReplacement(10, 200) as Array<Record<string, unknown>>)
+  assert.equal(h.available(), false,
+    'the bit must follow the fold DOWN when its evidence shrinks')
+  assert.equal(h.statusRefreshes(), before + 1,
+    'the downward flip re-derives the status too')
+})
+
+test('F1/PR5 §3.2: a ROUTE change that clears the fold windows re-answers availability from the CURRENT fold', async () => {
+  // `observeRoute` clears both windows on a provider/model change, so the same
+  // StatsFolder can go from complete to insufficient without the generation
+  // changing.
+  const h = harness()
+  h.setWindow(validSampleTurn(1, 0), true)
+  await h.coldHydrate()
+  for (let turn = 2; turn <= 10; turn += 1) h.applyLive(validSampleTurn(turn, (turn - 1) * 10))
+  assert.equal(h.available(), true, 'fixture check: the window is complete')
+  h.applyLive(routeChangeTurn(11, 100, 'other-provider', 'other-model') as Array<Record<string, unknown>>)
+  assert.equal(h.available(), false,
+    'a route change resets the fold, so availability must be re-answered as insufficient')
+})
+
+test('F1/PR5 §3.2: a history-start window (hasMore=false) STAYS available while its evidence shrinks', async () => {
+  // The second, independent authority: a window that provably reaches the
+  // history start is authoritative even with zero valid samples, so a route
+  // change (or any shrink) must NOT revoke its availability.
+  const h = harness()
+  h.setWindow([], false)
+  await h.coldHydrate()
+  assert.equal(h.available(), true, 'fixture check: a history-start window is available with no samples')
+  const before = h.statusRefreshes()
+  h.applyLive(validSampleTurn(1, 0))
+  h.applyLive(routeChangeTurn(2, 10, 'other-provider', 'other-model') as Array<Record<string, unknown>>)
+  assert.equal(h.available(), true,
+    'the committed history-start fact keeps availability true regardless of retained evidence')
+  assert.equal(h.statusRefreshes(), before,
+    'no status churn when the answered value does not change')
 })
