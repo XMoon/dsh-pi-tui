@@ -25,7 +25,9 @@ M3-4 PR1 DONE      (application runtime-selection spine: `SelectedApplicationRun
 M3-4 PR2 DONE      (main Session read/presentation/status over the Remote aggregate — see the M3-4 PR2 section)
 M3-4 PR3 DONE      (submission/interaction/shell authority over the Remote main Session — see the M3-4 PR3 notes)
 M3-4 PR4 DONE      (main-session command/action plane: implementation landed — Client command registry (both branches), Host origin/claim authority, whole-log rewind, Client-derived tool cards, permission projection/cycle; its review loop closed)
-M3-4 PR5 IN REVIEW (final main-application closure PR #211 → `next`: command Host/Client ORIGIN authority, descriptor/attachment precedence, rewind picker/claimed/adopted/error identity lifecycle with the mounted stale-success L6, `/yolo` Remote reachability, `/status` unknown-vs-zero, Direct cache read/write parity, Ctrl+R identity, docs/contract reconciliation. NOT yet DONE: the authoritative `M3-4 DONE` line is published on the MERGED HEAD only — this branch is an unmerged PR)
+M3-4 PR5 DONE/MERGED (final main-application closure MERGED as PR #211 into `next @ e520c016`: command Host/Client ORIGIN authority, descriptor/attachment precedence, rewind picker/claimed/adopted/error identity lifecycle with the mounted stale-success L6, `/yolo` Remote reachability, `/status` unknown-vs-zero, Direct cache read/write parity, Ctrl+R identity, docs/contract reconciliation)
+M3-4 DONE          (PR1–PR5 landed and PR5 merged; the main TUI application + command runtime run on the experimental Remote backend — see the M3-4 status section)
+M3-5 NEXT / NOT STARTED (secondary surfaces + writer-held recovery; implementation not started — see the migration stage pointer)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -46,6 +48,19 @@ Remote writes:              experimental/test only (no production wiring)
 Remote attach:              unsupported
 Direct rollback:           available
 ```
+
+### Migration stage pointer
+
+```text
+M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
+M3-5 = NEXT / NOT STARTED   (secondary surfaces + writer-held recovery)
+```
+
+M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
+(reads, submission, status and the command runtime with their currentness
+fences). It does NOT flip the production backend: Direct remains the default,
+no public/config/env Remote selector exists, and M3 is not complete while M3-5
+and M3-6 remain.
 
 ## Current state
 
@@ -3561,7 +3576,7 @@ longer resolves the Host tools registry outside the Direct branch.
 - **Remote `!` / `!!` remain fail-closed** (M3-4 PR3 shell authority
   amendment, unchanged by PR4).
 
-## M3-4 status (PR1–PR4 landed; PR5 IN REVIEW — not merged)
+## M3-4 status (DONE — PR1–PR5 landed; PR5 merged as PR #211 at `next @ e520c016`)
 
 M3-4 composes the main TUI application over the Remote Backend. The stage is
 a PR train; each PR closes its own slice with closure evidence.
@@ -3700,10 +3715,13 @@ implementation) is not Host origin. The v4 §1C origin-aware authority
 (mirror provenance + the origin map + `hostOriginClaimOf` + the one
 classifier) is the single implementation contract.
 
-### PR5 — Main TUI Remote Closure & Exit (IN REVIEW — PR #211, unmerged)
+### PR5 — Main TUI Remote Closure & Exit (DONE / MERGED — PR #211 at `next @ e520c016`)
 
 PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
-(`next @ 8b536b20`, DSH `0.2.0-rc.2`, source `639ed015`). PR #211 is OPEN on `next`; `M3-4 = DONE` becomes authoritative on the MERGED HEAD only. What this PR closes:
+(branch point `next @ 8b536b20`, DSH `0.2.0-rc.2`, source `639ed015`). PR #211
+is MERGED into `next` as the merged HEAD `e520c016` (the PR's final branch HEAD
+`bdc10c07` carries the identical tree, rebased onto `next`); the authoritative
+`M3-4 = DONE` line is bound to that MERGED HEAD. What this PR closes:
 
 - **Required transcript capability** (plan §3.1): `transcriptExportAvailable`
   is a required `boolean` on `TuiCommandRunner`; `/transcript` refuses on
@@ -4089,8 +4107,8 @@ waiver does not extend to detached `/model`, reconnect or teardown, and
 auto-expires if a non-submit navigation path appears). With both decisions
 recorded, no required row remains PARTIAL; the v2 additions
 (origin-aware authority, `/yolo`, `/status` unknown-vs-zero, rewind final
-currentness, Ctrl+R identity) are recorded above with their evidence. This branch's state satisfies the
-closure criteria; the `M3-4 = DONE` line becomes authoritative on the
-MERGED HEAD (v4 §19), not on this branch alone. The next stage is M3-5
-(secondary surfaces); no automatic "PR6" is created for historical
-unchecked checklist items.
+currentness, Ctrl+R identity) are recorded above with their evidence. This
+closure state is authoritative at the MERGED HEAD (`next @ e520c016`, PR #211,
+v4 §19) — not only on the pre-merge branch. The next migration stage is M3-5
+(secondary surfaces + writer-held recovery), which is NEXT / NOT STARTED; no
+automatic "PR6" is created for historical unchecked checklist items.
