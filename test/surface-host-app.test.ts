@@ -590,6 +590,58 @@ test('whole-PR F3: a known -> missing model CLEARS the extension session snapsho
   app.stop()
 })
 
+test('whole-PR F3 sibling: an emptied cwd/branch CLEARS the extension snapshot (same per-field merge)', async (t) => {
+  // Same root cause as the model: `updateSession` is a shallow merge, so an
+  // OMITTED field keeps its previous value. `cwd` is a required snapshot field
+  // (canonical unknown = ''), `branch` is optional (canonical clear =
+  // undefined) — both must be WRITTEN, never omitted.
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  app.refreshChrome()
+  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  await settle()
+  assert.equal(host.state().session.cwd, '/repo/a')
+  assert.equal(host.state().session.branch, 'main')
+  app.setStatus({ model: 'm1', cwd: '', branch: '', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  await settle()
+  assert.equal(host.state().session.cwd, '',
+    'an emptied cwd must not leave the previous directory in the extension snapshot')
+  assert.equal(host.state().session.branch, undefined,
+    'an emptied branch must not leave the previous branch in the extension snapshot')
+  app.stop()
+})
+
+test('whole-PR F3 sibling: a session SWITCH commits the new cwd and never leaks the previous branch', async (t) => {
+  // The identity commit answers `cwd` (it carries the session's own workspace)
+  // but NOT `branch`: on a subject switch the previous session's branch must be
+  // cleared, and the following status sync writes the new subject's real value.
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  app.refreshChrome()
+  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setWelcomeCard({ cwd: '/repo/a', sessionId: 'session-a', model: 'model-a', version: '0.0.0' })
+  await settle()
+  assert.equal(host.state().session.sessionId, 'session-a')
+  assert.equal(host.state().session.branch, 'main')
+  app.setWelcomeCard({ cwd: '/repo/b', sessionId: 'session-b', version: '0.0.0' })
+  await settle()
+  assert.equal(host.state().session.sessionId, 'session-b', 'the switch took effect')
+  assert.equal(host.state().session.cwd, '/repo/b', "the switch commits the NEW session's workspace")
+  assert.equal(host.state().session.branch, undefined,
+    "session B must never inherit session A's branch")
+  app.stop()
+})
+
 test('runner permission projection clears on service/agent absence (runner-level guard)', async () => {
   // The runner's refreshStatus decides the permission via the pure
   // deriveRunnerPermission: a missing permission service OR a missing

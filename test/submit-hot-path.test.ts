@@ -2741,6 +2741,21 @@ test('a name the host catalog resolves with an UNCLAIMED line never runs the col
     'the MODEL receives the raw line')
 })
 
+// QUALIFICATION GAP (recorded honestly, whole-PR F2): this case is NOT a
+// discriminating witness. Restoring the raw `isSkillInvocation` predicate in
+// either sibling still passes it, because the target line is already routed
+// ordinary at an earlier gate. The reviewer's diagnosis of WHY, and the recipe
+// for a real witness: this fixture boots `hostCommands: ['grilling']`, which
+// registers the Host name BEFORE mount, so `replaceSkillCommands` skips the
+// wrapper (`taken` contains the name) and `waitForSkillWrapper` is satisfied by
+// the Host name alone — no LIVE wrapper ever exists. A discriminating case must
+// follow the AC-2/R7-3 order instead: boot `skills: true` with NO same-name
+// hostCommands, first PROVE the `[skill]` wrapper is registered, and only then
+// `registerScoped('command-session', { name: 'grilling', handler })` WITHOUT
+// `input` — at that point an argued line is Host-reserved ordinary while the raw
+// skill predicate is genuinely true. The F2 evidence in this PR is the
+// structural guard (both siblings must consume the Host reservation), not this
+// test.
 test('whole-PR F2: an ordinary line under a Host name a LIVE skill wrapper shares takes the ORDINARY steer route', async (t) => {
   // The RAW skill predicate used to outrank the classification on this sibling:
   // with a live `/grilling` wrapper AND a genuine execute-kind Host `/grilling`,

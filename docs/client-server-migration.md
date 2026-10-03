@@ -3986,10 +3986,12 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
 
 ### M3-4 exit closure matrix (original-plan reconciliation)
 
-Every original M3-4 acceptance item, with its disposition (the v4 §20 canonical
-set, plus the two qualified forms this ledger uses where a SUB-case is
-unreachable — `N/A_WITH_REASON` with a topology enumeration — or where a whole
-stage is split out — the `SUPERSEDED*` / `DEFERRED_TO_M3_*` rows below):
+Every original M3-4 acceptance item, with its disposition. The Disposition
+column uses the v4 §20 canonical vocabulary and NOTHING else — `DONE_WITH_EVIDENCE`,
+`DONE_UNIT_QUALIFIED`, `SUPERSEDED_BY_CURRENT_CONTRACT`,
+`INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX`, `DEFERRED_WITH_OWNER`,
+`OUT_OF_SCOPE_LATER_STAGE`, `BLOCKER`. A qualified or reachability-specific
+reason is never a new disposition: it belongs in the Evidence column.
 
 | Original item | Disposition | Evidence |
 |---|---|---|
@@ -4018,11 +4020,11 @@ stage is split out — the `SUPERSEDED*` / `DEFERRED_TO_M3_*` rows below):
 | Selected-runtime teardown | DONE_WITH_EVIDENCE | PR5 (`runner-remote-races` §3.9) |
 | In-handler submit-FIFO mounted scenarios | DONE_UNIT_QUALIFIED | PR5 §15 waiver (plan-owner APPROVED): unit-qualified; mounted subject replacement unreachable under the single submit-FIFO product invariant. Scope = in-handler awaits only (`/preset` roster, `/status` stats, `/copy` paging, Host-command settlement), EXCLUDING detached `/model`, reconnect/rollover and teardown; auto-expires if any non-submit navigation path appears. Detached `/model` and the rewind stale-success race are mounted-qualified, NOT waived. |
 | Remote sessionless `/model` default write | INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX | adapter `unsupported`; docs corrected (entry-contract §2.2) |
-| Old giant PR5 race cross-product | SUPERSEDED | four representative classes + currentness invariants (PR2–PR5) |
-| Remote local shell positive path | SUPERSEDED | Host-user-shell authority: Remote stays fail-closed |
-| Global fatal/HMR teardown matrix | DEFERRED_TO_M3_6 | stage boundary (unchanged) |
+| Old giant PR5 race cross-product | SUPERSEDED_BY_CURRENT_CONTRACT | four representative classes + currentness invariants (PR2–PR5) |
+| Remote local shell positive path | SUPERSEDED_BY_CURRENT_CONTRACT | Host-user-shell authority: Remote stays fail-closed |
+| Global fatal/HMR teardown matrix | DEFERRED_WITH_OWNER = M3-6 | stage boundary (unchanged) |
 | Child viewer / Job / Plugin Manager semantics | OUT_OF_SCOPE_LATER_STAGE | M3-5 (unchanged) |
-| Old optional `transcriptExportAvailable` | SUPERSEDED_BY_PR5_REQUIRED_CAPABILITY | required boolean + guards |
+| Old optional `transcriptExportAvailable` | SUPERSEDED_BY_CURRENT_CONTRACT | required boolean + guards |
 | Extension registry global lifecycle | OUT_OF_SCOPE_LATER_STAGE | M3-6 (unchanged) |
 
 Original M3-4 overall plan §13 (representative positive evidence) — every
@@ -4046,10 +4048,10 @@ row, with its disposition:
 | Remote known tool card live + replay | DONE_WITH_EVIDENCE | PR4 L6 §7.4-10/11 (live + durable replay) |
 | Remote unknown tool generic fallback | DONE_WITH_EVIDENCE | PR4 L6 (bounded generic fallback renders name + raw args) |
 | Remote permission preset cycle | DONE_WITH_EVIDENCE | PR4 L6 (projection-authoritative cycle) |
-| Remote local shell bypass | SUPERSEDED_BY_FAIL_CLOSED_POLICY | the original positive was retired by the Host-user-shell authority decision: Remote `!`/`!!` fail closed with zero spawn/zero write (`runner-remote-submission` §37 CARRIER_GAP L6); no Remote positive exists or is claimed |
+| Remote local shell bypass | SUPERSEDED_BY_CURRENT_CONTRACT | the original positive was retired by the Host-user-shell authority decision: Remote `!`/`!!` fail closed with zero spawn/zero write (`runner-remote-submission` §37 CARRIER_GAP L6); no Remote positive exists or is claimed |
 | Remote image prompt | DONE_WITH_EVIDENCE | PR3 L6 §37 (staged bytes → PromptContentPart → durable attachment) |
 | Remote durable image read | DONE_WITH_EVIDENCE | PR3 L6 (`runner-remote-submission` §37: staged bytes → durable attachment → official readAttachment byte equality) |
-| Remote durable image resend (a second submission citing a recalled durable image) | DONE_WITH_EVIDENCE (mounted L6 qualified) | PR5 mounted L6 (`runner-remote-submission` "image resend"): first submit → durable image → authorized byte equality; a busy-queued image occurrence is recalled via the REAL Alt+Up pull-back (the recalled draft carries NO local bytes — recalledRef only, asserted); the second submission re-delivers the ORIGINAL authorized bytes through the official attachment read into a fresh durable user/message row (content-addressed ids may repeat; the acceptance is the delivered content and the authorized path). Plus the `remote-prompt-serializer` unit (the durable ref never crosses the wire). Plan-owner decision 2026-10-03: mounted closure required (option 1a) — landed |
+| Remote durable image resend (a second submission citing a recalled durable image) | DONE_WITH_EVIDENCE | PR5 mounted L6 qualified (`runner-remote-submission` "image resend"): first submit → durable image → authorized byte equality; a busy-queued image occurrence is recalled via the REAL Alt+Up pull-back (the recalled draft carries NO local bytes — recalledRef only, asserted); the second submission re-delivers the ORIGINAL authorized bytes through the official attachment read into a fresh durable user/message row (content-addressed ids may repeat; the acceptance is the delivered content and the authorized path). Plus the `remote-prompt-serializer` unit (the durable ref never crosses the wire). Plan-owner decision 2026-10-03: mounted closure required (option 1a) — landed |
 | Remote Session export through the selected backend | DONE_WITH_EVIDENCE | PR4 L6 (Host `/export` claim + SessionArchivePort authority) |
 
 Original M3-4 overall plan §14 (required negative / fail-closed evidence) —
@@ -4072,8 +4074,9 @@ every row:
 | Turn-end Remote path → never Host sessions.flush | DONE_WITH_EVIDENCE | PR3 turn-end settlement (official flush contract; no TUI-side sessions.flush anywhere in `runtime/remote`) |
 
 M3-4 closure state: every §13/§14 row above carries its disposition; the
-row marked SUPERSEDED_BY_FAIL_CLOSED_POLICY records the retired shell
-positive precisely. The two escalated acceptance decisions were ruled by
+`Remote local shell bypass` row records the retired shell positive precisely
+(disposition `SUPERSEDED_BY_CURRENT_CONTRACT`; the reachability reason is its
+Evidence). The two escalated acceptance decisions were ruled by
 the plan owner on 2026-10-03: (1) durable-image-resend — mounted closure
 REQUIRED and LANDED (option 1a; see the resend row); (2) the in-handler
 FIFO-bound mounted scenarios — unit-qualified acceptance APPROVED with the
@@ -4083,8 +4086,7 @@ waiver does not extend to detached `/model`, reconnect or teardown, and
 auto-expires if a non-submit navigation path appears). With both decisions
 recorded, no required row remains PARTIAL; the v2 additions
 (origin-aware authority, `/yolo`, `/status` unknown-vs-zero, rewind final
-currentness with the plan-owner N/A amendment, Ctrl+R identity) are
-recorded above with their evidence. This branch's state satisfies the
+currentness, Ctrl+R identity) are recorded above with their evidence. This branch's state satisfies the
 closure criteria; the `M3-4 = DONE` line becomes authoritative on the
 MERGED HEAD (v4 §19), not on this branch alone. The next stage is M3-5
 (secondary surfaces); no automatic "PR6" is created for historical

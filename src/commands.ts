@@ -4012,6 +4012,14 @@ export function registerTuiCommands(
         const dispose = registerOne({
           name: skill.name,
           description: '[skill] ' + skill.description,
+          // §1C-6 (whole-PR F4 sink): a per-skill wrapper CLAIMS its argued
+          // line (`/name args` — everything after the name is the skill's
+          // args), exactly like a Host skill command's leading input. Without
+          // the descriptor the Client registry's exact-line admission rejects
+          // the argued gesture at `execute()`, and the wrapper's own handler
+          // never runs on the Remote branch (the line is swallowed instead of
+          // delivered).
+          input: { hint: '<args>' },
           // The handler captures ONLY the skill name; execution re-fetches
           // from the current live agent and re-checks the policy. Trailing
           // input (`/name args`) travels VERBATIM as the invocation's
@@ -4095,6 +4103,11 @@ export function registerTuiCommands(
           const dispose = registerOne({
             name,
             description: `[skill: revalidating] ${name}`,
+            // §1C-6 (whole-PR F4 sink): the revalidating transition claims its
+            // argued line exactly like the direct wrapper — it accepts
+            // `/name args` and forwards them to loadSkill, so the Client
+            // registry's exact-line admission must accept it too.
+            input: { hint: '<args>' },
             handler: async (invocation) => {
               // Captured before any await, exactly like the direct wrapper.
               const delivery = takeDelivery()
