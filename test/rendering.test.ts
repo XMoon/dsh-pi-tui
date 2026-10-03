@@ -2081,6 +2081,25 @@ test('viewport anchors distinguish duplicate messages and cloned Focus activitie
 const WHALE_MARKERS = [".--'---._", '.------._', '.-------.', ".---'--.", '/ /~~~~~~']
 const hasWhale = (view: string): boolean => WHALE_MARKERS.some(marker => view.includes(marker))
 
+test('F2: an ABSENT welcome-card model fact is OMITTED, never rendered as an authoritative "unconfigured"', async () => {
+  // The official `SessionReader.sessionStatus()` contract: an absent field means
+  // the projection/capability is UNAVAILABLE and must not be guessed or replaced
+  // with a definitive business value. The Remote welcome branch therefore passes
+  // the absent fact THROUGH (no `model` key) instead of inventing
+  // "unconfigured", and the card renders no model line at all.
+  const { vt, app } = startApp()
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-absent-fact', version: '0.1.0' })
+  const view = await viewport(vt)
+  const plainFacts = view.split('\n').map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  assert.ok(view.includes('session-absent-fact'), `the card must still render its facts:\n${view}`)
+  assert.equal(view.includes('unconfigured'), false,
+    'an unavailable model projection must never become a definitive business value')
+  assert.equal(view.includes('no model'), false,
+    'nor the legacy no-model literal')
+  assert.equal(/model[ \t]*\S/.test(plainFacts), false,
+    `no model value may be rendered from an absent fact:\n${view}`)
+})
+
 test('welcome card shows the whale and full facts in the wide layout', async () => {
   const { vt, app } = startApp()
   // Values long enough to wrap inside the ~76-col side-by-side facts column.

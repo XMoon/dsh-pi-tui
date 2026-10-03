@@ -24,8 +24,8 @@ M3-3B DONE         (rc.2 retarget + frozen-contract reconvergence; rc.2 Question
 M3-4 PR1 DONE      (application runtime-selection spine: `SelectedApplicationRuntime` core + the Remote application runtime aggregate + the internal selection seam in bootstrap; normal/default remains Direct, no public/config/env selector — see the M3-4 status section)
 M3-4 PR2 DONE      (main Session read/presentation/status over the Remote aggregate — see the M3-4 PR2 section)
 M3-4 PR3 DONE      (submission/interaction/shell authority over the Remote main Session — see the M3-4 PR3 notes)
-M3-4 PR4 IN REVIEW (main-session command/action plane: implementation landed — Client command registry (both branches), Host claim precedence, whole-log rewind, Client-derived tool cards, permission projection/cycle; the review loop is closing the remaining mandatory L6 scenarios before DONE)
-M3-4 DONE          (main TUI Remote composition; the PR train PR1–PR5 landed — PR5 closed the final main-surface gaps; next stage M3-5)
+M3-4 PR4 DONE      (main-session command/action plane: implementation landed — Client command registry (both branches), Host origin/claim authority, whole-log rewind, Client-derived tool cards, permission projection/cycle; its review loop closed)
+M3-4 PR5 IN REVIEW (final main-application closure PR #211 → `next`: command Host/Client ORIGIN authority, descriptor/attachment precedence, rewind picker/claimed/adopted/error identity lifecycle with the mounted stale-success L6, `/yolo` Remote reachability, `/status` unknown-vs-zero, Direct cache read/write parity, Ctrl+R identity, docs/contract reconciliation. NOT yet DONE: the authoritative `M3-4 DONE` line is published on the MERGED HEAD only — this branch is an unmerged PR)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -3696,7 +3696,7 @@ controls). Its central replacement rule — "use the current
 `hostCatalogResolves()` as the Host-name authority" — is SUPERSEDED by the
 v2 plan: on Direct the registry itself carries this TUI's compatibility
 mirrors, so raw membership (and the pre-v2 `hostCatalogResolves`
-implementation) is not Host origin. The v2 §1C origin-aware authority
+implementation) is not Host origin. The v4 §1C origin-aware authority
 (mirror provenance + the origin map + `hostOriginClaimOf` + the one
 classifier) is the single implementation contract.
 
@@ -3762,7 +3762,7 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   added — a bypass a production user can never reach is not L6 evidence,
   and a reconnect is a DIFFERENT currentness axis (transport identity, not
   subject replacement).
-- **Rewind final-notification currentness** (PR5 v2 §3C, corrected per
+- **Rewind final-notification currentness** (PR5 v4 §3C, corrected per
   review R6-5 and the plan-owner amendment): FOUR navigation identities,
   each owning exactly its settlement class —
   1. PICKER IDENTITY (captured at picker open): owns picker/selection
@@ -3812,7 +3812,7 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   (`clientCommands.list()`, extension contributions, the completion merge) is
   joined only for the DISPLAY list and the advertised-claim view; it never
   flows back into the origin map.
-- **Origin-aware command authority** (PR5 v2 §1C): a successful Direct
+- **Origin-aware command authority** (PR5 v4 §1C): a successful Direct
   Host-registry registration of a TUI definition is a COMPATIBILITY
   MIRROR, never Host origin — `registerTuiCommands` tracks the mirrors in
   a provenance set (removed before disposal so the synchronous
@@ -3833,14 +3833,14 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   is NOT origin, and running+steer still reaches the handler, never the
   inbox) plus the Remote running+steer regressions from the earlier
   supplement closure.
-- **Remote `/yolo` semantic reachability** (PR5 v2 §1D): the Direct-Agent
+- **Remote `/yolo` semantic reachability** (PR5 v4 §1D): the Direct-Agent
   prerequisite is removed from the transport-neutral permission apply —
   the mounted L6 proves live-session `/yolo` → ConfigPort → the official
   /permission path → the committed `permissions` projection → the footer
   row, with exactly ONE official command row. The independent
   approval-policy override remains INTENTIONAL_UNSUPPORTED (the settings
   row stays hidden/disabled; no carrier was invented).
-- **`/status` unknown-vs-zero truthfulness** (PR5 v2 §1B-2):
+- **`/status` unknown-vs-zero truthfulness** (PR5 v4 §1B-2):
   `SessionStatsFacts` carries the stats as AUTHORITY GROUPS (lifetime ←
   the sessionStats projection, tokens ← tokenUsage, recent ← the bounded
   window, contextWindow); the Remote composer keeps an absent source an
@@ -3848,7 +3848,7 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   a visible zero, and the `/status` Stats row renders known groups only
   (no known group reads `unmeasured`). Direct maps its complete fold onto
   a fully-populated facts value — no Direct display regression.
-- **Ctrl+R Current-session identity** (PR5 v2 §2.12): the identity getter
+- **Ctrl+R Current-session identity** (PR5 v4 §2.12): the identity getter
   is the SELECTED OWNERSHIP authority (`ownership.currentSessionId()`),
   never `agentNow()` — a Remote session's history search follows the
   transport-neutral subject.
@@ -4008,12 +4008,12 @@ stage is split out — the `SUPERSEDED*` / `DEFERRED_TO_M3_*` rows below):
 | permission cycle / tool cards | DONE_WITH_EVIDENCE | PR4 L6 (reused) |
 | Client command reachability under running/steer | DONE_WITH_EVIDENCE | PR5 supplement L6 (`runner-remote-command-plane`) |
 | `/exit` ↔ `/quit` sessionless parity | DONE_WITH_EVIDENCE | PR5 supplement (policy + guard test) |
-| Command Host-origin authority (mirror ≠ origin) | DONE_WITH_EVIDENCE | PR5 v2 §1C (origin map + classifier + Direct source-to-sink + guards) |
-| Host descriptor authority under collisions | DONE_WITH_EVIDENCE | PR5 v2 §1C (the origin map keeps the winning HOST descriptor; Client synthesis cannot overwrite it — guarded) |
-| Remote `/yolo` semantic reachability | DONE_WITH_EVIDENCE | PR5 v2 §1D (mounted L6: ConfigPort → official /permission → projection → footer) |
-| Remote `/status` unknown-vs-zero | DONE_WITH_EVIDENCE | PR5 v2 §1B-2 (SessionStatsFacts; composer regressions) |
-| `/rewind` final notification currentness | DONE_WITH_EVIDENCE (N/A_WITH_REASON for the stale mounted negative — topology enumeration in the PR5 section) | PR5 v2 §3C (owned-adoption identity + mounted positive + mint/consume guards) |
-| Ctrl+R Remote Session identity | DONE_WITH_EVIDENCE | PR5 v2 §2.12 (selected-ownership seam + guard) |
+| Command Host-origin authority (mirror ≠ origin) | DONE_WITH_EVIDENCE | PR5 v4 §1C (origin map + classifier + Direct source-to-sink + guards) |
+| Host descriptor authority under collisions | DONE_WITH_EVIDENCE | PR5 v4 §1C (the origin map keeps the winning HOST descriptor; Client synthesis cannot overwrite it — guarded) |
+| Remote `/yolo` semantic reachability | DONE_WITH_EVIDENCE | PR5 v4 §1D (mounted L6: ConfigPort → official /permission → projection → footer) |
+| Remote `/status` unknown-vs-zero | DONE_WITH_EVIDENCE | PR5 v4 §1B-2 (SessionStatsFacts; composer regressions) |
+| `/rewind` final notification currentness | DONE_WITH_EVIDENCE | PR5 v4 §3C: four operation-owned identities (picker validity / claimed fork epoch / adopted settlement = published child + claimed epoch / structured error notification + detection-time owner for the pre-admission notices). The stale-success race is production-reachable and mounted-qualified: the mounted stale negative is REQUIRED and DONE (`runner-session-navigation`, with real liveness facts: source retired exactly once + B's transcript installed before the no-stale-toast assertion), paired with the mounted positive control. The old FIFO/topology `N/A_WITH_REASON` for this race is REVOKED by v4 and no longer claimed anywhere. |
+| Ctrl+R Remote Session identity | DONE_WITH_EVIDENCE | PR5 v4 §2.12 (selected-ownership seam + guard) |
 | Task Center Remote semantics | DEFERRED_WITH_OWNER = M3-5 | v2 §2.13 (not touched by PR5; `/tasks` not used as a routing proof) |
 | Selected-runtime teardown | DONE_WITH_EVIDENCE | PR5 (`runner-remote-races` §3.9) |
 | In-handler submit-FIFO mounted scenarios | DONE_UNIT_QUALIFIED | PR5 §15 waiver (plan-owner APPROVED): unit-qualified; mounted subject replacement unreachable under the single submit-FIFO product invariant. Scope = in-handler awaits only (`/preset` roster, `/status` stats, `/copy` paging, Host-command settlement), EXCLUDING detached `/model`, reconnect/rollover and teardown; auto-expires if any non-submit navigation path appears. Detached `/model` and the rewind stale-success race are mounted-qualified, NOT waived. |

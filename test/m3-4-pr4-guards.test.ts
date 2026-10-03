@@ -426,3 +426,62 @@ test('PR5 §3C-4 (R7-4): the rewind settlement owner is phase-specific', () => {
   assert.ok(events.includes('if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return'),
     'the pre-admission failure fences on the picker identity')
 })
+
+
+/* ── PR5 F1: the availability bit follows the SAME fold's live evidence ── */
+
+test('PR5 §3.2 (F1): the live ingress re-answers availability off the SAME fold — never a second scan', () => {
+  const presentation = code('app/surface/session-presentation.ts')
+  // The flip reads THIS fold's retained evidence (no second StatsFolder, no
+  // second event scan through the whole-log helper).
+  const refresh = presentation.slice(
+    presentation.indexOf('const refreshRecentPerformanceAvailability = ('),
+    presentation.indexOf('const refreshRecentPerformanceAvailability = (') + 900,
+  )
+  assert.ok(refresh.includes('statsFolder.hasEnoughRecentEvidence()'),
+    'the flip is answered by the live fold itself')
+  assert.equal(refresh.includes('hasEnoughRecentPerformanceSamples('),
+    false, 'the live flip must not run a second event scan')
+  assert.ok(refresh.includes('deps.refreshStatusCheap()'),
+    'the flip re-derives the status so the footer stops omitting the figures')
+  // Monotonic within a generation.
+  assert.ok(refresh.includes('if (recentPerformanceAvailable) return'),
+    'the bit only moves false -> true inside a generation')
+  // The live ingress performs the pair on the same fold, at BOTH append sites.
+  const routing = code('app/surface/runtime.ts')
+  const pairs = routing.split('main.stats.apply([event])').length - 1
+  const refreshes = routing.split('main.refreshRecentPerformanceAvailability()').length - 1
+  assert.ok(pairs > 0 && refreshes === pairs,
+    'every live stats append re-answers the availability predicate')
+  // ONE predicate shared by the fold accessor and the whole-log helper.
+  const stats = code('stats.ts')
+  assert.ok(stats.includes('return recentEvidenceComplete(foldSessionStats(events).recent)'),
+    'the whole-log helper delegates to the one predicate')
+  assert.ok(stats.includes('return recentEvidenceComplete(this.recent)'),
+    'the live fold accessor delegates to the SAME predicate')
+})
+
+
+/* ── PR5 F2: an unavailable Remote model fact is never a business value ── */
+
+test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendered as a business value', () => {
+  const status = code('app/surface/status-runtime.ts')
+  const branch = status.slice(
+    status.indexOf('const updateWelcomeCard = ('),
+    status.indexOf('const updateWelcomeCard = (') + 1600,
+  )
+  // The Remote welcome branch: a present sessionStatus with an ABSENT model
+  // field passes NO model fact (the card then omits the line) — it must not
+  // synthesize a definitive business value.
+  assert.ok(branch.includes('...facts.model === undefined'),
+    'the absent model fact is spread away, not replaced')
+  assert.equal(branch.includes("'unconfigured'"),
+    false, 'an unavailable projection must never become "unconfigured"')
+  assert.equal(branch.includes('???'), false)
+  // The card renders the fact only when it is present.
+  const card = code('tui-app.ts')
+  assert.ok(card.includes("...facts.model === undefined ? [] : [`${color.textDim(label('model'))}"),
+    'the card omits the model line when the fact is absent')
+  assert.ok(card.includes('model?: string'),
+    'the card accepts an absent model fact')
+})

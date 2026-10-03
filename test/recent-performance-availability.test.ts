@@ -52,6 +52,12 @@ interface Harness {
    *  not leak into a read that already begun). */
   parkNextRead(): { release(): void }
   available(): boolean | undefined
+  /** The LIVE append pair (what the live ingress performs): apply the newly
+   *  appended events to the SAME main stats fold, then re-answer the
+   *  availability predicate off that fold. No `loadOlder`/rehydrate involved. */
+  applyLive(events: Array<Record<string, unknown>>): void
+  /** How many times the availability flip re-derived the status (footer). */
+  statusRefreshes(): number
   coldHydrate(): Promise<void>
   rehydrate(): Promise<void>
   /** The synchronous generation-bump reset (the A2 seam). */
@@ -93,11 +99,12 @@ function harness(): Harness {
     }
     return observed
   }
+  let statusRefreshes = 0
   const presentation = createSessionPresentation<SessionPresentationEvent>({
     surface: surface as never,
     diag,
     isCleanedUp: () => false,
-    refreshStatusCheap: () => {},
+    refreshStatusCheap: () => { statusRefreshes += 1 },
     folds: { title: () => undefined },
     direct: {
       installModelSelection: () => {},
@@ -151,6 +158,11 @@ function harness(): Harness {
       return gate
     },
     available: () => presentation.mainRecentPerformanceAvailable(),
+    applyLive: events => {
+      presentation.mainStats().apply(events as never)
+      presentation.main.refreshRecentPerformanceAvailability()
+    },
+    statusRefreshes: () => statusRefreshes,
     coldHydrate: () => presentation.initLiveRemoteSession('s').then(() => undefined),
     rehydrate: () => presentation.rehydrateFromWindow('s'),
     resetForGeneration: () => {
@@ -281,4 +293,49 @@ test('PR5 §3.2 generation reset: the availability bit returns to false before t
   h.setWindow(proven, true)
   await h.coldHydrate()
   assert.equal(h.available(), true)
+})
+
+
+test('F1/PR5 §3.2: a bounded insufficient window becomes AVAILABLE through live appends (no loadOlder)', async () => {
+  // The reported defect: availability is shadow state beside the SAME fold, so
+  // a truncated window that committed `false` must follow ordinary appended
+  // evidence (the live ingress applies to the same fold and re-answers the
+  // predicate). It must NOT require a `loadOlder`/rehydrate to flip, and the
+  // flip must re-derive the status so the footer/`/status` stop omitting the
+  // recent figures in the same step.
+  const h = harness()
+  h.setWindow(validSampleTurn(1, 0), true)
+  await h.coldHydrate()
+  assert.equal(h.available(), false, 'fixture check: the truncated window starts UNAVAILABLE')
+
+  // Nine valid completed turns: TTFT is satisfied (>= 5) but the throughput
+  // CANDIDATE window (>= 10) is not — the bit must stay down.
+  for (let turn = 2; turn <= 10; turn += 1) h.applyLive(validSampleTurn(turn, (turn - 1) * 10))
+  assert.equal(h.available(), true,
+    'the tenth valid sample completes the throughput candidate window and flips the bit')
+
+  // The flip re-derived the status (the footer reads the bit through the status
+  // snapshot, so a silent flip would leave the omitted metrics on screen).
+  assert.equal(h.statusRefreshes() >= 1, true,
+    'the availability flip must re-derive the status')
+})
+
+test('F1/PR5 §3.2: the live flip is monotonic and never fires before the evidence is complete', async () => {
+  const h = harness()
+  h.setWindow(validSampleTurn(1, 0), true)
+  await h.coldHydrate()
+  const before = h.statusRefreshes()
+  // Nine turns total: still incomplete, so no flip and no status churn from the
+  // refresh path (it must not repaint on every append).
+  for (let turn = 2; turn <= 9; turn += 1) h.applyLive(validSampleTurn(turn, (turn - 1) * 10))
+  assert.equal(h.available(), false, 'an incomplete window stays UNAVAILABLE')
+  assert.equal(h.statusRefreshes(), before,
+    'no status re-derivation while the evidence is still incomplete')
+  // The tenth completes it — exactly one flip.
+  h.applyLive(validSampleTurn(10, 90))
+  assert.equal(h.available(), true)
+  h.applyLive(validSampleTurn(11, 100))
+  assert.equal(h.available(), true, 'the bit is monotonic within a generation')
+  assert.equal(h.statusRefreshes(), before + 1,
+    'exactly one status re-derivation, on the flip')
 })

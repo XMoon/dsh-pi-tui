@@ -288,7 +288,14 @@ export function hasEnoughRecentPerformanceSamples(events: readonly SessionEvent[
   // removeThroughput, attempt/retry handling, and the completed-turn fence
   // all change which samples the window retains; review round 2 caught the
   // drifted copy admitting a burst-invalidated window as complete).
-  const admitted = foldSessionStats(events).recent.admittedCounts()
+  return recentEvidenceComplete(foldSessionStats(events).recent)
+}
+
+/** The ONE "the recent window is complete" predicate, read off a LIVE window.
+ *  Shared by the whole-log helper above and by {@link StatsFolder}'s own fold so
+ *  a live append can re-answer it without a second scan or a second fold (F1). */
+function recentEvidenceComplete(recent: RecentPerformanceWindow): boolean {
+  const admitted = recent.admittedCounts()
   return admitted.ttft >= RECENT_PERFORMANCE_SAMPLE_LIMIT
     && admitted.throughput >= RECENT_PERFORMANCE_CANDIDATE_LIMIT
 }
@@ -900,6 +907,18 @@ export class StatsFolder {
   }
 
   /** The derived stats as of the last applied event. */
+  /**
+   * Whether THIS fold currently retains a COMPLETE recent-performance window —
+   * the SAME evidence {@link hasEnoughRecentPerformanceSamples} reads, taken
+   * from the window the fold already keeps while applying (never a second scan
+   * and never a second fold). Presentation-owned callers use it to let the
+   * availability bit follow LIVE evidence (F1), instead of waiting for the next
+   * `loadOlder`/rehydrate commit to re-prove it.
+   */
+  hasEnoughRecentEvidence(): boolean {
+    return recentEvidenceComplete(this.recent)
+  }
+
   snapshot(): SessionStats {
     const derived: SessionStats = { ...this.stats }
     applyDerivedPerformance(derived, this.recent)

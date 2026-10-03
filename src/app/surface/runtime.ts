@@ -402,6 +402,13 @@ export interface SurfaceMainPresentation<Event> {
   readonly previews: Map<string, StreamingToolPreview>
   /** Apply one event to the main streaming tool-preview projection. */
   applyToolPreview(event: Event): void
+  /**
+   * F1 (PR5 §3.2): let the recent-performance availability bit follow the
+   * SAME fold this sink just mutated. Called by the live ingress after the
+   * stats append; the owner decides whether the predicate is now proven and
+   * re-derives the status when it flips.
+   */
+  refreshRecentPerformanceAvailability(): void
 }
 
 /**
@@ -2281,12 +2288,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // the settled card, not the running one.
         main.folder.apply([event])
         main.stats.apply([event])
+        main.refreshRecentPerformanceAvailability()
         source.exitView()
         return
       }
     }
     main.folder.apply([event])
     main.stats.apply([event])
+    // F1 (PR5 §3.2): the appended event may be exactly the sample that
+    // completes the recent-performance window — re-answer the availability
+    // predicate off the fold that append just updated, so the footer/`/status`
+    // stop omitting the recent figures without waiting for a `loadOlder`.
+    main.refreshRecentPerformanceAvailability()
     // The goal badge folds incrementally: the newest goal/change event
     // decides, so one event is enough (clear/completed hide the badge).
     if (event.type === 'goal/change') source.applyGoalChange(event)
