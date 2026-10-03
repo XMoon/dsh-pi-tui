@@ -332,6 +332,11 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   /** The Client-owned command registry (PR4 §1.3): the submission route's
    *  TUI_BUILTIN execution owner on the Remote branch. */
   readonly clientCommands: ClientCommandRegistry
+  /** §1C-6: the LIVE Client registry's exact-line claim — the ONLY source the
+   *  line classification may read for TUI ownership. Never a static name
+   *  list: a name in `LOCAL_COMMANDS` without a live registration owns no
+   *  production line. */
+  clientClaimsLine(parsed: { name: string; rawInput?: string } | undefined): boolean
   /** The exact Direct attachment of a fenced live scope. */
   agentForLiveScope(scope: SessionScope): ExactAgent
   /** The exact Direct attachment of an already-fenced live session id. */
@@ -1056,6 +1061,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     catalogRefreshAvailable,
     isSkillInvocation,
     clientCommands: deps.clientCommands,
+    clientClaimsLine: (parsed) => deps.clientCommands.claimsLine(parsed),
     agentForLiveScope,
     attachmentForSession,
     disposeCatalog,

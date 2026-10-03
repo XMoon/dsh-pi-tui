@@ -368,8 +368,20 @@ test('PR5 §1C-4 (R7-1): every routing read of the Host claim consumes the GENUI
   const controller = code('app/submission/controller.ts')
   // The final command-plane ownership, the submit-time echo gate and the
   // attachment payload all read the origin claim — never the advertised union.
-  assert.ok(controller.includes("const originClaim = deps.command.hostOriginClaimOf(parsedAtSubmit)"),
-    'the final plane ownership reads the genuine Host-origin line claim')
+  assert.ok(controller.includes('const originClaim = effectiveOriginClaim(parsedAtSubmit)'),
+    'the final plane ownership reads the sticky genuine Host-origin line claim')
+  // §1C-5 (whole-PR F1): that ONE helper is the sticky authority — the final
+  // genuine claim wins, otherwise a submit-time non-invocation survives.
+  const sticky = controller.slice(
+    controller.indexOf('const effectiveOriginClaim = ('),
+    controller.indexOf('const effectiveOriginClaim = (') + 700,
+  )
+  assert.ok(sticky.includes('deps.command.hostOriginClaimOf(parsed)'),
+    'the sticky authority reads the genuine Host-origin claim')
+  assert.ok(sticky.includes('finalClaim?.claimed === true'),
+    'a FINAL genuine claim overrides the sticky non-invocation')
+  assert.ok(sticky.includes('submitOriginClaim?.claimed === false ? submitOriginClaim : finalClaim'),
+    'the submit-time non-invocation is sticky otherwise')
   assert.ok(controller.includes('submitOriginClaim?.claimed !== true'),
     'the submit-time echo gate reads the genuine Host-origin claim')
   assert.ok(controller.includes('submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit)'),
@@ -517,18 +529,73 @@ test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendere
 
 /* ── PR5 §1C-7 (whole-PR F4): the sessionless route consumes the classifier ── */
 
-test('PR5 §1C-7 (whole-PR F4): the sessionless LOCAL route never re-judges by NAME alone', () => {
+test('PR5 §1C-7 (whole-PR F4): the sessionless route is the classifier TUI family, never a name set alone', () => {
   const controller = code('app/submission/controller.ts')
-  const at = controller.indexOf('if (parsed !== undefined && isSessionless')
-  assert.ok(at > 0, 'the sessionless route exists')
-  const branch = controller.slice(at, at + 700)
-  // The route must consume the SAME classification: a genuine Host name whose
-  // execute-kind descriptor does not claim the ARGUED form is an ordinary
-  // submission and must not be pulled back into the local command surface.
-  assert.ok(branch.includes("classification.kind === 'client-command'"),
-    'the sessionless route consumes the classification')
-  assert.ok(branch.includes("classification.source === 'tui'"),
+  const at = controller.indexOf('const isSessionless = parsed !== undefined')
+  assert.ok(at > 0, 'the sessionless predicate exists')
+  const predicate = controller.slice(at, at + 400)
+  // The ONE classification decides: a genuine Host name whose execute-kind
+  // descriptor does not claim the ARGUED form is an ordinary submission and
+  // must not be pulled back into the local surface by a name-set membership.
+  assert.ok(predicate.includes("classification.kind === 'client-command'"),
+    'the sessionless route consumes the classification family')
+  assert.ok(predicate.includes("classification.source === 'tui'"),
     "and only for THIS surface's own registration")
-  assert.equal(branch.includes('isSessionless) {'),
-    false, 'the name-only re-judge must not come back')
+  assert.ok(predicate.includes('SESSIONLESS_COMMANDS.has(parsed.name)'),
+    'the sessionless name set remains an additional filter, never the decider')
+})
+
+test('PR5 §1C-6 (whole-PR F4): TUI ownership comes from the LIVE Client registry, never the static name list', () => {
+  const controller = code('app/submission/controller.ts')
+  // The live exact-line claim is the TUI ownership source at every consumer.
+  assert.ok(controller.includes('deps.command.clientClaimsLine(parsedAtSubmit)'),
+    'the routing consumers read the live claim')
+  assert.ok(controller.includes('&& deps.command.clientClaimsLine(parsed)'),
+    'the main classification term reads the live claim')
+  assert.ok(controller.includes('tuiCommand: deps.command.clientClaimsLine(parsedAtSubmit)'),
+    'the TUI-owned predicate reads the live claim')
+  assert.ok(controller.includes('const clientHandler = deps.command.clientClaimsLine(parsed)'),
+    "the local dispatch handler lookup is claim-gated (the sink invariant)")
+  // No ownership decision may fall back to the static membership list any more.
+  assert.equal(controller.includes('if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true'),
+    false, 'the plane ownership must not read the static list')
+  assert.equal(controller.includes('tuiCommand: LOCAL_COMMANDS.has('),
+    false, 'the classifier TUI term must not read the static list')
+  assert.equal(controller.includes('isLocalCommandLine('),
+    false, 'the controller no longer consumes the static-policy line predicate')
+  // The registry enforces the SAME admission at the sink.
+  const registry = code('app/command/client-command-registry.ts')
+  assert.ok(registry.includes("return (parsed.rawInput ?? '').trim() === '' || definition.input !== undefined"),
+    'the registry claim is the official matchEnter rule')
+  assert.ok(registry.includes('if (!claimsLineOf(parsed)) return undefined'),
+    'execute() enforces the same admission (sink invariant)')
+  assert.ok(registry.includes('claimsLine: claimsLineOf'),
+    'the ownership question and the sink share ONE rule')
+})
+
+
+/* ── PR5 §1C-5 (whole-PR F2): the raw skill predicate never outranks the Host reservation ── */
+
+test('PR5 §1C-5 (whole-PR F2): every skill-route sibling consumes the Host reservation condition', () => {
+  const controller = code('app/submission/controller.ts')
+  // The early echo and the steer sibling both consumed the RAW
+  // `isSkillInvocation` predicate, so a genuine Host name that does not claim
+  // this argued line (while a live wrapper shares the name) was denied its
+  // ordinary treatment. Both sites now read the reservation alongside it.
+  const echo = controller.slice(
+    controller.indexOf('const ordinaryPromptAtSubmit = parsedAtSubmit === undefined'),
+    controller.indexOf('let localEchoInstalled = false'),
+  )
+  assert.ok(echo.includes('deps.command.isSkillInvocation(parsedAtSubmit, text)'),
+    'the early echo still excludes genuine skill invocations')
+  assert.ok(echo.includes('deps.command.hostCatalogResolves(parsedAtSubmit.name) === false'),
+    'but ONLY where the line is not a genuine Host-origin name')
+  const steer = controller.slice(
+    controller.indexOf('const skillLine = deps.command.isSkillInvocation(parsed, text)'),
+    controller.indexOf('steerNow(text, true, persistHistory)'),
+  )
+  assert.ok(steer.includes("deps.command.hostCatalogResolves(parsed.name) === false"),
+    'the steer sibling consumes the SAME reservation condition')
+  assert.equal(steer.includes('if (deps.command.isSkillInvocation(parsed, text)) {'),
+    false, 'the bare raw predicate must not decide the skill route')
 })

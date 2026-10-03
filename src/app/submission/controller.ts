@@ -91,6 +91,10 @@ export interface SubmissionCommandAuthority {
    *  name (the claim-set union also carries this surface's own Client
    *  registrations, so it cannot discriminate Host authority). */
   hostCatalogResolves(name: string): boolean
+  /** §1C-6: the LIVE Client registry's exact-line claim — the ONLY TUI
+   *  ownership source the classification may read (bare token, or an argued
+   *  line when the definition declares an `input` descriptor). */
+  clientClaimsLine(parsed: { name: string; rawInput?: string } | undefined): boolean
   isSkillWrapperName(name: string): boolean
   isSkillInvocation(parsed: { name: string } | undefined, text: string): boolean
   withCommandDelivery<T>(delivery: SubmitDelivery, run: () => T): T
@@ -711,13 +715,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // `/export foo` is an ordinary submission and gets its immediate
         // echo like every prompt, instead of silently vanishing behind a
         // blocked FIFO turn. Skill invocations keep their own exclusion.
-        && !isLocalCommandLine(
-          parsedAtSubmit.name,
-          deps.command.isSkillWrapperName,
-          undefined,
-          deps.command.hostCatalogResolves(parsedAtSubmit.name),
-        )
-        && !deps.command.isSkillInvocation(parsedAtSubmit, text))
+        // §1C-6 (whole-PR F4): the TUI term is the LIVE Client registry's
+        // exact-line claim — the static name list never answers ownership.
+        // §1C-4 keeps a genuine Host NAME out of the TUI family.
+        && !(deps.command.hostCatalogResolves(parsedAtSubmit.name) === false
+          && deps.command.clientClaimsLine(parsedAtSubmit))
+        // §1C-5 (whole-PR F2): the skill exclusion applies only where the line
+        // is NOT a genuine Host-origin name. A Host name that does not claim
+        // this argued line is an ORDINARY submission, so a live wrapper
+        // sharing its name must not deny it the immediate echo.
+        && !(deps.command.isSkillInvocation(parsedAtSubmit, text)
+          && deps.command.hostCatalogResolves(parsedAtSubmit.name) === false))
     // Install the echo NOW for a known ordinary prompt on an existing
     // session — before the FIFO turn and the asynchronous admission. A
     // deferred start installs after the session materializes, below.
@@ -764,16 +772,35 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // Host leading-input `/export` next to the TUI's execute-kind Client
     // `/export` reads `claimed:false` from the union and would be wrongly
     // handed to the ordinary-submission route).
+    // §1C-5 (whole-PR F1): the SUBMIT-TIME non-invocation is STICKY. A name the
+    // genuine Host origin resolved but did NOT claim on this line was an
+    // ordinary submission when it was submitted; a later catalog disappearance
+    // (a deferred, session-scoped re-resolution, or a definition that went
+    // away) must not hand it to a same-name static TUI route or a live skill
+    // wrapper. Only a FINAL genuine claim may turn it back into a command.
+    const effectiveOriginClaim = (parsed: { name: string; rawInput?: string } | undefined) => {
+      if (parsed === undefined) return undefined
+      const finalClaim = deps.command.hostOriginClaimOf(parsed)
+      if (finalClaim?.claimed === true) return finalClaim
+      return submitOriginClaim?.claimed === false ? submitOriginClaim : finalClaim
+    }
     const commandPlaneOwnsLine = (): boolean => {
       if (parsedAtSubmit === undefined) return true
-      const originClaim = deps.command.hostOriginClaimOf(parsedAtSubmit)
+      const originClaim = effectiveOriginClaim(parsedAtSubmit)
       if (originClaim !== undefined) return originClaim.claimed !== false
-      if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true
+      // §1C-5 NAMESPACE ORDER: a LIVE skill wrapper owns its own slash line
+      // BEFORE the Client-registration terms — the wrapper's handler turns
+      // `/name args` into loadSkill, and the wrapper's own Client registration
+      // (an `execute`-shaped definition without `input`) must not disqualify it.
       if (deps.command.isSkillWrapperName(parsedAtSubmit.name) === true) return true
-      // The final catalog owns no genuine Host name at all: the plane decides
-      // (a session-scoped command the standing view cannot see) — UNLESS the
-      // line was ALREADY a known non-invocation when it was submitted, which
-      // no disappearance can turn into an invocation.
+      // §1C-6 (whole-PR F4): a LIVE Client definition that does not claim THIS
+      // line (an argued line of a definition without an `input` descriptor)
+      // owns nothing — the line is an ordinary submission, exactly like the
+      // argued line of an execute-kind Host command.
+      if (deps.command.clientClaimsLine(parsedAtSubmit)) return true
+      if (deps.command.clientCommands.get(parsedAtSubmit.name) !== undefined) return false
+      // The final catalog resolves nothing at all: the plane decides (a
+      // session-scoped command the standing view cannot see).
       return submitOriginClaim?.claimed !== false
     }
     // Assigned inside the runOwned factory (invocation-time capture).
@@ -966,16 +993,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             if (parsed === undefined) return undefined
             const finalSkillInvocation = deps.command.isSkillInvocation(parsed, text)
             const finalClassification = classifyCommandLine({
-              hostOriginClaim: deps.command.hostOriginClaimOf(parsed),
+              // §1C-5 (whole-PR F1): the sticky submit-time non-invocation
+              // survives a final-catalog disappearance.
+              hostOriginClaim: effectiveOriginClaim(parsed),
               // §1C-5 (review R6-4): the skill-invocation rule comes FIRST —
-              // the static `LOCAL_COMMANDS` membership of `skill` must never
-              // absorb an argued `/skill <name>` into a Client command.
-              tuiCommand: !finalSkillInvocation && isLocalCommandLine(
-                parsed.name,
-                deps.command.isSkillWrapperName,
-                isBareCommandLine(parsed) ? (name => deps.extensions.isLocal(name, LOCAL_COMMANDS)) : undefined,
-                false,
-              ),
+              // a Client registration must never absorb an argued
+              // `/skill <name>` into a Client command. §1C-6 (whole-PR F4):
+              // the TUI term is the LIVE Client registry claim plus the
+              // BARE-line contribution, never a static name list.
+              tuiCommand: !finalSkillInvocation
+                && (deps.command.clientClaimsLine(parsed)
+                  || (isBareCommandLine(parsed) && deps.extensions.isLocal(parsed.name, LOCAL_COMMANDS) === true)),
               // The wrapper-outranks-contribution precedence (§1C-5).
               extensionCommand: clientLocalAtSubmit && !finalSkillInvocation
                 && isBareCommandLine(parsed)
@@ -995,8 +1023,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             // the TUI's own registry, so the skill/wrapper terms stay OUT of
             // this predicate.)
             && classifyCommandLine({
-              hostOriginClaim: deps.command.hostOriginClaimOf(parsedAtSubmit),
-              tuiCommand: LOCAL_COMMANDS.has(parsedAtSubmit.name)
+              // §1C-5 (whole-PR F1): the sticky submit-time non-invocation.
+              hostOriginClaim: effectiveOriginClaim(parsedAtSubmit),
+              // §1C-6 (whole-PR F4): the LIVE Client registry claim.
+              tuiCommand: deps.command.clientClaimsLine(parsedAtSubmit)
                 || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true,
               extensionCommand: false,
               skillInvocation: false,
@@ -1142,7 +1172,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const bridgeCommandRef = bridgeCommandId === undefined
       ? undefined
       : deps.extensions.recordHealthRef('command', bridgeCommandId)
-    const clientHandler = deps.command.clientCommands.get(parsed.name)
+    // §1C-6 SINK INVARIANT: the same exact-line admission the registry's
+    // `execute` enforces — an argued line of a definition WITHOUT an `input`
+    // descriptor is not an invocation, so it falls through instead of running
+    // a handler that never claimed the line.
+    const clientHandler = deps.command.clientClaimsLine(parsed)
+      ? deps.command.clientCommands.get(parsed.name)
+      : undefined
     const planeHandler = clientHandler === undefined && deps.backendKind === 'direct'
       ? deps.commandPlane.findHandler(parsed.name)
       : undefined
@@ -1459,17 +1495,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const skillInvocation = deps.command.isSkillInvocation(parsed, text)
     const classification = classifyCommandLine({
       hostOriginClaim: parsed === undefined ? undefined : deps.command.hostOriginClaimOf(parsed),
-      // §1C-5 source fidelity: the TUI term covers THIS surface's OWN
-      // registrations (built-ins via LOCAL_COMMANDS + live wrappers), and
-      // only for a line that is NOT a skill invocation.
+      // §1C-6 source fidelity (whole-PR F4): the TUI term is the LIVE Client
+      // registry's EXACT-LINE claim — a registered definition owns the bare
+      // token, and an argued line only when it declares an `input` descriptor
+      // (the official `matchEnter` semantics). The static name list is not an
+      // ownership source, and only a line that is NOT a skill invocation is a
+      // Client command.
       tuiCommand: parsed !== undefined
         && !skillInvocation
-        && isLocalCommandLine(
-          parsed.name,
-          deps.command.isSkillWrapperName,
-          isBareCommandLine(parsed) ? (name => LOCAL_COMMANDS.has(name)) : undefined,
-          false,
-        ),
+        && deps.command.clientClaimsLine(parsed),
       // A live skill wrapper outranks a same-name extension contribution
       // (the wrapper route wins everywhere) — the extension term excludes
       // wrapper names.
@@ -1506,7 +1540,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         return
       }
     }
-    const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
+    // §1C-7 (whole-PR F4/F5): the sessionless LOCAL route consumes the ONE
+    // classification — the TUI client-command family — instead of re-judging a
+    // name against `SESSIONLESS_COMMANDS` alone. A genuine Host name whose
+    // execute-kind descriptor does not claim the ARGUED form classifies as
+    // ordinary-submission and must never be pulled back into the local surface.
+    const isSessionless = parsed !== undefined
+      && classification.kind === 'client-command'
+      && classification.source === 'tui'
+      && SESSIONLESS_COMMANDS.has(parsed.name)
     // §1C-7: the delivery gate consumes the SAME classification — every
     // Client command (TUI or extension) takes the local-command placeholder
     // (never steer), skill invocations and ordinary submissions follow the
@@ -1640,19 +1682,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // a session exists. Without a live agent it runs locally (and creates
     // none); with a live agent it dispatches through the session's command
     // service, but the persist closure still supplies undefined.
-    // §1C-7 (whole-PR review): the sessionless LOCAL route consumes the SAME
-    // classification. A name in SESSIONLESS_COMMANDS is not by itself a
-    // TUI-owned line: a genuine Host name whose execute-kind descriptor does
-    // NOT claim the ARGUED form (`/model foo`, `/exit foo`) classifies as
-    // `ordinary-submission` with `hostNameReserved`, and re-judging by name
-    // alone pulled it back into the local command surface — the very routing
-    // drift the classifier exists to prevent. Every sessionless name is in
-    // `LOCAL_COMMANDS`, so a genuinely TUI-owned line still classifies as the
-    // TUI client-command family and keeps this route unchanged (and its
-    // delivery stays `queue`, so it is never steered by falling through).
-    if (parsed !== undefined && isSessionless
-      && classification.kind === 'client-command'
-      && classification.source === 'tui') {
+    // §1C-7: the sessionless LOCAL route (see `isSessionless`: the TUI
+    // client-command family, LIVE-registry-derived, intersected with the
+    // sessionless name set). Its delivery stays `queue`, so falling through can
+    // never steer it.
+    if (parsed !== undefined && isSessionless) {
       if (deps.liveAgent() === undefined) {
         runLocalCommand(parsed, text, persistHistory, delivery, undefined)
       } else {
@@ -1678,7 +1712,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // Image placeholders ride the line untouched; the history row is
       // written by the dispatch AFTER the session exists (the
       // deferred-start gate), with the FINAL session id.
-      if (deps.command.isSkillInvocation(parsed, text)) {
+      // §1C-5 (whole-PR F2): the skill-delivery route consumes the semantic
+      // family, never the raw predicate alone. A genuine Host name that does
+      // NOT claim this argued line is an ORDINARY submission, so it takes the
+      // ordinary steer path even while a live skill wrapper shares its name.
+      const skillLine = deps.command.isSkillInvocation(parsed, text)
+        && (parsed === undefined || deps.command.hostCatalogResolves(parsed.name) === false)
+      if (skillLine) {
         dispatchViaSession(text, persistHistory, delivery)
         return
       }
