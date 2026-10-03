@@ -10,6 +10,7 @@ knows where the rest lives.
 
 | File | Audience | What it records |
 |---|---|---|
+| `code-review.md` | contributors/reviewers | Project review checkpoints, contract navigation, evidence/current-state requirements, and PR acceptance vs stage closure; generic review-loop mechanics stay in the reusable skill |
 | `architecture.md` | contributors | Which module owns which state, and the planned extraction order for the runner's remaining responsibilities |
 | `transcript-display-disclosure.md` | contributors | The canonical DisplayPreset authority, layered disclosure defaults, semantic transcript classes, migration precedence, command compatibility, and Direct/Remote parity boundary |
 | `overlay-focus-contract.md` | contributors | The managed-overlay / focus / fullscreen state model: the authority map, the synchronous-reentrancy transaction invariant, the transition map, the reentrancy matrix, the fork focus-transition rules (X056), and the regression checklist for `/model`, new modals, plugin UI and fullscreen work |

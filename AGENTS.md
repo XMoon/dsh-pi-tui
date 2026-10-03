@@ -13,6 +13,13 @@ before editing. Read subsystem docs only when the task touches that subsystem.
 - **Do not hide contradictions.** Prefer fast failure over silent defaults, broad catches, speculative fallbacks, or validation for states guaranteed by internal contracts. Validate at real system boundaries.
 - **Never push or force-push without explicit user approval.** Local commits are allowed when appropriate; remote changes are not.
 
+## Code review
+
+Before reviewing code changes, read `docs/code-review.md` and pass it plus the
+applicable requirements/contracts to the reviewer. It supplements the generic
+review loop; subsystem contracts remain authoritative. PR acceptance is not
+stage closure or permission to merge.
+
 ## Naming and writing
 
 - Repository/profile/package names are `dsh-pi-tui`, `pi-tui`, `@xmoon76/pi-tui`
