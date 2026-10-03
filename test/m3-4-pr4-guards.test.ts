@@ -254,3 +254,54 @@ test('PR5 the transcript-export capability is REQUIRED and refused unless exactl
   assert.ok(surface.includes('readonly transcriptExportAvailable: boolean'),
     'the command-surface backend deps keep the field required (structural guard)')
 })
+
+/* ── PR5 v2 §1C: origin-aware command authority guards ─────────────────── */
+
+test('PR5 §1C the Direct compatibility mirror is NOT Host origin (registry membership ≠ ownership)', () => {
+  const commands = code('commands.ts')
+  // §1C-2: the provenance set exists and marks ONLY successful mirrors.
+  assert.ok(commands.includes('directCompatibilityMirrors'), 'the mirror-provenance set exists')
+  // §1C-4: the genuine Host-origin line authority exists and reads the
+  // origin-filtered descriptors, never the union claims or raw membership.
+  assert.ok(commands.includes('const hostOriginClaimOf'), 'the hostOriginClaimOf primitive exists')
+  const originBody = commands.slice(
+    commands.indexOf('const hostOriginClaimOf'),
+    commands.indexOf('const hostOriginClaimOf') + 900,
+  )
+  assert.ok(originBody.includes('hostOriginDescriptors.get'), 'the origin claim reads the ORIGIN map')
+  assert.equal(originBody.includes('claims.get'), false, 'the origin claim never reads the union claims')
+  // §1C-3: the origin map derives with the mirror subtraction.
+  const derive = commands.slice(
+    commands.indexOf('const deriveHostOriginDescriptors'),
+    commands.indexOf('const deriveHostOriginDescriptors') + 600,
+  )
+  assert.ok(derive.includes('directCompatibilityMirrors.has'), 'the derivation subtracts the live mirrors')
+  // hostCatalogResolves answers from the ORIGIN map, not raw registry
+  // membership.
+  const resolves = commands.slice(
+    commands.indexOf('hostCatalogResolves: (name: string): boolean'),
+    commands.indexOf('hostCatalogResolves: (name: string): boolean') + 300,
+  )
+  assert.ok(resolves.includes('hostOriginDescriptors.has(name)'),
+    'hostCatalogResolves is origin-aware (never raw registry membership)')
+})
+
+test('PR5 §1C one classifier drives the submission siblings', () => {
+  const controller = code('app/submission/controller.ts')
+  assert.ok(controller.includes('classifyCommandLine('), 'the controller consumes the classifier')
+  // The delivery/attachment/host-dispatch gates consume classification.kind.
+  const deliveryGate = controller.slice(controller.indexOf('const tuiLocalLine ='))
+  assert.ok(deliveryGate.includes("classification.kind === 'client-command'"),
+    'the delivery gate consumes the classification')
+  assert.ok(controller.includes("classification.kind === 'host-command'"),
+    'the Host dispatch branch consumes the classification')
+  assert.ok(controller.includes("classification.kind === 'client-command' && classification.source === 'extension'"),
+    'the contribution gate consumes the classification (the extension family alone)')
+  // The policy module owns the classifier + the four-kind vocabulary.
+  const policy = code('command-policy.ts')
+  assert.ok(policy.includes('export type CommandLineClassification'), 'the classification type is exported')
+  for (const kind of ["'host-command'", "'client-command'", "'skill-invocation'", "'ordinary-submission'"]) {
+    assert.ok(policy.includes(kind), `the ${kind} kind exists`)
+  }
+  assert.ok(policy.includes('hostNameReserved'), 'ordinary submissions can record a Host-reserved name')
+})

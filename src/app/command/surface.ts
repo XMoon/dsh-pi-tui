@@ -304,9 +304,14 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   refreshLiveCatalogById(sessionId: string): Promise<void>
   /** Is a slash name advertised by the CURRENT completion list? */
   wasAdvertisedClaim(name: string): boolean
-  /** Does the CURRENT effective host catalog claim this line? */
+  /** Does the CURRENT effective host catalog claim this line? (The
+   *  advertised union view — completion/advertised-miss semantics.) */
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
-  /** §D3 precedence: does the AUTHORITATIVE HOST catalog resolve the name?
+  /** PR5 v2 §1C-4: the GENUINE Host-origin line authority (this TUI's own
+   *  Direct compatibility mirrors excluded; Client synthesis can never
+   *  overwrite it) — the ROUTING primitive. */
+  hostOriginClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** §D3 precedence: does a GENUINE HOST-ORIGIN command resolve the name?
    *  (The claim-set union cannot answer this — it also carries this
    *  surface's own Client registrations.) */
   hostCatalogResolves(name: string): boolean
@@ -403,6 +408,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * (PR115-fix problem 1). */
   
   let hostClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
+
+  /** PR5 v2 §1C-4: the installed GENUINE Host-origin line authority. */
+  let hostOriginClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
 
   /** The §D3 precedence discriminator installed by registerTuiCommands: does
    *  the AUTHORITATIVE HOST catalog resolve the name (never the union claim
@@ -636,6 +644,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       }
       wasAdvertisedClaim = installed.wasAdvertised
       hostClaimOf = installed.hostClaimOf
+      hostOriginClaimOf = installed.hostOriginClaimOf
       hostCatalogResolves = installed.hostCatalogResolves
       isSkillWrapperName = installed.isSkillWrapper
       refreshCommandCompletions = installed.refreshCommandCompletions
@@ -1032,6 +1041,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     refreshLiveCatalogById,
     wasAdvertisedClaim: (name) => wasAdvertisedClaim?.(name) === true,
     hostClaimOf: (parsed) => hostClaimOf?.(parsed),
+    hostOriginClaimOf: (parsed) => hostOriginClaimOf?.(parsed),
     hostCatalogResolves: (name) => hostCatalogResolves?.(name) === true,
     isSkillWrapperName: (name) => isSkillWrapperName?.(name) === true,
     takeCommandDraftDisposition: (commandId) => takeCommandDraftDisposition?.(commandId),

@@ -40,16 +40,16 @@ export const SESSIONLESS_COMMANDS = new Set([
 ])
 
 /**
- * The LOCAL-execute command set: TUI-owned UI/control commands AND core
- * control commands the TUI does not itself register (e.g. /kill) that
- * must ALWAYS run locally through the commands service, never steered,
- * regardless of the busyEnter preference. Everything NOT in this set —
- * plain prompts AND non-local commands (the per-skill slash commands like
- * /grilling or /matrix-cli) — flows through the busy-Enter submission
- * policy while the agent is running: web parity, where a skill invocation
- * is a plain `session.prompt` whose leading `/name` line the host's
- * pre-step listener (dsh-tool-skill) resolves into the injected skill
- * body — there is no command-execution wire for skills.
+ * The LOCAL-execute command set (PR5 v2 §1C-6 narrows its semantic role):
+ * TUI-owned UI/control names AND core control names the TUI dispatches but
+ * does not register (/kill). It remains the STATIC policy surface —
+ * reserved-name validation, the extension collision catalog
+ * (HOST_COMMAND_CATALOG), and the fallback term of the line classifier
+ * when no LIVE Client-registry test was supplied. It is NOT by itself an
+ * answer to "who owns this production line": ownership comes from the
+ * live sources (the genuine Host-origin descriptors, the Client registry,
+ * the extension registry, the skill-wrapper state) through
+ * {@link classifyCommandLine}.
  */
 export const LOCAL_COMMANDS = new Set([
   'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
@@ -107,6 +107,67 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
   // command list.
   'plan',
 ])
+
+/**
+ * PR5 v2 §1C-5: ONE semantic classification of a parsed slash line. Every
+ * sibling consumer (busy delivery, early echo, attachment policy, the
+ * command-plane route, the Host-vs-Client collision decision) consumes THIS
+ * result instead of independently re-inferring authority from registry
+ * membership, claim unions or static name lists.
+ */
+export type CommandLineClassification =
+  | { readonly kind: 'host-command'; readonly attachments: boolean }
+  | { readonly kind: 'client-command'; readonly source: 'tui' | 'extension' }
+  | { readonly kind: 'skill-invocation' }
+  | { readonly kind: 'ordinary-submission'; readonly hostNameReserved: boolean }
+
+/** The classifier input facts (each one a LIVE source observation — never a
+ *  reconstructed name-list guess). */
+export interface CommandLineClassificationFacts {
+  /** The genuine Host-origin claim of this exact line (§1C-4
+   *  `hostOriginClaimOf`): `undefined` = no genuine Host command owns the
+   *  name; `claimed:false` = Host owns the name but not this line. */
+  readonly hostOriginClaim: HostCommandClaim | undefined
+  /** Whether a LIVE TUI-owned Client command registration owns the name
+   *  (the Client registry itself — a bare-line invocation shape). */
+  readonly tuiCommand: boolean
+  /** The extension contribution of a BARE line, when one is live. */
+  readonly extensionCommand: boolean
+  /** Whether this line is an agent-facing skill invocation: `/skill <name>`
+   *  with arguments, or a live dynamic skill wrapper (`/<skill-name> ...`). */
+  readonly skillInvocation: boolean
+}
+
+/**
+ * Classify ONE parsed slash line (PR5 v2 §1C-5). Precedence:
+ *
+ *   1. genuine Host-origin name exists
+ *        claimed line   -> host-command (the HOST descriptor's attachments)
+ *        unclaimed line -> ordinary-submission (hostNameReserved: a
+ *                          same-name Client registration never takes the
+ *                          argued line of a genuine Host command)
+ *   2. no genuine Host-origin name
+ *        TUI Client registration (bare shape) -> client-command (tui)
+ *        extension contribution (bare shape)  -> client-command (extension)
+ *        skill invocation                     -> skill-invocation
+ *        otherwise                            -> ordinary-submission
+ *
+ * `skillInvocation` must already encode the split semantics: the BARE
+ * `/skill` picker is NOT a skill invocation (it classifies through
+ * `tuiCommand`), while `/skill <name>` and dynamic wrappers are.
+ */
+export function classifyCommandLine(facts: CommandLineClassificationFacts): CommandLineClassification {
+  const claim = facts.hostOriginClaim
+  if (claim !== undefined) {
+    return claim.claimed
+      ? { kind: 'host-command', attachments: claim.attachments === true }
+      : { kind: 'ordinary-submission', hostNameReserved: true }
+  }
+  if (facts.tuiCommand) return { kind: 'client-command', source: 'tui' }
+  if (facts.extensionCommand) return { kind: 'client-command', source: 'extension' }
+  if (facts.skillInvocation) return { kind: 'skill-invocation' }
+  return { kind: 'ordinary-submission', hostNameReserved: false }
+}
 
 /**
  * The TUI-local classification the attachment gate uses: a TUI/core local
