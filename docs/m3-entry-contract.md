@@ -29,6 +29,7 @@ progress):
 | Date | Baseline | Section | Old assumption | New authority | Reason |
 |---|---|---|---|---|---|
 | 2026-09-30 | `next @ 25295d7f3ac688cd95c94c6ac7c256f4060be218` | §2.1 `interaction` | Approval and Question both described as waterfall-only | Approval remains waterfall/fail-closed for unsupported policy operations; Question gains official `attachWait` + projection + `answer` authority | DSH `0.2.0-rc.2` publishes the full Question contract |
+| 2026-10-03 | `next @ e520c01614e27c12b12190b4419bdf7fa3e6636d` | §2.4 / §8 | The explicit Client Remote contribution closure could be read as a global registry for every future feature, and the "a plugin contributing UI is loaded in the Client Context" wording could be read as forbidding Host-originated declarative surfaces | The existing list is the current M3 CORE Remote contribution closure. Existing PiTui imperative UI callbacks/components remain Client-owned. A future feature may own a generated Remote lifecycle, and a Host-owned feature may expose declarative UI as serializable facts/action identity, without moving any callback/component/renderer/editor object across the wire | Clarify composition ownership and preserve the no-callback boundary; no rc.2 capability, dependency or implementation change |
 
 This register is normative from 2026-09-30 onward. Earlier contract corrections
 (the `transport.rpc` → `installConnection({ transport })` carrier correction, the
@@ -245,6 +246,15 @@ This is also the M3/M4 portability boundary: M3 runs the composition in process;
 M4 moves the same Host composition behind a local process carrier. Business API
 shape does not change when placement changes.
 
+Narrow clarification (2026-10-03 amendment): the §2.4 closure is the CURRENT M3
+CORE dependency closure for the rc.2 TUI contract. It is **not** a universal
+registry requiring every optional future feature Remote to be centrally owned by
+`RemoteClientRuntime`. A future optional feature may own its generated
+contribution lifecycle only after that feature is adopted and its public
+contract exists on the selected released DSH baseline; such a contribution must
+reuse the existing Connection/Gateway and may not duplicate a core
+namespace/authority. No current row changes.
+
 #### 2.4.1 Host composition closure
 
 M3-1 adds `src/app/remote/host-runtime.ts`, owned by the dynamically imported
@@ -288,10 +298,20 @@ considered available unless `session-log-export` is mounted. Existing smoke
 fixtures that manually `provide('fileUploads', ...)` or `provide('fileUpload',
 ...)` are dependency-isolation tests, not proof of the product composition.
 
+Composition-ownership rule (2026-10-03 amendment): generated Remote availability
+does not choose Host composition ownership. `RemoteHostRuntime` owns the current
+M3 additive Host closure because those rows are required by the M3 core graph; a
+future feature-owned Host plugin remains owned by that feature unless a separate
+accepted architecture change promotes it into base/common/core composition. No
+current row is added, removed or reclassified.
+
 #### 2.4.2 Client generated Remote contributions
 
-The generated contribution list remains explicit. Every row is a public
-`./remote` native-ESM subpath and is mounted by the Client runtime owner:
+The generated contribution list remains explicit: it is the **current M3 core
+generated contribution closure** for the rc.2 TUI contract (2026-10-03
+clarification), not an implied list of every Remote the TUI may ever consume or
+mount. Every row is a public `./remote` native-ESM subpath and is mounted by the
+Client runtime owner `RemoteClientRuntime`:
 
 | Contribution | Namespaces gained | Consumed by |
 |---|---|---|
@@ -959,11 +979,32 @@ semantic rewrite, because the ownership above is already correct.
 Audit result: no `src/extension/**` module reads a Host service (`ctx.get('<host
 service>')` is absent); the extension boundary is already Host-free. The one open
 question is where an extension plugin that needs BOTH UI contributions and Host
-domain state is mounted: M3's answer is that a plugin contributing UI is loaded in
-the Client Context and reads Host domain state only through public Remote facts;
-a Host-only extension stays in the Host Context. M3-6 owns any rebinding this
-requires. The public Extension API keeps its semantics, and no callback crosses
-the wire (AGENTS.md hard rule; `docs/extension-api.md`).
+domain state is mounted: M3's answer is that a plugin using the existing PiTui
+**imperative** extension API (callback/component/editor/renderer contribution) is
+loaded in the Client Context and reads Host domain state only through public
+Remote facts; a Host-only extension stays in the Host Context. M3-6 owns any
+rebinding this requires. The public Extension API keeps its semantics, and no
+callback crosses the wire (AGENTS.md hard rule; `docs/extension-api.md`).
+
+Clarification (2026-10-03 amendment): that Client-context rule covers the
+existing imperative extension API and does not require every future Host-owned
+feature that exposes UI to move its implementation into the Client Context. A
+Host-owned feature may instead expose a **declarative** surface while keeping its
+callbacks and business authority Host-side:
+
+```text
+Host-owned feature/domain
+  -> Host-owned callback/state
+  -> serialized declarative surface / action identity
+  -> official Remote
+  -> Client-local renderer + local input projection
+```
+
+This is not a PiTuiExtension callback crossing the wire: no executable
+callback/component/renderer/editor object crosses the boundary. It is a legal
+future architecture pattern only — no current rc.2 API, dependency, composition
+owner or support claim is created by it. See the 2026-10-03 amendment register
+row and `docs/client-server-migration.md` §Hard invariants.
 
 ## 9. Error / reconnect semantics
 

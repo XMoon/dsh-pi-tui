@@ -587,10 +587,45 @@ permanent architecture debt.
 - Base-owned Host services are reused, not remounted. Additive migration
   composition may require/check them but must not silently replace their
   namespace/projection ownership.
+- The explicit `RemoteClientRuntime` contribution list is the M3 CORE Remote
+  contribution closure, not a universal optional-feature registry.
+- An optional future feature may own its generated Remote contribution lifecycle
+  over the existing Client Connection/Gateway when its released DSH contract and
+  product integration actually require it.
+- Generated Remote availability does not determine Host composition ownership; a
+  feature-owned Host plugin stays feature-owned unless a separate accepted
+  architecture change promotes it into base/common/core composition.
+- Host-originated declarative UI crosses only as serializable facts/tree/action
+  identity; callbacks/components/renderers/editors remain on their owning side.
 
 These four are correctness contracts, not implementation style preferences; the
 per-invariant forbidden forms and the composition-ownership rules live in
 `docs/client-server-coupling.md`.
+
+### Composition ownership and UI locality clarification (2026-10-03)
+
+The 2026-10-03 frozen-contract amendment (`docs/m3-entry-contract.md`
+§Amendment register, §2.4/§8) records why these invariants were made explicit:
+the existing composition owners are the current M3 core graph, not universal
+registries, and a Host-owned feature may expose a declarative serialized surface
+without moving callbacks Client-side.
+
+M3-6 remains "locality / extensions / reconnect / closure"; its future extension
+task is clarified, not expanded:
+
+- preserve the existing PiTui extension callbacks/components as Client-owned;
+- ensure mixed Host-state + Client-UI extensions consume public Remote facts;
+- do not require all future Host-originated declarative UI to use the PiTui
+  callback/component extension path;
+- introduce no generic callback transport.
+
+No new M3-6 implementation obligation is created for Claude Code Mods.
+
+2026-10-03 research note: the experimental Claude Code Mods implementation on
+DSH `master` (`5badb15009ae1756c3afe0ae0cef1faafc290ccc`) was used only as evidence
+that Host-owned callbacks can drive a serialized Remote UI surface. dsh-pi-tui
+remains qualified against released DSH `0.2.0-rc.2`; this note adds no capability,
+dependency or support claim.
 
 ## Feature locality ledger (M0–M5 footer/status work)
 
