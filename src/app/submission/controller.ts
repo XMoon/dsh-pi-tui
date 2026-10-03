@@ -29,7 +29,7 @@ import { runReservedSubmit } from '../../image/submit-flow.ts'
 import type { DraftImageStore } from '../../image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments, prepareUserMessage, type PrepareInputDeps } from '../../image/submit.ts'
 import { expandImagePlaceholders } from '../../image/placeholder.ts'
-import { commandIsLocalForAttachments, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
+import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
@@ -80,8 +80,14 @@ export interface SubmissionCommandPlane<ExactAgent> {
 /** The A5b-3 command authority seams the submission path consumes. */
 export interface SubmissionCommandAuthority {
   wasAdvertisedClaim(name: string): boolean
+  /** The ADVERTISED union claim view (completion/advertised-miss semantics).
+   *  NOT a routing authority — routing uses {@link hostOriginClaimOf}. */
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
-  /** §D3 precedence: whether the AUTHORITATIVE HOST catalog resolves the
+  /** PR5 v2 §1C-4: the GENUINE Host-origin line authority (this TUI's own
+   *  Direct compatibility mirrors excluded; Client synthesis never
+   *  overwrites it). Every routing decision consumes THIS. */
+  hostOriginClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** §D3 precedence: whether a GENUINE HOST-ORIGIN command resolves the
    *  name (the claim-set union also carries this surface's own Client
    *  registrations, so it cannot discriminate Host authority). */
   hostCatalogResolves(name: string): boolean
@@ -940,37 +946,44 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             (t) => deps.app().setEditorText(t),
             (m, k) => deps.app().notify(m, k),
           ),
-          // DEFERRED AUTHORITY: re-apply the attachment policy against the
-          // FINAL catalog BEFORE the command plane runs.
+          // DEFERRED AUTHORITY (§1C-8): re-run the SAME classifier against
+          // the FINAL catalog BEFORE the command plane runs, and re-apply
+          // the attachment policy from that final classification (the
+          // dynamic contribution term stays STICKY to the submit-time
+          // route, exactly as the sticky-rules note in §1C-8 records).
           lateAttachmentRefusal: () => {
             if (parsed === undefined) return undefined
+            const finalClassification = classifyCommandLine({
+              hostOriginClaim: deps.command.hostOriginClaimOf(parsed),
+              tuiCommand: isLocalCommandLine(
+                parsed.name,
+                deps.command.isSkillWrapperName,
+                isBareCommandLine(parsed) ? (name => deps.extensions.isLocal(name, LOCAL_COMMANDS)) : undefined,
+                false,
+              ),
+              extensionCommand: clientLocalAtSubmit && isBareCommandLine(parsed)
+                && deps.extensions.findContribution(parsed.name) !== undefined,
+              skillInvocation: deps.command.isSkillInvocation(parsed, text),
+            })
             return attachmentRefusal(
               parsed,
               text,
-              commandIsLocalForAttachments(
-                parsed,
-                deps.command.isSkillWrapperName,
-                // The dynamic (client contribution) term is STICKY to the
-                // submit-time route.
-                n => clientLocalAtSubmit && (deps.extensions.isLocal(n, LOCAL_COMMANDS) ?? false),
-                // FINAL LIVE AUTHORITY (PR5 supplement): re-apply the
-                // attachment policy against the AUTHORITATIVE host catalog
-                // at settlement time — a name it resolves now is host
-                // territory regardless of the submit-time view.
-                deps.command.hostCatalogResolves(parsed.name),
-              ),
+              finalClassification.kind === 'client-command',
               deps.command.isSkillInvocation(parsed, text),
             )
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: () => parsedAtSubmit !== undefined
-            // §D3: an authoritative HOST-catalog name disqualifies the
-            // TUI-owned route FIRST (a same-named TUI built-in or skill
-            // wrapper must never shadow a resolved Host command; the union
-            // claim-set cannot discriminate — it carries the Client's own
-            // registrations too).
-            && !deps.command.hostCatalogResolves(parsedAtSubmit.name)
-            && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true),
+            // §1C-7: the TUI-owned route is the classifier's client-command
+            // (tui) family evaluated against the FINAL catalog — a genuine
+            // Host-origin name (mirrors excluded) disqualifies it first.
+            && classifyCommandLine({
+              hostOriginClaim: deps.command.hostOriginClaimOf(parsedAtSubmit),
+              tuiCommand: LOCAL_COMMANDS.has(parsedAtSubmit.name)
+                || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true,
+              extensionCommand: false,
+              skillInvocation: false,
+            }).kind === 'client-command',
           commandPlaneOwnsLine,
           submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,
@@ -1413,14 +1426,36 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // like /plan, and plain prompts — creates the session lazily. M5: a
     // plugin-declared sessionless command (CommandBridge) joins the set.
     const parsed = parseCommand(text)
-    // The CURRENT host catalog's view of THIS LINE, asked ONCE for the
-    // synchronous routing decisions below (the deferred resolution asks
-    // again, against the catalog the session committed). This is the
-    // LINE-LEVEL claim view only (a `leadingInput` descriptor claims its
-    // argued line; an execute-kind one claims the bare token) — the
-    // Host-vs-Client NAME authority is `hostCatalogResolves`, which the
-    // gates below consult separately (PR5 supplement: the claim union also
-    // carries this Client's own TUI registrations).
+    // PR5 v2 §1C-5/§1C-7: ONE semantic classification drives every sibling
+    // gate below (attachment policy, busy delivery, early echo, the
+    // namespace order, the deferred re-checks). Its Host term is the
+    // GENUINE Host-origin claim (§1C-4 `hostOriginClaimOf`: this TUI's own
+    // Direct compatibility mirrors are excluded, so a successfully mirrored
+    // /status still classifies CLIENT_COMMAND — the PR4 regression class),
+    // its Client terms come from the LIVE sources (the Client registry
+    // seam, the extension contribution of a bare line, the skill-wrapper
+    // state), never from a reconstructed name list.
+    const classification = classifyCommandLine({
+      hostOriginClaim: parsed === undefined ? undefined : deps.command.hostOriginClaimOf(parsed),
+      // §1C-5 source fidelity: the TUI term covers THIS surface's OWN
+      // registrations (built-ins via LOCAL_COMMANDS + live wrappers); a
+      // bare-line EXTENSION contribution is its own source kind and must
+      // not be absorbed into the TUI term (the run paths differ: the
+      // extension bridge vs the Client registry).
+      tuiCommand: parsed !== undefined
+        && isLocalCommandLine(
+          parsed.name,
+          deps.command.isSkillWrapperName,
+          isBareCommandLine(parsed) ? (name => LOCAL_COMMANDS.has(name)) : undefined,
+          false,
+        ),
+      extensionCommand: parsed !== undefined
+        && isBareCommandLine(parsed)
+        && deps.extensions.findContribution(parsed.name) !== undefined,
+      skillInvocation: deps.command.isSkillInvocation(parsed, text),
+    })
+    // The advertised union claim view (§1C-1): kept ONLY for the advertised
+    // -miss semantics below — never a routing authority.
     const hostView = parsed === undefined ? undefined : deps.command.hostClaimOf(parsed)
     // Command semantics matrix (plan §19.3): slash commands are not LLM
     // prompts — an image-bearing command line is REJECTED explicitly
@@ -1437,15 +1472,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // an argued line of a contribution name is an ordinary submission, with
     // its attachments.
     if (parsed !== undefined) {
+      // §1C-7: the attachment gate consumes the SAME classification — a
+      // Client command (TUI or extension) refuses staged attachments, a
+      // Host command follows the HOST descriptor's own declaration, skill
+      // invocations and ordinary submissions stay multimodal.
       const refusal = attachmentRefusal(
         parsed,
         text,
-        commandIsLocalForAttachments(
-          parsed,
-          deps.command.isSkillWrapperName,
-          n => deps.extensions.isLocal(n, LOCAL_COMMANDS) ?? false,
-          deps.command.hostCatalogResolves(parsed.name),
-        ),
+        classification.kind === 'client-command',
         deps.command.isSkillInvocation(parsed, text),
       )
       if (refusal !== undefined) {
@@ -1455,25 +1489,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       }
     }
     const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
-    // The §D3 line authority, derived ONCE and shared by every gate below
-    // (delivery, echo, the attachment refusal): a HOST-RESOLVED name —
-    // claimed or merely resolved — is never a TUI-local line, so an argued
-    // `/export foo` of an execute-kind Host command follows the ORDINARY
-    // prompt policy everywhere (busy queue/steer, multimodal attachments),
-    // matching the dispatch's commandPlaneOwnsLine order. PR5 supplement:
-    // the discriminator is the AUTHORITATIVE-catalog NAME authority
-    // (`hostCatalogResolves`), never the effective line claim — the claim
-    // union carries this Client's own TUI registrations, and a self-claim
-    // must not disqualify the TUI's own local commands (the PR4 regression:
-    // /status under a running session resolved to steer).
-    const tuiLocalLine = parsed === undefined
-      ? false
-      : isLocalCommandLine(
-        parsed.name,
-        deps.command.isSkillWrapperName,
-        isBareCommandLine(parsed) ? (name => deps.extensions.isLocal(name, LOCAL_COMMANDS)) : undefined,
-        deps.command.hostCatalogResolves(parsed.name),
-      )
+    // §1C-7: the delivery gate consumes the SAME classification — every
+    // Client command (TUI or extension) takes the local-command placeholder
+    // (never steer), skill invocations and ordinary submissions follow the
+    // busy queue/steer policy, Host commands ride the command path. A Host
+    // -origin name that does not claim this line is an ORDINARY submission
+    // (hostNameReserved), so an argued `/export foo` keeps the ordinary
+    // prompt policy everywhere.
+    const tuiLocalLine = classification.kind === 'client-command'
     // The submission's effective delivery mode — resolved ONCE, here at
     // the boundary (web ComposerSubmissionPolicy parity, DSH
     // 0.1.6): an idle agent queues, plain Enter takes the
@@ -1504,9 +1527,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // (also excluded from the claim). A claimed command the real session
     // then lacks is consumed by the advertised-miss gate inside
     // dispatchViaSession — never a plain model message.
-    if (parsed !== undefined
-      && !LOCAL_COMMANDS.has(parsed.name)
-      && hostView?.claimed === true) {
+    if (classification.kind === 'host-command') {
       dispatchViaSession(text, persistHistory, delivery)
       return
     }
@@ -1525,16 +1546,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // TUI-owned agent-facing input and outranks a contribution of the same
     // name (the contribution may have been registered before the skill
     // catalog loaded).
+    // §1C-7: the contribution gate consumes the SAME classification — only
+    // the classifier's client-command(extension) family routes here (a
+    // genuine Host-origin name, claimed or merely reserved, and a live
+    // skill wrapper already outranked it inside the classifier; a TUI-owned
+    // registration is the TUI branch below, never this one).
     const contribution = parsed === undefined
-      || !isBareCommandLine(parsed)
-      || deps.command.isSkillWrapperName(parsed.name) === true
-      // A name the AUTHORITATIVE host catalog RESOLVES is host territory even
-      // when it does not claim THIS line: the line is an ordinary submission,
-      // so a same-named contribution — reachable only in the failed-source
-      // collision state — never runs for it. PR5 supplement: the effective
-      // line claim (whose union carries this Client's own TUI registrations)
-      // must never serve as this NAME-authority discriminator.
-      || deps.command.hostCatalogResolves(parsed.name)
+      || !(classification.kind === 'client-command' && classification.source === 'extension')
       ? undefined
       : deps.extensions.findContribution(parsed.name)
     if (parsed !== undefined && contribution !== undefined) {
@@ -1560,17 +1578,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         run: async () => {
           await deps.session.ensureSession()
           if (deps.isCleanedUp() || deps.liveAgent() === undefined) return
-          // AUTHORITY RE-CHECK after the session exists: the deferred start
-          // commits a session whose scoped catalog the standing view could
-          // not see, and the skill catalog may load with it. A HOST-resolved
-          // NAME or a TUI skill wrapper outranks the contribution that was
-          // decided before the session existed. PR5 supplement: the
-          // discriminator is the AUTHORITATIVE-catalog NAME authority
-          // (`hostCatalogResolves`), never the effective line claim — a TUI
-          // built-in sharing the name appears in the claim union's Client
-          // registrations and must not read as Host territory. The delivery
-          // resolved before the session existed, so it is a queue-mode
-          // submission: `dispatchViaSession` delivers the line itself.
+          // AUTHORITY RE-CHECK after the session exists (§1C-8): the
+          // deferred start commits a session whose scoped catalog the
+          // standing view could not see, and the skill catalog may load with
+          // it. The SAME origin-aware classifier is re-run against the FINAL
+          // catalog: a genuine Host-origin NAME (mirrors excluded) or a TUI
+          // skill wrapper outranks the contribution decided before the
+          // session existed. The delivery resolved before the session
+          // existed, so it is a queue-mode submission: `dispatchViaSession`
+          // delivers the line itself.
           if (deps.command.hostCatalogResolves(parsed.name) || deps.command.isSkillWrapperName(parsed.name) === true) {
             dispatchViaSession(text, persistHistory, delivery)
             return

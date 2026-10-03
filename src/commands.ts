@@ -1504,8 +1504,15 @@ export function registerTuiCommands(
   /** The CURRENT host catalog's view of ONE parsed line (see
    * {@link HostCommandClaim}): `undefined` when the catalog does not RESOLVE
    * the name, `claimed: false` when it resolves the name without claiming
-   * this line. */
+   * this line. This is the ADVERTISED union view (completion/advertised-miss
+   * semantics); routing authority is {@link hostOriginClaimOf}. */
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** PR5 v2 §1C-4: the GENUINE Host-origin line authority — the Host
+   *  descriptor view with this TUI's own Direct compatibility mirrors
+   *  excluded and Client synthesis never able to overwrite it. Routing
+   *  (delivery/echo/attachments/command-plane/collision) consumes THIS,
+   *  never the advertised union or raw registry membership. */
+  hostOriginClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
   /** §D3 precedence: whether the AUTHORITATIVE HOST catalog (never the
    *  claim-set union, which also carries this surface's own Client
    *  registrations) resolves one slash name. */
@@ -1555,6 +1562,22 @@ export function registerTuiCommands(
   // is a programming error and fails fast exactly as before (a best-effort
   // whole pass would silently leave a partial command surface).
   const registrationFailures: string[] = []
+  // ── Direct compatibility-mirror provenance (PR5 v2 §1C-2) ────────────────
+  // A SUCCESSFUL Direct `commands.register` of a TUI-owned definition is a
+  // COMPATIBILITY MIRROR: it exists so the in-process dispatch surface
+  // (busy-Enter, sessionless execution) keeps working — it is NOT evidence
+  // of genuine Host-origin ownership. This set records exactly those
+  // successful mirrors so the Host-origin view (§1C-3) can subtract them.
+  //   • Only a SUCCESSFUL Host registration marks the name (a duplicate-name
+  //     refusal means the pre-existing Host name IS genuine Host authority).
+  //   • The marker is removed BEFORE `disposeHost()` runs: disposal fires
+  //     `commands/change` SYNCHRONOUSLY, and that refresh must not see the
+  //     dying mirror as genuine Host origin.
+  //   • `registerOne` is the SINGLE registration seam (built-ins, aliases,
+  //     skill wrappers and the revalidating transitions all pass through),
+  //     so provenance cannot drift for any registration kind.
+  // Remote never populates this set (no Host registration happens there).
+  const directCompatibilityMirrors = new Set<string>()
   const registerOne = (definition: Parameters<typeof clientCommands.register>[0]): (() => void) => {
     // The CLIENT registration is unconditional (PR4 §D2): the definition is
     // owned here on BOTH branches. A same-name overwrite inside the Client
@@ -1562,9 +1585,12 @@ export function registerTuiCommands(
     // dispose before re-registering), so it is never a "collision".
     const disposeClient = clientCommands.register(definition)
     if (commands === undefined) return disposeClient
+    const mirrorName = String((definition as { name?: unknown }).name)
     try {
       const disposeHost = commands.register(definition)
+      directCompatibilityMirrors.add(mirrorName)
       return () => {
+        directCompatibilityMirrors.delete(mirrorName)
         disposeHost()
         disposeClient()
       }
@@ -1577,8 +1603,7 @@ export function registerTuiCommands(
       // exactly as before.
       const message = error instanceof Error ? error.message : String(error)
       if (!/^command "[^"]+" is already registered/.test(message)) throw error
-      const name = (definition as { name?: unknown }).name
-      registrationFailures.push(`/${String(name)}: ${message}`)
+      registrationFailures.push(`/${mirrorName}: ${message}`)
       return disposeClient
     }
   }
@@ -1964,6 +1989,32 @@ export function registerTuiCommands(
    */
   let authoritativeHostCatalog: readonly SurfaceCommandSummary[] = []
   /**
+   * The GENUINE HOST-ORIGIN descriptor map (PR5 v2 §1C-3): the winning Host
+   * descriptor facts (`leadingInput`, `attachments`) per name, built from the
+   * authoritative Host catalog with this TUI's own successful Direct
+   * compatibility MIRRORS subtracted on Direct (a mirror is execution
+   * compatibility, never Host-origin ownership — §1C-2). On Remote the
+   * generation-fenced Host snapshot is already mirror-free (the TUI never
+   * registers into the Host there). This map is the ONLY Host-name-authority
+   * source: Client descriptor synthesis can never overwrite it, and a
+   * same-name Client definition never masquerades as Host origin.
+   */
+  let hostOriginDescriptors = new Map<string, { leadingInput: boolean; attachments: boolean }>()
+  /** Derive the Host-origin map from a Host catalog view (§1C-3): subtract
+   *  the live compatibility mirrors (Direct only; the set is empty on
+   *  Remote) and keep the WINNING descriptor facts of what remains. */
+  const deriveHostOriginDescriptors = (hostCatalog: readonly SurfaceCommandSummary[]): void => {
+    const derived = new Map<string, { leadingInput: boolean; attachments: boolean }>()
+    for (const command of hostCatalog) {
+      if (directCompatibilityMirrors.has(command.name)) continue
+      derived.set(command.name, {
+        leadingInput: command.input !== undefined,
+        attachments: command.input?.attachments === true,
+      })
+    }
+    hostOriginDescriptors = derived
+  }
+  /**
    * The sessionless completion view: the CURRENT global layer (fresh read —
    * TUI built-ins, global plugins and installed skill wrappers all flow in)
    * overlaid with the saved scoped overrides from the latest snapshot.
@@ -2058,14 +2109,20 @@ export function registerTuiCommands(
     // the last authoritative Host catalog the coordinator installed.
     if (runner.currentSessionId === undefined) {
       const entries = mergeGlobalAndSavedScoped()
-      if (commands !== undefined) authoritativeHostCatalog = entries
+      if (commands !== undefined) {
+        authoritativeHostCatalog = entries
+        deriveHostOriginDescriptors(entries)
+      }
       installCompletionsContained(entries, commands === undefined
         ? { claimsFrom: authoritativeHostCatalog }
         : {})
       return
     }
     const scoped = runner.listScopedCommands()
-    if (commands !== undefined) authoritativeHostCatalog = scoped
+    if (commands !== undefined) {
+      authoritativeHostCatalog = scoped
+      deriveHostOriginDescriptors(scoped)
+    }
     const byName = new Map<string, SurfaceCommandSummary>()
     for (const entry of scoped) byName.set(entry.name, entry)
     for (const definition of clientCommands.list()) {
@@ -3955,8 +4012,10 @@ export function registerTuiCommands(
    * plain model message while the catalog is unavailable.
    */
   const installSurfaceSnapshot = (snapshot: SurfaceCatalogSnapshot): void => {
-    // The snapshot's command rows ARE the Host authority (PR4 §D3).
+    // The snapshot's command rows ARE the Host authority (PR4 §D3); the
+    // Host-origin map derives with the same mirror subtraction (§1C-3).
     authoritativeHostCatalog = snapshot.commands
+    deriveHostOriginDescriptors(snapshot.commands)
     const scopedNames = new Set(snapshot.scopedCommands.map(command => command.name))
     const skillsFailed = snapshot.issues.some(issue => issue.provider === 'skills')
     withCommandCommit(() => {
@@ -4037,11 +4096,41 @@ export function registerTuiCommands(
     // A TUI-owned skill wrapper is an agent-facing invocation — never a
     // Host-command claim (its `/name args` line still belongs to the command
     // PLANE through the LOCAL/skill ownership checks). §D3 Host-vs-wrapper
-    // PRECEDENCE is decided separately by `hostCatalogResolves` against the
-    // AUTHORITATIVE Host catalog, so a wrapper sharing a REAL Host name can
-    // never shadow it (the registration side also refuses taken Host names).
+    // PRECEDENCE is decided separately by `hostOriginClaimOf` against the
+    // GENUINE Host-origin descriptors, so a wrapper sharing a REAL Host name
+    // can never shadow it (the registration side also refuses taken Host
+    // names).
     if (skillDisposers.has(parsed.name)) return undefined
     const descriptor = claims.get(parsed.name)
+    if (descriptor === undefined) return undefined
+    if (!descriptor.leadingInput && (parsed.rawInput?.trim() ?? '') !== '') return { claimed: false }
+    return { claimed: true, attachments: descriptor.attachments }
+  }
+
+  /**
+   * The ONE Host-origin line authority (PR5 v2 §1C-4): the GENUINE
+   * Host-origin descriptor view of ONE parsed line, excluding this TUI's own
+   * successful Direct compatibility mirrors (§1C-2) and never influenced by
+   * Client descriptor synthesis (§1C-3).
+   *
+   *   `undefined`          — no genuine Host-origin command owns the name.
+   *   `{ claimed: false }` — a genuine Host command owns the NAME but does
+   *                          not claim THIS exact line (an execute-kind
+   *                          descriptor with trailing input): the line is an
+   *                          ordinary submission whose name is Host-reserved.
+   *   `{ claimed: true, attachments }` — a genuine Host command owns the
+   *                          name AND claims this exact line; `attachments`
+   *                          is the HOST descriptor's own declaration.
+   *
+   * Routing (delivery, echo, attachments, the command plane, collisions)
+   * must consume THIS primitive — never `hostClaimOf` (the advertised
+   * union view) or `hostCatalogResolves` (raw registry membership).
+   */
+  const hostOriginClaimOf = (parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined => {
+    // A TUI-owned skill wrapper is never a genuine Host command, exactly as
+    // in hostClaimOf (the registration side also refuses taken Host names).
+    if (skillDisposers.has(parsed.name)) return undefined
+    const descriptor = hostOriginDescriptors.get(parsed.name)
     if (descriptor === undefined) return undefined
     if (!descriptor.leadingInput && (parsed.rawInput?.trim() ?? '') !== '') return { claimed: false }
     return { claimed: true, attachments: descriptor.attachments }
@@ -5731,12 +5820,18 @@ export function registerTuiCommands(
      * contribution (the dispatch caller excludes TUI-local commands itself via
      * LOCAL_COMMANDS). */
     hostClaimOf,
-    /** §D3 precedence discriminator: whether the AUTHORITATIVE HOST CATALOG
-     *  (never the claim-set union, which also carries this surface's own
-     *  Client registrations) resolves one slash name. A same-named TUI
-     *  built-in or skill wrapper must never shadow a resolved Host command. */
+    hostOriginClaimOf,
+    /** §D3 precedence discriminator: whether a GENUINE HOST-ORIGIN command
+     *  (§1C-3: the authoritative Host catalog minus this TUI's own Direct
+     *  compatibility mirrors — never raw registry membership, never the
+     *  claim-set union) resolves one slash name. A same-named TUI built-in
+     *  or skill wrapper must never shadow a resolved Host command. */
     hostCatalogResolves: (name: string): boolean =>
-      authoritativeHostCatalog.some(command => command.name === name),
+      // PR5 v2 §1C-4: NAME authority is the GENUINE Host-origin view — the
+      // authoritative catalog with this TUI's own Direct compatibility
+      // mirrors subtracted. Raw registry membership is NOT Host origin (a
+      // successfully mirrored TUI built-in must still answer false here).
+      hostOriginDescriptors.has(name),
     /** Whether one slash name is a LIVE TUI-owned skill wrapper (the
      * revalidating transition wrappers included). */
     isSkillWrapper: (name: string): boolean => skillDisposers.has(name),
