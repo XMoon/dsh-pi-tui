@@ -14,6 +14,10 @@
  *   loader, presets, userQuestions, workspace, filesystem
  * - the official in-process Client/Gateway path over the real carrier
  * - M3 additive Host rows mount/unwind with the composed runtime
+ * - with `pluginManagerProfile: true` (M3-5 PR4): a real managed profile
+ *   directory (`profileContext`) plus the real base-owned
+ *   `@deepseek-ai/dsh-plugin-manager` Host service, so the Remote Plugin
+ *   Manager L6 reads the genuine Host authority over the wire
  *
  * TEST STAND-INS / SUBSTITUTIONS
  * - `agentDefaultModel` + `webServer`: the minimal readiness values the
@@ -43,7 +47,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -98,6 +102,99 @@ export class StubLlmAdapter extends LlmAdapter {
   override async *stream(_options: unknown): AsyncGenerator<never> {}
 }
 
+/** The managed profile fixture the real base-owned PluginManager prerequisite
+ *  reads (M3-5 PR4 L6): a real profile directory + a real dsh installation
+ *  anchor, plus ONE distinctive disposable bundle listed while DISABLED (the
+ *  official toggle target) and a `@xmoon76/dsh-pi-tui`-named stand-in for the
+ *  Current-TUI negative control. */
+export interface PluginManagerProfileFixture {
+  /** The real managed profile directory (`profileContext.dir`). */
+  readonly profileDir: string
+  /** The distinctive fixture bundle (togglable, listed while disabled). */
+  readonly bundleName: string
+  /** The bundle names the profile manifest currently selects (Host truth). */
+  selectedBundles(): readonly string[]
+}
+
+/** The fixture bundle name (distinctive, never a production package). */
+export const PLUGIN_MANAGER_FIXTURE_BUNDLE = 'm3-5-pr4-fixture-bundle'
+
+/**
+ * Build the real managed profile directory the base-owned PluginManager
+ * prerequisite reads: a real profile manifest + patch, a real dsh installation
+ * anchor manifest, ONE distinctive disposable bundle listed while DISABLED,
+ * and a `@xmoon76/dsh-pi-tui`-named stand-in (the exact-name Current-TUI
+ * negative-control target).
+ */
+function mountPluginManagerProfile(workRoot: string): {
+  profileContext: Record<string, unknown>
+  fixture: PluginManagerProfileFixture
+} {
+  const profileDir = join(workRoot, 'profile')
+  const installationDir = join(workRoot, 'installation')
+  const installationAnchor = join(installationDir, 'package.json')
+  const profilePatchPath = join(profileDir, 'cordis.patch.yml')
+  const fixtureBundleDir = join(profileDir, 'node_modules', PLUGIN_MANAGER_FIXTURE_BUNDLE)
+  const selfBundleDir = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  mkdirSync(fixtureBundleDir, { recursive: true })
+  mkdirSync(selfBundleDir, { recursive: true })
+  mkdirSync(installationDir, { recursive: true })
+  writeFileSync(installationAnchor, JSON.stringify({
+    name: 'm3-5-pr4-fixture-installation',
+    private: true,
+    dependencies: {},
+  }, null, 2))
+  // A real bundle manifest (no patch rows): the official manager lists it,
+  // resolves it, and can select it through the profile manifest.
+  writeFileSync(join(fixtureBundleDir, 'package.json'), JSON.stringify({
+    name: PLUGIN_MANAGER_FIXTURE_BUNDLE,
+    version: '0.0.0',
+    private: true,
+    dsh: { bundle: { patch: [] } },
+  }, null, 2))
+  // The Current-TUI protection is the exact shipped name; only a resolvable
+  // manifest is needed for the card to exist (its patch declares no rows).
+  writeFileSync(join(selfBundleDir, 'package.json'), JSON.stringify({
+    name: '@xmoon76/dsh-pi-tui',
+    version: '0.0.0',
+    private: true,
+    dsh: { bundle: { patch: [] } },
+  }, null, 2))
+  const writeManifest = (bundles: readonly string[]): void => {
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'm3-5-pr4-fixture-profile',
+      private: true,
+      dependencies: { [PLUGIN_MANAGER_FIXTURE_BUNDLE]: '0.0.0', '@xmoon76/dsh-pi-tui': '0.0.0' },
+      dsh: { profile: { bundles, patch: 'cordis.patch.yml' } },
+    }, null, 2))
+  }
+  writeManifest([])
+  writeFileSync(profilePatchPath, '[]\n')
+  return {
+    profileContext: {
+      name: 'm3-5-pr4-fixture',
+      dir: profileDir,
+      patchPath: profilePatchPath,
+      installAnchor: installationAnchor,
+      cwd: workRoot,
+      home: workRoot,
+      startedBundles: [],
+      overlays: [],
+      telemetryDisabledEnv: undefined,
+    },
+    fixture: {
+      profileDir,
+      bundleName: PLUGIN_MANAGER_FIXTURE_BUNDLE,
+      selectedBundles: () => {
+        const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+          dsh?: { profile?: { bundles?: string[] } }
+        }
+        return manifest.dsh?.profile?.bundles ?? []
+      },
+    },
+  }
+}
+
 /** The ordinary rc.2 Host fixture: real services, no M3 rows, no Remote composition. */
 export async function createRemoteApplicationHostFixture(
   life: TestLifecycle,
@@ -106,6 +203,13 @@ export async function createRemoteApplicationHostFixture(
     /** Replace the default `smoke` LLM adapter (e.g. a streaming stand-in).
      *  The default registers the non-streaming `StubLlmAdapter`. */
     readonly llmAdapter?: LlmAdapter
+    /**
+     * Reproduce the base-owned Host PluginManager prerequisite (M3-5 PR4):
+     * a real `profileContext` over a real profile directory plus the real
+     * `@deepseek-ai/dsh-plugin-manager` Host service. Off by default so every
+     * other consumer keeps its exact previous composition.
+     */
+    readonly pluginManagerProfile?: boolean
   } = {},
 ): Promise<{
   ctx: Context
@@ -113,6 +217,8 @@ export async function createRemoteApplicationHostFixture(
   anchorDir: string
   /** The production AgentLoop test driver (composes real live Agents). */
   harness: Awaited<ReturnType<typeof mountAgentLoopTestHarness>>
+  /** Present only with `pluginManagerProfile: true`. */
+  pluginManager?: PluginManagerProfileFixture
   dispose(): Promise<void>
 }> {
   const workRoot = life.tempDir('dsh-m3-4-pr1-')
@@ -121,6 +227,7 @@ export async function createRemoteApplicationHostFixture(
   const ctx = new Context()
   let persistenceFiber: Fiber | undefined
   let harness: Awaited<ReturnType<typeof mountAgentLoopTestHarness>> | undefined
+  let pluginManager: { profileContext: Record<string, unknown>; fixture: PluginManagerProfileFixture } | undefined
   try {
     await ctx.plugin(TypertRegistry)
     await mountAgentLoopTestDependencies(ctx)
@@ -142,6 +249,15 @@ export async function createRemoteApplicationHostFixture(
     ctx.provide('webServer', { registerUpgrade: () => () => {} })
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
+    if (options.pluginManagerProfile === true) {
+      pluginManager = mountPluginManagerProfile(workRoot)
+      ctx.provide('profileContext', pluginManager.profileContext as never)
+      // The REAL base-owned Host service (`@deepseek-ai/dsh-base` mounts it
+      // when a profile exists): the M3 additive Host runtime must REUSE it and
+      // never mount a second manager.
+      const PluginManager = (await import('@deepseek-ai/dsh-plugin-manager')).default
+      await ctx.plugin(PluginManager, {})
+    }
     await ctx.plugin(AgentPresetRegistry, { default: presetId })
     await ctx.get('agentPresets')!.register({ id: presetId, name: `preset ${presetId}`, plugins: [] })
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
@@ -184,7 +300,14 @@ export async function createRemoteApplicationHostFixture(
   }
   life.defer(dispose)
   assert.ok(harness !== undefined, 'the agent-loop harness must be mounted')
-  return { ctx, workRoot, anchorDir, harness, dispose }
+  return {
+    ctx,
+    workRoot,
+    anchorDir,
+    harness,
+    ...pluginManager === undefined ? {} : { pluginManager: pluginManager.fixture },
+    dispose,
+  }
 }
 
 export { testLifecycle }

@@ -56,6 +56,7 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
@@ -163,6 +164,7 @@ function recoveryHarness(options: {
     },
     cancelInstall: async (requestId) => { cancelCalls.push(String(requestId)); return { status: 'cancelled' } },
     subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},

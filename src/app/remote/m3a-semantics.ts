@@ -182,7 +182,10 @@ export function createRemoteM3ASemantics(
     hostCommand: new RemoteHostCommandPort(remote.commands),
     presentationReader: new RemotePresentationReader(sessions, generation),
     interaction,
-    pluginManager: new RemotePluginManagerPort({ pluginManager: remote.pluginManager, $on: forwardedEvents }),
+    pluginManager: new RemotePluginManagerPort(
+      { pluginManager: remote.pluginManager, $on: forwardedEvents },
+      generation,
+    ),
     jobObservation: new RemoteJobObservationPort(runtime.jobs),
     dispose(): void {
       if (disposed) return

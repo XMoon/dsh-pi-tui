@@ -153,8 +153,11 @@ function officialSubmissionPresentation(
   return new RemoteSubmissionPresentation(sessions, generation)
 }
 
-function officialPluginManagerPort(remote: ClientRemote): RemotePluginManagerPort {
-  return new RemotePluginManagerPort(remote)
+function officialPluginManagerPort(
+  remote: ClientRemote,
+  generation: ConnectionGenerationState,
+): RemotePluginManagerPort {
+  return new RemotePluginManagerPort(remote, generation)
 }
 
 function officialJobObservationPort(jobs: IJobs): RemoteJobObservationPort {

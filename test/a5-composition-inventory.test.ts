@@ -388,6 +388,7 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['approval/request', 'src/runtime/direct/interaction-direct.ts'],
   ['plugin-manager/install-state', 'src/runtime/direct/plugin-manager-direct.ts'],
   ['plugin-manager/install-log', 'src/runtime/direct/plugin-manager-direct.ts'],
+  ['plugin-manager/changed', 'src/runtime/direct/plugin-manager-direct.ts'],
   ['agent/assistant-stream', 'src/runtime/direct/assistant-stream-direct.ts'],
   ['agent/disposed', 'src/runtime/direct/assistant-stream-direct.ts'],
   ['skills/change', 'src/skill-catalog.ts'],

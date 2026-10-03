@@ -31,6 +31,7 @@ function port(): PluginManagerPort {
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
   }
 }
 

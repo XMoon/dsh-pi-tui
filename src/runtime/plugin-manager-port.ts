@@ -201,4 +201,16 @@ export interface PluginManagerPort {
   cancelInstall(requestId: string): Promise<PluginInstallCancellationFact>
   /** Subscribe to the official install progress/log events. */
   subscribeInstall(listener: (event: PluginInstallEvent) => void): () => void
+  /**
+   * Subscribe to one transport-neutral invalidation hint: the question it
+   * answers is "has something happened that makes the cached snapshot
+   * potentially stale, and therefore worthy of an authoritative
+   * {@link PluginManagerPort.snapshot} reread?".
+   *
+   * The listener carries NO new business truth and is NOT authority: only
+   * `snapshot()` answers with inventory. It never implies polling, and a
+   * consumer that is not showing the inventory must not turn it into a
+   * background read. The returned disposer releases exactly this subscription.
+   */
+  subscribeInvalidation(listener: () => void): () => void
 }
