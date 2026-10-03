@@ -4223,8 +4223,11 @@ remain).
   every older in-flight read, so an older read can neither repaint stale
   inventory nor clear a newer failure; the last good snapshot survives a newest
   read failure.
-- **Disposal hardening**: `dispose()` aborts an in-flight inspect, releases the
-  install-event and invalidation subscriptions, and drops late reads/settlements
+- **Disposal hardening**: the constructor acquires its two subscriptions
+  transactionally (a synchronously throwing invalidation subscription releases
+  the already-installed install subscription and rethrows). `dispose()` is
+  idempotent, aborts an in-flight inspect, releases the install-event and
+  invalidation subscriptions exactly once, and drops late readings/settlements
   — it never cancels a Host install. Install request identity (`requestId`),
   `waitForInstall(requestId)` recovery, close/reopen-without-redispatch, and the
   Current-TUI self-protection policy are unchanged.
@@ -4239,6 +4242,7 @@ remain).
 | External Host change invalidates an open panel | L6 | L6-D: a second Host actor's manager operation → forwarded `plugin-manager/changed` → invalidation → reread; no `R` key |
 | Reconnect invalidation | L6 | L6-E: a hand-edited profile truth (no event) stays cached; the official `connection.reconnect()` establishes a new generation → invalidation → authoritative reread, with no mutation replay |
 | Forwarded install events over the real wire | L5 | the `L5:` scenario in the same suite (real Host install events forwarded to the Remote adapter). The controller's exact-request-id filtering, close/reopen-without-redispatch and `waitForInstall` recovery remain covered by `test/plugin-manager-install.test.ts` and `test/plugin-manager-port.test.ts` |
+| Controller disposal lifecycle | L2 | `test/plugin-manager-port.test.ts`: a synchronously throwing invalidation subscription releases the install subscription and rethrows; `dispose()` releases BOTH subscriptions exactly once and is idempotent; a held inventory read settled (success AND failure) after dispose never commits nor repaints; a held inspect result never advances the phase nor repaints; a late install settlement never mutates nor repaints; no `cancelInstall`. `test/remote-plugin-manager.test.ts` proves each Remote adapter disposer runs exactly once (off-call counters, repeated dispose included) |
 | Direct behaviour preserved | L3/L6 | `test/plugin-manager-direct.test.ts`, `test/plugin-manager-runner-integration.test.ts` and the controller suite remain green |
 
 **Honest gap:** the network/pnpm real package *installation* L6-F scenario is
