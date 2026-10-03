@@ -1245,9 +1245,14 @@ test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies th
     ],
   })
 
-  let releaseDrain!: () => void
+  let releaseDrain: (() => void) | undefined
   let signalDrainReached!: () => void
   const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  // The held drain MUST have a fallback release: any failing assertion above the
+  // in-body release would otherwise leave the gate parked and turn a plain
+  // failure into a teardown HANG (the harness's own cleanup, registered earlier,
+  // awaits the parked execution first — a later after-hook is too late).
+  life.defer(() => { releaseDrain?.() })
   let drainCalls = 0
   const harness = makeHarness(home, [source, targetB], { provider: 'global', model: 'fallback' }, undefined, undefined, () => ({
     drainContinuableDescendants: async () => {
@@ -1319,10 +1324,16 @@ test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies th
     }
     return predicate()
   }
-  assert.equal(await until(() => harness.retirementEvents.includes(`dispose:${source.id}`), 10_000), true,
-    'the rewind settlement really ran: its source owner was retired')
-  assert.equal(await until(() => harness.resumeSessionIds.includes('rewind-stale-target-b'), 10_000), true,
-    'the external /resume really executed and switched the surface to B')
+  assert.equal(await until(() =>
+    harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length === 1, 10_000), true,
+    'the rewind settlement really ran: its source owner was retired EXACTLY once')
+  // `resumeSessionIds` only records that `agents.resume` was ENTERED (the fake
+  // pushes before the handle/setup/return, and even before a resumeError throw),
+  // so it cannot prove the switch. B's authoritative appearance is its
+  // transcript: the surface installs it only once the switch really committed.
+  assert.equal(await until(() =>
+    (probe.capturedMessages ?? []).some(row => JSON.stringify(row).includes('session b content')), 10_000), true,
+    'the external /resume really switched the surface to B (its transcript is installed)')
   await settle()
 
   // The paired positive control is the sibling test above ("a rewind-picker fork
