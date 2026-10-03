@@ -563,6 +563,15 @@ test('PR5 §1C-6 (whole-PR F4): TUI ownership comes from the LIVE Client registr
     false, 'the classifier TUI term must not read the static list')
   assert.equal(controller.includes('isLocalCommandLine('),
     false, 'the controller no longer consumes the static-policy line predicate')
+  // §1C-6 (whole-PR R15-1): the INDIRECT chain is forbidden too — the static
+  // membership list must not answer ownership through the extension bridge
+  // (`extensions.isLocal(..., LOCAL_COMMANDS)` -> `CommandBridge.isLocal`'s
+  // `staticLocal.has(name)`), which is how a bare `/kill` re-entered the
+  // deferred attachment classifier's TUI family.
+  assert.equal(controller.includes('extensions.isLocal('),
+    false, 'no ownership decision may route through the static-list bridge')
+  assert.equal(controller.includes('LOCAL_COMMANDS) === true'),
+    false, 'no classifier term may consult the static policy set for ownership')
   // The registry enforces the SAME admission at the sink.
   const registry = code('app/command/client-command-registry.ts')
   assert.ok(registry.includes("return (parsed.rawInput ?? '').trim() === '' || definition.input !== undefined"),

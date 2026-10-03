@@ -616,10 +616,11 @@ test('whole-PR F3 sibling: an emptied cwd/branch CLEARS the extension snapshot (
   app.stop()
 })
 
-test('whole-PR F3 sibling: a session SWITCH commits the new cwd and never leaks the previous branch', async (t) => {
-  // The identity commit answers `cwd` (it carries the session's own workspace)
-  // but NOT `branch`: on a subject switch the previous session's branch must be
-  // cleared, and the following status sync writes the new subject's real value.
+test('whole-PR R15-2: a session SWITCH keeps the NEW subject branch (the later identity commit must not clear it)', async (t) => {
+  // PRODUCTION ORDER: `status.refresh()` for B (which writes B's model/cwd/
+  // branch) runs BEFORE the welcome identity commit. A switch-clear in the
+  // welcome commit therefore overwrote a fact the new subject had just proved
+  // (`extension snapshot.branch = undefined` while B's branch was known).
   const ledger = new ExtensionLedger(() => {})
   const { vt, app, host } = makeApp(ledger)
   await vt.waitForRender()
@@ -633,12 +634,39 @@ test('whole-PR F3 sibling: a session SWITCH commits the new cwd and never leaks 
   await settle()
   assert.equal(host.state().session.sessionId, 'session-a')
   assert.equal(host.state().session.branch, 'main')
+  // B's STATUS commit first (the production order), then B's identity commit.
+  app.setStatus({ model: 'm2', cwd: '/repo/b', branch: 'feature-b', turns: 1, steps: 1, statsLine: '', permission: undefined })
   app.setWelcomeCard({ cwd: '/repo/b', sessionId: 'session-b', version: '0.0.0' })
   await settle()
   assert.equal(host.state().session.sessionId, 'session-b', 'the switch took effect')
   assert.equal(host.state().session.cwd, '/repo/b', "the switch commits the NEW session's workspace")
+  assert.equal(host.state().session.branch, 'feature-b',
+    "the later identity commit must not clear the branch the NEW subject already proved")
+  app.stop()
+})
+
+test('whole-PR R15-2 control: a switch to a subject whose branch is ABSENT clears the previous one', async (t) => {
+  // The clear lives in the STATUS writer (explicit `undefined` for an absent
+  // branch), which runs FIRST for the new subject — never in the later identity
+  // commit, which cannot know whether the new subject has a branch.
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  app.refreshChrome()
+  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setWelcomeCard({ cwd: '/repo/a', sessionId: 'session-a', model: 'model-a', version: '0.0.0' })
+  await settle()
+  assert.equal(host.state().session.branch, 'main')
+  app.setStatus({ model: 'm2', cwd: '/repo/b', branch: '', turns: 1, steps: 1, statsLine: '', permission: undefined })
+  app.setWelcomeCard({ cwd: '/repo/b', sessionId: 'session-b', version: '0.0.0' })
+  await settle()
+  assert.equal(host.state().session.sessionId, 'session-b')
   assert.equal(host.state().session.branch, undefined,
-    "session B must never inherit session A's branch")
+    "session B must never inherit session A's branch when B has none")
   app.stop()
 })
 
