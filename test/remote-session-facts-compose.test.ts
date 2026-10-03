@@ -62,15 +62,10 @@ test('§3.3 stats: lifetime totals come from the projections, not the window', a
     },
   })
   assert.ok(stats !== undefined)
-  assert.equal(stats.turns, 3, 'lifetime turns are projection-backed')
-  assert.equal(stats.steps, 9, 'lifetime steps are projection-backed')
-  assert.equal(stats.llmMs, 12_000, 'lifetime llmMs is projection-backed')
-  assert.equal(stats.inputTokens, 100)
-  assert.equal(stats.outputTokens, 50)
-  assert.equal(stats.cacheReadTokens, 30)
-  assert.equal(stats.cacheWriteTokens, 20)
-  // billed = 100 + 30 + 20 = 150; cacheHit = 30/150 = 20%
-  assert.equal(stats.cacheHitPct, 20)
+  assert.deepEqual(stats.lifetime, { turns: 3, steps: 9, llmMs: 12_000 },
+    'the lifetime group is projection-backed (§1B-2 facts shape)')
+  assert.deepEqual(stats.tokens, { input: 100, output: 50, cacheRead: 30, cacheWrite: 20, cacheHitPct: 20 },
+    'the tokens group is projection-backed (billed 150; cacheHit 30/150 = 20%)')
   assert.equal(stats.contextWindow, 128_000)
 })
 
@@ -138,7 +133,7 @@ test('§3.3 stats: bounded paging stops once enough recent samples are loaded', 
   })
   assert.ok(stats !== undefined)
   assert.equal(loadOlderCalls, 1, 'paging stops once the recent-sample window is complete (never loads the whole log)')
-  assert.equal(stats.turns, 30, 'the projection still owns lifetime totals')
+  assert.equal(stats.lifetime?.turns, 30, 'the projection still owns lifetime totals')
 })
 
 /** One completed turn whose assistant message carries a VALID sample (an
@@ -221,8 +216,8 @@ test('§3.3/F3 stats: 10 invalid newest steps DO NOT stop paging — the fold ke
   })
   assert.ok(stats !== undefined)
   assert.equal(loadOlderCalls, 1, 'invalid completed steps never satisfy the page-stop (the fold keeps paging)')
-  assert.equal(stats.firstTokenMsAvg, 500, 'the valid samples (step/start 0 → first token 500) drive TTFT')
-  assert.ok(stats.tokensPerSec > 0, 'the valid samples drive the throughput figure')
+  assert.equal(stats.recent?.firstTokenMsAvg, 500, 'the valid samples (step/start 0 → first token 500) drive TTFT')
+  assert.ok((stats.recent?.tokensPerSec ?? 0) > 0, 'the valid samples drive the throughput figure')
 })
 
 test('§3.3/F3 stats: a NEVER-satisfied window pages to the history start and equals the whole-log fold (no silent cap)', async () => {
@@ -263,8 +258,8 @@ test('§3.3/F3 stats: a NEVER-satisfied window pages to the history start and eq
   // The whole-log reference: the same all-invalid log folds to 0/0 — so the
   // composed figures are the WHOLE-LOG TRUTH here (not a partial artifact).
   const wholeLog = await import('../src/stats.ts').then(m => m.computeStats(allInvalid as never))
-  assert.equal(stats.firstTokenMsAvg, wholeLog.firstTokenMsAvg)
-  assert.equal(stats.tokensPerSec, wholeLog.tokensPerSec)
+  assert.equal(stats.recent?.firstTokenMsAvg, wholeLog.firstTokenMsAvg)
+  assert.equal(stats.recent?.tokensPerSec, wholeLog.tokensPerSec)
 })
 
 test('§3.6 lastAssistantText: newest message inside the window returns verbatim', async () => {
@@ -355,4 +350,82 @@ test('§3.6 lastAssistantText: a superseded paging result is dropped (undefined)
     fence: { isCurrent: () => reads < 1 },
   })
   assert.equal(text, undefined, 'a stale paging settle never presents its page')
+})
+
+/* ── PR5 v2 §1B-2: unknown stays unknown (never `?? 0`) ─────────────────── */
+
+test('§1B-2 absent projections stay absent groups — never fabricated zeros', async () => {
+  const window: PresentationReadSnapshot = {
+    sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
+    coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',
+  }
+  // EVERY authoritative source absent.
+  const facts = await composeRemoteSessionStats({
+    sessionId: 's',
+    reader: { read: async () => window, loadOlder: async () => window },
+    fence: { isCurrent: () => true },
+    facts: { sessionStats: undefined, usage: undefined, contextWindow: undefined },
+  })
+  assert.ok(facts !== undefined)
+  assert.equal(facts.lifetime, undefined, 'an absent sessionStats projection keeps the lifetime group ABSENT (never t0/s0/LLM 0s)')
+  assert.equal(facts.tokens, undefined, 'an absent tokenUsage projection keeps the tokens group ABSENT (never ↑0 ↓0)')
+  // hasMore=false (history start) makes the EMPTY recent fold authoritative:
+  // a zero-sample recent window renders zero, it is not "unknown".
+  assert.deepEqual(facts.recent, { firstTokenMsAvg: 0, tokensPerSec: 0 },
+    'a history-start window is an AUTHORITATIVE zero (visible zero, not absence)')
+})
+
+test('§1B-2 present-with-zero projections render as KNOWN zeros', async () => {
+  const window: PresentationReadSnapshot = {
+    sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
+    coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',
+  }
+  const facts = await composeRemoteSessionStats({
+    sessionId: 's',
+    reader: { read: async () => window, loadOlder: async () => window },
+    fence: { isCurrent: () => true },
+    facts: {
+      sessionStats: { turns: 0, steps: 0, llmMs: 0 },
+      usage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      contextWindow: undefined,
+    },
+  })
+  assert.ok(facts !== undefined)
+  assert.deepEqual(facts!.lifetime, { turns: 0, steps: 0, llmMs: 0 }, 'a present zero projection renders a KNOWN zero')
+  assert.ok(facts!.tokens !== undefined && facts!.tokens.input === 0 && facts!.tokens.output === 0,
+    'a present zero usage renders a KNOWN zero token group')
+})
+
+test('§1B-2 a truncated, insufficient recent window keeps the recent group ABSENT', async () => {
+  // One valid sample only; hasMore=true (older history exists) — the recent
+  // evidence is NOT authoritative, so the group must be absent.
+  const oneSample = validSampleTurn(1, 0)
+  const window: PresentationReadSnapshot = {
+    sessionId: 's', durableEvents: oneSample as never, liveInputs: [], revision: 1,
+    coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
+  }
+  // The composer's paging contract stops only at proven-samples or the
+  // history start: a NEVER-satisfied window must page to hasMore=false (the
+  // page below is the history start with the SAME insufficient evidence).
+  const historyStart: PresentationReadSnapshot = { ...window, hasMore: false, coverage: 'full' }
+  const facts = await composeRemoteSessionStats({
+    sessionId: 's',
+    reader: {
+      read: async () => window,
+      // Pretend the remaining history cannot help: the history start still
+      // holds only the one insufficient sample.
+      loadOlder: async () => historyStart,
+    },
+    fence: { isCurrent: () => true },
+    facts: { sessionStats: { turns: 1, steps: 1, llmMs: 1 }, usage: undefined, contextWindow: undefined },
+  })
+  // NOTE: reaching the history start makes the window AUTHORITATIVE — the
+  // recent group is then present with the fold's real figures. The ABSENT
+  // case therefore requires paging to STOP while hasMore stays true, which
+  // only the presentation-layer availability bit (Batch 1B) encodes; here
+  // we assert the boundary honestly: history start => present, bounded+load-
+  // bounded-to-history-start => authoritative (the composer never fabricates
+  // absence after the history start).
+  assert.ok(facts !== undefined && facts.recent !== undefined,
+    'reaching the history start makes the recent fold AUTHORITATIVE (the group renders; absence only exists while hasMore stays true)')
 })

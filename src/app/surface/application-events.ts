@@ -206,6 +206,10 @@ export interface ApplicationEventsDeps {
       onAdopted: () => void,
       pickerIdentity: RewindNavigationIdentity,
     ): Promise<SessionForkOutcome>
+    /** PR5 v2 §3C: whether one navigation identity (the picker's, or the
+     *  runtime-minted post-adoption identity carried on a success outcome)
+     *  is still the live navigation subject. */
+    isNavigationCurrent(expected: RewindNavigationIdentity): boolean
   }
   /** The subagent viewer's Host delivery ports. */
   readonly subagentDelivery: ApplicationEventsSubagentDelivery
@@ -305,6 +309,13 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             if (result === undefined) return
             const { outcome, candidate } = result
             if (outcome.kind === 'success' && adopted) {
+              // §3C: the success toast belongs to the identity THIS
+              // operation's own adoption minted (the runtime's
+              // post-adoption navigation). A later external navigation
+              // (including A→B→A) must not receive the stale toast; the
+              // operation's own adoption is not supersession.
+              const owned = outcome.adoptedNavigation
+              if (owned !== undefined && !deps.rewind.isNavigationCurrent(owned)) return
               if (candidate.hasNonTextContent) {
                 app.notify(`rewound to turn ${candidate.turn}; original non-text content was not re-staged — review it before sending`, 'error')
               } else {
@@ -313,6 +324,9 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
               return
             }
             if (outcome.kind === 'error') {
+              // A pre-adoption failure belongs to the ORIGINAL picker
+              // identity: notify only while that identity is still current.
+              if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return
               if (outcome.text === 'the session changed before fork dispatch') {
                 app.notify('session changed — rewind cancelled', 'info')
               } else {
@@ -321,6 +335,9 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             }
           },
           onError: (error) => {
+            // The owned surface for an operational failure is the picker's
+            // identity (no adoption happened).
+            if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return
             app.notify(safeErrorMessage(error), 'error')
           },
         })

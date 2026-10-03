@@ -3687,6 +3687,19 @@ submission serializer, command runtime, tool cards, rewind, images, local
 shell, permission cycle and secondary surfaces are later M3-4 PRs (PR2+
 consume the seam without re-deciding runtime/Connection/owner composition).
 
+### PR5 supplement supersession record
+
+`temp/m3/pr5-command-fix.md` remains investigation history (the self-claim
+regression, the running+steer reproduction, the attachment sibling impact,
+the `/quit` drift, the real source-to-sink standard and the negative
+controls). Its central replacement rule — "use the current
+`hostCatalogResolves()` as the Host-name authority" — is SUPERSEDED by the
+v2 plan: on Direct the registry itself carries this TUI's compatibility
+mirrors, so raw membership (and the pre-v2 `hostCatalogResolves`
+implementation) is not Host origin. The v2 §1C origin-aware authority
+(mirror provenance + the origin map + `hostOriginClaimOf` + the one
+classifier) is the single implementation contract.
+
 ### PR5 — Main TUI Remote Closure & Exit (COMPLETE)
 
 PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
@@ -3749,6 +3762,79 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   added — a bypass a production user can never reach is not L6 evidence,
   and a reconnect is a DIFFERENT currentness axis (transport identity, not
   subject replacement).
+- **Rewind final-notification currentness** (PR5 v2 §3C, plan-owner
+  amendment 2026-10-03): the pre-adoption error/onError publication is
+  fenced by the ORIGINAL picker identity; the successful settlement is
+  fenced by `adoptedNavigation` — the navigation identity minted by THIS
+  runtime at the rewind's own adoption commit (never the pre-adoption
+  picker identity, which the operation's own adoption legitimately
+  invalidates). Evidence: the mounted positive control (`runner-remote-
+  rewind` §7.4-9 — the success toast still renders), the mint/consume
+  structural guards (mint only after the adoption commit; the success gate
+  consumes the owned identity; the error gates consume the picker
+  identity). The mounted STALE negative (an external navigation between
+  the adoption commit and the final settlement) is
+  **N/A_WITH_REASON (topology-unreachable)** under the current topology —
+  NOT a FIFO-waiver extension. Topology enumeration — every production
+  entry that advances the navigation identity:
+  1. `switchSession` (from the `/sessions` picker Enter and `/resume`):
+     submit-driven; the rewind settlement holds the single submit FIFO
+     turn, so a second submit queues.
+  2. `transitionTo` (from `/new`): a submit-driven command handler; the
+     same FIFO serialization.
+  3. `forkSession` (from `/fork`, and the rewind's own): submit-driven
+     AND serialized behind the same session-transition gate / operation
+     barrier as every ordinary switch (`switchSession`'s own contract:
+     the gate means two transitions never interleave).
+  No entry can execute between the rewind's adoption commit and its final
+  settlement; the serialization owners are the single submit FIFO
+  (entries 1–2) and the session-transition gate + operation barrier
+  (entry 3). REQUALIFICATION TRIGGER: any future change that makes a
+  navigation entry independently reachable in that window (a non-submit
+  switch surface, a background/server-driven switch, an external
+  navigation event) voids this N/A and requires the mounted stale race.
+  The production fence stays in place regardless — a topology change
+  re-exposes nothing unprotected.
+- **Origin-aware command authority** (PR5 v2 §1C): a successful Direct
+  Host-registry registration of a TUI definition is a COMPATIBILITY
+  MIRROR, never Host origin — `registerTuiCommands` tracks the mirrors in
+  a provenance set (removed before disposal so the synchronous
+  commands/change refresh cannot misread a dying mirror), the genuine
+  Host-origin descriptor map subtracts them (the Remote generation-fenced
+  snapshot is mirror-free by construction), `hostOriginClaimOf` is the one
+  line-level Host-origin primitive, `hostClaimOf` stays the advertised
+  union view (completion/advertised-miss only), and `hostCatalogResolves`
+  answers from the origin map (raw registry membership is not Host
+  origin). ONE classifier (`classifyCommandLine`: host-command |
+  client-command(tui|extension) | skill-invocation |
+  ordinary-submission+hostNameReserved) drives the sibling gates (busy
+  delivery, early echo, attachment policy, the command-plane route, the
+  collision decision, the deferred re-checks); `LOCAL_COMMANDS` is the
+  static policy surface, not line ownership. Qualification: a REAL Direct
+  source-to-sink regression (`direct-command-origin` — the production
+  registerTuiCommands mirrors /status into the Host registry, the mirror
+  is NOT origin, and running+steer still reaches the handler, never the
+  inbox) plus the Remote running+steer regressions from the earlier
+  supplement closure.
+- **Remote `/yolo` semantic reachability** (PR5 v2 §1D): the Direct-Agent
+  prerequisite is removed from the transport-neutral permission apply —
+  the mounted L6 proves live-session `/yolo` → ConfigPort → the official
+  /permission path → the committed `permissions` projection → the footer
+  row, with exactly ONE official command row. The independent
+  approval-policy override remains INTENTIONAL_UNSUPPORTED (the settings
+  row stays hidden/disabled; no carrier was invented).
+- **`/status` unknown-vs-zero truthfulness** (PR5 v2 §1B-2):
+  `SessionStatsFacts` carries the stats as AUTHORITY GROUPS (lifetime ←
+  the sessionStats projection, tokens ← tokenUsage, recent ← the bounded
+  window, contextWindow); the Remote composer keeps an absent source an
+  ABSENT group (no `?? 0` fabrication), an authoritative zero renders as
+  a visible zero, and the `/status` Stats row renders known groups only
+  (no known group reads `unmeasured`). Direct maps its complete fold onto
+  a fully-populated facts value — no Direct display regression.
+- **Ctrl+R Current-session identity** (PR5 v2 §2.12): the identity getter
+  is the SELECTED OWNERSHIP authority (`ownership.currentSessionId()`),
+  never `agentNow()` — a Remote session's history search follows the
+  transport-neutral subject.
 - **Selected-runtime teardown proof** (plan §3.9): with a pending main-path
   READ (a parked `/status` stats read) and, separately, a pending WRITE (a
   parked serializer), the runner fiber disposal is OBSERVED through real
@@ -3802,6 +3888,13 @@ Every original M3-4 acceptance item, with its disposition:
 | permission cycle / tool cards | DONE_WITH_EVIDENCE | PR4 L6 (reused) |
 | Client command reachability under running/steer | DONE_WITH_EVIDENCE | PR5 supplement L6 (`runner-remote-command-plane`) |
 | `/exit` ↔ `/quit` sessionless parity | DONE_WITH_EVIDENCE | PR5 supplement (policy + guard test) |
+| Command Host-origin authority (mirror ≠ origin) | DONE_WITH_EVIDENCE | PR5 v2 §1C (origin map + classifier + Direct source-to-sink + guards) |
+| Host descriptor authority under collisions | DONE_WITH_EVIDENCE | PR5 v2 §1C (the origin map keeps the winning HOST descriptor; Client synthesis cannot overwrite it — guarded) |
+| Remote `/yolo` semantic reachability | DONE_WITH_EVIDENCE | PR5 v2 §1D (mounted L6: ConfigPort → official /permission → projection → footer) |
+| Remote `/status` unknown-vs-zero | DONE_WITH_EVIDENCE | PR5 v2 §1B-2 (SessionStatsFacts; composer regressions) |
+| `/rewind` final notification currentness | DONE_WITH_EVIDENCE (N/A_WITH_REASON for the stale mounted negative — topology enumeration in the PR5 section) | PR5 v2 §3C (owned-adoption identity + mounted positive + mint/consume guards) |
+| Ctrl+R Remote Session identity | DONE_WITH_EVIDENCE | PR5 v2 §2.12 (selected-ownership seam + guard) |
+| Task Center Remote semantics | DEFERRED_WITH_OWNER = M3-5 | v2 §2.13 (not touched by PR5; `/tasks` not used as a routing proof) |
 | Selected-runtime teardown | DONE_WITH_EVIDENCE | PR5 (`runner-remote-races` §3.9) |
 | Remote sessionless `/model` default write | INTENTIONAL_UNSUPPORTED_WITH_EXPLICIT_UX | adapter `unsupported`; docs corrected (entry-contract §2.2) |
 | Old giant PR5 race cross-product | SUPERSEDED | four representative classes + currentness invariants (PR2–PR5) |
@@ -3867,6 +3960,11 @@ binding scope recorded in the qualification note above (mounted
 counterpart unreachable by the single submit-FIFO product invariant; the
 waiver does not extend to detached `/model`, reconnect or teardown, and
 auto-expires if a non-submit navigation path appears). With both decisions
-recorded, no required row remains PARTIAL. The next stage is M3-5
+recorded, no required row remains PARTIAL; the v2 additions
+(origin-aware authority, `/yolo`, `/status` unknown-vs-zero, rewind final
+currentness with the plan-owner N/A amendment, Ctrl+R identity) are
+recorded above with their evidence. This branch's state satisfies the
+closure criteria; the `M3-4 = DONE` line becomes authoritative on the
+MERGED HEAD (v2 §19), not on this branch alone. The next stage is M3-5
 (secondary surfaces); no automatic "PR6" is created for historical
 unchecked checklist items.

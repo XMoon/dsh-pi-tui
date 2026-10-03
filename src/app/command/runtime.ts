@@ -30,7 +30,7 @@ import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { SkillCatalogCapability, SkillDefinitionResult } from '../../runtime/catalog-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../../skill-catalog-refresh.ts'
 import type { HumanSkillCatalog } from '../../skill-catalog.ts'
-import type { SessionStats } from '../../stats.ts'
+import type { SessionStats, SessionStatsFacts } from '../../stats.ts'
 import type { SurfaceCommandSummary } from '../../surface-catalog.ts'
 import type { LiveSessionScope, SessionScope, SessionScopeAuthority } from '../session/scope.ts'
 
@@ -69,7 +69,7 @@ export interface CommandRuntimeSurface {
    * for the recent performance window — never a synchronous facade that
    * weakens the semantics.
    */
-  sessionStats(sessionId: string, signal?: AbortSignal): Promise<SessionStats | undefined>
+  sessionStats(sessionId: string, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
   /** The live owner's last assistant text, or `undefined` ('' = the
    *  message carries no text; undefined = no assistant message yet). Async
    *  since PR4 §3.6: the Remote branch pages loadOlder until the newest
@@ -121,7 +121,7 @@ export interface CommandRuntime {
     readonly cwd: string
   }
   currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
-  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
+  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
   lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   /** Refresh the LIVE Session's scoped catalog. The scope is validated at the
    *  SYNC admission (the exact owner is captured there) and again after the

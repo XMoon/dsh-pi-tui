@@ -77,6 +77,86 @@ export interface SessionStats {
   cacheWriteTokens: number
 }
 
+/**
+ * PR5 v2 §1B-2: the authority-grouped facts of one session's stats. Unlike
+ * the numeric compatibility type {@link SessionStats}, every group here can
+ * be ABSENT — an absent group means its authoritative source cannot answer
+ * (a Remote projection gap), never a zero stand-in. An authoritative zero
+ * stays a visible zero.
+ */
+export interface SessionStatsFacts {
+  /** Lifetime counters (the official `sessionStats` projection). */
+  readonly lifetime?: {
+    readonly turns?: number
+    readonly steps?: number
+    readonly llmMs?: number
+  }
+  /** Cumulative token totals (the official `tokenUsage` projection). */
+  readonly tokens?: {
+    readonly input: number
+    readonly output: number
+    readonly cacheRead: number
+    readonly cacheWrite: number
+    readonly cacheHitPct: number
+  }
+  /** The recent performance window — present only when the evidence is
+   *  authoritative (see the presentation-owned availability). */
+  readonly recent?: {
+    readonly firstTokenMsAvg: number
+    readonly tokensPerSec: number
+  }
+  /** The route's advertised context window, when known. */
+  readonly contextWindow?: number
+}
+
+/** Project a COMPLETE (Direct) fold onto the facts type: every group is
+ *  present — a full-log fold is authoritative by construction. */
+export function sessionStatsFactsOf(
+  stats: SessionStats,
+  options: { readonly recentAvailable?: boolean } = {},
+): SessionStatsFacts {
+  return {
+    lifetime: { turns: stats.turns, steps: stats.steps, llmMs: stats.llmMs },
+    tokens: {
+      input: stats.inputTokens,
+      output: stats.outputTokens,
+      cacheRead: stats.cacheReadTokens,
+      cacheWrite: stats.cacheWriteTokens,
+      cacheHitPct: stats.cacheHitPct,
+    },
+    ...(options.recentAvailable === false
+      ? {}
+      : { recent: { firstTokenMsAvg: stats.firstTokenMsAvg, tokensPerSec: stats.tokensPerSec } }),
+    ...(stats.contextWindow === undefined ? {} : { contextWindow: stats.contextWindow }),
+  }
+}
+
+/** Render the /status Stats row from the AUTHORITY-GROUPED facts (PR5 v2
+ *  §1B-2): known groups render; absent groups are omitted; NO known group
+ *  reads `unmeasured`. An authoritative zero still renders as a zero. */
+export function formatStatsFacts(facts: SessionStatsFacts): string {
+  const parts: string[] = []
+  const lifetime = facts.lifetime
+  if (lifetime !== undefined) {
+    const lifetimeParts: string[] = []
+    if (lifetime.turns !== undefined) lifetimeParts.push(`t${lifetime.turns}`)
+    if (lifetime.steps !== undefined) lifetimeParts.push(`s${lifetime.steps}`)
+    if (lifetime.llmMs !== undefined) lifetimeParts.push(`LLM ${formatDuration(lifetime.llmMs)}`)
+    if (lifetimeParts.length > 0) parts.push(lifetimeParts.join('/'))
+  }
+  const tokens = facts.tokens
+  if (tokens !== undefined) {
+    parts.push(`↑${formatTokens(tokens.input)} ↓${formatTokens(tokens.output)}`
+      + (tokens.cacheRead > 0 || tokens.cacheWrite > 0 ? ` CH${tokens.cacheHitPct.toFixed(1)}%` : ''))
+  }
+  const recent = facts.recent
+  if (recent !== undefined) {
+    parts.push(`TTFB ${formatSeconds(recent.firstTokenMsAvg)} · ${recent.tokensPerSec} tok/s`)
+  }
+  if (parts.length === 0) return 'unmeasured'
+  return parts.join(' | ')
+}
+
 const EMPTY: SessionStats = {
   turns: 0,
   steps: 0,

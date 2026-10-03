@@ -70,7 +70,7 @@ import { parseGitAttributionMode, type GitAttributionState } from '../git-attrib
 import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
-import { computeStats, type SessionStats } from '../stats.ts'
+import { computeStats, type SessionStats, type SessionStatsFacts, sessionStatsFactsOf } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
@@ -1648,7 +1648,7 @@ export function applyRunnerWithRuntime(
           return commands.list(agentNow()).map(commandSummaryOf)
         },
         sessionStats: (sessionId, signal) => remoteSources === undefined
-          ? Promise.resolve(directSessionStats(sessionId))
+          ? Promise.resolve(sessionStatsFactsOf(directSessionStats(sessionId)))
           : composeRemoteSessionStats({
             sessionId,
             reader: remoteSources.presentationReader,
@@ -2277,6 +2277,9 @@ export function applyRunnerWithRuntime(
             && remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, identity),
         forkSession: (sourceSessionId, atSeq, onAdopted, pickerIdentity) =>
           sessionRuntime.forkSession(sourceSessionId, atSeq, onAdopted, pickerIdentity),
+        // PR5 v2 §3C: the navigation-currency check the final rewind
+        // settlement consults (the runtime's own identity authority).
+        isNavigationCurrent: (expected) => sessionRuntime.isNavigationCurrent(expected),
       },
       // The subagent viewer's Host delivery ports (the viewer STATE stays in
       // the A5b-1 viewer owner). These are the Direct parent resolution and
@@ -2352,8 +2355,10 @@ export function applyRunnerWithRuntime(
       sessionCwd: () => status.sessionCwd(),
       // The session scope's identity — a GETTER like the cwd: a session switch
       // must make the next Ctrl+R search the NEW session (the panel captures it
-      // once at open time).
-      sessionId: () => agentNow()?.session.id,
+      // once at open time). PR5 v2 §2.12: the SELECTED OWNERSHIP authority is
+      // the source (transport-neutral — a Remote session has no Direct agent),
+      // never `agentNow()`.
+      sessionId: () => ownership.currentSessionId(),
       // M5: a material width change refreshes the command surface (the runner
       // coalesces to its interval).
       onTerminalResize: () => settings.requestFooterCommandRefresh(),

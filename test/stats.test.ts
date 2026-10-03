@@ -9,7 +9,7 @@ import test from 'node:test'
 import { MessageId, type AssistantStreamRecord, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { computeStats, formatStats, StatsFolder, type SessionStats } from '../src/stats.ts'
+import { computeStats, formatStats, formatStatsFacts, sessionStatsFactsOf, StatsFolder, type SessionStats } from '../src/stats.ts'
 import { StepUsageAccumulator } from '../src/token-usage.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
@@ -2463,4 +2463,40 @@ test('invalidating one of the latest five BACKFILLS the next-older candidate', (
   assert.equal(folder.snapshot().tokensPerSec, 280, `the evicted candidate must backfill:\n${JSON.stringify(folder.snapshot())}`)
   assert.deepEqual(folder.snapshot(), oneShot)
   assert.equal(folder.snapshot().outputTokens, 1_400, 'the accounting applies the authoritative zero')
+})
+
+test('PR5 §1B-2 formatStatsFacts: known groups render; absent groups omit; none -> unmeasured', () => {
+  const full: import('../src/stats.ts').SessionStatsFacts = {
+    lifetime: { turns: 12, steps: 38, llmMs: 120000 },
+    tokens: { input: 2579, output: 5507, cacheRead: 20000, cacheWrite: 0, cacheHitPct: 88.6 },
+    recent: { firstTokenMsAvg: 2000, tokensPerSec: 40 },
+  }
+  const fullLine = formatStatsFacts(full)
+  assert.ok(fullLine.includes('t12') && fullLine.includes('s38'), 'lifetime renders')
+  assert.ok(fullLine.includes('↑2.6k') && fullLine.includes('↓5.5k'), 'tokens render')
+  assert.ok(fullLine.includes('TTFB 2s') && fullLine.includes('40 tok/s'), 'recent renders')
+
+  const lifetimeOnly: import('../src/stats.ts').SessionStatsFacts = { lifetime: { llmMs: 120000 } }
+  const lifetimeLine = formatStatsFacts(lifetimeOnly)
+  assert.ok(lifetimeLine.includes('LLM 2m') && !lifetimeLine.includes('TTFB') && !lifetimeLine.includes('↑'),
+    'absent token/recent groups are OMITTED (never ↑0 ↓0 / TTFB 0s stand-ins)')
+
+  assert.equal(formatStatsFacts({}), 'unmeasured', 'no known group reads unmeasured')
+
+  const zeros: import('../src/stats.ts').SessionStatsFacts = {
+    lifetime: { turns: 0, steps: 0, llmMs: 0 },
+    recent: { firstTokenMsAvg: 0, tokensPerSec: 0 },
+  }
+  const zeroLine = formatStatsFacts(zeros)
+  assert.ok(zeroLine.includes('t0') && zeroLine.includes('TTFB 0s'),
+    'authoritative ZEROS render as visible zeros (not absence)')
+})
+
+test('PR5 §1B-2 sessionStatsFactsOf maps a complete Direct fold fully; recent can be withheld', () => {
+  const stats = computeStats([])
+  const full = sessionStatsFactsOf(stats)
+  assert.ok(full.lifetime !== undefined && full.tokens !== undefined && full.recent !== undefined,
+    'a complete-log fold is authoritative in every group')
+  const withoutRecent = sessionStatsFactsOf(stats, { recentAvailable: false })
+  assert.equal(withoutRecent.recent, undefined, 'an withheld recent window omits the group')
 })
