@@ -324,10 +324,16 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
               return
             }
             if (outcome.kind === 'error') {
-              // A pre-adoption failure belongs to the ORIGINAL picker
-              // identity: notify only while that identity is still current.
-              if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return
-              if (outcome.text === 'the session changed before fork dispatch') {
+              // PR5 v2 §3C (plan-owner amendment): each error settles
+              // against ITS OWN notification fence. A runtime-DETECTED
+              // supersession carries the live identity observed at the
+              // detection moment (`notificationNavigation`) — A → B → A
+              // lands on A/N+2 and the cancellation is publishable while
+              // THAT identity is current; any later advance suppresses it.
+              // Every other pre-adoption failure belongs to the ORIGINAL
+              // picker identity. No error-text string matching.
+              if (!deps.rewind.isNavigationCurrent(outcome.notificationNavigation)) return
+              if (outcome.reason === 'navigation-changed-before-dispatch') {
                 app.notify('session changed — rewind cancelled', 'info')
               } else {
                 app.notify(outcome.text, 'error')
@@ -335,9 +341,13 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             }
           },
           onError: (error) => {
-            // The owned surface for an operational failure is the picker's
-            // identity (no adoption happened).
-            if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return
+            // An operational failure escaped the outcome contract entirely
+            // (a throw past forkSession's never-throws boundary). There is
+            // no trustworthy identity to fence with — the picker-open
+            // identity is necessarily stale after any admission (the
+            // d529d464 lesson) — so the failure is shown: hiding a
+            // contract-violating throw behind a stale fence would silence
+            // a programming error.
             app.notify(safeErrorMessage(error), 'error')
           },
         })

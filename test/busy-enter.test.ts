@@ -128,11 +128,11 @@ function fakeTuiSettings(busyEnter: string, localShellSandbox = 'bypass'): { val
 
 /** A fake commands service recording the registered definitions. */
 function fakeCommands() {
-  const defs: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }[] = []
+  const defs: { name: string; handler?: unknown; definitionId?: string; input?: { hint: string; attachments?: boolean } }[] = []
   return {
     defs,
     service: {
-      register: (def: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }): (() => void) => {
+      register: (def: { name: string; handler?: unknown; definitionId?: string; input?: { hint: string; attachments?: boolean } }): (() => void) => {
         defs.push(def)
         return () => {}
       },
@@ -145,6 +145,10 @@ function fakeCommands() {
       list: () => defs.map(def => ({
         name: def.name,
         description: 'a command',
+        // The official descriptor carries the registration's own
+        // `definitionId` through (PR5 v2 §1C: the origin derivation compares
+        // the effective winner's id against this surface's stamped mirrors).
+        ...(def.definitionId === undefined ? {} : { definitionId: def.definitionId }),
         ...(def.input === undefined ? {} : { input: def.input }),
       })),
       find: () => undefined,
@@ -280,8 +284,63 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
+  return { vt, app, ctx, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
 }
+
+test('PR5 §1C-3 (R6-1): only the winner stamped with THIS surface\'s mirror id is subtracted', () => {
+  const t = setup()
+  try {
+    // The Direct compatibility mirror for /status carries the stamped
+    // provenance id and is therefore NOT Host origin.
+    const mirror = t.commands.defs.find(def => def.name === 'status')
+    assert.ok(mirror?.definitionId !== undefined,
+      'the Direct Host mirror carries the stamped provenance id')
+    assert.equal(t.installed.hostCatalogResolves('status'), false,
+      'a mirrored name is not Host origin')
+    assert.equal(t.installed.hostOriginClaimOf({ name: 'status' }), undefined,
+      'no Host-origin line claim for a mirrored name')
+    // A GENUINE Host command now takes the same name (its own identity — no
+    // stamped id). The effective winner is genuine Host authority: a
+    // name-based subtraction would have wrongly removed it (the R6-1 bug).
+    t.commands.defs.push({
+      name: 'status',
+      handler: () => ({ kind: 'success' }),
+      input: { hint: '<x>', attachments: true },
+    })
+    t.ctx.emit('commands/change')
+    assert.equal(t.installed.hostCatalogResolves('status'), true,
+      'the genuine Host winner IS Host origin — a name alone never subtracts it')
+    assert.deepEqual(t.installed.hostOriginClaimOf({ name: 'status' }), { claimed: true, attachments: true },
+      'the origin claim reads the WINNING Host descriptor, never the mirror underneath')
+  } finally {
+    t.app.stop()
+  }
+})
+
+test('PR5 §1C-3 (R6-2/R6-3): the sessionless origin derives from the PURE Host view; the advertised union may differ', () => {
+  const t = setup()
+  try {
+    // A genuine Host /export declares attachments; the TUI's own Client
+    // definition of the same name declares none. In the OLD sessionless
+    // merge the Client definition overwrote the Host descriptor.
+    t.commands.defs.push({
+      name: 'export',
+      handler: () => ({ kind: 'success' }),
+      input: { hint: '<path>', attachments: true },
+    })
+    t.ctx.emit('commands/change')
+    // The ADVERTISED union (completion/advertised-miss semantics) still lets
+    // the Client definition overwrite the Host one — this is exactly why the
+    // sibling gates had to move off it.
+    assert.deepEqual(t.installed.hostClaimOf({ name: 'export' }), { claimed: true, attachments: false },
+      'the advertised union is contaminated by the same-name Client descriptor')
+    // The origin view keeps the genuine Host declaration.
+    assert.deepEqual(t.installed.hostOriginClaimOf({ name: 'export' }), { claimed: true, attachments: true },
+      'the origin view keeps the WINNING Host attachment declaration (never Client synthesis)')
+  } finally {
+    t.app.stop()
+  }
+})
 
 test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
   // A future TUI command added to commands.ts but forgotten in the local

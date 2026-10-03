@@ -108,9 +108,37 @@ export interface SessionRuntimeDeps {
  * command layer renders it), but defined here so `app/session` never imports
  * the Host command package.
  */
+/**
+ * PR5 v2 §3C (plan-owner amendment): the machine-readable reason of one
+ * fork error. REASON controls the user-facing wording; the separate
+ * `notificationNavigation` controls currentness — never the error text.
+ */
+export type SessionForkErrorReason =
+  | 'navigation-changed-before-dispatch'
+  | 'host-refused'
+  | 'adoption-failed'
+  | 'fork-failed'
 export type SessionForkOutcome =
   | { readonly kind: 'success'; readonly text?: string; readonly adoptedNavigation?: RewindNavigationIdentity }
-  | { readonly kind: 'error'; readonly text: string }
+  | {
+    readonly kind: 'error'
+    readonly text: string
+    readonly reason: SessionForkErrorReason
+    /**
+     * The notification fence of THIS error — the navigation identity the
+     * failure was determined against:
+     * - pre-admission stale-picker detection: the LIVE identity observed
+     *   at detection (`before` — A→B→A lands on A/N+2);
+     * - every post-admission failure (host refusal, adoption, lifecycle):
+     *   THIS fork's ADMISSION identity (`expected`) — the failure happened
+     *   inside this operation's claim, and the picker-open identity was
+     *   already invalidated by the claim's own bump (the d529d464 defect:
+     *   it made every admitted error settlement compare against a
+     *   necessarily-stale snapshot).
+     * The presentation publishes only while this identity is current.
+     */
+    readonly notificationNavigation: RewindNavigationIdentity
+  }
 /* PR5 v2 §3C: `adoptedNavigation` (above) is the POST-ADOPTION navigation
  * identity minted by THIS runtime at the adoption commit (the only layer
  * allowed to mint it). The final visible settlement ("rewound to turn N")
@@ -146,13 +174,16 @@ export interface SessionRuntime {
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
   /** Hand the TUI over to another persisted session (never throws). */
   switchSession(sessionId: string): Promise<string | undefined>
-  /** Adopt one forked child inside the gate (plan §4B). */
+  /** Adopt one forked child inside the gate (plan §4B). Resolves to the
+   * navigation identity captured INSIDE the publication commit (PR5 v2
+   * §3C — the caller's final settlement consumes exactly this saved
+   * value), or `undefined` when the child was not adopted. */
   adoptFork(
     handle: SessionHandle,
     expected: RewindNavigationIdentity,
     onAdopted?: () => void,
     pin?: ForkSourcePin,
-  ): Promise<boolean>
+  ): Promise<RewindNavigationIdentity | undefined>
   /** Fork one source Session (capture → pin → Host fork → supersession fence →
    *  adopt/park). Never throws. */
   forkSession(
@@ -631,9 +662,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     onAdopted?: () => void,
     pin?: ForkSourcePin,
     ledger: ForkAdoptionLedger = { released: false },
-  ): Promise<boolean> => {
+    /** The navigation epoch THIS fork claimed at admission (PR5 v2 §3C,
+     *  review R6-5): the publication identity is minted from THIS value,
+     *  never re-read from the shared counter — a concurrent external
+     *  bump (before the gate queues it) must not get absorbed into the
+     *  operation's own identity. */
+    claimedEpoch?: number,
+  ): Promise<RewindNavigationIdentity | undefined> => {
     let adopted = false
     let forkCommitted = false
+    /** PR5 v2 §3C: the navigation identity captured SYNCHRONOUSLY inside
+     *  the publication commit (undefined until the commit happens). */
+    let committedNavigation: RewindNavigationIdentity | undefined
     try {
       await core.gate.run(() => core.barrier.runTransition(async () => {
         if (deps.surface.isSurfaceDisposed() || !isNavigationCurrent(expected)) {
@@ -700,6 +740,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // seamless (plain assignments only).
               const identity = deps.owners.completionIdentity(nextOwner)
               core.setCurrentOwner(nextOwner, nextSessionId)
+              // PR5 v2 §3C (plan-owner amendment): the operation-owned
+              // settlement identity composes the PUBLISHED CHILD session id
+              // with the epoch THIS rewind claimed at its admission bump —
+              // an immutable claim, never a re-read of the shared counter
+              // (a concurrent external bump, e.g. a queued /resume's
+              // synchronous pre-gate advance, must not get absorbed into
+              // this operation's own identity) and never the picker-open
+              // identity (this operation's own adoption legitimately
+              // invalidates that one).
+              committedNavigation = claimedEpoch === undefined
+                ? { sessionId: nextSessionId, navigationEpoch: core.captureNavigationIdentity().navigationEpoch }
+                : { sessionId: nextSessionId, navigationEpoch: claimedEpoch }
               forkCommitted = true
               return identity
             },
@@ -786,7 +838,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       // recalls (post-publication failures are contained, never restored).
       if (!forkCommitted) deps.surface.settlePendingQueueRecalls(false)
     }
-    return adopted
+    return adopted ? committedNavigation : undefined
   }
 
   /**
@@ -810,11 +862,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // Reject an obsolete picker before consuming an epoch. A stale A picker must
     // not invalidate a newer legitimate A fork that already admitted.
     if (deps.surface.isSurfaceDisposed() || !pickerCurrent || expectedSessionId !== sourceSessionId) {
-      return { kind: 'error' as const, text: 'the session changed before fork dispatch' }
+      return {
+        kind: 'error' as const,
+        text: 'the session changed before fork dispatch',
+        reason: 'navigation-changed-before-dispatch' as const,
+        notificationNavigation: before,
+      }
     }
+    const claimedEpoch = core.bumpNavigationEpoch()
     const expected: RewindNavigationIdentity = {
       sessionId: expectedSessionId,
-      navigationEpoch: core.bumpNavigationEpoch(),
+      navigationEpoch: claimedEpoch,
     }
     // Pin the source for the WHOLE fork (from admission, before the child is
     // created): an open/resume of it must wait until the fork settles and, if it
@@ -838,7 +896,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // Client-local pre-dispatch refusal: nothing reached the Host, so there
         // is no child to park and no Host settlement to report.
         if (result.ownership === 'superseded' || !isNavigationCurrent(expected)) return { kind: 'success' as const }
-        return { kind: 'error' as const, text: outcome.message }
+        return { kind: 'error' as const, text: outcome.message, reason: 'host-refused' as const, notificationNavigation: expected }
       }
       if (outcome.kind === 'rejected' || outcome.kind === 'indeterminate' || outcome.kind === 'published-with-error') {
         if (outcome.kind === 'published-with-error') parkForkOwner(outcome.handle)
@@ -848,21 +906,26 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         if (result.ownership === 'superseded' || !isNavigationCurrent(expected)) {
           return { kind: 'success' as const }
         }
-        return { kind: 'error' as const, text: `${outcome.error.message} (${outcome.error.code})` }
+        // The refusal happened INSIDE this fork's claim: its notification
+        // fence is the ADMISSION identity (the claimed epoch), not the
+        // picker-open identity the admission bump already invalidated.
+        return { kind: 'error' as const, text: `${outcome.error.message} (${outcome.error.code})`, reason: 'host-refused' as const, notificationNavigation: expected }
       }
       if (result.ownership === 'superseded' || !isNavigationCurrent(expected)) {
         parkForkOwner(outcome.handle)
         return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}; navigation stayed on the newer session` }
       }
       forkedHandle = outcome.handle
-      const adopted = await adoptFork(outcome.handle, expected, onAdopted, pin, adoption)
-      if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
+      // §3C (review R6-5): adoptFork returns the identity captured INSIDE
+      // the publication commit — the caller consumes exactly that SAVED
+      // value, never a re-capture after the post-commit awaits (source
+      // retirement, child quiescence, catalog refresh) during which an
+      // external navigation may have bumped the epoch.
+      const adoptedNavigation = await adoptFork(outcome.handle, expected, onAdopted, pin, adoption, claimedEpoch)
+      if (adoptedNavigation === undefined) {
+        return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
+      }
       deps.surface.clearUnpinnedDrafts()
-      // §3C: the adoption commit just made THIS child the navigation subject
-      // — mint the post-adoption identity HERE (the navigation owner), so
-      // the caller's final notify can distinguish this operation's own
-      // adoption from a later external navigation.
-      const adoptedNavigation = core.captureNavigationIdentity()
       return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}`, adoptedNavigation }
     } catch (error) {
       // An owner the adoption cleanup already released exactly once must not
@@ -878,9 +941,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         return {
           kind: 'error' as const,
           text: `forked as ${forkedHandle.session.id}, but adopting the child session failed: ${safeErrorMessage(error)}`,
+          reason: 'adoption-failed' as const,
+          // Post-adoption failure: THIS claim's currency is the fence.
+          notificationNavigation: expected,
         }
       }
-      return { kind: 'error' as const, text: `fork failed: ${safeErrorMessage(error)}` }
+      return { kind: 'error' as const, text: `fork failed: ${safeErrorMessage(error)}`, reason: 'fork-failed' as const, notificationNavigation: expected }
     } finally {
       settleFork()
       // If the fork committed, its source retirement owns the pin (released when

@@ -2474,6 +2474,7 @@ test('PR5 §1B-2 formatStatsFacts: known groups render; absent groups omit; none
   const fullLine = formatStatsFacts(full)
   assert.ok(fullLine.includes('t12') && fullLine.includes('s38'), 'lifetime renders')
   assert.ok(fullLine.includes('↑2.6k') && fullLine.includes('↓5.5k'), 'tokens render')
+  assert.ok(fullLine.includes('R20k') && fullLine.includes('CH'), 'Direct cache R/W display parity (review R6-6)')
   assert.ok(fullLine.includes('TTFB 2s') && fullLine.includes('40 tok/s'), 'recent renders')
 
   const lifetimeOnly: import('../src/stats.ts').SessionStatsFacts = { lifetime: { llmMs: 120000 } }

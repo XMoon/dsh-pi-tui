@@ -757,15 +757,24 @@ function makeHarness(home: string, options: {
     discoverModels: async () => [],
     listConfigurableProviders: () => [],
   }
-  const definitions = new Map<string, { name: string; description: string; handler: (...args: never[]) => unknown }>()
+  const definitions = new Map<string, { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }>()
   const commands = {
-    register: (definition: { name: string; description: string; handler: (...args: never[]) => unknown }) => {
+    register: (definition: { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }) => {
       definitions.set(definition.name, definition)
       return () => {
         if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
       }
     },
-    list: () => [...definitions.values()].map(({ name, description }) => ({ name, description })),
+    // The official descriptor carries the registration's own `definitionId`
+    // (PR5 v2 §1C: the Host-origin derivation compares the EFFECTIVE WINNER's
+    // id against this surface's stamped Direct compatibility mirrors —
+    // dropping it here would make every mirror look like a genuine Host
+    // command).
+    list: () => [...definitions.values()].map(({ name, description, definitionId }) => ({
+      name,
+      description,
+      ...definitionId === undefined ? {} : { definitionId },
+    })),
     execute: options.execute ?? (async () => ({ result: { kind: 'success' } })),
     handler: (name: string) => definitions.get(name)?.handler,
   }

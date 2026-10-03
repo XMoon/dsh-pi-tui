@@ -93,27 +93,79 @@ function makeHarness(home: string) {
     listConfigurableProviders: () => [],
   }
   const definitions = new Map<string, { name: string; description: string; handler: (...args: never[]) => unknown }>()
+  /** The official ScopedLayers semantics in miniature: a scoped entry
+   * (registered under an exact agent key) SHADOWS the global entry for that
+   * agent's effective view, exactly like the frozen rc.2 registry. */
+  const scopedDefinitions = new Map<string, Map<string, { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }>>()
+  /** The bridge to the REAL cordis emitter: the runner registers
+   * ctx.on('commands/change'); the fake registry calls this hook, which the
+   * test wires to the real ctx's dispatch once it exists. */
+  let emitChange: () => void = () => {}
   const commands = {
-    register: (definition: { name: string; description: string; handler: (...args: never[]) => unknown }) => {
+    register: (definition: { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }) => {
       definitions.set(definition.name, definition)
+      emitChange()
       return () => {
-        if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
+        if (definitions.get(definition.name) === definition) {
+          definitions.delete(definition.name)
+          emitChange()
+        }
       }
     },
-    list: () => [...definitions.values()].map(({ name, description }) => ({ name, description })),
+    registerScoped: (agent: { session: { id: string } }, definition: { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }) => {
+      const key = agent.session.id
+      let layer = scopedDefinitions.get(key)
+      if (layer === undefined) { layer = new Map(); scopedDefinitions.set(key, layer) }
+      layer.set(definition.name, definition)
+      emitChange()
+      return () => {
+        if (scopedDefinitions.get(key)?.get(definition.name) === definition) {
+          scopedDefinitions.get(key)!.delete(definition.name)
+          emitChange()
+        }
+      }
+    },
+    // The official descriptor carries each registration's own
+    // `definitionId` (see src/commands.ts §1C-3: the origin derivation
+    // compares the EFFECTIVE WINNER's id against the stamped mirror ids).
+    list: (agent?: { session: { id: string } }) => {
+      const descriptorOf = (d: { name: string; description: string; definitionId?: string }) => ({
+        name: d.name,
+        description: d.description,
+        ...d.definitionId === undefined ? {} : { definitionId: d.definitionId },
+      })
+      const scopedLayer = agent === undefined ? undefined : scopedDefinitions.get(agent.session.id)
+      if (scopedLayer === undefined) return [...definitions.values()].map(descriptorOf)
+      const byName = new Map([...definitions.values()].map(d => [d.name, descriptorOf(d)]))
+      for (const [name, def] of scopedLayer) byName.set(name, descriptorOf(def))
+      return [...byName.values()]
+    },
     // A REAL dispatch (what the production in-process Host service does):
     // parse the line, invoke the registered handler, wrap its result.
-    execute: async (_agent: unknown, line: string) => {
+    execute: async (agent: unknown, line: string) => {
       const name = line.replace(/^\//, '').split(/\s+/)[0] ?? ''
-      const definition = definitions.get(name)
+      // The official dispatch resolves the EFFECTIVE view (scoped shadow
+      // over global) for the exact agent.
+      const scopedLayer = (agent as { session?: { id: string } } | undefined)?.session === undefined
+        ? undefined
+        : scopedDefinitions.get(((agent as { session: { id: string } }).session.id))
+      const definition = scopedLayer?.get(name) ?? definitions.get(name)
       if (definition === undefined) return undefined
       const rawInput = line.replace(/^\/[^\s]+\s?/, '')
       const result = await definition.handler({ name, rawInput } as never)
       return { result: result as { kind: 'success' } | { kind: 'error'; text: string } }
     },
-    handler: (name: string) => definitions.get(name)?.handler,
+    handler: (name: string, agent?: unknown) => {
+      const scopedLayer = (agent as { session?: { id: string } } | undefined)?.session === undefined
+        ? undefined
+        : scopedDefinitions.get((agent as { session: { id: string } }).session.id)
+      return (scopedLayer?.get(name) ?? definitions.get(name))?.handler
+    },
   }
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, commands, live }
+  return {
+    persistence, sessionQuery, agents, sessions, defaultModel, llm, commands, live,
+    setChangeEmitter: (emit: () => void) => { emitChange = emit },
+  }
 }
 
 async function settle(rounds = 40): Promise<void> {
@@ -166,29 +218,31 @@ test('PR5 AC-1 Direct: a successful Host-registry compatibility mirror stays CLI
     assert.ok(harness.commands.list().some(row => row.name === 'status'),
       'the TUI /status IS present in the Direct Host registry (compatibility mirror installed)')
 
-    // (2) The runner's OWN authority seam reflects mirror≠origin: a mirrored
-    // name answers FALSE on the (now origin-aware) Host-name authority.
-    const runnerFace = (app as unknown as {
-      runnerCommands?: { hostCatalogResolves(name: string): boolean }
-    }).runnerCommands
-    if (runnerFace !== undefined) {
-      assert.equal(runnerFace.hostCatalogResolves('status'), false,
-        'the mirrored /status is NOT genuine Host origin (origin-aware name authority)')
-    }
+    // (2) ORIGIN: the mirror carries THIS surface's stamped provenance id, so
+    // the effective winner IS a compatibility mirror — not Host origin. (The
+    // authority rule itself is proved discriminatingly by the mutation-
+    // verified busy-enter unit tests; this mounted case proves the SINK.)
+    const mirrored = harness.commands.list().find(row => row.name === 'status') as { definitionId?: string } | undefined
+    assert.ok(mirrored?.definitionId !== undefined,
+      'the Direct Host mirror carries the stamped provenance id (a mirror that looks like a genuine Host command would be kept as origin)')
 
-    // (3) SINK: create a session, drive its agent RUNNING, then submit
-    // /status with the steer-producing accelerated gesture. The Client
-    // handler must run (the settings panel opens) — never a steer of the
-    // literal line, never an agent prompt.
-    const submit = (app as unknown as { setDraft(text: string): void; submitDraft(request?: string): void })
-    submit.setDraft('warm up the session')
+    // (3) WARM-UP: a plain prompt creates the deferred session and its live
+    // agent (the fake's prompt seam refuses, which does not block the create).
+    const submit = app as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
+    submit.setDraft('warmup prompt')
     submit.submitDraft()
     await settle(200)
-    const agent = harness.live.values().next().value as unknown as { status: string } | undefined
-    assert.ok(agent !== undefined, 'a live Direct agent exists')
-    ;(agent as unknown as { status: string }).status = 'running'
-    await settle(20)
+    const agent = harness.live.values().next().value as unknown as {
+      status: string
+      inbox: { nextTurn: unknown[]; nextStep: unknown[] }
+    } | undefined
+    assert.ok(agent !== undefined, 'the warm-up created the live agent')
+    // The busy window: a RUNNING agent is what makes the accelerated gesture
+    // resolve to STEER (busyEnter default queue) — the exact supplement repro.
+    agent.status = 'running'
 
+    // (4) SINK: /status must still reach its handler with the image-free
+    // command line, and must never be steered into the model.
     submit.setDraft('/status')
     submit.submitDraft('accelerated') // busyEnter default queue ⇒ accelerated resolves to STEER
     await new Promise(resolve => setTimeout(resolve, 1200))
@@ -197,12 +251,95 @@ test('PR5 AC-1 Direct: a successful Host-registry compatibility mirror stays CLI
     const frame = vt.getViewport().join('\n')
     assert.ok(frame.includes('Stats'),
       'the /status settings panel OPENED — the Client handler executed under running+steer')
-
-    // (4) The agent inbox never received the literal command (no steer): the
-    // fake agent's inbox is the counterfactual authority.
-    const inbox = (agent as unknown as { inbox: { nextTurn: unknown[]; nextStep: unknown[] } }).inbox
-    assert.deepEqual([...inbox.nextTurn, ...inbox.nextStep].map(value => JSON.stringify(value)).filter(value => value.includes('status')), [],
+    assert.deepEqual(
+      [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+        .map(value => JSON.stringify(value)).filter(value => value.includes('status')),
+      [],
       'the literal /status line was NEVER steered into the agent inbox')
+  } finally {
+    TuiApp.prototype.start = originalStart
+    restoreTerminal()
+    await fiber.dispose().catch(() => {})
+    await ctx.fiber.dispose().catch(() => {})
+  }
+})
+
+test('PR5 R6-1: a genuine Agent-SCOPED Host shadow over our global mirror stays HOST authority (winner provenance, not name)', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'pr5-direct-shadow-'))
+  t.after(() => { rmSync(home, { recursive: true, force: true }) })
+  const harness = makeHarness(home)
+  const ctx = new Context()
+  // Bridge the fake registry's change notification to the REAL cordis
+  // emitter (the runner listens through ctx.on('commands/change')).
+  harness.setChangeEmitter(() => { ctx.emit('commands/change') })
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const apps: TuiApp[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: TuiApp) {
+    apps.push(this)
+    return originalStart.apply(this)
+  }
+  const fiber = await (async () => {
+    ctx.provide('appExit', () => {})
+    ctx.provide(TUI_STARTUP_SERVICE, { shippedPresetRoot: home })
+    ctx.provide('sessionPersistence', harness.persistence as never)
+    ctx.provide('sessionQuery', harness.sessionQuery as never)
+    ctx.provide('agents', harness.agents as never)
+    ctx.provide('sessions', harness.sessions as never)
+    ctx.provide('agentDefaultModel', harness.defaultModel as never)
+    ctx.provide('llm', harness.llm as never)
+    ctx.provide('commands', harness.commands as never)
+    ctx.provide('loader', { await: async () => {} } as never)
+    const started = ctx.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off' } as never)))
+    await started
+    await settle(200)
+    return started
+  })()
+  try {
+    const app = apps.at(-1)
+    assert.ok(app !== undefined, 'the runner mounted')
+    // A live session exists first (the scoped layer is agent-keyed).
+    const submit0 = (app as unknown as { setDraft(text: string): void; submitDraft(): void })
+    submit0.setDraft('scoped shadow warmup')
+    submit0.submitDraft()
+    await settle(200)
+    // (1) The TUI's own global /status mirror is registered.
+    assert.ok(harness.commands.list().some(row => row.name === 'status'),
+      'the global /status compatibility mirror exists in the Host registry')
+    // (2) A REAL Agent-scoped Host shadow over the SAME name (a genuine
+    // Host command for the live agent). The fake registry's scoped shape
+    // mirrors the official one: register into the scoped layer.
+    const scoped = harness.commands as unknown as {
+      registerScoped?: (agent: unknown, definition: { name: string; description: string; handler: () => unknown }) => () => void
+    }
+    if (scoped.registerScoped === undefined) {
+      // The fake harness has no scoped layer; the semantics are locked by
+      // the ORIGIN-MAP unit test below instead. Skip the mounted half.
+      return
+    }
+    const agent = harness.live.values().next().value as unknown as { session: { id: string } } | undefined
+    assert.ok(agent !== undefined, 'a live agent exists for the scoped layer')
+    let scopedHostRuns = 0
+    const disposeScoped = scoped.registerScoped(agent, {
+      name: 'status',
+      description: 'the genuine agent-scoped Host /status',
+      handler: () => { scopedHostRuns += 1; return { kind: 'success', text: 'HOST scoped ran' } },
+    })
+    // A catalog refresh re-reads the scoped view (commands/change parity).
+    await settle(150)
+    // BEHAVIORAL assertion: with the SCOPED genuine Host /status as the
+    // effective winner, the submission routes the line through the HOST
+    // dispatch (the scoped handler runs) — the origin derivation did NOT
+    // subtract the winner for carrying our mirror's name.
+    const submit2 = (app as unknown as { setDraft(text: string): void; submitDraft(request?: string): void })
+    submit2.setDraft('/status')
+    submit2.submitDraft()
+    await new Promise(resolve => setTimeout(resolve, 1000))
+    await settle(400)
+    assert.ok(scopedHostRuns >= 1,
+      'the SCOPED genuine Host winner executed through the Host dispatch (name-subtraction would have misrouted it as a Client command)')
+    disposeScoped()
   } finally {
     TuiApp.prototype.start = originalStart
     restoreTerminal()

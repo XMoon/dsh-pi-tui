@@ -3762,39 +3762,45 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   added — a bypass a production user can never reach is not L6 evidence,
   and a reconnect is a DIFFERENT currentness axis (transport identity, not
   subject replacement).
-- **Rewind final-notification currentness** (PR5 v2 §3C, plan-owner
-  amendment 2026-10-03): the pre-adoption error/onError publication is
-  fenced by the ORIGINAL picker identity; the successful settlement is
-  fenced by `adoptedNavigation` — the navigation identity minted by THIS
-  runtime at the rewind's own adoption commit (never the pre-adoption
-  picker identity, which the operation's own adoption legitimately
-  invalidates). Evidence: the mounted positive control (`runner-remote-
-  rewind` §7.4-9 — the success toast still renders), the mint/consume
-  structural guards (mint only after the adoption commit; the success gate
-  consumes the owned identity; the error gates consume the picker
-  identity). The mounted STALE negative (an external navigation between
-  the adoption commit and the final settlement) is
-  **N/A_WITH_REASON (topology-unreachable)** under the current topology —
-  NOT a FIFO-waiver extension. Topology enumeration — every production
-  entry that advances the navigation identity:
-  1. `switchSession` (from the `/sessions` picker Enter and `/resume`):
-     submit-driven; the rewind settlement holds the single submit FIFO
-     turn, so a second submit queues.
-  2. `transitionTo` (from `/new`): a submit-driven command handler; the
-     same FIFO serialization.
-  3. `forkSession` (from `/fork`, and the rewind's own): submit-driven
-     AND serialized behind the same session-transition gate / operation
-     barrier as every ordinary switch (`switchSession`'s own contract:
-     the gate means two transitions never interleave).
-  No entry can execute between the rewind's adoption commit and its final
-  settlement; the serialization owners are the single submit FIFO
-  (entries 1–2) and the session-transition gate + operation barrier
-  (entry 3). REQUALIFICATION TRIGGER: any future change that makes a
-  navigation entry independently reachable in that window (a non-submit
-  switch surface, a background/server-driven switch, an external
-  navigation event) voids this N/A and requires the mounted stale race.
-  The production fence stays in place regardless — a topology change
-  re-exposes nothing unprotected.
+- **Rewind final-notification currentness** (PR5 v2 §3C, corrected per
+  review R6-5 and the plan-owner amendment): FOUR navigation identities,
+  each owning exactly its settlement class —
+  1. PICKER IDENTITY (captured at picker open): owns picker/selection
+     admission staleness only — never a settlement fence.
+  2. FORK CLAIMED NAVIGATION (`forkSession` admission's
+     `bumpNavigationEpoch()`): THIS rewind's immutable claim.
+  3. ADOPTED NAVIGATION (composed at the publication commit from the
+     PUBLISHED child session id + the CLAIMED epoch — never a shared-
+     counter re-read, which a queued /resume's synchronous pre-gate bump
+     would have absorbed): owns the successful post-adoption settlement
+     ("rewound to turn N").
+  4. ERROR NOTIFICATION NAVIGATION (REQUIRED on EVERY error outcome, with
+     a structured reason controlling the wording — never the error text):
+     the pre-admission stale detection carries the LIVE identity observed
+     at detection (A→B→A lands on A/N+2; a later N+3 advance suppresses
+     it); EVERY post-admission failure (host refusal, adoption, lifecycle)
+     carries the ADMISSION identity — the claim's own currency. The
+     d529d464 defect this round found and fixed: the picker-open identity
+     was extended into the publication authority for admitted
+     settlements, but the admission bump itself invalidates it, so EVERY
+     admitted error was being suppressed.
+  Evidence: the mounted positive controls (`runner-remote-rewind` §7.4-9
+  and the navigation suite's success/fork-rejection/cancellation cases —
+  including the two pre-existing d529d464 regressions this round found
+  and fixed: every rewind ERROR settlement was being suppressed because
+  the gate compared against the picker-open identity the admission bump
+  had already invalidated); the MOUNTED STALE NEGATIVE
+  (`runner-session-navigation` "a rewind settling after an EXTERNAL
+  navigation never notifies"): the rewind parks in its source-retirement
+  drain (post-commit, pre-settlement — a real fixture control point), a
+  REAL /resume submit advances the navigation epoch (synchronously,
+  before its switch queues behind the transition gate), and the released
+  rewind settlement does NOT notify — the claimed-epoch identity was
+  superseded; the consumer-level N+3 suppression sibling; the mint/
+  consume structural guards. Topology facts (corrected): the rewind
+  picker callback is a DETACHED owned task (it does NOT hold the submit
+  FIFO), `/resume`'s epoch advance happens synchronously BEFORE the
+  transition gate queues it — the stale race is REACHABLE and fenced.
 - **Origin-aware command authority** (PR5 v2 §1C): a successful Direct
   Host-registry registration of a TUI definition is a COMPATIBILITY
   MIRROR, never Host origin — `registerTuiCommands` tracks the mirrors in
