@@ -4080,6 +4080,11 @@ export class TuiApp {
   private exitConfirmTimer: NodeJS.Timeout | undefined
   /** Session workspace root for path relativization (Web relativizeToCwd). */
   private workspaceRoot: string | undefined
+  /** The session id the extension snapshot last mirrored through the welcome
+   *  card — the SUBJECT-SWITCH detector (a switch must clear subject fields the
+   *  identity commit cannot answer, instead of leaving the previous session's
+   *  values behind). */
+  private extensionMirrorSessionId: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
   private readonly present: ToolPresenter | undefined
   /**
@@ -12943,16 +12948,30 @@ export class TuiApp {
     this.welcomeCard.setFacts(facts)
     this.rebuildMessages()
     // Session identity mirrors into the extension snapshot (plan §7.2).
-    // ALWAYS written, like `permission` above: the snapshot merge is PER FIELD,
-    // so an OMITTED model kept the previous session's value alive — a switch to
+    // ALWAYS written, like `permission` below: the snapshot merge is PER FIELD,
+    // so an OMITTED field kept the previous session's value alive — a switch to
     // a session whose model projection is unavailable (or a known -> missing
     // transition) reported the OLD model as the new session's fact. An explicit
     // `undefined` clears it; an unavailable fact must never masquerade as a
-    // stale one.
+    // stale one. `cwd` is authoritative HERE (the identity commit carries the
+    // session's own workspace), so it is written unconditionally too.
+    // A REAL subject switch (a previous identity exists and differs). The FIRST
+    // identity commit is not a switch: clearing there would drop the branch the
+    // status sync may already have written for this same session.
+    const switchedSubject = this.extensionMirrorSessionId !== undefined
+      && this.extensionMirrorSessionId !== facts.sessionId
+    this.extensionMirrorSessionId = facts.sessionId
     this.extensionHost?.updateSession({
       sessionId: facts.sessionId,
       workspaceRoot: facts.cwd,
+      cwd: facts.cwd,
       model: facts.model === '' ? undefined : facts.model,
+      // `branch` is NOT answered here. The welcome card is also refreshed on
+      // ordinary `/model` // `/preset` updates, where an unconditional clear
+      // would flap a live fact; only a SUBJECT SWITCH proves the previous
+      // session's branch must not survive, and the following status sync then
+      // writes the real value for the new subject.
+      ...switchedSubject ? { branch: undefined } : {},
     })
   }
 
@@ -17035,11 +17054,13 @@ export class TuiApp {
       busy: this.busy,
       turns: this.status.turns,
       steps: this.status.steps,
-      // ALWAYS written (the `permission` rule below): an omitted model keeps
-      // the stale value across a known -> missing transition.
+      // ALWAYS written (the `permission` rule below): an omitted field keeps
+      // the stale value across a known -> missing transition. `cwd` is a
+      // required snapshot field, so its canonical "unknown" clear is the empty
+      // string; `branch` is optional and clears with an explicit `undefined`.
       model: this.status.model === '' ? undefined : this.status.model,
-      ...this.status.cwd === '' ? {} : { cwd: this.status.cwd },
-      ...this.status.branch === '' ? {} : { branch: this.status.branch },
+      cwd: this.status.cwd,
+      branch: this.status.branch === '' ? undefined : this.status.branch,
       // ALWAYS written (like todoSummary): the extension snapshot merge
       // is per-field monotonic, so an OMITTED permission would keep the
       // stale value — an explicit undefined clears it.
