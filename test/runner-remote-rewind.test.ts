@@ -332,3 +332,118 @@ test('L6 §7.4-15 stale rewind: select A\'s old turn → switch away mid-loadThr
     'the stale selection never forked a replacement session (zero children)')
   assert.equal(app.getDraft(), '', 'the stale selection never installed its editor text')
 })
+
+
+test('PR5 R7-4: a rewind pre-admission LOAD failure follows the PICKER identity (Remote async read)', async (t) => {
+  // §3C-4: a throw from the PRE-ADMISSION region — the `loadThrough` detail
+  // read, which on the Remote branch is a real async transport read (the Direct
+  // adapter's is synchronous by construction, so the window is only expressible
+  // here) — belongs to the PICKER identity: superseded => suppressed, current =>
+  // published. Both halves run against ONE mounted surface so the only
+  // difference is the navigation.
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-rewind-load'
+  const targetId = 'm3-4-pr4-rewind-load-target'
+  const presetId = 'm3-4-pr4-preset'
+  const host = await mountPr4Host(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(targetId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const seed = (id: string, label: string): void => {
+    const session = host.ctx.sessions.get(SessionId(id)) as unknown as { append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void }
+    for (let turn = 1; turn <= 2; turn += 1) {
+      session.append('turn/start', { turn })
+      session.append('step/start', { turn, step: 1 })
+      session.append('user/message', { id: `u-${label}-${turn}`, role: 'user', content: [{ type: 'text', text: `${label} prompt ${turn}` }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      session.append('assistant/message', {
+        turn, step: 1,
+        message: { id: `a-${label}-${turn}`, role: 'assistant', content: [{ type: 'text', text: `answer ${turn}` }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      session.append('step/end', { turn, step: 1 })
+      session.append('turn/end', { turn, reason: { kind: 'completed' } })
+    }
+  }
+  seed(mainId, 'load')
+  seed(targetId, 'target')
+
+  const aggregate = await createRemoteApplicationRuntime({ hostContext: host.ctx, waitForHostPrerequisites: async () => {} })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+  life.defer(restoreTerminal)
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  host.ctx.provide('appExit', (code: number) => { void code })
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  host.ctx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const override: RemoteApplicationOverride = { selected: aggregate.selected, presentation: aggregate.presentation }
+  const apps: unknown[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: unknown) { apps.push(this); return originalStart.call(this) }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  const runnerFiber = host.ctx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => { runnerFiber.dispose() })
+  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+  const app = await (async () => {
+    for (let i = 0; i < 600; i++) {
+      const candidate = apps.at(-1) as unknown as { setDraft(text: string): void; submitDraft(): void; tui: { handleTerminalInput(data: string): void } } | undefined
+      if (candidate !== undefined && typeof candidate.setDraft === 'function') return candidate
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed the draft surface')
+  })()
+
+  // Park the selection's detail read (the test owns this injected port object).
+  const reader = aggregate.presentation.presentationReader as unknown as {
+    loadThrough(sessionId: string, seq: number, signal?: AbortSignal): Promise<unknown>
+  }
+  const originalLoad = reader.loadThrough.bind(reader)
+  let releaseLoad: (() => void) | undefined
+  let parked = false
+  life.defer(() => { releaseLoad?.() })
+  life.defer(() => { reader.loadThrough = originalLoad })
+  reader.loadThrough = async (sessionId, seq, signal) => {
+    if (!parked) {
+      parked = true
+      await new Promise<void>(resolve => { releaseLoad = resolve })
+      throw new Error('rewind load failed (fixture)')
+    }
+    return originalLoad(sessionId, seq, signal)
+  }
+
+  // PHASE 1 (stale): pick a turn, move the navigation with a REAL /resume, then
+  // let the read fail. A picker identity that has been superseded must not
+  // publish the failure.
+  app.setDraft('/rewind')
+  app.submitDraft()
+  await waitFor('picker open (phase 1)', () => vt.getViewport().join('').includes('Rewind conversation'), 15_000)
+  app.tui.handleTerminalInput('\x1b[B')
+  app.tui.handleTerminalInput('\r')
+  await waitFor('the parked load read was entered (phase 1)', () => parked, 10_000)
+  app.setDraft(`/resume ${targetId}`)
+  app.submitDraft()
+  await new Promise(resolve => setTimeout(resolve, 400))
+  releaseLoad?.()
+  await new Promise(resolve => setTimeout(resolve, 800))
+  assert.equal(vt.getViewport().join('').includes('rewind load failed (fixture)'), false,
+    'a superseded pre-admission load failure must not be published to the replacement surface')
+
+  // PHASE 2 (positive control): the SAME failure on a current picker identity
+  // must be published — so phase 1's silence cannot be a vacuous "nothing ran".
+  parked = false
+  app.setDraft('/rewind')
+  app.submitDraft()
+  await waitFor('picker open (phase 2)', () => vt.getViewport().join('').includes('Rewind conversation'), 15_000)
+  app.tui.handleTerminalInput('\x1b[B')
+  app.tui.handleTerminalInput('\r')
+  await waitFor('the parked load read was entered (phase 2)', () => parked, 10_000)
+  releaseLoad?.()
+  await waitFor('the current load failure is published', () => vt.getViewport().join('').includes('rewind load failed (fixture)'), 10_000)
+})

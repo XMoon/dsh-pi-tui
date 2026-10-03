@@ -254,9 +254,12 @@ test('a rewind-picker fork awaits source retirement before its handoff completes
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
 
-  let releaseDrain!: () => void
+  let releaseDrain: (() => void) | undefined
   let signalDrainReached!: () => void
   const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  // The held gate MUST have a fallback release: any failing assertion (or a
+  // timeout) would otherwise leave the drain parked and hang the teardown.
+  life.defer(() => { releaseDrain?.() })
   const source = fakeSession({
     id: 'rewind-retirement-source',
     header: { id: 'rewind-retirement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -1129,6 +1132,64 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
     'matching inherited state must not append a redundant child selection')
 })
 
+test('PR5 R7-4 positive control: a rewind LOAD failure whose picker identity is still current is shown', async (t) => {
+  // §3C-4: a throw from the PRE-ADMISSION region (here the `loadThrough` read)
+  // belongs to the picker identity, and while that identity is current the
+  // failure must be reported truthfully.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-load-ok-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const source = fakeSession({
+    id: 'rewind-load-ok',
+    header: { id: 'rewind-load-ok', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', { id: MessageId('load-ok-1'), role: 'user', content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      event('user/message', { id: MessageId('load-ok-2'), role: 'user', content: [{ type: 'text', text: 'second' }], source: { kind: 'user' } } as never, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TuiApp for the rewind picker')
+  // The picker is OPEN (its outline already read). Now the SELECTION's detail
+  // read fails: the §3C-4 pre-admission throw path.
+  const original = source.snapshotEvents
+  life.defer(() => { source.snapshotEvents = original })
+  source.snapshotEvents = () => { throw new Error('rewind load failed (fixture)') }
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\x1b[B')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  const until = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await new Promise<void>(resolve => setTimeout(resolve, 25))
+    }
+    return predicate()
+  }
+  assert.equal(await until(() => probe.notices.some(notice => notice.includes('rewind load failed (fixture)')), 8_000), true,
+    `a current pre-admission load failure must be shown: ${probe.notices.join(', ')}`)
+})
+
 test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies the replacement surface (mounted stale negative)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-rewind-stale-')
@@ -1218,36 +1279,58 @@ test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies th
   ])
   assert.equal(reachedDrain, true, 'the rewind fork must reach (and park in) the source-retirement drain phase after the adoption commit')
 
-  // THE EXTERNAL NAVIGATION inside the window: a REAL /resume submit through
-  // the mounted editor switches the visible subject to B (the navigation
-  // epoch advances BEFORE the gate — the exact production entry).
+  // ── The EXTERNAL NAVIGATION inside the parked window ─────────────────────
+  // A REAL `/resume <B>` submit through the mounted editor. The navigation
+  // epoch advances SYNCHRONOUSLY at the entry (`switchSession` bumps BEFORE it
+  // enters the transition gate), while the switch itself queues behind the
+  // rewind's held gate. That is the production entry the stale fence exists for
+  // — and because the drain is still parked, the rewind's own settlement cannot
+  // have run yet.
   const submit = app as unknown as { setDraft(text: string): void; submitDraft(): void }
   submit.setDraft('/resume rewind-stale-target-b')
   submit.submitDraft()
-  await new Promise(resolve => setTimeout(resolve, 80))
-  // Wait for B to become the visible subject (its transcript content is the
-  // observable), bounded — this is the topology fact the case depends on.
-  // The /resume's navigation EPOCH ADVANCE is the stale-fence axis, and it
-  // happens SYNCHRONOUSLY BEFORE switchSession enters the transition gate —
-  // the switch itself queues behind the rewind's held gate (the FIFO), but
-  // the epoch has already moved. Probe the epoch through the runner's own
-  // navigation identity seam... the visible evidence available to the test
-  // is that the stale rewind settlement (after release) lands on a surface
-  // whose navigation has moved — asserted below. Here we only require the
-  // submit to have DISPATCHED (not the switch to have committed).
-  await new Promise(resolve => setTimeout(resolve, 120))
-  // Release the drain: the old rewind settles now (its owned identity was
-  // superseded by the epoch advance even though the switch is queued), then
-  // the queued switch commits B.
-  releaseDrain()
-  await new Promise(resolve => setTimeout(resolve, 400))
+  // Give the submitted /resume its bounded chance to reach `switchSession`
+  // INSIDE the parked window: the picker resolves the direct-match listing
+  // asynchronously, and only then does the synchronous pre-gate
+  // `bumpNavigationEpoch()` run. (The switch itself cannot commit yet — it
+  // queues behind the rewind's held gate.) This wait only PLACES the external
+  // navigation inside the window; it is never the evidence — the post-release
+  // facts below fail loudly if the navigation did not make it there.
+  const deadline = Date.now() + 700
+  while (Date.now() < deadline && !probe.notices.some(notice => notice.includes('rewound to turn'))) {
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+  }
 
-  // Release the drain: the OLD rewind settles now. Its final settlement
-  // must NOT notify — the operation-owned identity was superseded by the
-  // external navigation.
-  releaseDrain()
-  await new Promise(resolve => setTimeout(resolve, 60))
-  assert.ok(!probe.notices.some(notice => notice.includes('rewound to turn')),
+  // Release the drain: the old rewind's post-commit tail runs, and its
+  // settlement publishes (or is fenced) now.
+  releaseDrain?.()
+
+  // POSITIVE liveness facts BEFORE the negative assertion, so "no toast" can
+  // never be satisfied vacuously by an operation that never got there:
+  //  (a) the rewind's settlement really reached its end — its source owner was
+  //      retired exactly once (the post-commit tail's own effect);
+  //  (b) the external navigation really executed — B's authoritative switch
+  //      ran (it was queued behind the same gate, so this completes here too).
+  const until = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await new Promise<void>(resolve => setTimeout(resolve, 25))
+    }
+    return predicate()
+  }
+  assert.equal(await until(() => harness.retirementEvents.includes(`dispose:${source.id}`), 10_000), true,
+    'the rewind settlement really ran: its source owner was retired')
+  assert.equal(await until(() => harness.resumeSessionIds.includes('rewind-stale-target-b'), 10_000), true,
+    'the external /resume really executed and switched the surface to B')
+  await settle()
+
+  // The paired positive control is the sibling test above ("a rewind-picker fork
+  // awaits source retirement before its handoff completes"): the SAME park with
+  // NO external navigation DOES publish "rewound to turn N". Together the two
+  // prove the toast is suppressed by the superseded operation-owned identity,
+  // not by the settlement never happening.
+    assert.ok(!probe.notices.some(notice => notice.includes('rewound to turn')),
     `the stale rewind settlement must not notify the replacement surface: ${probe.notices.join(', ')}`)
 })
 

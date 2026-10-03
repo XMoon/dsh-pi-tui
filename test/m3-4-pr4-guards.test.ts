@@ -334,8 +334,17 @@ test('PR5 §3C the rewind final settlement is gated by the operation-owned navig
     'the success toast is suppressed once the operation-owned identity is superseded')
   // NO error path consults the picker-open identity anymore (the d529d464
   // defect): every error fences on its OWN notificationNavigation.
-  assert.equal(events.slice(events.indexOf("if (outcome.kind === 'error')")).includes('pickerIdentity'), false,
-    'no error settlement consults the picker-open identity')
+  // The ADMITTED-error settlement block only (up to the pre-admission `onError`
+  // handler, which legitimately owns the picker identity — see the §3C-4 guard
+  // below): an admitted rewind error must never fence on the picker-open
+  // identity, because this operation's own admission bump already invalidated
+  // it (the d529d464 defect).
+  const admittedErrorBlock = events.slice(
+    events.indexOf("if (outcome.kind === 'error')"),
+    events.indexOf('onError: (error)'),
+  )
+  assert.equal(admittedErrorBlock.includes('pickerIdentity'), false,
+    'an admitted error settlement never consults the picker-open identity')
 })
 
 /* ── PR5 v2 §2.12: Ctrl+R main Session identity ─────────────────────────── */
@@ -350,4 +359,70 @@ test('PR5 the Ctrl+R Current-session identity comes from the selected ownership 
   assert.ok(bootstrap.includes('sessionId: () => agentNow()?.session.id') === false
     || bootstrap.slice(0, bootstrap.indexOf('PR5 v2 §2.12')).includes('sessionId: () => agentNow()?.session.id'),
     'no Direct-agent identity seam remains for the Ctrl+R scope')
+})
+
+
+/* ── PR5 v4 / R7: the final authority boundaries this round locked ─────── */
+
+test('PR5 §1C-4 (R7-1): every routing read of the Host claim consumes the GENUINE Host-origin authority', () => {
+  const controller = code('app/submission/controller.ts')
+  // The final command-plane ownership, the submit-time echo gate and the
+  // attachment payload all read the origin claim — never the advertised union.
+  assert.ok(controller.includes("const originClaim = deps.command.hostOriginClaimOf(parsedAtSubmit)"),
+    'the final plane ownership reads the genuine Host-origin line claim')
+  assert.ok(controller.includes('submitOriginClaim?.claimed !== true'),
+    'the submit-time echo gate reads the genuine Host-origin claim')
+  assert.ok(controller.includes('submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit)'),
+    'the dispatched payload claim is the genuine Host-origin claim')
+  // No routing consumer may read the advertised union any more (§1C-4).
+  assert.equal(controller.includes('deps.command.hostClaimOf'),
+    false, 'no controller path routes on the advertised union')
+  assert.equal(controller.includes('const hostView ='), false,
+    'the dead advertised-union view is gone')
+})
+
+test('PR5 §1C-4 (R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
+  const commands = code('commands.ts')
+  const origin = commands.slice(
+    commands.indexOf('const hostOriginClaimOf'),
+    commands.indexOf('const hostOriginClaimOf') + 1200,
+  )
+  assert.ok(origin.includes('hostOriginDescriptors.get(parsed.name)'),
+    'the origin claim reads the genuine Host-origin descriptor map')
+  assert.equal(origin.includes('skillDisposers.has(parsed.name)'),
+    false, 'a live wrapper NAME must not erase a later genuine Host winner')
+})
+
+test('PR5 §1C-4 (R7-2): the attachment gate consumes the shared classification alone', () => {
+  const controller = code('app/submission/controller.ts')
+  const gate = controller.slice(
+    controller.indexOf('const attachmentRefusal = ('),
+    controller.indexOf('const attachmentRefusal = (') + 1400,
+  )
+  assert.ok(gate.includes('classification: CommandLineClassification'),
+    'the gate takes the classification as its only line input')
+  assert.equal(gate.includes('skillInvocation: boolean'),
+    false, 'no parallel skill predicate may outrank the Host precedence')
+  assert.ok(gate.includes("if (classification.kind === 'client-command')"),
+    'a Client command refuses staged attachments')
+  assert.ok(gate.includes("if (classification.kind === 'host-command')"),
+    'a genuine Host command follows its own attachment declaration')
+})
+
+test('PR5 §3C-4 (R7-4): the rewind settlement owner is phase-specific', () => {
+  const events = code('app/surface/application-events.ts')
+  // The success settlement is fenced by the operation-owned adopted identity.
+  assert.ok(events.includes('!deps.rewind.isNavigationCurrent(owned)) return'),
+    'the success settlement fenced by the operation-owned adopted identity')
+  // The error settlement is fenced by the identity the failure was determined
+  // against — never inferred from the error text.
+  assert.ok(events.includes('if (!deps.rewind.isNavigationCurrent(outcome.notificationNavigation)) return'),
+    'the admitted error settlement fences on its structured notification identity')
+  assert.equal(events.includes("outcome.text === 'the session changed"),
+    false, 'no error-text branching for currentness')
+  // A throw can only escape the PRE-ADMISSION region (forkSession never throws),
+  // so the picker identity is that failure's owner — while the VISIBLE notice is
+  // suppressed once the surface moved (runOwned already reported it).
+  assert.ok(events.includes('if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return'),
+    'the pre-admission failure fences on the picker identity')
 })

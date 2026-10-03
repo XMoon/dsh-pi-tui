@@ -341,13 +341,19 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             }
           },
           onError: (error) => {
-            // An operational failure escaped the outcome contract entirely
-            // (a throw past forkSession's never-throws boundary). There is
-            // no trustworthy identity to fence with — the picker-open
-            // identity is necessarily stale after any admission (the
-            // d529d464 lesson) — so the failure is shown: hiding a
-            // contract-violating throw behind a stale fence would silence
-            // a programming error.
+            // §3C-4 (review R7-4): the notification owner follows the failure's
+            // STAGE. A throw can only escape the PRE-ADMISSION region of this
+            // owned body — the `loadThrough()` read above and the identity
+            // re-checks (a Remote reader legitimately propagates a plain read
+            // failure). `forkSession` itself never throws (it RETURNS an error
+            // outcome), so no rewind admission claim can exist on this path:
+            // the picker-open identity IS this failure's owner here, and
+            // fencing an ADMITTED failure on it would be the d529d464 defect.
+            // `runOwned` has already reported the throw to diagnostics before
+            // this callback (src/detached.ts), so once the surface has moved,
+            // suppressing the VISIBLE notice neither hides nor loses it.
+            if (deps.lifecycle.isCleanedUp()) return
+            if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return
             app.notify(safeErrorMessage(error), 'error')
           },
         })
