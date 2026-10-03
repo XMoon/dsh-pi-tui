@@ -38,18 +38,25 @@ function reader(
   valuesBySession: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
   cwds: Readonly<Record<string, string>> = {},
   liveIds: readonly string[] = Object.keys(valuesBySession),
+  /** Sessions ATTACHED/retained in the Host registry without a live Agent
+   *  (the M3-5 retained-Session subject). Defaults to the live ids so the
+   *  historical fixtures keep their exact meaning. */
+  retainedIds: readonly string[] = liveIds,
 ): {
   direct: DirectSessionReader
   snapshotKeys: string[][]
 } {
   const projections = projectionsHost(valuesBySession)
   const live = new Set(liveIds)
+  const retained = new Set([...liveIds, ...retainedIds])
   const agentOf = (id: string): unknown =>
     live.has(String(id))
       ? { session: { header: { id: SessionId(String(id)), cwd: cwds[String(id)] } } }
       : undefined
   const direct = new DirectSessionReader(projections.host, {
-    sessionOf: id => agentOf(id) === undefined ? undefined : ({ header: { id: SessionId(String(id)), cwd: cwds[String(id)] } }) as never,
+    sessionOf: id => retained.has(String(id))
+      ? ({ header: { id: SessionId(String(id)), cwd: cwds[String(id)] } }) as never
+      : undefined,
     agentOf: id => agentOf(id) as never,
   })
   return { direct, snapshotKeys: projections.snapshotKeys }
@@ -172,4 +179,68 @@ test('W6 (Direct): malformed projection values stay absent — never coerced', (
   })
   const status = direct.sessionStatus('s')!
   assert.deepEqual(status, { sessionId: 's' }, 'no field is invented from malformed values')
+})
+
+// ── M3-5 PR1: the projection SUBJECT is the retained/attached Session ──────
+// A retained Session whose Agent is inactive (or never mounted in this
+// process) still owns its official projection facts. The read must never
+// require a live Agent, must never start/materialize a Session, and must
+// never fall back to another subject.
+
+test('M3-5 §9.1: a RETAINED Session with no live Agent still answers its own status', () => {
+  const { direct } = reader(
+    {
+      'retained-child': {
+        modelSelection: { lastUsed: { provider: 'p', model: 'child' } },
+        contextPressure: { projectedTokens: 100, contextWindow: 2000 },
+        tokenUsage: { uncachedInputTokens: 5, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        todos: [{ content: 'child todo', status: 'in_progress' }],
+      },
+      main: { contextPressure: { projectedTokens: 900 }, todos: [{ content: 'parent todo', status: 'pending' }] },
+    },
+    { 'retained-child': '/child/ws', main: '/main/ws' },
+    ['main'],
+    ['retained-child'],
+  )
+  assert.deepEqual(direct.sessionStatus('retained-child'), {
+    sessionId: 'retained-child',
+    cwd: '/child/ws',
+    model: { provider: 'p', model: 'child' },
+    context: { projectedTokens: 100, contextWindow: 2000 },
+    todos: [{ content: 'child todo', status: 'in_progress' }],
+    usage: { uncachedInputTokens: 5, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  }, 'the retained Session own facts only — the live MAIN session must not fill any field')
+})
+
+test('M3-5 §9.1: retained child A / child B stay isolated and an absent Session stays unavailable', () => {
+  const { direct } = reader(
+    {
+      'child-a': { contextPressure: { projectedTokens: 10 }, todos: [{ content: 'a', status: 'pending' }] },
+      'child-b': { contextPressure: { projectedTokens: 20 } },
+    },
+    { 'child-a': '/a', 'child-b': '/b' },
+    [],
+    ['child-a', 'child-b'],
+  )
+  assert.deepEqual(direct.sessionStatus('child-a'), {
+    sessionId: 'child-a',
+    cwd: '/a',
+    context: { projectedTokens: 10 },
+    todos: [{ content: 'a', status: 'pending' }],
+  })
+  // A -> B: no stale A facts ride along.
+  assert.deepEqual(direct.sessionStatus('child-b'), {
+    sessionId: 'child-b',
+    cwd: '/b',
+    context: { projectedTokens: 20 },
+  })
+  assert.equal(direct.sessionStatus('not-attached'), undefined, 'an unattached Session reads unavailable')
+})
+
+test('M3-5 §9.1: a retained Session without the projection service reads unavailable', () => {
+  const direct = new DirectSessionReader({ get: () => undefined }, {
+    sessionOf: () => ({ header: { id: SessionId('s'), cwd: '/s' } }) as never,
+    agentOf: () => undefined,
+  })
+  assert.equal(direct.sessionStatus('s'), undefined)
 })

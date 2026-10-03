@@ -359,15 +359,21 @@ export class DirectSessionReader implements SessionReader {
   }
 
   sessionStatus(sessionId: string): SessionStatusProjection | undefined {
-    const agent = this.liveAgent(sessionId)
-    if (agent === undefined) return undefined
+    // The projection SUBJECT is the attached/retained Session identity, NOT
+    // the live Agent: a retained Session whose Agent is inactive (or was
+    // never mounted in this process) still owns its official projection
+    // facts. Requiring a live Agent here would read a valid retained Session
+    // as status-unavailable — and would force a cold-resume merely to answer
+    // a status question (M3-5 PR1 §9.1).
+    const session = this.liveSession(sessionId)
+    if (session === undefined) return undefined
     // ONE consistent cut over the official projection units of THIS exact
     // session (M3-4/M3-5 foundation). No StatsFolder, no raw-log fold, no
     // other session's values ever ride along.
     const projections = this.sessionProjections()
     if (projections === undefined) return undefined
     try {
-      const values = projections.snapshot(agent.session, [
+      const values = projections.snapshot(session, [
         'modelSelection',
         'contextPressure',
         'contextBreakdown',
@@ -382,7 +388,7 @@ export class DirectSessionReader implements SessionReader {
         'permissions',
       ])?.values
       if (values === undefined) return undefined
-      return detachedSessionStatus(sessionId, values, agent.session.header.cwd)
+      return detachedSessionStatus(sessionId, values, session.header.cwd)
     } catch {
       // A projection authority failure is `undefined` (unknown), never a
       // crash and never partially invented facts.
