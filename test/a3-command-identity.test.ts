@@ -197,27 +197,42 @@ test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId',
   // The frozen §3.2 write contract: a stale scope takes an EXPLICIT refusal path
   // and its sessionId is never dispatched to a replacement-owner resolver.
   // A5b-3b-2: the facade (and its write guards) is owned by the command surface.
-  const writes = ['applyPermissionPreset', 'setSessionApprovalPolicy']
-  const end = commandSurfaceSource.indexOf('\n      switchSession:', commandSurfaceSource.indexOf('setSessionApprovalPolicy: '))
-  assert.ok(end > 0, 'the write provider span end was not found')
-  for (let index = 0; index < writes.length; index += 1) {
-    const at = commandSurfaceSource.indexOf(`${writes[index]}: `)
-    assert.ok(at > 0, `${writes[index]} provider not found`)
-    const next = index + 1 < writes.length
-      ? commandSurfaceSource.indexOf(`${writes[index + 1]}: `, at)
-      : end
-    const body = commandSurfaceSource.slice(at, next)
-    // The exact-owner admission and the explicit refusal...
-    assert.ok(body.includes('agentForLiveScope(scope)'),
-      `${writes[index]} must admit through agentForLiveScope`)
-    assert.ok(body.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
-      `${writes[index]} must REFUSE a stale scope explicitly (never retarget)`)
-    // ...BOTH of which precede the ONLY sessionId dispatch.
-    const guard = body.indexOf('agentForLiveScope(scope)')
-    const dispatch = body.indexOf('scope.sessionId')
-    assert.ok(dispatch > guard, `${writes[index]} must guard before dispatching scope.sessionId`)
-    assert.ok(!body.includes('agentNow()'), `${writes[index]} must not read the current attachment directly`)
+  const writeSpan = (name: string, nextName: string | undefined): string => {
+    const at = commandSurfaceSource.indexOf(`${name}: `)
+    assert.ok(at > 0, `${name} provider not found`)
+    const next = nextName === undefined
+      ? commandSurfaceSource.indexOf('\n      switchSession:', at)
+      : commandSurfaceSource.indexOf(`${nextName}: `, at)
+    assert.ok(next > at, `${name} provider span end was not found`)
+    return commandSurfaceSource.slice(at, next)
   }
+  // `setSessionApprovalPolicy` is a synchronous write: the exact-owner
+  // admission and the explicit stale-scope refusal BOTH precede the only
+  // `scope.sessionId` dispatch (never a re-resolved id).
+  const approval = writeSpan('setSessionApprovalPolicy', 'switchSession')
+  assert.ok(approval.includes('agentForLiveScope(scope)'),
+    'setSessionApprovalPolicy must admit through agentForLiveScope')
+  assert.ok(approval.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
+    'setSessionApprovalPolicy must REFUSE a stale scope explicitly (never retarget)')
+  assert.ok(approval.indexOf('scope.sessionId') > approval.indexOf('agentForLiveScope(scope)'),
+    'setSessionApprovalPolicy must guard before dispatching scope.sessionId')
+  assert.ok(!approval.includes('agentNow()'),
+    'setSessionApprovalPolicy must not read the current attachment directly')
+  // `applyPermissionPreset` is TRANSPORT-NEUTRAL (PR5 v2 §1D, owner ruling):
+  // the permission preset apply is an ASYNC ConfigPort dispatch, so the
+  // contract that survives is the explicit stale-scope refusal BEFORE the
+  // dispatch — and the §1D removal of the Direct-Agent prerequisite is
+  // itself part of the contract, asserted by ABSENCE (a re-introduced
+  // `agentForLiveScope(scope)` would re-break the Remote `/yolo` path).
+  const preset = writeSpan('applyPermissionPreset', 'setSessionApprovalPolicy')
+  assert.ok(preset.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
+    'applyPermissionPreset must REFUSE a stale scope explicitly (never retarget)')
+  assert.ok(preset.indexOf('scope.sessionId') > preset.indexOf('if (!deps.sessionScope.isCurrent(scope)) return'),
+    'applyPermissionPreset must guard before dispatching scope.sessionId')
+  assert.ok(!preset.includes('agentForLiveScope(scope)'),
+    'applyPermissionPreset must NOT require a Direct agent (§1D: transport-neutral ConfigPort dispatch)')
+  assert.ok(!preset.includes('agentNow()'),
+    'applyPermissionPreset must not read the current attachment directly')
   // The ASYNC permission write re-checks the ORIGINAL scope after its await, so
   // a settlement is never presented for a superseded owner.
   const permissionWrite = commandSurfaceSource.slice(

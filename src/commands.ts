@@ -4161,9 +4161,14 @@ export function registerTuiCommands(
    * union view) or `hostCatalogResolves` (raw registry membership).
    */
   const hostOriginClaimOf = (parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined => {
-    // A TUI-owned skill wrapper is never a genuine Host command, exactly as
-    // in hostClaimOf (the registration side also refuses taken Host names).
-    if (skillDisposers.has(parsed.name)) return undefined
+    // §1C-4 (review R7-3): the GENUINE Host-origin descriptor is consulted
+    // FIRST. A live TUI skill wrapper must not erase a Host winner that was
+    // installed LATER: the registration side refuses to mirror a name the
+    // Host already owns, but the reverse order (wrapper first, then a plugin's
+    // genuine Agent-scoped Host command) leaves the wrapper disposer live, so a
+    // name-based wrapper shortcut would hide that Host winner forever. When no
+    // genuine Host descriptor owns the name the lookup below is `undefined`
+    // anyway, so the wrapper term is not needed here at all.
     const descriptor = hostOriginDescriptors.get(parsed.name)
     if (descriptor === undefined) return undefined
     if (!descriptor.leadingInput && (parsed.rawInput?.trim() ?? '') !== '') return { claimed: false }

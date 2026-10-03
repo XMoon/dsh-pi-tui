@@ -214,10 +214,15 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
       }
     },
     inject: (message: unknown) => { host?.injected.push(message) },
-    cancel: (_reason: unknown, options: { keepInbox: boolean }) => {
+    // The official Agent shape is `cancel(cause, options?)` — the knobs are
+    // OPTIONAL (`src/interrupt.ts`), and the Direct retirement's pre-cancel
+    // deliberately calls it with no knobs at all (the port hides them). The
+    // fake must tolerate the no-arg call instead of reading an undefined
+    // options object.
+    cancel: (_reason?: unknown, options?: { keepInbox?: boolean }) => {
       if (host === undefined) return
       host.cancelCalls += 1
-      host.lastCancelKeepInbox = options.keepInbox
+      if (options !== undefined) host.lastCancelKeepInbox = options.keepInbox
       // The interrupt transport: the test hook models the turn converging to
       // idle (the real Agent drains the turn and keeps the inbox).
       host.onCancel?.()
@@ -387,6 +392,33 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     handler: (...args: never[]) => unknown
   }>()
   const executed: { line: string; attachments: readonly unknown[]; outcome: 'executed' | 'rejected' }[] = []
+  /** The registry-change notification the official service fires synchronously
+   *  per register/dispose; the runner's completions + Host-origin refresh
+   *  listens on it. Wired to the real context by `bootCommandHarness`. */
+  let emitChange: () => void = () => {}
+  /** The session-scoped command layers, keyed by the exact session id. */
+  const scopedLayers = new Map<string, Map<string, {
+    name: string
+    handler: (...args: never[]) => unknown
+    description?: string
+    input?: { hint: string; attachments?: boolean }
+    definitionId?: string
+  }>>()
+  /** The EFFECTIVE view for one agent: the global layer with the agent's
+   *  session-scoped entries shadowing it (official `ScopedLayers.merge`). */
+  const effectiveView = (agent: unknown): Map<string, {
+    name: string
+    handler: (...args: never[]) => unknown
+    description?: string
+    input?: { hint: string; attachments?: boolean }
+    definitionId?: string
+  }> => {
+    const merged = new Map(definitions)
+    const sessionId = (agent as { session?: { id?: string } } | undefined)?.session?.id
+    const layer = sessionId === undefined ? undefined : scopedLayers.get(sessionId)
+    if (layer !== undefined) for (const [name, definition] of layer) merged.set(name, definition)
+    return merged
+  }
   const commands = {
     register: (definition: {
       name: string
@@ -395,9 +427,45 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
       input?: { hint: string; attachments?: boolean }
       definitionId?: string
     }): (() => void) => {
+      // The official registry refuses a same-LAYER duplicate by name
+      // (`command "<name>" is already registered`). The Direct mirror
+      // provenance depends on it: the TUI's compatibility mirror must LOSE to
+      // a pre-existing genuine Host command instead of silently overwriting it
+      // (an overwrite would make the genuine command unreachable and leave the
+      // origin map answering with our own mirror).
+      if (definitions.has(definition.name)) {
+        throw new Error(`command "${definition.name}" is already registered`)
+      }
       definitions.set(definition.name, definition)
+      emitChange()
       return () => {
-        if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
+        if (definitions.get(definition.name) === definition) {
+          definitions.delete(definition.name)
+          emitChange()
+        }
+      }
+    },
+    // The SESSION-scoped layer (the official `ScopedLayers`): a scoped entry
+    // SHADOWS the global one for that exact session, and a same-name scoped
+    // registration is legal across layers — that is how a session's effective
+    // catalog differs from the standing one (a plugin's session-scoped
+    // command, or a descriptor the session commits).
+    registerScoped: (sessionId: string, definition: {
+      name: string
+      handler: (...args: never[]) => unknown
+      description?: string
+      input?: { hint: string; attachments?: boolean }
+      definitionId?: string
+    }): (() => void) => {
+      let layer = scopedLayers.get(sessionId)
+      if (layer === undefined) { layer = new Map(); scopedLayers.set(sessionId, layer) }
+      layer.set(definition.name, definition)
+      emitChange()
+      return () => {
+        if (scopedLayers.get(sessionId)?.get(definition.name) === definition) {
+          scopedLayers.get(sessionId)?.delete(definition.name)
+          emitChange()
+        }
       }
     },
     // The effective catalog mirrors the registry EXACTLY, the descriptor's
@@ -405,7 +473,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // `leadingInput` command (`/goal <objective>`) and an execute-kind one
     // (`/compact`). Fabricating an `input` for every row would erase the
     // command KIND and let a name-level routing bug pass.
-    list: () => [...definitions.values()].map(({ name, description, input, definitionId }) => ({
+    list: (agent?: unknown) => [...(agent === undefined ? definitions : effectiveView(agent)).values()].map(({ name, description, input, definitionId }) => ({
       name,
       description: description ?? '',
       // The official descriptor carries the registration's own
@@ -420,7 +488,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // global layer too (`find(undefined, name)`); the harness mirrors it so
     // a TUI-owned sessionless command runs LOCALLY in a deferred start
     // instead of falling through to the session dispatch.
-    find: (_agent: unknown, name: string) => definitions.get(name),
+    find: (agent: unknown, name: string) => effectiveView(agent).get(name),
     // A REGISTERED command executes through the command plane (the Host
     // command semantics): the handler runs with a CommandRuntime-shaped
     // invocation, so a real handler (e.g. /skill → loadSkill) delivers
@@ -429,7 +497,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // ACTUAL executions are recorded — an attempted miss is not a command.
     execute: async (agent: unknown, line: string, attachments: readonly unknown[] = []) => {
       const name = line.trim().replace(/^\//, '').split(/\s+/)[0] ?? ''
-      const def = definitions.get(name)
+      const def = effectiveView(agent).get(name)
       // A name that does not resolve is NOT a command-plane call (the submit
       // falls back to the ordinary delivery). A RESOLVED invocation is
       // recorded WITH its settled outcome: the real host executor appends its
@@ -457,6 +525,8 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
       return { commandId: CommandId('cmd-test'), result }
     },
     handler: (name: string) => definitions.get(name)?.handler,
+    /** Test seam: wire the registry-change notification to the real context. */
+    setChangeEmitter: (emit: () => void) => { emitChange = emit },
   }
   return {
     counting,
@@ -1305,6 +1375,14 @@ async function bootCommandHarness(
     } as never)
   }
   const harness = makeHarness(home, { id: 'command-session', events: sessionEvents('resumed answer') })
+  // The official command service notifies `commands/change` on every
+  // register/dispose; the runner's completion + Host-origin refresh listens on
+  // it. Without the bridge a post-mount registration could never reach the
+  // effective catalog the routing gates read.
+  if (process.env.PR5_BISECT_NO_BRIDGE !== '1') {
+    ;(harness.commands as { setChangeEmitter(emit: () => void): void })
+      .setChangeEmitter(() => { context.emit('commands/change') })
+  }
   const hostCommandDisposers = new Map<string, () => void>()
   for (const entry of options.hostCommands ?? []) {
     const command: { name: string; input?: { hint: string; attachments?: boolean } } =
@@ -2703,6 +2781,11 @@ test('§D3 immediate echo (review F11): an argued line of a host-resolved name e
   mounted.app.setDraft('/export foo')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
 
+  // A held gate MUST be released on EVERY exit path. `t.after` is NOT enough:
+  // the harness's own lifecycle cleanup (registered earlier) awaits the parked
+  // execution, so it runs — and blocks — BEFORE a later-registered after-hook;
+  // the fallback has to fire inside the test body, ahead of any teardown.
+  try {
   // BEFORE the FIFO turn: the local echo is already installed (the install
   // is synchronous — this is the exact gap the finding describes).
   const pending = mounted.app.pendingInputForTest()
@@ -2747,6 +2830,11 @@ test('§D3 immediate echo (review F11): an argued line of a host-resolved name e
     return !settled.queued.some(row => row.local === true && String(row.text).includes('/export foo'))
   }, 5_000), true,
     'the local echo retired with its authoritative occurrence')
+  } finally {
+    // Idempotent: the success path already released it above; a failing
+    // assertion reaches here instead of leaving the FIFO turn parked.
+    releaseSlow?.()
+  }
 })
 
 test('an unclaimed line of a host-resolved name keeps its attachment: ordinary multimodal submission', async (t) => {
@@ -3209,6 +3297,103 @@ test('a deferred session where the host name DISAPPEARS keeps the argued line an
     'a known non-invocation is never consumed as an advertised command miss, even when the name disappears')
 })
 
+test('AC-2/R7-3: a genuine Host command installed AFTER a live skill wrapper owns its name (a wrapper name must not erase it)', async (t) => {
+  // R7-3: the live skill wrapper `/grilling` exists FIRST; a plugin then
+  // installs a GENUINE Host `/grilling`. The wrapper disposer stays live, so the
+  // name-based wrapper shortcut in `hostOriginClaimOf` (`skillDisposers.has`)
+  // would hide the Host winner forever and the line would stay an agent-facing
+  // skill invocation. The OBSERVABLE difference is the attachment policy: a
+  // genuine Host command that declares no `attachments` must refuse the staged
+  // image, while the skill-invocation route is multimodal and would admit it.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-r73-wrapper-shadow-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(3, 3))
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    skills: true,
+    attachments: true,
+  })
+  await drainUntil(() => (harness.commands as { list(): readonly { name: string }[] })
+    .list().some(def => def.name === 'grilling'), 10_000)
+  // An AGENT-SCOPED genuine Host command takes the LIVE wrapper's name
+  // afterwards (the wrapper disposer stays live — the reachable order).
+  ;(harness.commands as {
+    registerScoped(sessionId: string, def: { name: string; handler: () => unknown; input?: { hint: string } }): void
+  }).registerScoped('command-session', { name: 'grilling', handler: () => ({ kind: 'success' }), input: { hint: '<topic>' } })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/grilling ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => /accept attachments/.test(mounted.app.notifyTextForTest()), 8_000)
+  assert.match(mounted.app.notifyTextForTest(), /\/grilling does not accept attachments; remove them first/,
+    `the genuine Host descriptor outranks the live wrapper name: ${mounted.app.notifyTextForTest()}`)
+  assert.match(mounted.app.getDraft(), /\[image #1/, 'the draft comes back with its attachment intact')
+  assert.deepEqual(imageSaves, [], 'nothing was admitted through the wrapper route')
+})
+
+test('AC-2/R7-1: a genuine Host leading-input collision next to the Client `/export` runs the Host execution exactly once', async (t) => {
+  // AC-2: given a real Host `/export` and this TUI's own Client `/export`, the
+  // Host-ORIGIN name/line claim must decide the final command-plane ownership.
+  // The Client descriptor is execute-kind, so the effective union reads
+  // `claimed:false` for the argued line; the genuine Host descriptor is
+  // leading-input and claims it. Reading the union (the R7-1 shadow) would hand
+  // the line to the ordinary-submission route and the Host command would never
+  // run.
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    // The GENUINE Host `/export` owns the GLOBAL name: it is installed before
+    // the TUI mounts, so the TUI's same-name compatibility mirror is refused by
+    // the official same-layer duplicate rule and the genuine leading-input
+    // descriptor stays the effective winner.
+    hostCommands: [{ name: 'export', input: { hint: '<path>' } }],
+  })
+  mounted.app.setDraft('/export foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1,
+    `the genuine Host command executed exactly once: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.executed[0]?.line, '/export foo', 'the Host command receives the raw line')
+  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
+})
+
+test('AC-2/R7-2: a genuine Host `/skill` collision owns the attachment policy (the skill syntax predicate must not outrank it)', async (t) => {
+  // R7-2: `/skill <name>` is syntactically a skill invocation, but a GENUINE
+  // Host command owning that name outranks it (the classifier's Host precedence).
+  // This Host descriptor declares no `attachments`, so the staged image must be
+  // refused and the draft handed back — the parallel `isSkillInvocation`
+  // shortcut in the gate would have silently allowed it through.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-r72-skill-collision-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(3, 3))
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+  })
+  // A plugin installs an AGENT-SCOPED real Host `/skill`: it shadows the TUI's
+  // global compatibility mirror for this exact session, and the registry-change
+  // notification refreshes the effective catalog the routing gates read.
+  ;(harness.commands as {
+    registerScoped(sessionId: string, def: { name: string; handler: () => unknown; input?: { hint: string } }): void
+  }).registerScoped('command-session', { name: 'skill', handler: () => ({ kind: 'success' }), input: { hint: '<name>' } })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/skill alpha ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => /does not accept attachments/.test(mounted.app.notifyTextForTest()), 8_000)
+  assert.match(mounted.app.notifyTextForTest(), /\/skill does not accept attachments; remove them first/,
+    `the HOST declaration decides, never the skill syntax shortcut: ${mounted.app.notifyTextForTest()}`)
+  assert.match(mounted.app.getDraft(), /\[image #1/, 'the draft comes back with its attachment intact')
+  assert.deepEqual(imageSaves, [], 'nothing was admitted')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/skill')),
+    `the refused line never reaches the command plane: ${JSON.stringify(harness.executed)}`)
+})
+
 test('a deferred session that resolves a leadingInput host command executes its argued line', async (t) => {
   // The reverse descriptor mutation: the standing catalog resolves /deploy as
   // EXECUTE-KIND, so `/deploy prod` is not an invocation when submitted. The
@@ -3221,10 +3406,13 @@ test('a deferred session that resolves a leadingInput host command executes its 
     // Execute-kind at submit time (no `input`).
     hostCommands: ['deploy'],
   })
-  harness.onCreateSession(() => {
+  harness.onCreateSession(sessionId => {
+    // The SESSION's catalog commits a `leadingInput` /deploy — a scoped
+    // registration that SHADOWS the standing execute-kind one (the official
+    // scoped-over-global winner rule; a same-layer duplicate would be refused).
     ;(harness.commands as {
-      register(def: { name: string; handler: () => unknown; input?: { hint: string } }): void
-    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
+      registerScoped(sessionId: string, def: { name: string; handler: () => unknown; input?: { hint: string } }): void
+    }).registerScoped(sessionId, { name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   })
   mounted.app.setDraft('/deploy prod')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -3251,11 +3439,13 @@ test('a deferred session that resolves an EXECUTE-KIND host command takes the ar
     // `leadingInput` at submit time: `/deploy prod` is a real invocation.
     hostCommands: [{ name: 'deploy', input: { hint: '<target>' } }],
   })
-  harness.onCreateSession(() => {
+  harness.onCreateSession(sessionId => {
     // The session's catalog replaces the descriptor with the execute-kind
-    // shape (no `input`).
-    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void })
-      .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+    // shape (no `input`) — a scoped registration shadowing the standing
+    // `leadingInput` one (the official scoped-over-global winner rule).
+    ;(harness.commands as {
+      registerScoped(sessionId: string, def: { name: string; handler: () => unknown }): void
+    }).registerScoped(sessionId, { name: 'deploy', handler: () => ({ kind: 'success' }) })
   })
   mounted.app.setDraft('/deploy prod')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()

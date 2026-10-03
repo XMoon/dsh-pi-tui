@@ -17,8 +17,6 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -27,6 +25,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const SESSION_FORMAT_VERSION = 4
 
@@ -173,8 +172,7 @@ async function settle(rounds = 40): Promise<void> {
 }
 
 test('PR5 AC-1 Direct: a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /status reaches its handler under running+steer', async (t) => {
-  const home = mkdtempSync(join(tmpdir(), 'pr5-direct-origin-'))
-  t.after(() => { rmSync(home, { recursive: true, force: true }) })
+  const home = testLifecycle(t).tempDir('pr5-direct-origin-')
   const harness = makeHarness(home)
   const ctx = new Context()
   const vt = new VirtualTerminal(110, 32)
@@ -265,8 +263,7 @@ test('PR5 AC-1 Direct: a successful Host-registry compatibility mirror stays CLI
 })
 
 test('PR5 R6-1: a genuine Agent-SCOPED Host shadow over our global mirror stays HOST authority (winner provenance, not name)', async (t) => {
-  const home = mkdtempSync(join(tmpdir(), 'pr5-direct-shadow-'))
-  t.after(() => { rmSync(home, { recursive: true, force: true }) })
+  const home = testLifecycle(t).tempDir('pr5-direct-shadow-')
   const harness = makeHarness(home)
   const ctx = new Context()
   // Bridge the fake registry's change notification to the REAL cordis
@@ -339,7 +336,24 @@ test('PR5 R6-1: a genuine Agent-SCOPED Host shadow over our global mirror stays 
     await settle(400)
     assert.ok(scopedHostRuns >= 1,
       'the SCOPED genuine Host winner executed through the Host dispatch (name-subtraction would have misrouted it as a Client command)')
+
+    // AC-1 (second half): removing the scoped shadow must RESTORE the mirror
+    // classification. The scoped genuine handler is disposed, the catalog
+    // refreshes, and the mirrored name is once again THIS surface's own
+    // compatibility mirror — so the line goes back to the TUI's Client
+    // handler (the real /status opens the settings panel) and the scoped
+    // handler never runs again.
+    const before = scopedHostRuns
     disposeScoped()
+    await settle(150)
+    submit2.setDraft('/status')
+    submit2.submitDraft()
+    await new Promise(resolve => setTimeout(resolve, 1200))
+    await settle(400)
+    assert.equal(scopedHostRuns, before,
+      'the disposed scoped Host shadow no longer owns the name')
+    assert.ok(vt.getViewport().join('\n').includes('Stats'),
+      'the mirror classification is RESTORED: the TUI /status handler runs again (its settings panel opens)')
   } finally {
     TuiApp.prototype.start = originalStart
     restoreTerminal()

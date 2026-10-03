@@ -3841,6 +3841,87 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   is the SELECTED OWNERSHIP authority (`ownership.currentSessionId()`),
   never `agentNow()` — a Remote session's history search follows the
   transport-neutral subject.
+- **Round-7 closure (v4 §1C-4 / §3C-4, AC-1/AC-2)**: the genuine Host-origin
+  line claim is now the ONLY authority every ROUTING read consumes — the
+  final command-plane ownership, the submit-time echo gate and the
+  dispatched attachment payload all read `hostOriginClaimOf`; no controller
+  path reads the advertised union any more (`hostClaimOf` is retained only as
+  the advertised/completion view). `hostOriginClaimOf` no longer carries a
+  skill-wrapper NAME shortcut: a genuine Host command installed AFTER a live
+  wrapper owns its name (the registration side can only refuse the reverse
+  order), and the wrapper name must not erase it. `attachmentRefusal`
+  consumes the shared classification ALONE — the parallel
+  `isSkillInvocation` term that could outrank a genuine Host descriptor is
+  gone. The rewind settlement owner is phase-specific: the successful
+  settlement fences on the operation-owned adopted identity, an admitted
+  error fences on its own structured `notificationNavigation`, and a throw —
+  which can only escape the PRE-ADMISSION region, because `forkSession`
+  never throws — fences on the picker identity, whose currency decides the
+  VISIBLE notice (`runOwned` has already reported the throw to diagnostics).
+  Evidence: AC-2 mounted collision (a genuine Host leading-input `/export`
+  beside the Client `/export` runs the Host execution exactly once), a
+  genuine Host `/skill` refusing a staged image per ITS OWN declaration, a
+  genuine Host command installed after a live skill wrapper taking the
+  attachment policy over the wrapper route (mutation-verified: restoring the
+  wrapper name shortcut fails it), AC-1's restore half (disposing the scoped
+  shadow restores the mirror classification), and the mounted stale-success
+  L6 now carrying REAL liveness facts — the rewind's source owner retiring
+  exactly once AND the external `/resume` really switching the surface to B
+  precede the no-stale-toast assertion, so the negative can never pass
+  vacuously (mutation-verified: disabling the success fence fails it).
+- **Fixture fidelity (round 7)**: two authority-bearing fidelity gaps were
+  found and closed in the TEST fakes only. (1) `test/submit-hot-path.test.ts`
+  keeps its own local `makeHarness`; its `commands.list()` dropped
+  `definitionId`, so every stamped Direct mirror looked like a genuine Host
+  command — the cause of the four `submit-hot-path` regressions whose
+  expectations were and remain correct. Its
+  registry also modelled NEITHER of the two official command-registry rules:
+  a same-LAYER duplicate name is REFUSED (`command "<name>" is already
+  registered`), and a SESSION-scoped entry SHADOWS the global one across
+  layers. Without them a pre-existing genuine Host command was silently
+  overwritten by the TUI's same-name compatibility mirror, and — once the
+  faithful `commands/change` notification was wired — the authority gates read
+  a stale/partial origin map: the §D3 immediate-echo case had been passing on
+  exactly that stale state. Both rules are now modelled (`register` refuses,
+  `registerScoped` + an effective-view `list`/`find`/`execute`), and the two
+  cases that model a SESSION's descriptor mutation register through the scoped
+  layer (their expectations are unchanged). Its fake now preserves
+  `definitionId` AND fires the registry-change notification the official
+  service fires (the bridge that lets a post-mount genuine Host registration
+  reach the effective catalog the gates read). A bounded A/B measured the
+  bridge: 680 emits coalesce into 48 refreshes over 20 mounts (≈0.5 extra
+  refresh per mount) — faithful fixture cost, no event amplification, no
+  wiring defect. (2) The local fake's `agent.cancel` required an `options`
+  object and read `options.keepInbox` unconditionally, while the Direct
+  retirement's pre-cancel deliberately calls it with no knobs (the port
+  hides them) and `src/interrupt.ts` declares them optional — a
+  PRE-EXISTING fixture gap (both sides identical at the round-6 snapshot),
+  fixed by matching the official optional shape. No product fallback was
+  added for it.
+- **Rewind pre-admission failure authority (v4 §3C-4, review R7-4)**: a throw
+  can only escape the region BEFORE the fork dispatch (`forkSession` never
+  throws — it returns an error outcome), so the picker identity IS that
+  failure's owner, and it fences only the VISIBLE notice (`runOwned` has
+  already reported the throw to diagnostics). Evidence: a mounted positive
+  control (a rewind `loadThrough` failure still publishes while its picker
+  identity is current) and a mounted stale negative on the REMOTE path, where
+  the presentation read is a real async transport read — the test parks the
+  injected reader, switches the subject with a real `/resume`, and asserts the
+  superseded failure is NOT published (both halves run against one mounted
+  surface so the only difference is the navigation; mutation-verified:
+  disabling the fence publishes the stale notice). The Direct adapter's read is
+  synchronous by construction, so that window is not expressible there.
+- **Test hygiene (round 7)**: the `submit-hot-path` §D3 immediate-echo case held
+  a host execution open with no fallback release, so any earlier assertion
+  failure turned into a teardown HANG (it masked the real regression for a
+  while). The release now runs in a body-scoped `finally`, ahead of every
+  teardown hook (`t.after` is too late — the harness's own lifecycle cleanup,
+  registered earlier, awaits the parked execution first). Mutation-verified:
+  breaking an assertion now fails in seconds instead of hanging.
+- **Guard placement (v4 §12)**: the PR5-specific structural invariants stay
+  in `test/m3-4-pr4-guards.test.ts` (deliberate: the file is the PR4/PR5
+  migration-guard home and splitting would scatter one authority contract
+  across two files; the section headers name the PR5 rounds they lock).
 - **Selected-runtime teardown proof** (plan §3.9): with a pending main-path
   READ (a parked `/status` stats read) and, separately, a pending WRITE (a
   parked serializer), the runner fiber disposal is OBSERVED through real

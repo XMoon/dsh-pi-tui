@@ -353,16 +353,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // union here (review R6-3: the union lets a same-name Client
     // descriptor overwrite the winning Host declaration).
     classification: CommandLineClassification,
-    // The ONE skill-invocation predicate (`isSkillInvocation`: an explicit
-    // `/skill <name> ...` or a live skill wrapper) — TUI-owned agent-facing
-    // input that loadSkill owns. It is supplied rather than re-derived: the
-    // predicate applies the argued-`/skill` short-circuit, and WITHOUT it
-    // the line would fall into the HOST branch below (`/skill` is itself a
-    // registered TUI command) and be refused as a non-declaring command.
-    skillInvocation: boolean,
   ): string | undefined => {
     if (!draftHasAttachments(draft, deps.drafts.images, deps.drafts.files)) return undefined
-    if (skillInvocation) return undefined
+    // §1C-4/§3 (review R7-2): the classification is the ONLY input. A parallel
+    // `isSkillInvocation` predicate must not outrank the Host precedence — an
+    // argued `/skill <name>` whose name a GENUINE Host command owns (or a live
+    // wrapper whose name a later scoped Host command owns) is a `host-command`
+    // and follows the HOST descriptor's declaration. A real skill invocation
+    // classifies as `skill-invocation` and falls through to the multimodal
+    // return at the end, exactly as before.
     if (classification.kind === 'client-command') {
       return 'Attachments cannot be included in a user-shell command.'
     }
@@ -684,7 +683,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // argued line of an execute-kind command) stays one — no later catalog
     // change may turn it into an invocation except the final catalog
     // actually CLAIMING it.
-    const submitView = parsedAtSubmit === undefined ? undefined : deps.command.hostClaimOf(parsedAtSubmit)
+    const submitOriginClaim = parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit)
     // Whether this line is an ordinary agent-facing prompt (never a Host
     // command, a TUI-local control, or a skill invocation) at submit time.
     // Such a line installs its local echo SYNCHRONOUSLY, before the FIFO
@@ -701,13 +700,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // would neither dedupe against nor retire on their authoritative
     // occurrence. They keep their existing command feedback.
     const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
-      || (submitView?.claimed !== true
-        // §D3 line authority (round 4) + the PR5 supplement correction: the
-        // submit-time echo gate consumes the SAME NAME-authority primitive
-        // as the delivery gate below (`isLocalCommandLine` with
-        // `hostCatalogResolves`): a HOST-RESOLVED name is never a TUI-local
-        // line, while a TUI built-in's own Client registration (present in
-        // the effective claim union) never reads as Host territory.
+      || (submitOriginClaim?.claimed !== true
+        // §D3 line authority (round 4) + §1C-4 (review R7-1): the submit-time
+        // echo gate reads the GENUINE Host-origin claim above and the SAME
+        // NAME-authority primitive as the delivery gate below
+        // (`isLocalCommandLine` with `hostCatalogResolves`, which answers the
+        // origin map's NAME ownership): a genuine Host name is never a
+        // TUI-local line, while a TUI built-in's own Client registration is
+        // never Host territory.
         // `/export foo` is an ordinary submission and gets its immediate
         // echo like every prompt, instead of silently vanishing behind a
         // blocked FIFO turn. Skill invocations keep their own exclusion.
@@ -757,22 +757,24 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // §D3 ORDER: the AUTHORITATIVE HOST CATALOG is consulted FIRST — a
     // resolved Host name owns the line even when a TUI built-in or a skill
     // wrapper shares it (e.g. the frozen rc.2 Web-only Host `/export`
-    // colliding with the TUI's Client `/export`). The union claim-set cannot
-    // discriminate here (it also carries this surface's own Client
-    // registrations), so the discriminator is `hostCatalogResolves`; only an
-    // unresolved name falls through to the Client-owned routes.
+    // colliding with the TUI's Client `/export`). §1C-4 (review R7-1): the
+    // discriminator is the GENUINE Host-origin LINE claim — the effective
+    // winner with this surface's mirrors excluded — never the advertised
+    // union, which a same-name Client descriptor can overwrite (a genuine
+    // Host leading-input `/export` next to the TUI's execute-kind Client
+    // `/export` reads `claimed:false` from the union and would be wrongly
+    // handed to the ordinary-submission route).
     const commandPlaneOwnsLine = (): boolean => {
       if (parsedAtSubmit === undefined) return true
-      if (deps.command.hostCatalogResolves(parsedAtSubmit.name)) {
-        return deps.command.hostClaimOf(parsedAtSubmit)?.claimed !== false
-      }
+      const originClaim = deps.command.hostOriginClaimOf(parsedAtSubmit)
+      if (originClaim !== undefined) return originClaim.claimed !== false
       if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true
       if (deps.command.isSkillWrapperName(parsedAtSubmit.name) === true) return true
-      // The final catalog does not resolve the name at all: the plane decides
+      // The final catalog owns no genuine Host name at all: the plane decides
       // (a session-scoped command the standing view cannot see) — UNLESS the
       // line was ALREADY a known non-invocation when it was submitted, which
       // no disappearance can turn into an invocation.
-      return submitView?.claimed !== false
+      return submitOriginClaim?.claimed !== false
     }
     // Assigned inside the runOwned factory (invocation-time capture).
     let commandHealthRef: { slot: string; id: string; owner: string } | undefined
@@ -981,7 +983,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 && deps.extensions.findContribution(parsed.name) !== undefined,
               skillInvocation: finalSkillInvocation,
             })
-            return attachmentRefusal(parsed, text, finalClassification, finalSkillInvocation)
+            return attachmentRefusal(parsed, text, finalClassification)
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: () => parsedAtSubmit !== undefined
@@ -1000,7 +1002,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
               skillInvocation: false,
             }).kind === 'client-command',
           commandPlaneOwnsLine,
-          submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostClaimOf(parsedAtSubmit),
+          submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,
           invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
             deps.command.withCommandDelivery(delivery, () => {
@@ -1478,9 +1480,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         && deps.extensions.findContribution(parsed.name) !== undefined,
       skillInvocation,
     })
-    // The advertised union claim view (§1C-1): kept ONLY for the advertised
-    // -miss semantics below — never a routing authority.
-    const hostView = parsed === undefined ? undefined : deps.command.hostClaimOf(parsed)
     // Command semantics matrix (plan §19.3): slash commands are not LLM
     // prompts — an image-bearing command line is REJECTED explicitly
     // (never a silent drop, never a stray placeholder sent to the model).
@@ -1500,12 +1499,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // Client command (TUI or extension) refuses staged attachments, a
       // Host command follows the HOST descriptor's own declaration, skill
       // invocations and ordinary submissions stay multimodal.
-      const refusal = attachmentRefusal(
-        parsed,
-        text,
-        classification,
-        deps.command.isSkillInvocation(parsed, text),
-      )
+      const refusal = attachmentRefusal(parsed, text, classification)
       if (refusal !== undefined) {
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
         deps.app().notify(refusal, 'error')
