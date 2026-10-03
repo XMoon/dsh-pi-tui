@@ -3333,6 +3333,58 @@ test('AC-2/R7-3: a genuine Host command installed AFTER a live skill wrapper own
   assert.deepEqual(imageSaves, [], 'nothing was admitted through the wrapper route')
 })
 
+test('whole-PR F4: an argued SESSIONLESS name a genuine Host descriptor does not claim stays an ordinary submission', async (t) => {
+  // The sessionless local route used to re-judge by NAME alone
+  // (`SESSIONLESS_COMMANDS.has(name)`), so a genuine Host `/model` whose
+  // execute-kind descriptor does not claim the ARGUED form was pulled back into
+  // the local command surface even though the classifier had already returned
+  // `ordinary-submission` with `hostNameReserved`.
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    // A DEFERRED start is the discriminating window: the sessionless LOCAL route
+    // runs its handler with no live agent, while an ordinary submission must
+    // create the session first (name-only re-judging therefore shows up as "no
+    // session, no delivery").
+    deferredStart: true,
+    // A genuine GLOBAL Host `/model` (execute-kind: it claims its bare token only).
+    hostCommands: ['model'],
+  })
+  mounted.app.setDraft('/model foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued sessionless-name collision')
+  assert.equal(harness.createdSessionIds.length, 1,
+    'an ordinary submission must create the session through the deferred-start gate')
+  assert.equal(harness.host.followedUp.length, 1,
+    `the argued line must be delivered as an ordinary submission: ${JSON.stringify(harness.host.followedUp)}`)
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/model')),
+    `it must never reach the command plane: ${JSON.stringify(harness.executed)}`)
+})
+
+test('whole-PR F4 control: the SAME argued name stays LOCAL when no genuine Host descriptor owns it', async (t) => {
+  // The gate must not disturb the normal sessionless route: without a Host
+  // collision `/model foo` is this surface's own client-command line, so it
+  // executes locally and is never delivered to the model.
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  mounted.app.setDraft('/model foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.executed.length > 0 || mounted.app.notifyTextForTest() !== '', 5_000)
+  // The discriminating observable is the SESSIONLESS LOCAL route itself: it runs
+  // the TUI handler with NO session and never delivers the line. (On Direct both
+  // the TUI-owned route and the Host route funnel through
+  // `commandPlane.execute`, so `executed` cannot separate them.)
+  assert.equal(harness.createdSessionIds.length, 0,
+    'a genuinely TUI-owned sessionless line runs locally without creating a session')
+  assert.equal(harness.host.followedUp.length, 0,
+    'and it is never delivered as a prompt')
+})
+
 test('AC-2/R7-1: a genuine Host leading-input collision next to the Client `/export` runs the Host execution exactly once', async (t) => {
   // AC-2: given a real Host `/export` and this TUI's own Client `/export`, the
   // Host-ORIGIN name/line claim must decide the final command-plane ownership.

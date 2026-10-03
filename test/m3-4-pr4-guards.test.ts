@@ -513,3 +513,22 @@ test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendere
   assert.ok(card.includes('model?: string'),
     'the card accepts an absent model fact')
 })
+
+
+/* ── PR5 §1C-7 (whole-PR F4): the sessionless route consumes the classifier ── */
+
+test('PR5 §1C-7 (whole-PR F4): the sessionless LOCAL route never re-judges by NAME alone', () => {
+  const controller = code('app/submission/controller.ts')
+  const at = controller.indexOf('if (parsed !== undefined && isSessionless')
+  assert.ok(at > 0, 'the sessionless route exists')
+  const branch = controller.slice(at, at + 700)
+  // The route must consume the SAME classification: a genuine Host name whose
+  // execute-kind descriptor does not claim the ARGUED form is an ordinary
+  // submission and must not be pulled back into the local command surface.
+  assert.ok(branch.includes("classification.kind === 'client-command'"),
+    'the sessionless route consumes the classification')
+  assert.ok(branch.includes("classification.source === 'tui'"),
+    "and only for THIS surface's own registration")
+  assert.equal(branch.includes('isSessionless) {'),
+    false, 'the name-only re-judge must not come back')
+})
