@@ -3885,7 +3885,15 @@ PR5 closed the remaining MAIN-TUI Remote gaps on the frozen rc.2 contract
   exactly that stale state. Both rules are now modelled (`register` refuses,
   `registerScoped` + an effective-view `list`/`find`/`execute`), and the two
   cases that model a SESSION's descriptor mutation register through the scoped
-  layer (their expectations are unchanged). Its fake now preserves
+  layer (their expectations are unchanged; review round 8 confirmed the two
+  conversions change only the registration LAYER, with every execution /
+  model-fallback / raw-input assertion preserved). Known LIMITS of that fake,
+  recorded rather than papered over: it is not a full `ScopedLayers` replica —
+  `registerScoped` still permits a same-layer overwrite, and no scope ancestry
+  is modelled. Neither behaviour is depended on by any case in this PR (the
+  global→session winner rule, the winner's own `definitionId`, dispose
+  restoration and the change notification are the parts the PR5 authority
+  contract actually exercises). Its fake now preserves
   `definitionId` AND fires the registry-change notification the official
   service fires (the bridge that lets a post-mount genuine Host registration
   reach the effective catalog the gates read). A bounded A/B measured the
