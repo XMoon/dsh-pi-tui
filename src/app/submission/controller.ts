@@ -110,7 +110,6 @@ export interface SubmissionExtensionsDeps {
   findContribution(name: string): { readonly sessionless: boolean } | undefined
   handlerFor(name: string): TuiLocalCommandHandler | undefined
   commandIdFor(name: string): string | undefined
-  isLocal(name: string, staticLocal: ReadonlySet<string>): boolean
   recordHealthRef(slot: string, id: string): unknown
   recordError(ref: unknown, error: unknown): void
   clearError(ref: unknown): void

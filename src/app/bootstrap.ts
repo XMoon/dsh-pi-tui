@@ -2174,7 +2174,6 @@ export function applyRunnerWithRuntime(
         findContribution: (name) => extensionService?.commands.find(name),
         handlerFor: (name) => extensionService?.commands.handlerFor(name),
         commandIdFor: (name) => extensionService?.commands.idFor(name),
-        isLocal: (name, staticLocal) => extensionService?.commands.isLocal(name, staticLocal) ?? false,
         recordHealthRef: (slot, id) => extensionService?._recordRegistryHealthRef(slot, id),
         recordError: (ref, error) => extensionService?._recordRegistryError(ref as { slot: string; id: string; owner: string }, error),
         clearError: (ref) => extensionService?._clearRegistryError(ref as { slot: string; id: string; owner: string }),
