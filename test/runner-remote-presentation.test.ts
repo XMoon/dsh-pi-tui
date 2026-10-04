@@ -46,8 +46,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -1502,4 +1505,197 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
     `the footer re-derived its recent figures from the widened fold after the /status paging:\n${footerText}`)
   assert.match(footerText, /([1-9]\d{1,3}) tok\/s/u,
     `the footer's recent throughput re-derived from the widened fold:\n${footerText}`)
+})
+
+/* ─────────── PR5 §12 Slice E: real-holder writer-held recovery ─────────── */
+
+/** The two-process Session-writer holder (see test/support). */
+const SESSION_WRITER_HOLDER = fileURLToPath(new URL('./support/session-writer-holder.mjs', import.meta.url))
+
+interface WriterHolder {
+  /** SIGKILL the holder and await its exit (idempotent). */
+  kill(): Promise<void>
+}
+
+/** Start the holder against the fixture Host's shared persistence root and wait
+ *  until it reports `holding`. */
+async function startWriterHolder(
+  life: TestLifecycle,
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+): Promise<WriterHolder> {
+  const child = spawn(process.execPath, [
+    SESSION_WRITER_HOLDER,
+    join(host.workRoot, 'persistence'),
+    sessionId,
+    host.anchorDir,
+  ], { stdio: ['ignore', 'pipe', 'inherit'] })
+  const exited = new Promise<void>(resolve => { child.once('exit', () => { resolve() }) })
+  const kill = async (): Promise<void> => {
+    if (child.exitCode === null) child.kill('SIGKILL')
+    await exited
+  }
+  life.defer(kill)
+  await once(child.stdout!, 'data')
+  return { kill }
+}
+
+/** Read the durable event types straight off the Host persistence root. */
+async function readDurableEventTypes(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+): Promise<readonly string[]> {
+  const persistence = (host.ctx as unknown as {
+    sessionPersistence: {
+      open(id: unknown, mode: 'read'): Promise<{
+        read(): Promise<{ events: readonly { type: string }[] }>
+        close(): Promise<void>
+      }>
+    }
+  }).sessionPersistence
+  const handle = await persistence.open(SessionId(sessionId), 'read')
+  try {
+    const read = await handle.read()
+    return read.events.map(event => event.type)
+  } finally {
+    await handle.close()
+  }
+}
+
+test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title and /preset recover structurally, and an explicit retry commits after the holder exits', async (t) => {
+  const life = testLifecycle(t)
+  const heldId = 'm3-5-pr5-writer-held'
+  const hostPreset = 'm3-4-pr2-preset'
+  const altPreset = 'm3-5-pr5-alt-preset'
+  const promptText = 'a prompt against a held writer'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  // FAIL-CLOSED PRECONDITION: another process owns the kernel write lease.
+  const holder = await startWriterHolder(life, host, heldId)
+  // The runner resumes the EXTERNALLY persisted cold Session: the read/open is
+  // allowed, the write lease is not.
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: heldId,
+    host,
+    productionSerializer: true,
+    extraPresetIds: [altPreset],
+  })
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    submitDraft(): void
+    getDraft(): string
+  }
+  const viewport = (): string => fixture.vt.getViewport().join('')
+
+  // ---- E2: ordinary prompt source -> decision -> sink --------------------
+  editor.setDraft(promptText)
+  editor.submitDraft()
+  await waitFor('the writer-held guidance rendered for the prompt', () =>
+    viewport().includes('already in use'), 40_000)
+  assert.equal(editor.getDraft(), promptText,
+    'the human draft is restored EXACTLY once (a double restore would append it twice)')
+  assert.ok(!viewport().includes('Submitting'), 'the optimistic submit row is terminally settled')
+  assert.ok(!viewport().includes('submission failed'),
+    'a proven refusal never takes the generic submission-failure path')
+  assert.deepEqual(await readDurableEventTypes(host, heldId), ['turn/start', 'turn/end'],
+    'the refused prompt appended NO durable user/message')
+  assert.equal(host.ctx.agents.get(SessionId(heldId)), undefined,
+    'the refused write never activated a Host Agent')
+
+  // ---- E3: /title <name> (secondary surface) -----------------------------
+  editor.setDraft('/title held-title')
+  editor.submitDraft()
+  await waitFor('the held /title restores the command with the guidance', () =>
+    editor.getDraft() === '/title held-title' && viewport().includes('already in use'), 40_000)
+  assert.ok(!viewport().includes('title set:'),
+    'no fake title success notice on a refused rename')
+  assert.deepEqual(await readDurableEventTypes(host, heldId), ['turn/start', 'turn/end'],
+    'the refused rename mutated no durable title state')
+
+  // ---- E4: /preset <id> (secondary surface) ------------------------------
+  editor.setDraft(`/preset ${altPreset}`)
+  editor.submitDraft()
+  await waitFor('the held /preset restores the command with the guidance', () =>
+    editor.getDraft() === `/preset ${altPreset}` && viewport().includes('already in use'), 40_000)
+  assert.ok(!viewport().includes('preset switched to'),
+    'no optimistic preset selection on a refused switch')
+  assert.deepEqual(await readDurableEventTypes(host, heldId), ['turn/start', 'turn/end'],
+    'the refused preset switch appended no agent-preset/selected')
+
+  // ---- D4: explicit recovery positive control ----------------------------
+  await holder.kill()
+  editor.setDraft('/title recovered-title')
+  editor.submitDraft()
+  await waitFor('the explicit retry commits once the holder is gone', () => {
+    const session = host.ctx.sessions.get(SessionId(heldId)) as unknown as {
+      snapshotEvents(): Array<{ type: string }>
+    } | undefined
+    return (session?.snapshotEvents().length ?? 0) > 2
+  }, 40_000)
+  assert.equal(editor.getDraft(), '', 'a committed /title consumes the typed command')
+  const recovered = await readDurableEventTypes(host, heldId)
+  assert.ok(recovered.length > 2,
+    `the explicit retry appended durable title state after the lease was released: ${JSON.stringify(recovered)}`)
+})
+
+test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer settlement and never restored', async (t) => {
+  // The fact under test is the APPLICATION draft disposition after a genuine
+  // indeterminate result, not Host writer ownership (plan §12 E5). The Remote
+  // preset operation result is therefore controlled at the adapter port; the
+  // handler, the command settlement owner and the TUI surface stay real, and
+  // the gesture is driven through the real editor (`submitDraft`), never by
+  // calling the handler directly.
+  const life = testLifecycle(t)
+  const mainId = 'm3-5-pr5-preset-indeterminate'
+  const hostPreset = 'm3-4-pr2-preset'
+  const altPreset = 'm3-5-pr5-alt-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    extraPresetIds: [altPreset],
+  })
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    submitDraft(): void
+    getDraft(): string
+  }
+  const presets = fixture.aggregate.selected.backend.catalog.presets
+  let dispatches = 0
+  Object.assign(fixture.aggregate.selected.backend.catalog, {
+    presets: {
+      available: () => presets.available(),
+      roster: (signal?: AbortSignal) => presets.roster(signal),
+      resolve: (id?: string, signal?: AbortSignal) => presets.resolve(id, signal),
+      defaultId: () => presets.defaultId(),
+      selectSessionPreset: async () => {
+        dispatches += 1
+        return {
+          ownership: 'current' as const,
+          outcome: {
+            kind: 'indeterminate' as const,
+            error: { code: 'agent-preset/select-indeterminate', message: 'the recompose ran but the durable append failed' },
+          },
+        }
+      },
+    },
+  })
+
+  editor.setDraft(`/preset ${altPreset}`)
+  editor.submitDraft()
+  await waitFor('the indeterminate preset notice rendered', () =>
+    fixture.vt.getViewport().join('').includes('do not retry'), 30_000)
+  assert.equal(dispatches, 1, 'the switch dispatched exactly once — no automatic retry')
+  assert.equal(editor.getDraft(), '',
+    'a true indeterminate result must NOT restore the typed command as retry-ready intent')
+  assert.ok(!fixture.vt.getViewport().join('').includes('preset switched to'),
+    'no optimistic preset selection is presented')
+  const sessionTypes = (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string }>
+  }).snapshotEvents().map(event => event.type)
+  assert.ok(!sessionTypes.includes('agent-preset/selected'),
+    'an indeterminate switch commits no durable preset selection')
 })
