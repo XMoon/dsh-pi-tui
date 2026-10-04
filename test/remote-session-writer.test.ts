@@ -17,7 +17,7 @@ import {
   type RemoteWriteSessionFace,
   type RemoteWriteSessionsSource,
 } from '../src/runtime/remote/session-writer-remote.ts'
-import { classifyRemoteWriteFailure } from '../src/runtime/remote/write-failure.ts'
+import { classifyRemoteWriteFailure, SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 import { retainableSource, type RetainableSource } from './remote-reference-source.ts'
 import { createObservableGenerationHarness, type GenerationHarness } from './support/remote-generation.ts'
 
@@ -498,6 +498,25 @@ test('rename returns the normalized accepted title and keeps the old one on reje
   const rejected = await writer.rename('session-a', '   ')
   assert.equal(rejected.kind, 'rejected')
   assert.equal(rejected.kind === 'rejected' ? rejected.error.code : undefined, 'session/title-invalid')
+})
+
+test('PR5: a session/writer-held rename refusal is rejected with code, details and guidance', async () => {
+  // C1 qualification only: the official rc.2 `session.rename` resolves the
+  // Agent before the title mutation, so writer-held proves no rename happened.
+  const harness = writerHarness()
+  harness.setRenameResult({
+    ok: false,
+    error: new RemoteError('session/writer-held', 'internal writer diagnostic', { sessionId: 'session-a' as never }),
+  })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
+  const outcome = await writer.rename('session-a', 'held-title')
+  assert.deepEqual(harness.calls.renameCalls, ['held-title'], 'the rename is dispatched exactly once')
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') {
+    assert.equal(outcome.error.code, 'session/writer-held', 'the exact official code is preserved')
+    assert.deepEqual(outcome.error.details, { sessionId: 'session-a' }, 'the official failure details are preserved')
+    assert.equal(outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'the shared actionable guidance is the user copy')
+  }
 })
 
 test('refreshTitle is explicitly unsupported on the Remote path', async () => {
