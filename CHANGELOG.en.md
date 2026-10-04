@@ -50,11 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension session snapshot follows the same display subject: `sessionId`/
   `workspaceRoot`/`title` and `model`/`cwd`/`permission`/`turns`/`steps` plus
   the activity `todoCount`/`todoSummary` always describe one subject, with
-  `viewerMode` telling whether it is the main session or the viewed child —
-  an identity/status mismatch is no longer published. While a child is viewed,
-  the main session's identity head card (model / working directory / session
-  id) is no longer shown, and the main session's latest identity returns
-  immediately on exit.
+  While a child is viewed, the main session's identity head card (model /
+  working directory / session id) is no longer shown, and the main session's
+  latest identity returns immediately on exit. The child's own todo / title /
+  goal / permission / context facts — "the subject currently on screen" — are
+  published through the new optional `session.displaySubject` projection, which
+  exists only while a child viewer is mounted; the released extension
+  `SessionSnapshot` semantics (the live session's identity/status, and the
+  activity todo facts) are unchanged, so entering or leaving a viewer never makes
+  a plugin observe a session switch, and the first-party todo dock item renders
+  `displaySubject`'s summary. A child's todo / title / goal / permission now
+  update the moment their event lands, without waiting for a turn/step
+  boundary.
 
 ### Fixed
 

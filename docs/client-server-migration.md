@@ -4244,12 +4244,24 @@ What landed:
   actually displayed; an absent child fact renders nothing. Genuinely
   main-only chrome (Task Center badge, plan state, the `ext:*` bridge, queue,
   agents, run-state) keeps its subject gate.
-- **Extension snapshot parity.** The extension `SessionSnapshot` describes the
-  same committed display subject: `viewerMode` (derived from the committed
-  `view`), `sessionId`/`workspaceRoot`/`title`, `model`/`cwd`/`branch`/
-  `permission`/`turns`/`steps` and the activity `todoCount`/`todoSummary`. A
-  main identity with child facts (or the reverse) is never published. No new
-  public field was added.
+- **Extension contract decision (v2 unchanged + one additive projection).**
+  The released Stable `SessionSnapshot` (API_VERSION 2) semantics — "the live
+  session's identity and mode" — are UNCHANGED: a viewer transition never
+  re-points `sessionId`/`workspaceRoot`/`title`/`model`/`cwd`/`branch`/
+  `permission`/`turns`/`steps`, and the activity `todoCount`/`todoSummary` keep
+  describing the LIVE session. The display subject is published beside it as
+  the optional `session.displaySubject` (identity + the Session-owned status of
+  the viewed child), present only while a child viewer is mounted; the
+  first-party todo dock item prefers its `todoSummary`, so the chrome follows
+  the subject. Additive only — no version bump, no silently changed field. See
+  the explicit decision note in `docs/extension-api.md`.
+- **Display-subject invalidation.** The child's Session-owned facts come from
+  the official projections, so the re-read follows every durable event family
+  that can move them (`invalidatesDisplaySubjectStatus` in
+  `app/surface/runtime.ts`): the turn/step boundaries, `todo/write`,
+  `session/title`, `goal/change`, the permission knobs and the child's own
+  `compaction/end`. A lone `session/title` or `todo/write` between turns now
+  reaches the display subject immediately (no next-step boundary required).
 - **Remote main permission retention is subject-scoped.** The Remote branch's
   "an unavailable projection keeps its last value" rule now retains only a
   value the PREVIOUS committed snapshot carried for the SAME (main) subject —

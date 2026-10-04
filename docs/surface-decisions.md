@@ -405,15 +405,27 @@ future change must not silently reverse:
     Genuinely MAIN-only chrome keeps its subject gate and stays hidden while
     viewing: the Task Center badge, plan state, the `ext:*` extension bridge,
     queue, agents and run-state.
-  - **Extension snapshot parity.** The extension `SessionSnapshot` describes
-    the same display subject: `viewerMode`, `sessionId`/`workspaceRoot`/
-    `title`, `model`/`cwd`/`branch`/`permission`/`turns`/`steps` and the
-    activity `todoCount`/`todoSummary` all follow the committed subject — a
-    main identity with child facts (or the reverse) is never published.
-    Direct/current viewer composition is qualified by PR1; the Remote child
-    viewer stays PR2 (no Remote child-viewer L6 is claimed here).
-  The footer is refreshed at step/end and turn/end (never on streaming
-  deltas). **Extension footer segments do not render while viewing**:
+  - **Extension: v2 live-session semantics stay, the display subject is
+    published ADDITIVELY.** The released Stable `SessionSnapshot` (API_VERSION
+    2) means "the live session's identity and mode" and its semantics are
+    UNCHANGED: `sessionId`/`workspaceRoot`/`title`/`model`/`cwd`/`branch`/
+    `permission`/`turns`/`steps` and the activity `todoCount`/`todoSummary`
+    keep describing the LIVE session owner — a viewer transition never
+    re-points them (the M3-5 PR1 contract decision; see
+    `docs/extension-api.md`). The session the user is LOOKING AT is published
+    beside it as the optional `session.displaySubject` (`sessionId`, `title`,
+    `workspaceRoot`, `cwd`, `branch`, `model`, `permission`, `turns`, `steps`,
+    `todoCount`, `todoSummary`), present only while a child viewer is mounted
+    (`viewerMode`). The first-party todo dock item prefers
+    `displaySubject.todoSummary`, so the chrome still follows the subject while
+    the live-session fields stay truthful. Direct/current viewer composition is
+    qualified by PR1; the Remote child viewer stays PR2 (no Remote
+    child-viewer L6 is claimed here).
+  The display-subject status is re-derived for EVERY durable child event that
+  can move it — the turn/step boundaries, `todo/write` / `session/title` /
+  `goal/change`, the permission knobs and the child's own `compaction/end` —
+  never only on the turn/step counters and never on streaming deltas
+  (`invalidatesDisplaySubjectStatus`, `app/surface/runtime.ts`). **Extension footer segments do not render while viewing**:
   viewer mode is host-owned chrome, the extension surface already exposes
   `viewerMode` in its session state, and the first-party builtin's
   turn/step segment would otherwise duplicate the child counters with the
