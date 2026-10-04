@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   RemoteJobObservationPort,
+  type RemoteJobKillResult,
   type RemoteJobObservationSource,
   type RemoteObservedJobRow,
   type RemoteObservedJobState,
@@ -19,11 +20,14 @@ import type { JobObservedSnapshot } from '../src/runtime/job-observation-port.ts
 interface JobsFixture extends RemoteJobObservationSource {
   readonly watchCalls: string[]
   readonly observeCalls: Array<readonly [string | undefined, string]>
+  readonly killCalls: Array<readonly [string, string]>
   readonly rowReleases: string[]
   readonly observeReleases: string[]
   subscriberCount(): number
   setRows(sessionId: string, rows: readonly RemoteObservedJobRow[]): void
   setObserved(jobId: string, state: RemoteObservedJobState | undefined): void
+  setKill(result: RemoteJobKillResult): void
+  setSyncEmitOnObserve(value: boolean): void
   failWatch(error: unknown): void
   failObserve(error: unknown): void
 }
@@ -34,10 +38,13 @@ function jobsFixture(): JobsFixture {
   const listeners = new Set<() => void>()
   const watchCalls: string[] = []
   const observeCalls: Array<readonly [string | undefined, string]> = []
+  const killCalls: Array<readonly [string, string]> = []
   const rowReleases: string[] = []
   const observeReleases: string[] = []
   let watchError: unknown
   let observeError: unknown
+  let syncEmitOnObserve = false
+  let killResult: RemoteJobKillResult = { ok: true, value: { outcome: 'requested' } }
   const notify = (): void => { for (const listener of [...listeners]) listener() }
   return {
     state: {
@@ -61,6 +68,10 @@ function jobsFixture(): JobsFixture {
     },
     observe(sessionId, jobId) {
       observeCalls.push([sessionId, jobId])
+      // A structural source that publishes synchronously on acquisition: the
+      // state listener runs re-entrantly while `observe` is still in flight,
+      // BEFORE the (optional) acquisition failure.
+      if (syncEmitOnObserve) notify()
       if (observeError !== undefined) throw observeError
       let released = false
       return () => {
@@ -71,9 +82,16 @@ function jobsFixture(): JobsFixture {
     },
     get watchCalls() { return watchCalls },
     get observeCalls() { return observeCalls },
+    kill(sessionId, jobId) {
+      killCalls.push([sessionId, jobId])
+      return Promise.resolve(killResult)
+    },
+    get killCalls() { return killCalls },
     get rowReleases() { return rowReleases },
     get observeReleases() { return observeReleases },
     subscriberCount: () => listeners.size,
+    setKill(result) { killResult = result },
+    setSyncEmitOnObserve(value) { syncEmitOnObserve = value },
     failWatch(error) { watchError = error },
     failObserve(error) { observeError = error },
     setRows(sessionId, value) {
@@ -252,5 +270,141 @@ test('a synchronous observation acquisition failure rolls back the row watch and
   assert.throws(() => port.open('s1', 'job-1', () => {}), /context is tearing down/)
   assert.equal(jobs.subscriberCount(), 0, 'the state subscription must not leak')
   assert.deepEqual(jobs.rowReleases, ['s1'], 'the row watch must be released when the observation acquisition fails')
+  assert.deepEqual(jobs.observeReleases, [], 'no observation lease was acquired')
+})
+
+/** One failed official `job.kill` result. */
+const killFailure = (error: unknown): RemoteJobKillResult => ({ ok: false, error })
+
+test('stop maps the official kill admission and never mutates observation state', async () => {
+  const jobs = jobsFixture()
+  jobs.setRows('s1', [row()])
+  jobs.setObserved('job-1', observed())
+  const port = new RemoteJobObservationPort(jobs)
+  const { snapshots } = observe(port, 's1')
+  assert.equal(snapshots.length, 1)
+
+  // An independent DEEP copy: a shallow `getSnapshot()` would alias the row
+  // arrays and the observed OBJECT, so an in-place mutation would change the
+  // "before" too and the comparison could not see it.
+  const before = structuredClone(jobs.state.getSnapshot())
+  jobs.setKill({ ok: true, value: { outcome: 'requested' } })
+  assert.deepEqual(await port.stop('s1', 'job-1'), { kind: 'requested' })
+  assert.deepEqual(structuredClone(jobs.state.getSnapshot()), before, 'stop must not rewrite the source roster/observed state')
+  jobs.setKill({ ok: true, value: { outcome: 'already-finished' } })
+  assert.deepEqual(await port.stop('s1', 'job-1'), { kind: 'already-finished' })
+  assert.deepEqual(structuredClone(jobs.state.getSnapshot()), before, 'stop must not rewrite the source roster/observed state')
+  assert.deepEqual(jobs.killCalls, [['s1', 'job-1'], ['s1', 'job-1']])
+
+  // No optimistic local mutation: stop emitted no snapshot, and the source
+  // still reports the running row.
+  assert.equal(snapshots.length, 1)
+  assert.equal(snapshots[0]?.status, 'running')
+
+  // The next authoritative emission still reports the LIVE status: the adapter
+  // cached nothing from the stop settlement.
+  jobs.setObserved('job-1', observed({ text: 'line one\nline two\n' }))
+  assert.equal(snapshots.at(-1)?.status, 'running')
+  assert.equal(snapshots.at(-1)?.text, 'line one\nline two\n')
+})
+
+test('stop maps job/not-found to not-found and does not retry', async () => {
+  const jobs = jobsFixture()
+  const port = new RemoteJobObservationPort(jobs)
+  jobs.setKill(killFailure({ code: 'job/not-found', message: 'no such job' }))
+  assert.deepEqual(await port.stop('s1', 'job-1'), { kind: 'not-found' })
+  assert.equal(jobs.killCalls.length, 1, 'a not-found settlement is never replayed')
+})
+
+test('stop maps a proven business refusal to rejected and does not retry', async () => {
+  const jobs = jobsFixture()
+  const port = new RemoteJobObservationPort(jobs)
+  jobs.setKill(killFailure({ code: 'job/refused', message: 'the registry refused the kill' }))
+  assert.deepEqual(await port.stop('s1', 'job-1'), {
+    kind: 'rejected',
+    message: 'the registry refused the kill',
+  })
+  assert.equal(jobs.killCalls.length, 1)
+})
+
+test('stop maps carrier/internal/cancellation failures to indeterminate without retry', async () => {
+  for (const error of [
+    { code: 'gateway/internal', message: 'internal' },
+    { code: 'gateway/result-invalid', message: 'invalid result' },
+    { code: 'gateway/cancelled', message: 'cancelled' },
+    new Error('carrier went away'),
+  ]) {
+    const jobs = jobsFixture()
+    const port = new RemoteJobObservationPort(jobs)
+    jobs.setKill(killFailure(error))
+    const outcome = await port.stop('s1', 'job-1')
+    assert.equal(outcome.kind, 'indeterminate', `an unproven settlement must stay indeterminate for ${JSON.stringify(error)}`)
+    assert.equal(jobs.killCalls.length, 1, 'an indeterminate settlement is never replayed')
+  }
+})
+
+test('a late re-release of a closed observer cannot tear down its successor', () => {
+  const jobs = jobsFixture()
+  jobs.setRows('s1', [row()])
+  jobs.setObserved('job-1', observed())
+  const port = new RemoteJobObservationPort(jobs)
+
+  const first = observe(port, 's1')
+  first.close()
+  assert.deepEqual(jobs.rowReleases, ['s1'])
+  assert.deepEqual(jobs.observeReleases, ['job-1'])
+
+  // A successor observer for the SAME job id after the first fully released.
+  const successor = observe(port, 's1')
+  assert.equal(jobs.subscriberCount(), 1, 'the successor owns its own state subscription')
+  // The closed observer's closer is invoked again (a late duplicate release):
+  // its idempotent guard must leave the successor's leases intact.
+  first.close()
+  assert.deepEqual(jobs.rowReleases, ['s1'], 'the successor row watch must survive the old release')
+  assert.deepEqual(jobs.observeReleases, ['job-1'], 'the successor observation must survive the old release')
+  assert.equal(jobs.subscriberCount(), 1)
+
+  // The successor is genuinely live, and only ITS close releases its leases.
+  jobs.setObserved('job-1', observed({ text: 'successor\n' }))
+  assert.equal(successor.snapshots.at(-1)?.text, 'successor\n')
+  successor.close()
+  assert.deepEqual(jobs.rowReleases, ['s1', 's1'])
+  assert.deepEqual(jobs.observeReleases, ['job-1', 'job-1'])
+  assert.equal(jobs.subscriberCount(), 0)
+})
+
+test('a source that notifies re-entrantly during acquisition still owns and releases every lease', () => {
+  const jobs = jobsFixture()
+  jobs.setRows('s1', [row()])
+  jobs.setObserved('job-1', observed())
+  jobs.setSyncEmitOnObserve(true)
+  const port = new RemoteJobObservationPort(jobs)
+  const { snapshots, close } = observe(port, 's1')
+  // One emission re-enters from inside `observe`, plus the explicit emit after
+  // acquisition: both carry the current source state.
+  assert.equal(snapshots.length, 2)
+  assert.equal(snapshots.at(-1)?.text, 'line one\n')
+  close()
+  assert.deepEqual(jobs.rowReleases, ['s1'])
+  assert.deepEqual(jobs.observeReleases, ['job-1'])
+  assert.equal(jobs.subscriberCount(), 0)
+  jobs.setObserved('job-1', observed({ text: 'late\n' }))
+  assert.equal(snapshots.length, 2, 'a closed observer must not emit after the re-entrant acquisition')
+})
+
+test('a re-entrant acquisition failure unwinds every lease acquired before it', () => {
+  const jobs = jobsFixture()
+  jobs.setRows('s1', [row()])
+  jobs.setObserved('job-1', observed())
+  jobs.setSyncEmitOnObserve(true)
+  jobs.failObserve(new Error('the context is tearing down'))
+  const port = new RemoteJobObservationPort(jobs)
+  let callbacks = 0
+  assert.throws(() => port.open('s1', 'job-1', () => { callbacks += 1 }), /context is tearing down/)
+  // The re-entrant emission genuinely ran BEFORE the failure: the listener saw
+  // the current snapshot, then the original acquisition error propagated.
+  assert.equal(callbacks, 1, 'the synchronous in-acquisition emission must have reached the listener')
+  assert.equal(jobs.subscriberCount(), 0, 'the state subscription must not leak through the re-entrant failure')
+  assert.deepEqual(jobs.rowReleases, ['s1'], 'the row watch must be released through the re-entrant failure')
   assert.deepEqual(jobs.observeReleases, [], 'no observation lease was acquired')
 })

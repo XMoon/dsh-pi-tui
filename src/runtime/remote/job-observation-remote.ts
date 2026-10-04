@@ -13,12 +13,16 @@
  * - `state.rows[sessionId]`  -> kind / label / status / progress / detail
  * - `state.observed[jobId]`  -> text / gapBefore / streaming / error
  *
+ * and maps the one human mutation, `IJobs.kill` -> `job.kill`, onto the
+ * {@link JobStopOutcome} taxonomy without retrying an unproven settlement.
+ *
  * NOT composed into production: M3 owns Remote backend composition.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/job-observation-remote
  */
 
-import type { JobObservationPort, JobObservedSnapshot } from '../job-observation-port.ts'
+import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../job-observation-port.ts'
+import { classifyRemoteWriteFailure, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 /** One official client-safe Job roster row (`JobView`) subset used here. */
 export interface RemoteObservedJobRow {
@@ -52,6 +56,33 @@ export interface RemoteJobObservationSource {
   watchRows(sessionId: string): () => void
   /** Reference-counted observation for one job (undefined = unowned job). */
   observe(sessionId: string | undefined, jobId: string): () => void
+  /** The official human kill RPC (the generated `job.kill` passthrough). */
+  kill(sessionId: string, jobId: string): Promise<RemoteJobKillResult>
+}
+
+/** Structural official `RemoteResult` of one human `job.kill`. */
+export type RemoteJobKillResult =
+  | { readonly ok: true; readonly value: { readonly outcome: 'requested' | 'already-finished' } }
+  | { readonly ok: false; readonly error: unknown }
+
+/**
+ * Classify one failed `job.kill` `RemoteResult` into the Job-stop taxonomy.
+ *
+ * `job/not-found` is the Job-stop-specific proven non-commit (the session's
+ * list no longer carries a killable row); it must not be flattened into the
+ * generic domain-code `rejected` bucket. Every other proven business or
+ * pre-invocation refusal is `rejected`. A carrier/internal failure, a
+ * dispatch-shaped cancellation, or a code-less failure cannot prove the kill
+ * did not commit and stays `indeterminate` (never auto-replayed).
+ */
+export function classifyJobStopFailure(error: unknown): JobStopOutcome {
+  if (remoteFailureCode(error) === 'job/not-found') return { kind: 'not-found' }
+  const failure = classifyRemoteWriteFailure(error)
+  if (failure.kind === 'rejected') return { kind: 'rejected', message: failure.error.message }
+  if (failure.kind === 'indeterminate') return { kind: 'indeterminate', message: failure.error.message }
+  // A post-dispatch cancellation is not proof of non-commit: the kill may
+  // already have been admitted.
+  return { kind: 'indeterminate', message: remoteFailureMessage(error) }
 }
 
 /** The experimental Remote Job observation port over official `IJobs`. */
@@ -138,5 +169,20 @@ export class RemoteJobObservationPort implements JobObservationPort {
       closed = true
       for (const release of owned.splice(0)) release()
     }
+  }
+
+  /**
+   * Stop one Job through the official `IJobs.kill` passthrough. The generated
+   * method is a `RemoteResult` contract, so no defensive catch: a rejection is
+   * an assembly/programming defect. It shares no state with {@link open} and
+   * never mutates local observation/roster state; the official streams
+   * converge on their own. No automatic retry.
+   */
+  async stop(sessionId: string, jobId: string): Promise<JobStopOutcome> {
+    const result = await this.jobs.kill(sessionId, jobId)
+    if (result.ok) {
+      return result.value.outcome === 'requested' ? { kind: 'requested' } : { kind: 'already-finished' }
+    }
+    return classifyJobStopFailure(result.error)
   }
 }

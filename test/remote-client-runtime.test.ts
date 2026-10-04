@@ -44,10 +44,12 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import { JobId } from '@deepseek-ai/dsh-jobs'
+import { JobId, type JobHandle } from '@deepseek-ai/dsh-jobs'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
+import { RemoteJobObservationPort } from '../src/runtime/remote/job-observation-remote.ts'
+import type { JobObservedSnapshot } from '../src/runtime/job-observation-port.ts'
 import {
   createRemoteClientRuntime,
   disposeRemoteContributions,
@@ -98,7 +100,37 @@ async function waitFor(label: string, predicate: () => boolean, timeoutMs = 15_0
   }
 }
 
-/** The ordinary Host fixture: real rc.2 services, no M3 rows, no Remote composition. */
+/**
+ * The ordinary rc.2 Host fixture for the L5 composition matrix (M3-1). M3-5
+ * PR3 materially extends it with the Job observe+kill case H, so it carries the
+ * migration-governance fixture manifest.
+ *
+ * PRODUCTION PREREQUISITES REPRODUCED
+ * - the real rc.2 Host services the composition requires: Jsonl Session
+ *   persistence, storage/domain, credentials, workspace registry, filesystem,
+ *   SQLite session-query, commands, agent presets, user questions, the official
+ *   `LocalJobRegistry` + `JobController` rows, and the AgentLoop harness that
+ *   composes real live Agents/Sessions
+ * - the official in-process Client/Gateway path over the real carrier
+ *   (`createExperimentalRemoteRuntime`), including the official Client `IJobs`
+ * - case H: a REAL Host-owned background Job registered in that registry (its
+ *   output ring, settlement and the human `job.kill` admission are the genuine
+ *   production authorities), driven through the ONE shared Client Jobs service
+ *   and the production `RemoteJobObservationPort`
+ *
+ * TEST STAND-INS / SUBSTITUTIONS
+ * - `StubLlmAdapter` (no turn runs in this suite) and the readiness-only
+ *   `agentDefaultModel` / `attachments` / `webServer` values
+ * - the deterministic `jobs.start` producer used by case H: the registry record
+ *   and its kill admission are real; only the work behind the job is synthetic
+ *   (its `cancel`/`done` are fixture-controlled so it always settles)
+ *
+ * DELIBERATELY ABSENT
+ * - application Task Center reachability / runner wiring: the blocking
+ *   post-PR2 L6 starts at a real Remote Task Center Job row and is NOT claimed
+ *   here (this is L5 wire evidence only)
+ * - no second Client graph and no second Host Jobs/JobController mount
+ */
 interface HostFixture {
   ctx: Context
   workRoot: string
@@ -488,7 +520,7 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
     }
   })
 
-  await t.test('H. the Job Client mirrors a real Host job roster', async () => {
+  await t.test('H. the Job Client mirrors a real Host roster and the Remote port observes + stops a real job', async () => {
     const jobs = host.ctx.jobs as LocalJobRegistry
     // A background job's owner must have a live Agent: compose a real
     // production Agent (and its Session) through the AgentLoop harness, then
@@ -496,26 +528,61 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
     const ownerId = SessionId('m3-l5-job-owner')
     await host.harness.create(ownerId)
     const releaseWatch = client.jobs.watchRows(ownerId)
+    // The SAME production adapter the Remote backend composes: it shares the
+    // ONE Client Jobs service rather than mounting a second Client graph.
+    const port = new RemoteJobObservationPort(client.jobs)
     let jobId: JobId | undefined
+    let closeObserver: (() => void) | undefined
     try {
       // The producer settles on cancellation, so the fixture leaves no
       // never-settling registry record behind.
       let settle!: (outcome: { status: 'completed' | 'killed' | 'failed' }) => void
       const done = new Promise<{ status: 'completed' | 'killed' | 'failed' }>(resolve => { settle = resolve })
+      let handle: JobHandle | undefined
       jobId = jobs.start({
         kind: 'bash',
         label: 'm3-l5 fixture job',
         owner: ownerId,
-        run: () => ({
-          cancel: () => settle({ status: 'killed' }),
-          done,
-        }),
+        run: (job) => {
+          handle = job
+          return {
+            cancel: () => settle({ status: 'killed' }),
+            done,
+          }
+        },
       })
+      handle!.append('l5 retained output\n')
       await waitFor('the known job to appear in the Client roster', () => {
         const rows = client.jobs.state.getSnapshot().rows[ownerId] ?? []
         return rows.some(row => String(row.id) === String(jobId))
       })
+
+      // Real generated `job.follow` -> official `IJobs.observe` -> the adapter:
+      // the retained tail arrives, and a later append arrives live.
+      const snapshots: JobObservedSnapshot[] = []
+      closeObserver = port.open(String(ownerId), String(jobId), snapshot => snapshots.push(snapshot))
+      await waitFor('the retained output to reach the Remote observer', () =>
+        snapshots.some(snapshot => snapshot.text.includes('l5 retained output')))
+      handle!.append('l5 live output\n')
+      await waitFor('the live output to reach the Remote observer', () =>
+        snapshots.at(-1)?.text.includes('l5 live output') === true)
+
+      // Real adapter `stop` -> generated `job.kill` -> Host JobRegistry
+      // admission, then the official roster converges on its own. This is L5
+      // wire evidence only (the generated list/follow/kill path through the
+      // SAME Client graph); application Task Center reachability — the
+      // blocking post-PR2 L6 — is deliberately absent here.
+      assert.deepEqual(await port.stop(String(ownerId), String(jobId)), { kind: 'requested' })
+      await waitFor('the roster to converge to the terminal status', () => {
+        const rows = client.jobs.state.getSnapshot().rows[ownerId] ?? []
+        return rows.some(row => String(row.id) === String(jobId) && row.status === 'killed')
+      })
+      // A row that already settled is an already-finished admission; a row the
+      // session can no longer see is a proven non-commit.
+      assert.deepEqual(await port.stop(String(ownerId), String(jobId)), { kind: 'already-finished' })
+      assert.deepEqual(await port.stop(String(ownerId), 'job-that-does-not-exist'), { kind: 'not-found' })
     } finally {
+      closeObserver?.()
       releaseWatch()
       if (jobId !== undefined) jobs.kill(jobId, ownerId)
     }
