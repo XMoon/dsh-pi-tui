@@ -29,8 +29,9 @@ M3-4 PR5 DONE/MERGED (final main-application closure MERGED as PR #211 into `nex
 M3-4 DONE          (PR1–PR5 landed and PR5 merged; the main TUI application + command runtime run on the experimental Remote backend — see the M3-4 status section)
 M3-5 PR1 DONE      (child display-subject status foundation: Direct SessionStatus is Session-subject-neutral, ONE shared `SessionStatus(sessionId)` read, the viewed child's Session-owned facts (model/preset/permission/context/usage/todos/cwd/title/goal) come from its own projection, the released extension v2 live-session snapshot preserved with the additive `session.displaySubject`, atomic main↔child↔child transitions — see the M3-5 PR1 status section. Remote child SessionStatus authority is qualified; the Remote Task/child surface stays PR2)
 M3-5 PR4 DONE      (Remote Plugin Manager closure: lifecycle/qualification over an ALREADY backend-neutral surface — one invalidation hint on `PluginManagerPort`, Direct/Remote mappings, demand-aware controller rereads, latest-started read currentness, dispose hardening, real Remote `/plugins` + Settings dual-entry L6, external-change and reconnect invalidation L6 — see the M3-5 PR4 section)
-M3-5 PR2 LANDED    (Remote Task Center + real child viewer: the Task read contract is the full descendant tree + root job roster on both backends, `TaskBrowserRuntime` consumes the SELECTED semantic Task read, Remote invalidation is observable-driven, the Remote Job rows expose no detail/Stop yet (PR3), `tuiChildView` owns one child SessionReference per viewer acquired from the exact SubagentAddress, the ONE viewer hydrates through the shared PresentationReader + RemoteLiveIngress, PageUp targets the active display subject, the child steer subject is transport-neutral, and durable images read through the owning presentation's exact scoped retained Session — see the M3-5 PR2 section. **PR open; mark DONE only after merge**)
-M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR4 merged, PR2 implementation landed and PR open, PR3/PR5/PR6 remain — see the migration stage pointer)
+M3-5 PR2 DONE/MERGED (Remote Task Center + real child viewer: the Task read contract is the full descendant tree + root job roster on both backends, `TaskBrowserRuntime` consumes the SELECTED semantic Task read, Remote invalidation is observable-driven, `tuiChildView` owns one child SessionReference per viewer acquired from the exact SubagentAddress, the ONE viewer hydrates through the shared PresentationReader + RemoteLiveIngress, PageUp targets the active display subject, the child steer subject is transport-neutral, and durable images read through the owning presentation's exact scoped retained Session — MERGED as PR #216 into `next @ cd498a2f`; see the M3-5 PR2 section)
+M3-5 PR3 LANDED    (Remote selected-Job viewer closure: the selected-Job detail/Stop is the ONE semantic `jobObservation` port on BOTH backends, `TaskSurfaceJobs` is the roster feed only (`list`/`subscribe`), the viewer's facts come from the official Client `IJobs.observe` NON-CONSUMING stream and its Stop from the official `IJobs.kill`, the neutral surface carries no Direct registry `get`/`kill`, and the real post-PR2 Remote application L6 drives `/tasks` → Job row → OutputViewer → Stop → official roster/follow convergence. Direct records the same human-kill reason. rc.2 `JobView` still carries no stable child id, so a `kind:'subagent'` Job stays a detail view — see the M3-5 PR3 section. **PR open; mark DONE only after merge**)
+M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR2/PR4 merged, PR3 landed and PR open, PR5/PR6 remain — see the migration stage pointer)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -2034,7 +2035,7 @@ The D1 closure ledger is:
 | commands | `ctx.commands` | commands Remote | parity | — |
 | skills | scoped skill registry | skills Remote | parity | — |
 | direct-child subagents | Host subagent runtime | Client Session projections (`projectionsBySession` / `subagentCatalog` via `refreshProjections`; the 0.1.6-era `refreshSubagents` / `subagentsByParent` mirror is retired) | parity | — |
-| jobs | `ctx.jobs` (SessionId ownership) | official ClientJobs retained `watchRows` roster (the 0.1.6-era `jobsBySession` mirror is retired) | parity | — |
+| jobs | `ctx.jobs` (SessionId ownership) roster + `JobRegistry.get`/`kill` selected-Job detail/Stop | official ClientJobs retained `watchRows` roster + official `IJobs.observe`/`kill` selected-Job observation/Stop (the 0.1.6-era `jobsBySession` mirror is retired) | parity | — |
 | history window | Direct Session events | `SessionBinding.eventSource` | parity | — |
 | history paging | Direct full history | `SessionFace.loadOlder()` + eventSource | eventual parity; leading-turn completeness CLOSED by the rc.1 turn-aligned opening windows | — |
 | live Assistant presentation | Direct stream | transient event-source entries | parity | — |
@@ -4528,11 +4529,25 @@ Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
 - **The Remote Task reader's retained root Job-roster watch is released by its
   owner**: `RemoteApplicationRuntime.disposeTransport()` disposes the
   presentation/task bundle before the backend adapters and the Client Context.
-- **PR2's Job-action boundary.** `TaskSurfaceJobs.get`/`kill` are now OPTIONAL
-  selected-Job capabilities. Direct keeps the current Open + Stop behaviour;
-  Remote Job rows render status/attention/summary but advertise **neither detail
-  nor Stop**, and the action sites fail closed without them. No fake
-  "unsupported backend" Job view exists; PR3 owns that closure.
+- **PR3's Job closure (supersedes PR2's Job-action boundary).**
+  `TaskSurfaceJobs` is now the roster feed ONLY (`list`/`subscribe`); the
+  selected-Job detail and Stop are the ONE semantic `backend.jobObservation`
+  port on BOTH backends, so the neutral Task/Job UI carries no Direct registry
+  `get`/`kill`. `openJobView` resolves the selected row from the CURRENT Task
+  projection (never a fresh registry read); the viewer's facts come from the
+  official Client `IJobs.observe` NON-CONSUMING stream (the opening row is only
+  the pre-first-snapshot fallback) and its Stop from the official `IJobs.kill`;
+  both the viewer Stop and the Task-Center row Stop dispatch that same
+  operation behind the existing subject/browser fences and render the
+  `JobStopOutcome` taxonomy truthfully (no optimistic local status, no retry).
+  The Direct adapter records the same human-kill reason (`cancelled by the
+  user`) as the official Host `JobController.kill`, so the two backends
+  converge on one durable detail. rc.2 `JobView` still carries no stable child
+  id, so a `kind:'subagent'` Job stays a detail view (the child row in the Task
+  Center is the transcript entry; no label/time/order matching). Evidence: the
+  PR3 L1-L4 adapter/parity suites, the L5 real generated-wire observe+kill
+  case, and the post-PR2 real Remote application L6
+  (`test/runner-remote-job-viewer.test.ts`).
 - **`tuiChildView` is a third TUI-owned SessionReference source**
   (`src/runtime/remote/session-reference.ts`). `acquireChildViewReference()`
   owns one child generation from the exact durable `SubagentAddress`
