@@ -110,6 +110,55 @@ export interface RemoteApplicationSources {
   readonly sessionFacts: RemoteSessionFactsSource
   /** The branch-specific command authority read (PR4). */
   readonly commandSource: RemoteCommandSourceFace
+  /** The M3-5 PR2 Task Center read source (descendant catalog + Job roster). */
+  readonly task: RemoteTaskApplicationSource
+  /** The M3-5 PR2 child-view source (retained child reference + read/ingress). */
+  readonly childView: import('./surface/viewer-runtime.ts').ViewerChildSource<import('./surface/session-presentation.ts').SessionPresentationEvent>
+  /** The M3-5 PR2 durable image read of the ACTIVE retained Session. */
+  readonly attachments: RemoteAttachmentSource
+}
+
+/**
+ * The neutral Remote durable-image read face (M3-5 PR2 Step 9): resolve one
+ * attachment through the EXACT retained binding of the addressed Session.
+ * There is no Host attachment shortcut and no cold retain on this path.
+ */
+export interface RemoteAttachmentSource {
+  readDurableImage(
+    sessionId: string,
+    attachmentId: string,
+  ): Promise<{ ref: unknown; data: Uint8Array }>
+}
+
+/**
+ * The neutral Remote Task Center source face (M3-5 PR2): the semantic Task
+ * descendant read plus the official Client model's roster/activity reads and
+ * invalidation subscriptions. Declared structurally here so the composition
+ * root consumes it without any static `app/remote/**` edge.
+ */
+export interface RemoteTaskApplicationSource {
+  /** The full descendant catalog + root Job roster read. */
+  readDescendants(
+    parentSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<import('../runtime/task-read-port.ts').TaskReadSnapshot | undefined>
+  /** The CURRENT official Job roster of one root session. */
+  jobs(sessionId: string): readonly import('../runtime/task-read-port.ts').TaskJobEntry[]
+  /**
+   * The CURRENT official activity of one descendant, read from the Session-list
+   * fact (`byId.running`) WITHOUT borrowing or retaining a binding — the Task
+   * listing deliberately retains no descendant. `undefined` = the Client does
+   * not know the Session.
+   */
+  activityOf(childSessionId: string): 'running' | 'inactive' | undefined
+  /** Subscribe the official Job state changes (roster/status invalidation). */
+  subscribeJobs(listener: () => void): () => void
+  /** Subscribe the official Session-list changes (catalog/activity
+   * availability invalidation). */
+  subscribeSessions(listener: () => void): () => void
+  /** Release the retained roster watch and invalidate every in-flight read.
+   *  Idempotent; must run before the Client Context is disposed. */
+  dispose(): void
 }
 
 /** The neutral live-ingress factory face (see `app/remote/live-ingress.ts`

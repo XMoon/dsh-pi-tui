@@ -23,10 +23,12 @@ import { cancellationError } from './detached.ts'
 import type { SessionWriter, WriteError, WriteOutcome } from './runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
 
-/** The minimal agent surface the steer needs (the runner's live agent).
- * Pending queue state belongs to {@link PendingInputReader}, not this
- * identity/dispatch handle. */
-export interface SteerAgentLike {
+/** The minimal writer-subject surface a steer needs: the exact identity a
+ * gesture's writes address. On Direct that identity IS the live Agent object
+ * (stable across calls while the same Agent owns the Session); a child viewer
+ * publishes its own stable token. Pending queue state belongs to
+ * {@link PendingInputReader}, not this identity/dispatch handle. */
+export interface SteerSubjectLike {
   session: { id: string }
 }
 
@@ -34,8 +36,9 @@ export type SteerOutcome = 'ok' | 'stale' | 'indeterminate'
 
 /** Injectable dependencies of {@link steerAll}. */
 export interface SteerDeps {
-  /** Current live agent, re-read on every access (TOCTOU detection). */
-  currentAgent(): SteerAgentLike | undefined
+  /** The current writer subject, re-read on every access (TOCTOU detection):
+   * the exact object that admitted this gesture. */
+  currentSubject(): SteerSubjectLike | undefined
   /** Current session generation, re-read (session switch detection). */
   currentGeneration(): number
   notify(message: string, kind: 'info' | 'error'): void
@@ -161,17 +164,17 @@ export function mergeDraft(current: string, submitted: string): string {
 }
 
 /**
- * Whether a session identity captured before an async operation is still
- * current: the SAME agent object and the SAME generation. Used by the
+ * Whether a writer-subject identity captured before an async operation is still
+ * current: the SAME subject object and the SAME generation. Used by the
  * Enter-submit path too, so every capture-then-write flow re-checks what
  * the captured identity actually verified.
  */
 export function sessionUnchanged(
-  locked: { agent: object; generation: number },
-  agent: object | undefined,
+  locked: { subject: SteerSubjectLike; generation: number },
+  subject: SteerSubjectLike | undefined,
   generation: number,
 ): boolean {
-  return agent !== undefined && agent === locked.agent && generation === locked.generation
+  return subject !== undefined && subject === locked.subject && generation === locked.generation
 }
 
 /** Options for {@link steerAll}. */
@@ -243,7 +246,7 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
   // that starts while this steer awaits drains it first. The fence quick
   // refusal below only covers writers that START during a transition.
   const writerSection = deps.writerSection
-  const sessionId = deps.currentAgent()?.session.id
+  const sessionId = deps.currentSubject()?.session.id
   if (writerSection !== undefined && sessionId !== undefined) {
     try {
       return await writerSection(() => steerAllCore(deps, text, options))
@@ -271,18 +274,18 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
 /** Deliver one ordinary message through the semantic writer seam. */
 const deliverPrompt = async (
   deps: SteerDeps,
-  agent: SteerAgentLike,
+  subject: SteerSubjectLike,
   message: unknown,
   mode: 'queue' | 'steer',
-): Promise<WriteOutcome> => deps.writer.prompt(agent.session.id, message, mode)
+): Promise<WriteOutcome> => deps.writer.prompt(subject.session.id, message, mode)
 
 /** Deliver one exact queued occurrence through the official updateQueue
  * steer operation. */
 const deliverQueued = async (
   deps: SteerDeps,
-  agent: SteerAgentLike,
+  subject: SteerSubjectLike,
   messageId: string,
-): Promise<WriteOutcome> => deps.writer.updateQueue(agent.session.id, messageId, { kind: 'steer' })
+): Promise<WriteOutcome> => deps.writer.updateQueue(subject.session.id, messageId, { kind: 'steer' })
 
 /** Apply a writer settlement for the one-message draft prompt. Known
  * non-commits restore the draft; an indeterminate result may have delivered
@@ -316,13 +319,13 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   const onlyDraft = options.onlyDraft === true
   const draftHasPayload = options.draftHasPayload ?? text.trim() !== ''
   const draftOnly = onlyDraft || draftHasPayload
-  const agent = deps.currentAgent()
-  if (agent === undefined) {
+  const subject = deps.currentSubject()
+  if (subject === undefined) {
     if (text !== '') deps.restoreDraft(text)
     return 'ok'
   }
   const generation = deps.currentGeneration()
-  const pending = deps.pendingInputReader.snapshot(agent.session.id)
+  const pending = deps.pendingInputReader.snapshot(subject.session.id)
   if (pending === undefined) {
     // The identity was live but its semantic read projection disappeared
     // before the write window. Do not guess an empty queue or fall back to
@@ -352,11 +355,11 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
     if (text !== '') deps.restoreDraft(text)
     return 'ok'
   }
-  // Re-validate BEFORE delivery: agent identity and generation must still
-  // match what was captured. Queue races are resolved per occurrence by the
-  // writer below, so a changed queue does not invalidate the whole sweep.
-  const now = deps.currentAgent()
-  if (now === undefined || !sessionUnchanged({ agent, generation }, now, deps.currentGeneration())) {
+  // Re-validate BEFORE delivery: the writer subject identity and generation
+  // must still match what was captured. Queue races are resolved per occurrence
+  // by the writer below, so a changed queue does not invalidate the whole sweep.
+  const now = deps.currentSubject()
+  if (now === undefined || !sessionUnchanged({ subject, generation }, now, deps.currentGeneration())) {
     const verbatim = deps.restoreDraft(text)
     deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
     return 'stale'
@@ -381,10 +384,10 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   let steeredCount = 0
   for (const message of snapshot) {
     // Queue steering is one async occurrence at a time. Re-check the exact
-    // viewer/session identity before every occurrence so closing, switching,
-    // or replacing a same-id Agent stops an old sweep before its next write.
-    const current = deps.currentAgent()
-    if (current === undefined || !sessionUnchanged({ agent, generation }, current, deps.currentGeneration())) {
+    // writer-subject identity before every occurrence so closing, switching,
+    // or replacing a same-id subject stops an old sweep before its next write.
+    const current = deps.currentSubject()
+    if (current === undefined || !sessionUnchanged({ subject, generation }, current, deps.currentGeneration())) {
       deps.restoreDraft(text)
       deps.notify(deps.staleNotice(), 'info')
       return 'stale'

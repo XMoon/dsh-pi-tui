@@ -178,6 +178,23 @@ async function createHost() {
     mode: 'one-shot',
     label: 'task one-shot child',
   })
+  // M3-5 PR2 L5: a catalog entry whose CHILD SESSION DOES NOT EXIST is the real
+  // rc.2 carrier shape of an unreadable descendant branch. Upstream
+  // `listDescendants` reads the child catalog, `observeSession` throws
+  // `SESSION_QUERY_SESSION_NOT_FOUND` (NOT a SubagentError), so that branch
+  // becomes an `unavailable` diagnostic and its siblings survive; the Client's
+  // `session.projections` answers null for the missing Session, the projection
+  // store stays without the catalog key and settles `ready`, so the Remote
+  // adapter must classify that branch `unavailable` too — never as an
+  // authoritative empty child. This is the representable diagnostic both
+  // backends can agree on at the REAL wire level.
+  parent.append('subagent/catalog', {
+    version: 1,
+    childId: 'task-child-ghost',
+    childCreatedAt: 3_003,
+    mode: 'continuable',
+    label: 'task ghost child',
+  })
 
   const parentFiber = ctx.plugin(() => {})
   const emptyInbox = { nextTurn: [], nextStep: [] }
@@ -282,7 +299,7 @@ async function main() {
     const direct = new DirectTaskReader({
       agentFor: id => host.ctx.get('agents').get(SessionId(id)),
       subagents: {
-        listChildren: (id, signal) => host.ctx.get('subagents').listChildren(SessionId(id), signal),
+        listDescendants: (id, signal) => host.ctx.get('subagents').listDescendants(SessionId(id), signal),
       },
       jobs: {
         // DSH 0.1.7 JobRegistry ownership: the caller is the parent SessionId.
@@ -296,28 +313,49 @@ async function main() {
     // watch must be open and the official stream settled BEFORE the first
     // parity compare (a first-frame-empty roster is not an authoritative
     // empty set).
-    await remote.readDirectChildren('task-parent')
+    await remote.readDescendants('task-parent')
     await waitFor('the official roster frame', () => (clientJobs.state.getSnapshot().rows['task-parent'] ?? []).length === 1)
     const outcome = await shadow.compare({ parentSessionId: 'task-parent' })
     assert.equal(outcome.status, 'compared')
     assert.equal(outcome.report.comparable, true)
     assert.deepEqual(outcome.report.mismatches, [])
-    assert.deepEqual(outcome.report.skipped.map(field => field.field), ['subagent.descendantTree'])
+    // M3-5 PR2 closed the descendant-tree gap: the shadow now compares the full
+    // recursive catalog, so nothing is skipped.
+    assert.deepEqual(outcome.report.skipped, [])
 
-    const directSnapshot = await direct.readDirectChildren('task-parent')
-    const remoteSnapshot = await remote.readDirectChildren('task-parent')
+    const directSnapshot = await direct.readDescendants('task-parent')
+    const remoteSnapshot = await remote.readDescendants('task-parent')
     assert.ok(directSnapshot !== undefined)
     assert.ok(remoteSnapshot !== undefined)
-    assert.deepEqual(directSnapshot.children.map(entry => entry.id), [
+    assert.deepEqual(directSnapshot.descendants.map(entry => entry.id), [
       'task-child-continuable',
       'task-child-one-shot',
+      'task-child-ghost',
     ])
-    assert.deepEqual(remoteSnapshot.children.map(entry => entry.id), [
+    assert.deepEqual(remoteSnapshot.descendants.map(entry => entry.id), [
       'task-child-continuable',
       'task-child-one-shot',
+      'task-child-ghost',
     ])
     assert.equal(directSnapshot.jobs.length, 1)
     assert.equal(remoteSnapshot.jobs.length, 1)
+
+    // L5 (M3-5 PR2): the REAL unreadable-branch path through the official
+    // carrier — the missing child Session loses ONLY its own branch, and both
+    // backends classify that representable failure as `unavailable` (never as an
+    // authoritative empty child, never as `corrupt`).
+    const ghostDiagnostic = {
+      kind: 'diagnostic',
+      id: 'task-child-ghost',
+      reason: 'unavailable',
+      parentId: 'task-parent',
+      depth: 1,
+    }
+    for (const [label, snapshot] of [['direct', directSnapshot], ['remote', remoteSnapshot]]) {
+      assert.deepEqual(snapshot.descendants.at(-1), ghostDiagnostic,
+        `${label}: an unreadable branch must be an unavailable diagnostic, never an empty/normal child`)
+      assert.equal(snapshot.descendants.length, 3, `${label}: the siblings of the unreadable branch must survive`)
+    }
 
     host.childOneShotAgent.status = 'idle'
     host.settleJob({ status: 'completed', detail: 'fixture complete' })
@@ -331,9 +369,9 @@ async function main() {
     assert.equal(updated.status, 'compared')
     assert.equal(updated.report.comparable, true)
     assert.deepEqual(updated.report.mismatches, [])
-    const updatedSnapshot = await remote.readDirectChildren('task-parent')
+    const updatedSnapshot = await remote.readDescendants('task-parent')
     assert.ok(updatedSnapshot !== undefined)
-    const updatedChild = updatedSnapshot.children.find(entry => entry.id === 'task-child-one-shot')
+    const updatedChild = updatedSnapshot.descendants.find(entry => entry.id === 'task-child-one-shot')
     assert.equal(updatedChild?.kind === 'child' && updatedChild.activity, 'inactive')
     assert.equal(updatedSnapshot.jobs[0]?.status, 'completed')
 
@@ -341,7 +379,7 @@ async function main() {
       status: 'passed',
       comparable: true,
       mismatchCount: 0,
-      skipped: ['subagent.descendantTree'],
+      skipped: [],
       mutationVerified: true,
     }))
   } finally {

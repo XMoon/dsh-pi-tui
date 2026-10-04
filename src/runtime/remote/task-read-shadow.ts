@@ -1,10 +1,10 @@
 /**
  * Generation-fenced Direct-vs-Remote parity for the Task Center read surface.
  *
- * Direct remains authoritative. The shadow compares only the official
- * direct-child catalog and status-only job snapshots, then checks the existing
- * pure `buildTaskRows` projection. The complete descendant tree is recorded as
- * an explicit upstream gap rather than inferred from partial Client data.
+ * Direct remains authoritative. The shadow compares the full descendant
+ * catalog (ids/order/kind/mode/label/activity/hasChildren plus the traversal
+ * `parentId`/`depth` facts and branch diagnostics) and the status-only job
+ * snapshots, then checks the existing pure `buildTaskRows` projection.
  * @module @xmoon76/dsh-pi-tui/runtime/remote/task-read-shadow
  */
 
@@ -26,14 +26,18 @@ import type {
 
 /** Comparable fields in one Task Center read snapshot. */
 export type TaskReadMismatchField =
-  | 'children.ids'
-  | 'children.order'
+  | 'descendants.ids'
+  | 'descendants.order'
   | 'child.kind'
   | 'child.label'
   | 'child.mode'
   | 'child.activity'
   | 'child.hasChildren'
+  | 'child.parentId'
+  | 'child.depth'
   | 'diagnostic.reason'
+  | 'diagnostic.parentId'
+  | 'diagnostic.depth'
   | 'jobs.ids'
   | 'jobs.order'
   | 'job.kind'
@@ -53,18 +57,13 @@ export interface TaskReadMismatch {
   readonly actual: unknown
 }
 
-/** The upstream capability not represented by the official Client model. */
-export interface TaskReadSkippedField {
-  readonly field: 'subagent.descendantTree'
-  readonly reason: string
-}
-
 /** Successful comparison report for one Connection generation. */
 export interface TaskReadParityReport {
   readonly generation: string
   readonly comparable: boolean
   readonly mismatches: readonly TaskReadMismatch[]
-  readonly skipped: readonly TaskReadSkippedField[]
+  /** No Task capability remains an upstream gap: always an empty frozen array. */
+  readonly skipped: readonly never[]
 }
 
 export type TaskReadShadowUnavailableReason = 'disconnected' | 'reader-unavailable'
@@ -95,7 +94,7 @@ export type TaskReadShadowOutcome =
     readonly error: unknown
   }
 
-/** One direct-child Task read comparison request. */
+/** One Task Center read comparison request. */
 export interface TaskReadShadowOptions {
   readonly parentSessionId: string
   readonly signal?: AbortSignal
@@ -109,12 +108,7 @@ interface CapturedOperation {
   readonly signal: AbortSignal
 }
 
-const SKIPPED_FIELDS: readonly TaskReadSkippedField[] = Object.freeze([
-  Object.freeze({
-    field: 'subagent.descendantTree',
-    reason: 'the official Client exposes only direct-child catalogs; exact ordinary-Session traversal and stable pre-order remain a D5/upstream seam',
-  }),
-])
+const SKIPPED_FIELDS: readonly never[] = Object.freeze([])
 const MAX_DIAGNOSTIC_ITEMS = 64
 const MAX_DIAGNOSTIC_TEXT = 512
 const MAX_DIAGNOSTIC_MISMATCHES = 256
@@ -191,7 +185,7 @@ function pushFieldMismatch(
 }
 
 function childById(snapshot: TaskReadSnapshot): Map<string, TaskSubagentEntry> {
-  return new Map(snapshot.children.map(entry => [entry.id, entry]))
+  return new Map(snapshot.descendants.map(entry => [entry.id, entry]))
 }
 
 function jobById(snapshot: TaskReadSnapshot): Map<string, TaskJobEntry> {
@@ -209,6 +203,8 @@ function compareChild(
   }
   if (expected.kind === 'diagnostic' && actual.kind === 'diagnostic') {
     pushFieldMismatch(mismatches, 'diagnostic.reason', expected.id, expected.reason, actual.reason)
+    pushFieldMismatch(mismatches, 'diagnostic.parentId', expected.id, expected.parentId, actual.parentId)
+    pushFieldMismatch(mismatches, 'diagnostic.depth', expected.id, expected.depth, actual.depth)
     return
   }
   if (expected.kind !== 'child' || actual.kind !== 'child') return
@@ -216,6 +212,8 @@ function compareChild(
   pushFieldMismatch(mismatches, 'child.mode', expected.id, expected.mode, actual.mode)
   pushFieldMismatch(mismatches, 'child.activity', expected.id, expected.activity, actual.activity)
   pushFieldMismatch(mismatches, 'child.hasChildren', expected.id, expected.hasChildren, actual.hasChildren)
+  pushFieldMismatch(mismatches, 'child.parentId', expected.id, expected.parentId, actual.parentId)
+  pushFieldMismatch(mismatches, 'child.depth', expected.id, expected.depth, actual.depth)
 }
 
 function compareChildren(
@@ -223,19 +221,19 @@ function compareChildren(
   expected: TaskReadSnapshot,
   actual: TaskReadSnapshot,
 ): void {
-  const expectedIds = expected.children.map(entry => entry.id)
-  const actualIds = actual.children.map(entry => entry.id)
+  const expectedIds = expected.descendants.map(entry => entry.id)
+  const actualIds = actual.descendants.map(entry => entry.id)
   if (!sameStrings(expectedIds, actualIds)) {
     pushFieldMismatch(
       mismatches,
-      sameSet(expectedIds, actualIds) ? 'children.order' : 'children.ids',
+      sameSet(expectedIds, actualIds) ? 'descendants.order' : 'descendants.ids',
       undefined,
       expectedIds,
       actualIds,
     )
   }
   const actualById = childById(actual)
-  for (const entry of expected.children) {
+  for (const entry of expected.descendants) {
     const candidate = actualById.get(entry.id)
     if (candidate !== undefined) compareChild(mismatches, entry, candidate)
   }
@@ -271,7 +269,7 @@ function compareJobs(
 }
 
 function taskRowsOf(snapshot: TaskReadSnapshot): readonly TaskBrowserRow[] {
-  const agents: TaskBrowserAgentInput[] = snapshot.children.map(entry => entry.kind === 'child'
+  const agents: TaskBrowserAgentInput[] = snapshot.descendants.map(entry => entry.kind === 'child'
     ? {
       kind: 'child',
       id: entry.id,
@@ -279,13 +277,15 @@ function taskRowsOf(snapshot: TaskReadSnapshot): readonly TaskBrowserRow[] {
       mode: entry.mode,
       activity: entry.activity,
       hasChildren: entry.hasChildren,
-      depth: 1,
+      parentId: entry.parentId,
+      depth: entry.depth,
     }
     : {
       kind: 'diagnostic',
       id: entry.id,
       reason: entry.reason,
-      depth: 1,
+      parentId: entry.parentId,
+      depth: entry.depth,
     })
   return buildTaskRows(snapshot.jobs, agents)
 }
@@ -338,8 +338,8 @@ export class RemoteTaskReadShadow {
     const operation = this.beginOperation(capturedGeneration, options)
     try {
       const [direct, remote] = await Promise.all([
-        this.direct.readDirectChildren(options.parentSessionId, operation.signal),
-        this.remote.readDirectChildren(options.parentSessionId, operation.signal),
+        this.direct.readDescendants(options.parentSessionId, operation.signal),
+        this.remote.readDescendants(options.parentSessionId, operation.signal),
       ])
       if (!this.isCurrent(operation)) return this.discarded(operation)
       operation.signal.throwIfAborted()

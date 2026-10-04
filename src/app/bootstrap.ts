@@ -62,7 +62,8 @@ import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createUserShell } from './submission/user-shell.ts'
 import { preparePrompt } from '../image/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
-import { createViewerRuntime, type ViewerRuntime } from './surface/viewer-runtime.ts'
+import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from './surface/viewer-runtime.ts'
+import { createDirectChildViewSource } from './direct/child-view.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from '../present.ts'
 import { createClientToolPresenter } from '../tool-presentation-client.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
@@ -93,7 +94,7 @@ import { consumeDraftAttachments, type PrepareInputDeps } from '../image/submit.
 import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
-import { mergeDraft, refuseByTransitionFence, type SteerAgentLike } from '../steer.ts'
+import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from '../steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
 import type {
   ApplicationRuntimeSelection,
@@ -105,7 +106,8 @@ import { bindSessionRuntime } from '../app/session/runtime.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
-import { createSurfaceRuntime } from '../app/surface/runtime.ts'
+import { createSurfaceRuntime, type TaskSurfaceRead } from '../app/surface/runtime.ts'
+import { DirectTaskReader } from '../runtime/direct/task-read-direct.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
@@ -1198,7 +1200,7 @@ export function applyRunnerWithRuntime(
     // `viewerRef` is the late-binding seam for the generation reset: the
     // presentation owner owns the reset ORDER, the viewer owner owns its own
     // teardown.
-    let viewerRef: ViewerRuntime<SessionEvent, Agent> | undefined
+    let viewerRef: ViewerRuntime<SessionEvent> | undefined
     const presentation = createSessionPresentation<SessionEvent>({
       surface,
       diag,
@@ -1940,6 +1942,13 @@ export function applyRunnerWithRuntime(
       // (the TUI's physical owner.lock / lease / cooling stack is removed
       // legacy).
       lifecycleController.abort()
+      // M3-5 PR2: tear the child viewer down FIRST among the presentation
+      // resources — a mounted viewer owns a client child generation + live
+      // ingress (Remote) and an in-flight open may own a retained generation.
+      // NO painting: the app is going away, and the adapter -> Client disposal
+      // follows this step. Late-bound (`viewerRef`): a startup failure can run
+      // this cleanup before the viewer owner exists (TDZ guard).
+      viewerRef?.dispose()
       draftImages.clear()
       draftFiles.clear()
       // Abort any in-flight catalog refresh: its late result must never
@@ -2067,26 +2076,39 @@ export function applyRunnerWithRuntime(
     // being displayed yet; enterView replays this exact-agent baseline before
     // mounting the child surface.
     let assistantStreamBaselineFor: (agent: object) => readonly AssistantLiveInput[] = () => []
-    // A5b-1: the subagent viewer owner. The exact-Agent facts stay in the
-    // composition root (the Direct registry + the assistant-stream install) and
-    // reach the viewer through these narrow capabilities.
-    const viewer = createViewerRuntime<SessionEvent, Agent>({
+    // A5b-1: the subagent viewer owner. The ONE ViewerRuntime keeps its state
+    // machine; only its injected child-view SOURCE is backend-selected — the
+    // Direct in-process read (live/cold Session + Agent registry + live
+    // assistant baseline) or the Remote retained `tuiChildView` reference with
+    // the shared presentation reader/ingress. The Direct source is constructed
+    // ONLY on the Direct branch (it would otherwise bind never-called
+    // in-process reads on Remote).
+    const childView: ViewerChildSource<SessionEvent> = remoteSources === undefined
+      ? createDirectChildViewSource<SessionEvent>({
+        childSession: (childId) => sessions.get(SessionId(childId)),
+        observeChild: (childId) => {
+          const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
+          if (query?.observeSession === undefined) return undefined
+          return query.observeSession(SessionId(childId), { projectionMode: 'none' })
+        },
+        childAgent: (childId) => agents.get(SessionId(childId)),
+        assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
+      })
+      : remoteSources.childView as unknown as ViewerChildSource<SessionEvent>
+    const viewer = createViewerRuntime<SessionEvent>({
       surface,
       isCleanedUp: () => cleanedUp,
       currentSessionId: () => ownership.currentSessionId(),
       // Remote branch: the live pending subject is the CURRENT owner's
       // session (no Direct Agent exists to name it).
       liveParentSessionId: () => agentNow()?.session.id ?? (remoteSources !== undefined ? ownership.currentSessionId() : undefined),
-      childSession: (childId) => sessions.get(SessionId(childId)),
-      observeChild: (childId) => {
-        const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
-        if (query?.observeSession === undefined) return undefined
-        return query.observeSession(SessionId(childId), { projectionMode: 'none' })
-      },
-      childAgent: (childId) => agents.get(SessionId(childId)),
-      assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
+      childView,
       refreshStatus: () => status.refresh(),
       restoreMainTranscriptAnchor: () => presentation.restoreMainTranscriptAnchor(),
+      runDetached: (label, task) => runDetached(label, task, {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      }),
     })
     viewerRef = viewer
     // A5b-4: the submission/input controller — the submit FIFO turn, the local
@@ -2284,12 +2306,21 @@ export function applyRunnerWithRuntime(
         // settlement consults (the runtime's own identity authority).
         isNavigationCurrent: (expected) => sessionRuntime.isNavigationCurrent(expected),
       },
-      // The subagent viewer's Host delivery ports (the viewer STATE stays in
-      // the A5b-1 viewer owner). These are the Direct parent resolution and
-      // the Backend prompt/writer/host-file ports; the composition root only
-      // forwards them.
+      // The subagent viewer's delivery ports (the viewer STATE stays in the
+      // A5b-1 viewer owner). The queue subject is transport-neutral: Direct
+      // resolves the exact live child Agent; Remote reads the viewer's own
+      // published writer-subject token (the write itself goes through the
+      // backend-selected PendingInputReader/SessionWriter by child id).
       subagentDelivery: {
-        queueAgentFor: (childId) => directRuntime()?.queueAgentFor(childId) as unknown as SteerAgentLike | undefined,
+        queueSubjectFor: (childId) => {
+          if (remoteSources !== undefined) {
+            const authority = viewer.viewedQueueAuthority()
+            return authority !== undefined && authority.childSessionId === childId
+              ? authority.subject
+              : undefined
+          }
+          return directRuntime()?.queueAgentFor(childId) as unknown as SteerSubjectLike | undefined
+        },
         pendingInputReader: backend.pendingInputReader,
         writer: backend.sessionWriter,
         writerSection: (task) => submission.withWriterSection(task),
@@ -2347,7 +2378,26 @@ export function applyRunnerWithRuntime(
       // `ctx.attachments.readImage` only — never the draft store. The read
       // callback is a late-bound service access (AGENTS.md: never a bare
       // property read of a non-injected service).
-      readImage: (ref) => {
+      //
+      // M3-5 PR2 Step 9: the ACTIVE DISPLAY SUBJECT is captured when the
+      // component ASKS for bytes (`activeImageSubject`, resolved synchronously by
+      // the image loader) and travels with the ref. On Remote the read then
+      // borrows the exact retained binding of the DISPLAYED Session — the viewed
+      // child while its viewer is mounted, else the main Session. A mount WITHOUT
+      // that capture seam cannot prove which subject asked, so the Remote read
+      // FAILS CLOSED instead of late-selecting whichever subject happens to be
+      // displayed by then (a late resolution could send a child-only attachment
+      // to the parent). Direct keeps its in-process `ctx.attachments.readImage`.
+      activeImageSubject: () => viewer.read()?.id ?? ownership.currentSessionId(),
+      readImage: (ref, context) => {
+        if (remoteSources !== undefined) {
+          if (typeof context !== 'string') {
+            throw new ImageLoadError(
+              'The image request carries no captured display subject — the Remote image read requires the asking presentation\'s subject.',
+            )
+          }
+          return remoteSources.attachments.readDurableImage(context, ref.attachmentId)
+        }
         const attachments = ctx.get('attachments')
         if (attachments === undefined) {
           throw new ImageLoadError('Image attachments are unavailable in this deployment.')
@@ -2465,8 +2515,12 @@ export function applyRunnerWithRuntime(
         // generation — the routing-side fence keeps the same owner truth;
         // an opening target's PRE-COMMIT events never reach this routing
         // because the ingress subscribes only after the owner commit).
+        // M3-5 PR2: the VIEWED CHILD is routed through the same surface path
+        // (the child ingress publishes into `routeSessionEvent`), so the fence
+        // must admit the exact child currently mounted by the ONE viewer.
         if (remoteSources !== undefined) {
           return ownership.currentSessionId() === session.id
+            || viewer.read()?.id === session.id
         }
         const attachedSession = sessions.get(SessionId(session.id))
         return attachedSession === undefined || attachedSession === session
@@ -2556,20 +2610,31 @@ export function applyRunnerWithRuntime(
       },
       applyGoalChange: (event) => status.applyGoalChange(event),
       sessionTitleOf: (event) => foldSessionTitle([event])?.title,
-      // M3-4 PR2: the Remote bounded-window history extension — one official
-      // `loadOlder` page + the presentation re-hydrate; Direct returns false
-      // (its fold already holds the complete log).
+      // M3-4 PR2 / M3-5 PR2 Step 7: the Remote bounded-window history
+      // extension targets the ACTIVE DISPLAY SUBJECT — the viewed child
+      // Session while its viewer is mounted, else the main Session. Direct
+      // returns false (its fold already holds the complete log).
       extendLoadedHistory: () => {
         if (remoteSources === undefined) return false
-        const sessionId = ownership.currentSessionId()
+        const viewedChildId = viewer.read()?.id
+        const sessionId = viewedChildId ?? ownership.currentSessionId()
         if (sessionId === undefined || cleanedUp) return false
         // The in-flight latch is SUBJECT-scoped: a page still loading for the
-        // PREVIOUS session must not swallow the new session's first PageUp
-        // (each subject owns its own official paging operation).
+        // PREVIOUS subject must not swallow the new subject's first PageUp
+        // (each subject owns its own official paging operation). A child page
+        // that settles after the viewer switched/exited is dropped.
         if (remoteHistoryLoadingFor === sessionId) return true
         remoteHistoryLoadingFor = sessionId
         runOwned('remote loadOlder', async () => {
           try {
+            if (viewedChildId !== undefined) {
+              const child = viewer.read()
+              if (child === undefined || child.id !== sessionId) return
+              // The viewer owns the child's presentation: page the child's
+              // exact retained generation and re-fold THAT window.
+              await viewer.extendViewedChildHistory()
+              return
+            }
             const before = await remoteSources.presentationReader.read(sessionId)
             if (before === undefined || !before.hasMore || before.loadingOlder) return
             const snapshot = await remoteSources.presentationReader.loadOlder(sessionId, lifecycleController.signal)
@@ -2596,8 +2661,8 @@ export function applyRunnerWithRuntime(
       registeredAgentIs: (sessionId, agent) => directRuntime()?.registeredAgentFor(sessionId) === agent,
       isCurrentOwnerAgent: (agent) => isCurrentOwnerAgent(agent as Agent),
       viewedChildAgent: () => viewer.viewedChildAgent(),
-      setViewedChildAgent: (agent) => viewer.setViewedChildAgent(agent as Agent),
-      setViewedQueueAgent: (agent) => viewer.setViewedQueueAgent(agent as Agent),
+      setViewedChildAgent: (agent) => viewer.setViewedChildAgent(agent),
+      setViewedQueueAgent: (agent) => viewer.setViewedQueueAgent(agent),
       agentForSession: (sessionId) => agents.get(SessionId(sessionId)),
       applyViewedChildAssistantInput: (input) => viewer.applyAssistantInput(input),
       applyMainAssistantInput: (input, sessionId) => {
@@ -2613,10 +2678,63 @@ export function applyRunnerWithRuntime(
     // the subagent `TaskBrowserRuntime` hooks, the child viewer + the
     // writer-admitted interrupt, the selected-Job observation port and the root
     // row-disposition helpers. No new Backend port and no second task model.
-    const jobs = ctx.get('jobs')
+    const jobs = remoteSources === undefined ? ctx.get('jobs') : undefined
     const subagents = ctx.get('subagents')
+    // The selected Task read source: Direct composes the Host catalog/registry
+    // reads; Remote composes the official Client projection/Session-list reads
+    // from the ONE Remote application graph. Neither branch is a second task
+    // model — both satisfy the same semantic Task read port. The Direct jobs
+    // half is optional service-wise (a composition without the jobs service has
+    // no roster, exactly as before).
+    const directTaskReader = remoteSources !== undefined || subagents === undefined
+      ? undefined
+      : new DirectTaskReader({
+        agentFor: (sessionId) => agents.get(SessionId(sessionId)),
+        subagents: {
+          listDescendants: (sessionId, signal) => subagents.listDescendants(sessionId as SessionId, signal),
+        },
+        jobs: { list: (caller) => jobs?.list(caller as SessionId) ?? [] },
+      })
+    const taskReadKey = (): string | undefined => {
+      const sessionId = ownership.currentSessionId()
+      return cleanedUp || sessionId === undefined ? undefined : `${ownership.generation()}:${sessionId}`
+    }
+    const taskRead: TaskSurfaceRead | undefined = remoteSources === undefined
+      ? directTaskReader === undefined ? undefined : {
+        currentKey: taskReadKey,
+        currentSessionId: () => ownership.currentSessionId(),
+        // The Direct Task read is addressed by the live owner Agent (the
+        // semantic read's availability rule is the Direct attachment).
+        readTask: () => {
+          const sessionId = agentNow()?.session.id
+          return sessionId === undefined
+            ? Promise.resolve(undefined)
+            : directTaskReader.readDescendants(sessionId)
+        },
+        // The LIVE Direct runtime fact, read at COMMIT time: the Agent
+        // registry, never the catalog's store-presence activity.
+        activityOf: (childId) => agents?.get(childId as SessionId)?.status,
+      }
+      : {
+        currentKey: taskReadKey,
+        currentSessionId: () => ownership.currentSessionId(),
+        readTask: () => {
+          const sessionId = ownership.currentSessionId()
+          return sessionId === undefined
+            ? Promise.resolve(undefined)
+            : remoteSources.task.readDescendants(sessionId)
+        },
+        // The official Client current-activity fact, read at COMMIT time from
+        // the Session LIST (no descendant binding is borrowed or retained) —
+        // never the durable catalog presence.
+        activityOf: (childId) => remoteSources.task.activityOf(childId),
+      }
     surface.attachTasks({
-      sessionId: () => agentNow()?.session.id,
+      // The Task Center's owner session id is the TRANSPORT-NEUTRAL ownership
+      // read: the Direct live Agent's session, or (Remote) the current owner
+      // session — no Direct attachment is required to open /tasks or to read
+      // the roster on the Remote branch.
+      sessionId: () => agentNow()?.session.id ?? ownership.currentSessionId(),
       captureSubject: () => ownership.captureSubject(),
       subjectMatches: (subject) => captureMatches(subject),
       // The viewer target carries the row's OWN parent; only a direct child
@@ -2640,36 +2758,47 @@ export function applyRunnerWithRuntime(
       subagentJobTranscriptId,
       subagentJobViewHint,
       jobObservation: backend.jobObservation,
-      jobs: jobs === undefined ? undefined : {
-        // Job ownership is the Session id (DSH 0.1.7 JobRegistry); the caller
-        // may be omitted (the unowned-only view) when no session is live.
-        list: (sessionId) => jobs.list(sessionId as SessionId | undefined),
-        subscribe: (listener) => jobs.events.subscribe({ owners: 'scope' }, listener),
-        get: (jobId, sessionId) => jobs.get(jobId as JobId, sessionId as SessionId),
-        kill: (jobId, sessionId, reason) => jobs.kill(jobId as JobId, sessionId as SessionId, reason),
-      },
-      agents: subagents === undefined ? undefined : {
-        // The session fence key: generation + session id, captured when a
-        // refresh starts and re-checked after the async listing.
-        currentKey: () => {
-          const sessionId = ownership.currentSessionId()
-          return cleanedUp || sessionId === undefined ? undefined : `${ownership.generation()}:${sessionId}`
+      // The roster feed. Direct reads the Host registry (get/kill included:
+      // its Job detail + Stop are the current behavior). Remote reads the
+      // official Client Jobs model under the task reader's retained root watch
+      // and exposes NO detail/Stop — M3-5 PR2 leaves that closure to PR3, so the
+      // Job rows must not advertise it.
+      jobs: remoteSources === undefined
+        ? jobs === undefined ? undefined : {
+          // Job ownership is the Session id (DSH 0.1.7 JobRegistry); the caller
+          // may be omitted (the unowned-only view) when no session is live.
+          list: (sessionId) => jobs.list(sessionId as SessionId | undefined),
+          subscribe: (listener) => jobs.events.subscribe({ owners: 'scope' }, listener),
+          get: (jobId, sessionId) => jobs.get(jobId as JobId, sessionId as SessionId),
+          kill: (jobId, sessionId, reason) => jobs.kill(jobId as JobId, sessionId as SessionId, reason),
+        }
+        : {
+          list: (sessionId) => sessionId === undefined ? [] : remoteSources.task.jobs(sessionId),
+          // The official Jobs model is one observable: any snapshot change is a
+          // roster/status invalidation hint (the authoritative answer is always
+          // the next semantic read).
+          subscribe: (listener) => remoteSources.task.subscribeJobs(() => listener({ type: 'state' })),
         },
-        // The Task-Center owner derives the jobs-read session id from this
-        // injected core read; the retention fence itself is owner-side.
-        currentSessionId: () => ownership.currentSessionId(),
-        listDescendants: () => {
-          const sessionId = agentNow()?.session.id
-          return sessionId === undefined ? Promise.resolve([]) : subagents.listDescendants(sessionId)
-        },
-        // The LIVE runtime fact, read at COMMIT time: the Agent registry,
-        // never the catalog's store-presence activity.
-        agentStatusOf: (childId) => agents?.get(childId as SessionId)?.status,
-      },
+      taskRead,
     }, {
       diag,
       isCleanedUp: () => cleanedUp,
     })
+    if (remoteSources !== undefined) {
+      // M3-5 PR2 Step 2/§D3: the Remote Task Center invalidation is
+      // observable-driven — the official Session list (catalog membership and
+      // the per-session running fact) and the official Jobs state (roster
+      // changes) feed the EXISTING coalesced refresh gate. No timer, no poll.
+      const disposeTaskSessions = remoteSources.task.subscribeSessions(() => surface.refreshAgents())
+      const disposeTaskJobs = remoteSources.task.subscribeJobs(() => {
+        surface.refreshTasks()
+        surface.refreshAgents()
+      })
+      lifecycleController.signal.addEventListener('abort', () => {
+        disposeTaskSessions()
+        disposeTaskJobs()
+      }, { once: true })
+    }
     surface.refreshPendingInput()
     // A5b-3: the semantic command runtime binding AND the facade assembly are
     // command-owned; the composition root only triggers the wiring step.
@@ -2922,19 +3051,26 @@ export function applyRunnerWithRuntime(
     // reachability caveat applies; the tool/call fallback stays as a
     // redundant safety net. These are CATALOG events: membership/tree may
     // have changed, so they re-list (A4-7 surface routing).
-    ctx.on('subagent/start', () => surface.routeSubagentLifecycle())
-    ctx.on('subagent/end', () => surface.routeSubagentLifecycle())
-    // `agent/status` is the LIVE runtime channel: a child's driver transition
-    // (running ↔ idle) repaints the task browser and the badge WITHOUT a
-    // re-listing (membership changes come only from the lifecycle events, and
-    // `listDescendants().activity` is store-presence, never execution state).
-    // The MAIN agent's transitions feed the completion-notification controller
-    // (the authoritative settled boundary — running → idle on the SAME live
-    // agent; children never notify). A4-7: the membership gate, the
-    // completion-controller feed and the pending-input microtasks are
-    // surface-owned (`surface.routeAgentStatus`); the completion-identity
-    // provider stays here.
-    ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))
+    //
+    // M3-5 PR2: these are DIRECT Host runtime channels. The Remote Task Center's
+    // invalidation is observable-driven through the official Client model
+    // (`sessions.list` + `jobs.state`, wired at `attachTasks`), so a Host event
+    // must never double as the Remote authority.
+    if (remoteSources === undefined) {
+      ctx.on('subagent/start', () => surface.routeSubagentLifecycle())
+      ctx.on('subagent/end', () => surface.routeSubagentLifecycle())
+      // `agent/status` is the LIVE runtime channel: a child's driver transition
+      // (running ↔ idle) repaints the task browser and the badge WITHOUT a
+      // re-listing — membership changes come only from the lifecycle events, and
+      // `listDescendants().activity` is store-presence, never execution state).
+      // The MAIN agent's transitions feed the completion-notification controller
+      // (the authoritative settled boundary — running → idle on the SAME live
+      // agent; children never notify). A4-7: the membership gate, the
+      // completion-controller feed and the pending-input microtasks are
+      // surface-owned (`surface.routeAgentStatus`); the completion-identity
+      // provider stays here.
+      ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))
+    }
     // Provider-topology and credential events refresh the footer model row
     // and the welcome card: a /login /logout /add-provider (or an external
     // settings.yaml / .credentials.yaml edit) changes the live provider /

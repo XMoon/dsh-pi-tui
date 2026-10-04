@@ -148,6 +148,10 @@ const CLASSIFICATION = {
   remoteIngressHandle: BIND, disposeRemoteIngress: DISC, initRemoteLiveSurface: CONN, launchIntentOf: CONN,
   remoteRunningOf: CONN, remoteWorkingFold: BIND, remoteWorkingFoldProven: BIND, remoteHistoryLoadingFor: BIND,
   remoteWorkingFoldFor: BIND,
+  // M3-5 PR2: the branch-selected child-view source (Direct in-process read vs
+  // the Remote `tuiChildView` reference source), the ONE semantic Task read
+  // source, its fence-key helper and the branch-selected Task read bundle.
+  childView: BIND, directTaskReader: BIND, taskReadKey: CONN, taskRead: BIND,
   // M3-4 PR3: the Remote live-session facts projection (transport-neutral
   // {status, session.id} for the controller's liveAgent + the echo install)
   // and its scope-checked read — branch connectors over the aggregate bundle.
@@ -222,6 +226,11 @@ const LIFECYCLE = {
   createDirectRuntime: 'lazy accessor, per call (throws when the Direct branch never constructed)',
   compose: 'process-lifetime: created once at startup (Direct compose wrapper)',
   lifecycleAgents: 'process-lifetime: immutable create/open bridge bound to the runner signal',
+  // M3-5 PR2.
+  childView: 'branch-selected at startup (Direct child-view source over the in-process Session/Agent reads, or the Remote aggregate child-view source); read-only thereafter',
+  directTaskReader: 'branch-selected at startup (Direct Task read over listDescendants + Agent status + Job registry); read-only thereafter',
+  taskReadKey: 'pure fence-key read (generation + owner session id); no state',
+  taskRead: 'branch-selected at startup (the selected Task read source bundle); read-only thereafter',
 }
 const CAPABILITIES = {
   surfaceEvents: 'SubmissionController, CommandSurface, presentation/status/settings owners, SurfaceRuntime, extension semantic hooks, lifecycle/exit callbacks (A5b-5: app/surface/application-events.ts; must not become a callback bag)',
@@ -330,6 +339,14 @@ const SWEEP_NOTES = {
   launchIntentOf: 'pure per-call helper; no state, no Host reads.',
   directRuntimeNow: 'transitional local for the Direct assistant-stream install; no state.',
   directAssistantRuntime: 'transitional local for the Direct assistant-stream install; no state.',
+  // M3-5 PR2: the branch-selected child-view and Task read sources. Each is a
+  // narrow read bundle over authorities another owner already established (the
+  // Direct in-process Session/Agent reads, or the Remote aggregate's retained
+  // Client faces); none is a second Host lookup and none owns mutable truth.
+  childView: 'The SELECTED child-view source: Direct composes the live/cold child Session read + the Agent registry activity + the live assistant-stream baseline; Remote reuses the aggregate\'s retained `tuiChildView` reference source. Constructed once at startup; read-only thereafter.',
+  directTaskReader: 'The Direct Task read: official subagents.listDescendants + the Agent registry activity + the parent Session Job roster, mapped onto the semantic TaskReadSnapshot. Constructed once at startup; read-only thereafter.',
+  taskReadKey: 'Pure fence key: `${ownership.generation()}:${ownership.currentSessionId()}`. It reads the ownership core and returns a string; it owns no state.',
+  taskRead: 'The SELECTED Task read bundle ({currentKey, currentSessionId, readTask, activityOf}) consumed by the Task Center owner. Direct composes the in-process reads; Remote composes the aggregate\'s task source. Read-only thereafter.',
   remoteIngressHandleLifecycle: 'per-owner: replaced on every owner commit, disposed on rollover/abort.',
   startupAgent: 'agentNow() snapshot deciding the resume vs deferred startup surface; startup orchestration.',
   flushTurn: 'turn-persistence hook invoked by the surface routing; Direct/domain persistence seam.',

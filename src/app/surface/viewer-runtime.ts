@@ -9,20 +9,22 @@
  *   streaming previews);
  * - the in-flight OPEN token + snapshot→live event buffer (a stale open can
  *   never commit an obsolete child over the current surface);
- * - the exact-Agent display/queue identity of the viewed child (opaque here —
- *   the composition root supplies the in-process Direct facts);
+ * - the exact child writer-subject token of the viewed child (opaque here —
+ *   the selected child-view source supplies the Direct Agent identity, the
+ *   Remote branch its own viewer-owned token);
  * - the child's semantic pending-input subject (the queue pane's read);
  * - the auto-pop call map (which pending subagent call opened which child);
  * - the follow-up settlement (restore/fence/notify decision) and the abort
- *   fence that cancels a follow-up which has not reached inbox acceptance.
+ *   fence that cancels a follow-up which has not reached inbox acceptance;
+ * - the child live ingress handle (Remote), disposed BEFORE the child view
+ *   handle is released.
  *
  * The module is deliberately neutral: it never imports a Host session/agent
- * package and never performs a Host lookup. Every fact that belongs to the
- * official DSH client/session contract (the Session log, the live Agent
- * registry, the semantic `sessionQuery` observation, the official prompt
- * follow-up) arrives through a narrow injected capability, so the Direct
- * adapter stays the only place that maps official semantics onto the current
- * in-process implementation.
+ * package and never performs a Host lookup. Everything backend-specific — the
+ * child view acquisition/hydration, its live updates, its paging and its
+ * durable image reads — arrives through the injected {@link ViewerChildSource},
+ * whose Direct and Remote implementations are the only places that map the
+ * official semantics onto a backend.
  * @module @xmoon76/dsh-pi-tui/app/surface/viewer-runtime
  */
 
@@ -51,36 +53,93 @@ import {
   type SessionPresentationEvent,
 } from './session-presentation.ts'
 
-/** The exact-Agent facts the viewer reads from the in-process implementation.
- *  The object stays opaque here: only its session identity and run status are
- *  part of the viewer's contract. */
-export interface ViewerChildAgent {
-  readonly status: string
-  readonly session: {
-    readonly id: string
-    readonly header: { readonly parentSession?: string }
-  }
+/**
+ * One child view's hydrated snapshot as the viewer folds it. `durableEvents`
+ * is the child's OWN durable cut at read time; `liveInputs` are the transient
+ * assistant frames that were already reflected in that read (the Remote
+ * read-side partition baseline) and must be replayed after the durable fold.
+ */
+export interface ViewerChildSnapshot<Event> {
+  readonly durableEvents: readonly Event[]
+  readonly liveInputs: readonly AssistantLiveInput[]
+  readonly activity: 'running' | 'inactive'
+  readonly cwd: string
+  readonly revision: number | undefined
 }
 
-/** One live/cold session snapshot as the viewer reads it (official Session log). */
-export interface ViewerChildSession<Event> {
-  readonly header: { readonly cwd?: unknown }
-  snapshotEvents(): readonly Event[]
+/** The live sinks one child view publishes into the mounted viewer. */
+export interface ViewerChildLiveSinks<Event> {
+  onDurableEvent(event: Event): void
+  onLiveInput(input: AssistantLiveInput): void
+  onWindowReplaced(): void
+  onWindowPrepended(): void
+  onSessionSnapshotChanged(): void
+  onProjectionsChanged(): void
 }
 
-/** One semantic `sessionQuery` observation of a cold child, caller-owned. */
-export interface ViewerChildObservation<Event> {
-  readonly events: readonly Event[]
-  readonly header: { readonly cwd?: unknown }
-  [Symbol.dispose](): void
+/**
+ * The exact writer-subject identity that admitted a queue gesture: its only
+ * contract is the Session identity the write addresses. Direct supplies the
+ * exact child Agent object (identity comparison against the live registry);
+ * Remote supplies its own viewer-owned token — never a fabricated Agent.
+ */
+export interface ViewerQueueSubject {
+  readonly session: { readonly id: string }
 }
 
-/** The interactive continuable child's queue authority, published to the
- *  Direct composition (the in-process writer/admission owner). */
-export interface ViewerQueueAuthority<ChildAgent> {
+/**
+ * One acquired child view. The handle owns the child's Client generation (or
+ * its Direct live/cold session read) until {@link release}, which is
+ * idempotent; the viewer disposes any live subscription BEFORE releasing it.
+ */
+export interface ViewerChildView<Event> {
+  readonly childSessionId: string
+  readonly parentSessionId: string
+  readonly snapshot: ViewerChildSnapshot<Event>
+  /** The exact Direct child Agent identity for the assistant-stream fence;
+   *  absent on a backend without an Agent identity (Remote). */
+  readonly viewAgent?: object
+  /** Re-read the authoritative window (window replace / older-history prepend). */
+  rehydrate(): Promise<ViewerChildSnapshot<Event> | undefined>
+  /** Extend the window with one official older page. */
+  loadOlder(): Promise<void>
+  /** The child's CURRENT activity as the selected backend reads it (Direct: the
+   *  Agent registry; Remote: the retained binding's official `running` bit). */
+  currentActivity(): 'running' | 'inactive'
+  /** Subscribe this exact child generation's live updates (Direct: undefined —
+   *  the Host firehose already routes the viewed child). */
+  subscribe(sinks: ViewerChildLiveSinks<Event>): { dispose(): void } | undefined
+  /** Release the child's lifetime exactly once; idempotent. */
+  release(): void
+}
+
+/** One viewer open request: the exact durable target + its cancellation. */
+export interface ViewerChildOpenTarget {
   readonly parentSessionId: string
   readonly childSessionId: string
-  readonly agent: ChildAgent
+  readonly mode: 'one-shot' | 'continuable'
+  /** The catalog-projected activity the viewer opened from (the Direct
+   *  fallback when no live child Agent can answer). */
+  readonly activity: 'running' | 'inactive'
+  /** Aborted when the open is superseded (viewer exit/switch/swap). */
+  readonly signal: AbortSignal
+}
+
+/**
+ * The selected backend's child-view source (plan D1): Direct acquires the
+ * live/cold Session read, Remote retains the exact `SubagentAddress`
+ * generation and hydrates through the shared presentation reader. It never
+ * forks the viewer state machine.
+ */
+export interface ViewerChildSource<Event> {
+  /** Acquire + hydrate one child view. Returns `undefined` only when the
+   *  request was superseded (the caller commits nothing, silently); a real
+   *  open/read failure THROWS. */
+  open(target: ViewerChildOpenTarget): Promise<ViewerChildView<Event> | undefined>
+  /** The EXACT live child writer-subject identity, or `undefined` when the
+   *  backend has no Agent-bound subject for this child (Remote). Direct
+   *  returns the exact live child Agent object. */
+  childWriterSubject(childId: string): ViewerQueueSubject | undefined
 }
 
 /** The viewer's read model: the semantic display subject plus the child's own
@@ -98,9 +157,17 @@ export interface ViewerReadModel {
   readonly previews: Map<string, StreamingToolPreview>
 }
 
+/** The interactive continuable child's queue authority, published to the
+ *  selected composition (the writer/admission owner). */
+export interface ViewerQueueAuthority {
+  readonly parentSessionId: string
+  readonly childSessionId: string
+  readonly subject: ViewerQueueSubject
+}
+
 /** The narrow capabilities the viewer consumes. Nothing here is a Host lookup:
- *  the composition root maps each one onto the current in-process owner. */
-export interface ViewerRuntimeDeps<Event extends SessionPresentationEvent, ChildAgent extends ViewerChildAgent> {
+ *  the composition root maps each one onto the selected backend owner. */
+export interface ViewerRuntimeDeps<Event extends SessionPresentationEvent> {
   /** The mounted surface owner (its `app` is the live TuiApp once mounted). */
   readonly surface: SurfaceRuntime<Event>
   /** True once the runner is disposing: no new viewer work may start. */
@@ -109,22 +176,19 @@ export interface ViewerRuntimeDeps<Event extends SessionPresentationEvent, Child
   readonly currentSessionId: () => string | undefined
   /** The live parent session id of the current owner (the follow-up's fence). */
   readonly liveParentSessionId: () => string | undefined
-  /** The official Session snapshot of one child, or `undefined` when inactive. */
-  readonly childSession: (childId: string) => ViewerChildSession<Event> | undefined
-  /** The semantic cold-session observation; `undefined` when the seam is absent. */
-  readonly observeChild: (childId: string) => Promise<ViewerChildObservation<Event>> | undefined
-  /** The exact live Agent of one child, or `undefined` when not mounted. */
-  readonly childAgent: (childId: string) => ChildAgent | undefined
-  /** The live assistant-stream baseline of one exact Agent (official stream). */
-  readonly assistantStreamBaselineFor: (agent: ChildAgent) => readonly AssistantLiveInput[]
+  /** The selected backend's child-view acquisition/hydration source. */
+  readonly childView: ViewerChildSource<Event>
   /** Re-derive the footer/status projections after a viewer transition. */
   readonly refreshStatus: () => void
   /** Restore the main transcript's semantic latest/history anchor. */
   readonly restoreMainTranscriptAnchor: () => void
+  /** Start one detached viewer-owned async flow (the runner's ownership
+   *  model: a bare fire-and-forget promise is forbidden). */
+  readonly runDetached: (label: string, task: () => Promise<void>) => void
 }
 
 /** The subagent viewer as the rest of the application consumes it. */
-export interface ViewerRuntime<Event extends SessionPresentationEvent, ChildAgent extends ViewerChildAgent> {
+export interface ViewerRuntime<Event extends SessionPresentationEvent> {
   /** The mounted viewer's read model, or `undefined` when no viewer is open. */
   read(): ViewerReadModel | undefined
   /** Whether a viewer is currently mounted. */
@@ -147,14 +211,14 @@ export interface ViewerRuntime<Event extends SessionPresentationEvent, ChildAgen
   /** The EXACT live Agent object currently owning the viewed session. */
   viewedChildAgent(): object | undefined
   /** Rebind the viewed child's exact Agent (same-session activation rollover). */
-  setViewedChildAgent(agent: ChildAgent | undefined): void
+  setViewedChildAgent(agent: object | undefined): void
   /** Drop the old session's auto-pop state at a generation bump. */
   resetAutoPop(): void
-  /** Recompute the queue authority from the current viewer + exact Agent. */
-  setViewedQueueAgent(agent: ChildAgent | undefined): void
-  /** The currently published interactive-child queue authority (A5b-6): the
-   *  composition root reads this late-bound for the Direct queue resolver. */
-  viewedQueueAuthority(): ViewerQueueAuthority<ChildAgent> | undefined
+  /** Recompute the queue authority from the current viewer + exact subject. */
+  setViewedQueueAgent(subject: object | undefined): void
+  /** The currently published interactive-child queue authority: the
+   *  composition root reads this late-bound for the queue resolver. */
+  viewedQueueAuthority(): ViewerQueueAuthority | undefined
   /** The abort fence of the CURRENT viewer session's follow-up (if any). */
   followUpSignal(): AbortSignal | undefined
   /** The semantic pending-input subject (queue pane), viewer-aware. */
@@ -172,22 +236,34 @@ export interface ViewerRuntime<Event extends SessionPresentationEvent, ChildAgen
   ): void
   /** Apply one transient assistant input to the viewed child's presentation. */
   applyAssistantInput(input: AssistantLiveInput): void
+  /** Re-fold the viewed child from its authoritative window (window replace /
+   *  older-history prepend / PageUp extension). No-op without a viewer. */
+  rehydrateViewedChild(): Promise<void>
+  /** Extend the viewed child's window with one official older page. */
+  extendViewedChildHistory(): Promise<void>
   /** Tear the viewer down at a session-generation bump (unconditional). */
   teardownForSessionSwap(): void
+  /**
+   * Final teardown at surface/runner disposal (NO painting). Cancels an
+   * in-flight open and drops a mounted viewer's live ingress + child
+   * generation exactly once, so a dying surface never keeps a Client child
+   * generation (or its ingress) alive past the adapter/Client disposal order.
+   */
+  dispose(): void
 }
 
 /** Create the subagent viewer owner (plan §A5b-1). */
-export function createViewerRuntime<Event extends SessionPresentationEvent, ChildAgent extends ViewerChildAgent>(
-  deps: ViewerRuntimeDeps<Event, ChildAgent>,
-): ViewerRuntime<Event, ChildAgent> {
+export function createViewerRuntime<Event extends SessionPresentationEvent>(
+  deps: ViewerRuntimeDeps<Event>,
+): ViewerRuntime<Event> {
   // P7d: subagent viewer — while set, the transcript shows another live
   // session's log and Esc returns to the parent session. The target is
   // MODE-AWARE: a continuable child's viewer is INTERACTIVE (the editor
-  // submits human prompts through ctx.subagents.prompt), a one-shot
+  // submits human prompts through the child prompt authority), a one-shot
   // child's viewer stays read-only. The parent session id is pinned at
   // open time — follow-ups require the exact live direct parent, and
   // the viewer never guesses it from the current live agent.
-  
+
   let viewing: {
     id: string
     folder: TranscriptFolder
@@ -212,27 +288,45 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
      * identity fence compares Agent object identity (never a
      * re-derived session id), so a late frame from a retired child agent
      * can never reach the viewer after a replacement. */
-    viewAgent?: ChildAgent
+    viewAgent?: object
   } | undefined
 
-  /** The interactive continuable child's queue authority (A5b-6): the viewer
-   *  owns the published slot; the composition root reads it late-bound to
-   *  connect the Direct queue resolver to this owner. */
-  let queueAuthority: ViewerQueueAuthority<ChildAgent> | undefined
+  /** The acquired child view handle: the ONE lifetime owner of the child's
+   *  Client generation (Remote) or live/cold session read (Direct). */
+  let viewHandle: ViewerChildView<Event> | undefined
+  /** The child live-ingress handle (Remote); Direct needs none. */
+  let viewLiveDispose: { dispose(): void } | undefined
+  /**
+   * The IN-FLIGHT open's cancellation: a Remote open has already retained its
+   * `tuiChildView` generation while it awaits the reference's open/read, so
+   * every supersession/end path MUST abort it instead of only invalidating the
+   * request token — otherwise an unsettled stale open keeps the child
+   * generation alive (the source releases on abort).
+   */
+  let openingAbort: AbortController | undefined
 
-  const setViewedQueueAgent = (agent: ChildAgent | undefined): void => {
+  /** The interactive continuable child's queue authority: the viewer owns the
+   *  published slot; the selected composition reads it late-bound. */
+  let queueAuthority: ViewerQueueAuthority | undefined
+
+  /** Publish (or clear) the child queue authority from one exact subject: only
+   *  an interactive direct child of the CURRENT main owner exposes a queue. */
+  const publishQueueSubject = (subject: ViewerQueueSubject | undefined): void => {
     const current = viewing
-    if (agent !== undefined
-      && current !== undefined
-      && current.mode === 'continuable'
-      && current.access === 'interactive-direct-child'
-      && current.parentSessionId === deps.currentSessionId()
-      && agent.session.id === current.id
-      && agent.session.header.parentSession === current.parentSessionId) {
-      queueAuthority = { parentSessionId: current.parentSessionId, childSessionId: current.id, agent }
+    if (subject === undefined
+      || current === undefined
+      || current.mode !== 'continuable'
+      || current.access !== 'interactive-direct-child'
+      || current.parentSessionId !== deps.currentSessionId()
+      || subject.session.id !== current.id) {
+      queueAuthority = undefined
       return
     }
-    queueAuthority = undefined
+    queueAuthority = { parentSessionId: current.parentSessionId, childSessionId: current.id, subject }
+  }
+
+  const setViewedQueueAgent = (subject: object | undefined): void => {
+    publishQueueSubject(subject as ViewerQueueSubject | undefined)
   }
 
   // The queue pane consumes the same active semantic pending-input subject as
@@ -240,7 +334,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
   // interactive continuable child while its viewer is mounted. A child whose
   // authority is unavailable yields an empty pane; it never falls back to the
   // main session's queue. Non-interactive viewers expose no queue subject.
-  
+
   const activePendingSessionId = (): string | undefined => {
     const viewer = viewing
     if (viewer !== undefined) {
@@ -254,12 +348,12 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
   // Unsettled subagent delegations in the live session, in tool/call order.
   // The viewer matches one of these by description when the user opens a
   // child transcript, so the child's tool/result can pop the viewer back.
-  
+
   const pendingSubagentCalls: { callId: string; description: string }[] = []
 
   // callId → child session id, established when the user opens a child's
   // transcript (see enterView). Consumed on the matching tool/result.
-  
+
   const viewCallToChild = new Map<string, string>()
 
   // The search-overlay stale refresh, the navigation presentation and the
@@ -269,18 +363,18 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
    * target carries the catalog MODE (continuable = interactive editor,
    * one-shot = read-only — never guessed from running/inactive) and the
    * exact direct-parent session id the follow-up write path is pinned
-   * to. The open is ASYNC (a cold child's log is read from persistence);
-   * a viewer open/close/child switch — or a session swap — that lands
-   * while the inspection is in flight invalidates this request (the
-   * viewerOpen token), so a slow open can never commit an obsolete child
-   * over the current surface (round-4/5 findings). */
-  
+   * to. The open is ASYNC (the selected child-view source acquires and
+   * hydrates the child); a viewer open/close/child switch — or a session
+   * swap — that lands while the open is in flight invalidates this request
+   * (the viewerOpen token + the open signal), so a slow open can never
+   * commit an obsolete child over the current surface (round-4/5 findings). */
+
   const viewerOpen = createViewerOpenToken()
 
   /** Events for the child are buffered while its cold observation is in flight.
    * The buffer closes the snapshot → live opening gap; the request token fences
    * stale opens so an exited/superseded viewer never retains another child's events. */
-  
+
   let openingViewer: { request: number; childId: string; events: Event[] } | undefined
 
   /** The CURRENT viewer session's abort source: aborted when the viewer
@@ -289,7 +383,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
    * rejected send restores the draft into the child's slot). Once a
    * follow-up is accepted the DSH continuation contract hands ownership
    * to the child — the signal no longer matters. */
-  
+
   let viewerSessionAbort: AbortController | undefined
 
   /** Enter the subagent viewer for one session (live or persisted). M3-5 PR1
@@ -315,131 +409,219 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     const request = viewerOpen.open()
     const opening = { request, childId, events: [] as Event[] }
     openingViewer = opening
-     try {
-    const childFolder = new TranscriptFolder()
-    const childWindow = new TranscriptWindowController({
-      windowTurns: TRANSCRIPT_WINDOW_TURNS,
-      stepTurns: TRANSCRIPT_WINDOW_STEP,
-      turns: childFolder.groupedTurns(),
-    })
-    const childStats = new StatsFolder()
-    const childPreviews = new Map<string, StreamingToolPreview>()
-    let childCwd = ''
-    // Only the child's OWN events enter the viewer: a fork provider seeds
-    // the child with the parent's inherited prefix (ending at the
-    // session/end-seed boundary plus child-owned repair), and the parent's
-    // records — its subagent completion
-    // notices included — must never render as the child's transcript.
-    const initialChild = deps.childSession(childId)
-    let observedEvents: readonly Event[] = initialChild?.snapshotEvents() ?? []
-    let observedHeader: { cwd?: unknown } | undefined = initialChild?.header
-    if (initialChild !== undefined) {
-      observedHeader = initialChild.header
-    } else {
-      // An inactive child is no longer in the live store; load its log
-      // through the semantic session-query seam (the raw persistence
-      // fallback is removed legacy on the master baseline).
-      const observation = await deps.observeChild(childId)
-      if (observation !== undefined) {
-        try {
-          observedEvents = observation.events
-          observedHeader = observation.header
-        } finally {
-          observation[Symbol.dispose]()
-        }
-      }
-    }
-    // If the child cold-resumed while observation was in flight, its live
-    // Session snapshot is the authoritative durable cut. Otherwise append
-    // only buffered events beyond the observation cut, never replaying a
-    // duplicated seq from the snapshot.
-    const currentChild = deps.childSession(childId)
-    const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)
-    const own = childOwnEvents(durableEvents)
-    childFolder.hydrate(own)
-    childStats.hydrate(own)
-    const header = currentChild?.header ?? observedHeader
-    // The live/cold child's session header carries its workspace (the child
-    // may have been born in another directory).
-    childCwd = typeof header?.cwd === 'string' ? header.cwd : ''
-    const childAgent = deps.childAgent(childId)
-    let childActivity: 'running' | 'inactive' = childAgent === undefined
-      ? activity
-      : childAgent.status === 'running' ? 'running' : 'inactive'
-    if (childAgent === undefined) {
-      for (const event of own) {
-        if (event.type === 'turn/start') childActivity = 'running'
-        else if (event.type === 'turn/end') childActivity = 'inactive'
-      }
-    }
-    // A live child may already have emitted transient assistant frames before
-    // the viewer existed. Replay only the exact Agent's active baseline after
-    // durable hydration and before the child surface is mounted.
-    if (childAgent !== undefined) {
-      for (const input of deps.assistantStreamBaselineFor(childAgent)) {
+    // A new open supersedes any previous in-flight one: its retained child
+    // generation must be released NOW, not when (if ever) it settles.
+    openingAbort?.abort()
+    const openController = new AbortController()
+    openingAbort = openController
+    let acquired: ViewerChildView<Event> | undefined
+    try {
+      acquired = await deps.childView.open({
+        parentSessionId,
+        childSessionId: childId,
+        mode,
+        activity,
+        signal: openController.signal,
+      })
+      // A superseded open commits nothing; nothing was acquired.
+      if (acquired === undefined) return
+      const view = acquired
+      // Only the child's OWN events enter the viewer: a fork provider seeds
+      // the child with the parent's inherited prefix (ending at the
+      // session/end-seed boundary plus child-owned repair), and the parent's
+      // records — its subagent completion notices included — must never render
+      // as the child's transcript. The opening buffer closes the Direct
+      // snapshot → live gap; on Remote the source's snapshot is already an
+      // authoritative window and the buffer stays empty.
+      const durableEvents = mergeSessionEventCut(view.snapshot.durableEvents, opening.events)
+      const own = childOwnEvents(durableEvents)
+      const childFolder = new TranscriptFolder()
+      childFolder.hydrate(own)
+      const childStats = new StatsFolder()
+      childStats.hydrate(own)
+      const childPreviews = new Map<string, StreamingToolPreview>()
+      // A live child may already have emitted transient assistant frames before
+      // the viewer existed. Replay the read-side transient baseline after
+      // durable hydration and before the child surface is mounted.
+      for (const input of view.snapshot.liveInputs) {
         applyAssistantLiveInput(childFolder, childStats, childPreviews, input)
       }
-    }
-    // The user's deliberate look is the anchor for the auto-pop: match the
-    // child's durable label (the delegation's description) against the
-    // unsettled subagent calls so this child's tool/result can pop the
-    // viewer back. Duplicate labels take the MOST RECENT call (the one the
-    // user is most likely watching); an empty/absent label falls back to a
-    // lone pending call, and no match simply disables the auto-pop (the
-    // user exits with Esc as before).
-    //
-    // STALE-OPEN GUARD: while the inspection above was in flight the user
-    // may have exited, switched children, or swapped sessions — every one
-    // of those invalidates the viewerOpen token. A stale request must not
-    // commit its child over the current surface (no viewing write, no
-    // repaint, no viewer mount, no auto-pop match).
-    if (deps.isCleanedUp() || !viewerOpen.isCurrent(request)) {
+      const childWindow = new TranscriptWindowController({
+        windowTurns: TRANSCRIPT_WINDOW_TURNS,
+        stepTurns: TRANSCRIPT_WINDOW_STEP,
+        turns: childFolder.groupedTurns(),
+      })
+      // STALE-OPEN GUARD: while the acquisition/hydration above was in flight
+      // the user may have exited, switched children, or swapped sessions —
+      // every one of those invalidates the viewerOpen token. A stale request
+      // must not commit its child over the current surface (no viewing write,
+      // no repaint, no viewer mount, no auto-pop match); the acquired handle is
+      // released in the `finally` below.
+      if (deps.isCleanedUp() || !viewerOpen.isCurrent(request)) return
+      openingViewer = undefined
+      // SWITCH GUARD: entering a child while another viewer is mounted replaces
+      // it. The replaced viewer's retained child generation (Remote), its live
+      // ingress and its in-flight follow-up must be released HERE — a stale open
+      // returning early above never tears the mounted viewer down.
+      if (viewing !== undefined) {
+        viewerSessionAbort?.abort()
+        viewerSessionAbort = undefined
+        viewing = undefined
+        queueAuthority = undefined
+        releaseViewHandle()
+      }
+      // The user's deliberate look is the anchor for the auto-pop: match the
+      // child's durable label (the delegation's description) against the
+      // unsettled subagent calls so this child's tool/result can pop the
+      // viewer back. Duplicate labels take the MOST RECENT call (the one the
+      // user is most likely watching); an empty/absent label falls back to a
+      // lone pending call, and no match simply disables the auto-pop (the
+      // user exits with Esc as before).
+      const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
+      if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
+      viewerSessionAbort = new AbortController()
+      viewing = {
+        id: childId,
+        folder: childFolder,
+        window: childWindow,
+        stats: childStats,
+        parentSessionId,
+        label: label ?? childId,
+        mode,
+        activity: view.snapshot.activity,
+        access,
+        cwd: view.snapshot.cwd,
+        previews: childPreviews,
+        ...(view.viewAgent === undefined ? {} : { viewAgent: view.viewAgent }),
+      }
+      // The child's turn numbers are its OWN namespace: the parent's Focus
+      // disclosures must not leak into the child transcript (plan §26).
+      viewHandle = view
+      acquired = undefined
+      publishQueueSubject(view.viewAgent === undefined
+        // Remote: the viewer owns one stable writer-subject token for the whole
+        // viewer session (no fabricated Agent object).
+        ? Object.freeze({ session: Object.freeze({ id: childId }) })
+        : (view.viewAgent as ViewerQueueSubject))
+      // The child live ingress is installed AFTER the hydrated commit, fenced by
+      // the exact child generation inside the source (Remote); Direct returns no
+      // handle because the Host firehose already routes the viewed child.
+      viewLiveDispose = view.subscribe({
+        onDurableEvent: (event) => {
+          if (viewing === undefined || viewing.id !== childId) return
+          deps.surface.routeSessionEvent({ id: childId }, event)
+        },
+        onLiveInput: (input) => {
+          if (viewing === undefined || viewing.id !== childId) return
+          const target = viewing
+          applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
+          deps.surface.repaint()
+        },
+        onWindowReplaced: () => {
+          if (viewing === undefined || viewing.id !== childId) return
+          runDetachedViewerRehydrate()
+        },
+        onWindowPrepended: () => {
+          if (viewing === undefined || viewing.id !== childId) return
+          runDetachedViewerRehydrate()
+        },
+        onSessionSnapshotChanged: () => {
+          const target = viewing
+          const handle = viewHandle
+          if (target === undefined || target.id !== childId || handle === undefined) return
+          // The official snapshot channel carries the child's `running` flip: the
+          // viewer's own activity must follow the CURRENT fact (the composer's
+          // queue-vs-steer decision reads it), and the pending pane re-joins.
+          target.activity = handle.currentActivity()
+          deps.surface.refreshPendingInput()
+        },
+        onProjectionsChanged: () => {
+          if (viewing === undefined || viewing.id !== childId) return
+          deps.refreshStatus()
+        },
+      })
+      deps.surface.app.enterFocusViewerScope()
+      deps.surface.repaint()
+      // The viewer bar covers the editor (a read-only placeholder for
+      // one-shot, the child's own draft for continuable) and the header
+      // badges the mode — the transient notify is no longer the only "you
+      // are elsewhere" signal.
+      deps.surface.app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: view.snapshot.activity, access })
+      // M3-5 PR1 §9.7: the display-subject commit. StatusRuntime selects THIS
+      // child as the display subject and publishes the child's own
+      // SessionStatus facts (view/composition/access/workspace/usage) in ONE
+      // StatusStore update — before the first frame of the new subject can be
+      // painted (the enter is synchronous from `viewing =` onward).
+      deps.refreshStatus()
+      // The queue pane follows the child only after the viewer and its exact
+      // queue authority are both published.
+      deps.surface.refreshPendingInput()
+    } finally {
       if (openingViewer === opening) openingViewer = undefined
-      return
+      if (openingAbort === openController) openingAbort = undefined
+      // A stale/failed open releases everything it acquired; the mounted
+      // surface is untouched.
+      acquired?.release()
     }
-    openingViewer = undefined
-    // The viewer replaces the main transcript presentation owner, but the
-    // main session's live preview state continues updating off-screen.
-    const matched = matchPendingSubagentCall(pendingSubagentCalls, label)
-    if (matched !== undefined) viewCallToChild.set(matched.callId, childId)
-    viewerSessionAbort = new AbortController()
-    viewing = {
-      id: childId,
-      folder: childFolder,
-      window: childWindow,
-      stats: childStats,
-      parentSessionId,
-      label: label ?? childId,
-      mode,
-      activity: childActivity,
-      access,
-      cwd: childCwd,
-      previews: childPreviews,
-      ...(childAgent === undefined ? {} : { viewAgent: childAgent }),
-    }
-    // The child's turn numbers are its OWN namespace: the parent's Focus
-    // disclosures must not leak into the child transcript (plan §26).
-    setViewedQueueAgent(childAgent)
-    deps.surface.app.enterFocusViewerScope()
-    deps.surface.repaint()
-    // The viewer bar covers the editor (a read-only placeholder for
-    // one-shot, the child's own draft for continuable) and the header
-    // badges the mode — the transient notify is no longer the only "you
-    // are elsewhere" signal.
-    deps.surface.app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: childActivity, access })
-    // M3-5 PR1 §9.7: the display-subject commit. StatusRuntime selects THIS
-    // child as the display subject and publishes the child's own
-    // SessionStatus facts (view/composition/access/workspace/usage) in ONE
-    // StatusStore update — before the first frame of the new subject can be
-    // painted (the enter is synchronous from `viewing =` onward).
-    deps.refreshStatus()
-    // The queue pane follows the child only after the viewer and its exact
-    // queue authority are both published.
-    deps.surface.refreshPendingInput()
+  }
 
-     } finally {
-       if (openingViewer === opening) openingViewer = undefined
-     }
+  /** Dispose the child live subscription (if any) BEFORE the child handle is
+   *  released, so a synchronous teardown effect cannot repaint a dead viewer. */
+  const disposeViewLive = (): void => {
+    const handle = viewLiveDispose
+    viewLiveDispose = undefined
+    handle?.dispose()
+  }
+
+  /** Release the acquired child handle (idempotent) after its ingress is down. */
+  const releaseViewHandle = (): void => {
+    const handle = viewHandle
+    viewHandle = undefined
+    disposeViewLive()
+    handle?.release()
+  }
+
+  /** Re-fold the viewed child from the current authoritative window. The
+   * runner's detached ownership wrapper owns failure reporting; every commit
+   * re-checks the exact viewer identity. */
+  const runDetachedViewerRehydrate = (): void => {
+    deps.runDetached('viewer child re-hydration', () => rehydrateViewedChild())
+  }
+
+  const rehydrateViewedChild = async (): Promise<void> => {
+    const target = viewing
+    const handle = viewHandle
+    if (target === undefined || handle === undefined) return
+    if (deps.isCleanedUp()) return
+    const snapshot = await handle.rehydrate()
+    if (snapshot === undefined) return
+    // The viewer may have exited/switched while the re-read was in flight.
+    if (deps.isCleanedUp() || viewing !== target || viewHandle !== handle) return
+    const own = childOwnEvents(snapshot.durableEvents)
+    const folder = new TranscriptFolder()
+    folder.hydrate(own)
+    const stats = new StatsFolder()
+    stats.hydrate(own)
+    target.folder = folder
+    target.window.setTurns(folder.groupedTurns())
+    target.stats = stats
+    for (const input of snapshot.liveInputs) {
+      applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
+    }
+    target.cwd = snapshot.cwd
+    target.activity = snapshot.activity
+    deps.refreshStatus()
+    deps.surface.repaint()
+  }
+
+  /** Page one official older window into the viewed child, then re-fold. */
+  const extendViewedChildHistory = async (): Promise<void> => {
+    const target = viewing
+    const handle = viewHandle
+    if (target === undefined || handle === undefined || deps.isCleanedUp()) return
+    await handle.loadOlder()
+    if (deps.isCleanedUp() || viewing !== target) return
+    await rehydrateViewedChild()
   }
 
   /** Leave the subagent viewer (single Esc). Returns whether it exited.
@@ -447,17 +629,27 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
    * session swap, which routes through this) must prevent a slow
    * transcript inspection from reopening the viewer afterwards, even when
    * no viewer is currently mounted (the open is still in flight). */
-  
+
   const exitView = (): boolean => {
     viewerOpen.invalidate()
     openingViewer = undefined
-    if (viewing === undefined) return false
+    // Cancel an in-flight open even when nothing is mounted: its retained
+    // child generation must be released immediately.
+    openingAbort?.abort()
+    openingAbort = undefined
+    if (viewing === undefined) {
+      releaseViewHandle()
+      return false
+    }
     const previousViewing = viewing
     previousViewing.previews.clear()
     viewing = undefined
     queueAuthority = undefined
     viewerSessionAbort?.abort() // cancel an in-flight, not-yet-accepted follow-up
     viewerSessionAbort = undefined
+    // Dispose the child ingress BEFORE releasing the child handle: a
+    // synchronous teardown effect must not repaint the dead viewer.
+    releaseViewHandle()
     deps.surface.app.clearLocalMessages()
     deps.surface.app.clearNotify() // a viewer notify (if any) is stale now
     deps.surface.app.setViewerMode(undefined)
@@ -490,9 +682,11 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
       target.activity = 'running'
       // A cold child or same-session rollover becomes queue-authorized
       // at its lifecycle boundary, before the first assistant frame.
-      const current = deps.childAgent(target.id)
-      target.viewAgent = current
-      setViewedQueueAgent(current)
+      const current = deps.childView.childWriterSubject(target.id)
+      if (current !== undefined) {
+        target.viewAgent = current
+        publishQueueSubject(current)
+      }
     },
     endTurn: () => { viewing!.activity = 'inactive' },
     refreshFooter: () => deps.refreshStatus(),
@@ -512,7 +706,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
    *   closed/switched during the send restores into the OLD child's
    *   slot and never pollutes the new surface (the generation guard).
    */
-  
+
   const settleSubagentSubmit = (
     request: SubagentViewerSubmitRequest,
     text: string,
@@ -573,7 +767,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
   }
 
   /** The user-facing reason for a rejected follow-up (plan §18). */
-  
+
   const subagentPromptNotice = (reason: SubagentPromptReject, label: string): string => {
     switch (reason.kind) {
       case 'parent-unavailable': return 'Cannot send: parent session is no longer active'
@@ -659,12 +853,21 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
    * draft retention is the existing behavior.
    */
   const teardownForSessionSwap = (): void => {
+    // UNCONDITIONAL pending-open cancellation: a FIRST open has ALREADY retained
+    // its child generation before any viewer is mounted, and
+    // `teardownViewerForSessionSwap` returns before its callback when nothing is
+    // mounted — so this bookkeeping must run OUTSIDE that callback, or a session
+    // swap would leave the pending open holding its retained child generation
+    // until it happens to settle.
+    openingViewer = undefined
+    openingAbort?.abort()
+    openingAbort = undefined
     teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
-      openingViewer = undefined
       viewing = undefined
       queueAuthority = undefined
       viewerSessionAbort?.abort()
       viewerSessionAbort = undefined
+      releaseViewHandle()
       deps.surface.app.clearLocalMessages()
       deps.surface.app.clearNotify()
       deps.surface.app.setViewerMode(undefined)
@@ -680,6 +883,26 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
       deps.surface.repaint()
       deps.restoreMainTranscriptAnchor()
     })
+  }
+
+  /**
+   * Final teardown at surface/runner disposal. NO painting and NO surface
+   * writes: the mounted app is already going away, and the adapter/Client
+   * disposal follows. Cancels an in-flight open and drops the mounted viewer's
+   * ingress + child generation exactly once.
+   */
+  const dispose = (): void => {
+    viewerOpen.invalidate()
+    openingViewer = undefined
+    openingAbort?.abort()
+    openingAbort = undefined
+    viewing = undefined
+    queueAuthority = undefined
+    viewerSessionAbort?.abort()
+    viewerSessionAbort = undefined
+    // The ingress goes down BEFORE the child generation is released (the source
+    // also enforces that order internally).
+    releaseViewHandle()
   }
 
   return {
@@ -699,7 +922,10 @@ export function createViewerRuntime<Event extends SessionPresentationEvent, Chil
     settleSubagentCall,
     settleSubmit: settleSubagentSubmit,
     applyAssistantInput,
+    rehydrateViewedChild,
+    extendViewedChildHistory,
     teardownForSessionSwap,
+    dispose,
     isViewing,
   }
 }

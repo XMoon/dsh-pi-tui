@@ -29,7 +29,8 @@ M3-4 PR5 DONE/MERGED (final main-application closure MERGED as PR #211 into `nex
 M3-4 DONE          (PR1–PR5 landed and PR5 merged; the main TUI application + command runtime run on the experimental Remote backend — see the M3-4 status section)
 M3-5 PR1 DONE      (child display-subject status foundation: Direct SessionStatus is Session-subject-neutral, ONE shared `SessionStatus(sessionId)` read, the viewed child's Session-owned facts (model/preset/permission/context/usage/todos/cwd/title/goal) come from its own projection, the released extension v2 live-session snapshot preserved with the additive `session.displaySubject`, atomic main↔child↔child transitions — see the M3-5 PR1 status section. Remote child SessionStatus authority is qualified; the Remote Task/child surface stays PR2)
 M3-5 PR4 DONE      (Remote Plugin Manager closure: lifecycle/qualification over an ALREADY backend-neutral surface — one invalidation hint on `PluginManagerPort`, Direct/Remote mappings, demand-aware controller rereads, latest-started read currentness, dispose hardening, real Remote `/plugins` + Settings dual-entry L6, external-change and reconnect invalidation L6 — see the M3-5 PR4 section)
-M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR4 landed, PR2/PR3/PR5/PR6 remain — see the migration stage pointer)
+M3-5 PR2 LANDED    (Remote Task Center + real child viewer: the Task read contract is the full descendant tree + root job roster on both backends, `TaskBrowserRuntime` consumes the SELECTED semantic Task read, Remote invalidation is observable-driven, the Remote Job rows expose no detail/Stop yet (PR3), `tuiChildView` owns one child SessionReference per viewer acquired from the exact SubagentAddress, the ONE viewer hydrates through the shared PresentationReader + RemoteLiveIngress, PageUp targets the active display subject, the child steer subject is transport-neutral, and durable images read through the active retained Session — see the M3-5 PR2 section. **PR open; mark DONE only after merge**)
+M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR4 merged, PR2 implementation landed and PR open, PR3/PR5/PR6 remain — see the migration stage pointer)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -61,7 +62,9 @@ Direct rollback:           available
 ```text
 M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
 M3-5 = IN PROGRESS          (PR1 child display-subject status foundation and
-                             PR4 Remote Plugin Manager closure landed; PR2/PR3/PR5/PR6 remain)
+                             PR4 Remote Plugin Manager closure merged; PR2 Remote
+                             Task Center + real child viewer landed, PR open;
+                             PR3/PR5/PR6 remain)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
@@ -1330,8 +1333,11 @@ lifecycle, child-control, custom-serve, or production-backend switch.
   operation, caller-cancellation, and disposal fences discard stale work.
 - `RemoteTaskReadShadow` compares direct-child membership/order, kind, label, mode,
   activity, diagnostics, parent availability, jobs, and the existing
-  `buildTaskRows` projection. It records the complete descendant tree as an
-  explicit upstream gap instead of inferring it from direct-child data.
+  `buildTaskRows` projection. **Superseded by M3-5 PR2** (see the M3-5 PR2
+  section): the shadow now compares the FULL recursive descendant tree with
+  nothing skipped — the official parent `subagentCatalog` projections carry the
+  recursive membership authority, so the old "complete descendant tree is an
+  explicit upstream gap" note no longer holds.
 - `RemotePresentationReader` consumes only `SessionBinding.eventSource`, the
   outward `SessionFace` snapshot, and `SessionFace.loadOlder()`. It preserves the
   event-source order within the durable and transient planes,
@@ -2032,17 +2038,22 @@ The D1 closure ledger is:
 | history window | Direct Session events | `SessionBinding.eventSource` | parity | — |
 | history paging | Direct full history | `SessionFace.loadOlder()` + eventSource | eventual parity; leading-turn completeness CLOSED by the rc.1 turn-aligned opening windows | — |
 | live Assistant presentation | Direct stream | transient event-source entries | parity | — |
-| full descendant tree | `listDescendants` | no exact official equivalent | skipped | D5/upstream |
+| full descendant tree | `listDescendants` | official parent `subagentCatalog` projections consumed recursively (M3-5 PR2) | parity for the representable diagnostics; see the M3-5 PR2 carrier-taxonomy note | CLOSED by M3-5 PR2 |
 | `createdAt` | Direct query | no Client list field | skipped | later only if required |
 | Direct `live` bit | attached-store fact | different Client running semantic | skipped | reconsider on flip |
-| context pressure | token meter | no Client equivalent | skipped | later Host seam if retained |
+| context pressure | token meter | official `contextPressure` Session projection (same semantic) | parity | CLOSED by M3-3A (`session.measureContext` retired) |
 
-The D1 skips are `session.createdAt`, `session.live`,
-`session.measureContext`, and `subagent.descendantTree`; each is explicit in
-the D1 closure ledger and smoke. `presentation.leadingTurnCompleteness` CLOSED
-with the rc.1 turn-aligned opening windows: the pagination smoke now asserts
-a complete leading turn directly, so the skip is no longer carried. The
-Remote reader still does not guess or prefetch full history.
+The remaining D1 skips are `session.createdAt` and `session.live`; each is
+explicit in the D1 closure ledger and smoke.
+`session.measureContext` CLOSED in M3-3A: both backends read the ONE official
+`contextPressure` semantic and the field compares like every other (see the row
+above; `test/remote-session-read-shadow.test.ts` compares it).
+`subagent.descendantTree` CLOSED in M3-5 PR2 (the shadow compares the full
+recursive tree; the smoke reports `skipped: []`).
+`presentation.leadingTurnCompleteness` CLOSED with the rc.1 turn-aligned opening
+windows: the pagination smoke now asserts a complete leading turn directly, so
+the skip is no longer carried. The Remote reader still does not guess or
+prefetch full history.
 
 ## DSH 0.1.7-alpha.2 fork exact-cut convergence (B3)
 
@@ -4423,3 +4434,292 @@ in this PR is labelled L6 for installation.
 PR2 (Remote Task Center + real child viewer), PR3 (Remote Job viewer), PR5
 (writer-held recovery) and PR6 (stage closure) remain. `M3-5 DONE` is not
 claimed anywhere in this PR.
+
+## M3-5 PR2 — Remote Task Center + real child viewer
+
+Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
+**IN PROGRESS** and must not be marked DONE from this PR (PR3/PR5/PR6 remain).
+
+### Implemented authority
+
+- **The Task read contract is the FULL Task Center dataset.** `TaskReader`
+  (`src/runtime/task-read-port.ts`) now exposes `readDescendants()`, whose
+  `TaskReadSnapshot` carries one root Session, its complete descendant catalog
+  in stable DFS pre-order (per entry: `parentId`, `depth`, `mode`, `label`,
+  `activity`, `hasChildren`, or a `corrupt`/`unsupported`/`unavailable`
+  diagnostic) and the root's status-only Job roster. The former direct-child
+  read and its explicit "descendant tree is an upstream gap until D5" note are
+  gone; the runtime-only shadow no longer skips anything.
+- **Direct** (`src/runtime/direct/task-read-direct.ts`) maps the official
+  `subagents.listDescendants` + the Agent registry activity + `jobs.list`,
+  preserving the upstream ordering, `parentId`/`depth`, mode/label/
+  `hasChildren` and diagnostic vocabulary verbatim.
+- **Remote** (`src/runtime/remote/task-read-remote.ts`) reproduces those
+  semantics from the official Client projections: it recursively walks each
+  parent's `subagentCatalog` (`projectionsBySession` + `refreshProjections` —
+  a missing/loading projection is NEVER an authoritative empty membership; a
+  projection that settles `state: 'error'` re-enters the official RETRYABLE
+  `refreshProjections` exactly once before it gives up, so a transient failure —
+  and the Task Center's own retry — can actually recover; and a projection that
+  settles `state: 'ready'` WITHOUT the `subagentCatalog` key is a REAL read
+  failure, exactly the one upstream `listChildren` reports as
+  `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE`, never an authoritative empty
+  catalog), a ROOT read failure rejects (never an authoritative empty catalog), a
+  child branch read failure becomes a bounded `corrupt`/`unavailable` diagnostic
+  whose siblings survive, an `unknown` mode becomes an `unsupported` diagnostic
+  whose children are STILL traversed, `hasChildren` comes from the child's own
+  catalog, and activity comes from the official Session-list `running` bit —
+  never from catalog presence. Listing retains no Session and opens no child
+  log. The operation epoch + Connection generation + caller-session fences are
+  unchanged.
+- **`TaskBrowserRuntime` consumes the selected semantic Task read.** The
+  coordinator's hooks are now `currentKey` + `readTask` + `readJobs` +
+  `activityOf` (commit-time), so no process-local Agent/Job object is its
+  business authority. The cached catalog, the coalesced single-flight gate, the
+  "latest successfully committed wins" epoch, the failure-attention ledger, the
+  dataset scope, the preferred cursor, the dock badge and the independent
+  summary are all preserved. EVERY commit — the catalog commit, the runtime-only
+  refresh, `acknowledge` and `setScope` — re-reads the CURRENT roster through the
+  surface-owned, session-fenced `readJobs` read (which retains the last good
+  roster across a transient registry failure); a catalog snapshot is never
+  promoted to "the live roster", so acknowledging a failure can no longer
+  resurrect a settled `running` row. Runtime-only refreshes likewise re-read the
+  current activity (Direct: the Agent registry; Remote: the official Session-LIST
+  `running` bit — never a descendant binding, and never the durable catalog
+  presence).
+- **The composition root selects the Task read source by the selected
+  application runtime** (`src/app/bootstrap.ts`): the Direct branch composes
+  the in-process source and keeps the Host registry's Job detail/Stop reads;
+  the Remote branch composes `RemoteApplicationSources.task`
+  (`readDescendants` / `jobs` / `subscribeJobs` / `subscribeSessions`).
+  Remote Task invalidation is **observable-driven** — the official `sessions.list`
+  and the official `jobs.state` feed the EXISTING coalesced refresh gate; both
+  subscriptions are released on lifecycle abort. The Host `subagent/start|end`
+  and `agent/status` registrations are now **Direct-only**, so no Host event
+  doubles as a Remote Task authority, and `TaskSurfaceSource.sessionId()` is the
+  transport-neutral ownership read (the Direct live Agent's session, else the
+  current owner session) so `/tasks` opens on Remote too.
+- **The Remote Task reader's retained root Job-roster watch is released by its
+  owner**: `RemoteApplicationRuntime.disposeTransport()` disposes the
+  presentation/task bundle before the backend adapters and the Client Context.
+- **PR2's Job-action boundary.** `TaskSurfaceJobs.get`/`kill` are now OPTIONAL
+  selected-Job capabilities. Direct keeps the current Open + Stop behaviour;
+  Remote Job rows render status/attention/summary but advertise **neither detail
+  nor Stop**, and the action sites fail closed without them. No fake
+  "unsupported backend" Job view exists; PR3 owns that closure.
+- **`tuiChildView` is a third TUI-owned SessionReference source**
+  (`src/runtime/remote/session-reference.ts`). `acquireChildViewReference()`
+  owns one child generation from the exact durable `SubagentAddress`
+  (`parentSessionId` + `childSessionId` + catalog `mode`) and returns an
+  idempotently-releasable handle carrying the child id, the exact binding
+  identity and the `ready` open settlement. Acquiring a child never creates or
+  activates a Host Agent, and a failed acquisition releases the reference and
+  leaves the mounted surface untouched.
+- **ONE `ViewerRuntime`, one backend-selected child-view source.** The viewer
+  keeps its open token, opening-event buffer, one-viewer-at-a-time rule,
+  `childOwnEvents` filtering, independent child folder/window/stats/previews,
+  mode/access policy, per-child draft, auto-pop map, follow-up fence/settlement
+  and display-subject commit ordering. Its injected `ViewerChildSource` is
+  `src/app/direct/child-view.ts` on Direct (live/cold Session read + Agent
+  registry activity + live assistant-stream baseline) and
+  `src/app/remote/child-view.ts` on Remote. The Remote open order is: capture
+  the viewer-open token → retain the exact child address (`tuiChildView`) → await
+  the reference's initial open → read the window through the SHARED
+  `PresentationReader` → classify the OFFICIAL open state (an `openState: 'error'`
+  open — which the official `Session.doOpen` records while still resolving its
+  promise — releases the reference and surfaces the recorded `openError`; a
+  failed open never commits an empty child and never replaces the mounted
+  surface) → hydrate `childOwnEvents(durableEvents)` → replay `liveInputs` →
+  derive `cwd` from `sessionStatus(childId)` and activity from the exact binding
+  → re-check the token + binding identity → commit viewer state → subscribe the
+  SHARED `RemoteLiveIngress` with the hydrated revision → optionally publish the
+  child queue token. The child ingress is disposed BEFORE the child reference is
+  released on every exit/switch/swap/dispose path, entering another child
+  releases the replaced viewer's generation, and the viewer owner KEEPS the
+  in-flight open's `AbortController` so every supersession/end path (Esc, child
+  switch, session swap, surface disposal) cancels the pending retain instead of
+  leaving the child generation alive until it happens to settle. A dedicated
+  no-paint `ViewerRuntime.dispose()` runs FIRST in the runner's surface disposal,
+  before the surface/app and the adapter → Client → Host teardown order.
+- **The child live ingress reuses the existing pipeline.** Durable child events
+  route through the existing `surface.routeSessionEvent({id: childId}, …)` path
+  (the Remote routing fence now admits the exact viewed child), transient inputs
+  through the existing `applyAssistantLiveInput` fold, window replace/prepend
+  through the viewer's authoritative re-hydrate, Session-snapshot changes
+  through the child's current activity + pending-input refresh, and projection
+  changes through the PR1 display-subject status refresh.
+- **PageUp targets the ACTIVE display subject** (`src/app/bootstrap.ts`): the
+  viewed child's retained window while its viewer is open, else the main
+  Session's official page. The in-flight latch is subject-scoped, and a child
+  page that settles after a viewer switch/exit is dropped. Direct keeps full
+  coverage (no-op).
+- **The child queued-occurrence steer is transport-neutral** (`src/steer.ts` +
+  `src/app/surface/application-events.ts`). `SteerAgentLike`/`currentAgent()`
+  became `SteerSubjectLike`/`currentSubject()`: the helper's real question is
+  "is this exact writer subject still the one that admitted the gesture?".
+  Direct supplies the exact child Agent object; Remote supplies a viewer-owned
+  stable token created with the viewer session (never a fabricated Agent). The
+  write itself stays `PendingInputReader(childId)` +
+  `SessionWriter.updateQueue(childId, occurrence, {kind:'steer'})`.
+- **Durable images read through the ACTIVE retained Session**
+  (`src/app/remote/presentation-source.ts` + `src/app/bootstrap.ts`): the image
+  loader captures the requesting presentation's display subject SYNCHRONOUSLY at
+  the moment the component asks for bytes (`activeImageSubject`, a REQUIRED mount
+  input, resolved before the deferred read) and the ref travels with that captured
+  subject, so a viewer exit/switch in the same tick can never re-route a child-only
+  attachment to the parent. A mount that cannot supply a captured subject FAILS
+  CLOSED (a visible load failure) instead of late-selecting whichever subject is
+  displayed by then. On Remote the read borrows that exact retained binding, reads
+  `binding.session.readAttachment(attachmentId)`, unwraps the `RemoteResult` and
+  re-checks the Connection generation + binding identity before the bytes are
+  committed. There is no `retain()` on this path and no Host attachment access on
+  the Remote branch; Direct keeps `ctx.attachments.readImage`.
+
+### Qualification
+
+- L1/L2/L3: `test/remote-task-read.test.ts` (recursive traversal, pre-order,
+  `parentId`/`depth`, `hasChildren`, unknown-mode diagnostics with children
+  still traversed, branch diagnostics with sibling survival, root rejection,
+  activity from the Session list, no-retain/no-log, roster watch lifecycle,
+  supersession/generation/dispose fences, Direct mapping); the Direct↔Remote
+  parity cases in `test/remote-task-read-shadow.test.ts`; the child-reference
+  contract in `test/remote-child-view.test.ts`; the durable-image read in
+  `test/remote-attachment-read.test.ts`; the transport-neutral writer subject in
+  `test/steer-subject-neutral.test.ts`; the coordinator contract in
+  `test/task-browser-runtime.test.ts`.
+- L2 Direct-preserved: `test/runner-viewer-task-integration.test.ts`,
+  `test/subagent-viewer-submit.test.ts` and the Direct Task Center suites remain
+  green; the Direct child viewer read moved into the Direct child-view source
+  with the frozen deprecated-reader allowance relocated, not doubled.
+- L5: `pnpm smoke:remote-task-read-parity` compares the REAL Direct Host
+  descendant tree against the official-Client-derived Remote tree through the
+  parity shadow (`comparable: true`, zero mismatches, `skipped: []` — the former
+  descendant-tree gap is closed).
+- L6: `test/runner-remote-task-center.test.ts` drives the REAL runner over the
+  real Host (real parent/child catalog facts, real official Client/Gateway wire,
+  no second graph). It proves: `/tasks` renders the real Remote descendant tree
+  (ids / DFS pre-order / mode / depth) and the child row opens the REAL child
+  viewer (child transcript + the child's own StatusStore subject/workspace/cwd +
+  an ACTIVE child pending-input subject, while the parent's echo stays out); the
+  rendered row + dock badge follow the official Session-LIST `running` fact for an
+  UNRETAINED child (with a mutation-teeth control); PageUp extends the CHILD
+  window while the main window is byte-identical; Esc restores the main
+  transcript/status/queue anchor; a direct one-shot child and a nested child
+  render read-only with no child queue subject; and a negative control proves the
+  Remote Task/child path never enters `ctx.subagents.listDescendants` (behavioral
+  spy, 0 calls) nor reads any process-local
+  `ctx.(subagents|agents|jobs|attachments)` in the three Remote modules.
+  **§14 L6 step 8 is proven end to end with a REAL delegation**: a registered
+  `@deepseek-ai/dsh-subagent-spawn-in-process` provider + the official
+  `startContinuable` create the child (v3 `subagent/descriptor` + the parent
+  `subagent/catalog` row); the viewer follow-up is delivered through the official
+  `SubagentPort.prompt` and the HOST-side evidence is asserted, not a UI echo —
+  the child is verified genuinely cold (no live Agent/Session) while the viewer is
+  open, the Host then re-materializes the child Session, its durable Host log
+  gains the exact `user/message` with `source.kind === 'user'` and the minted
+  `source.rpcId`, the SAME viewer both renders it as a transcript row and carries
+  it in its own reader window, and the parent log/transcript stay byte-identical.
+  **Step 10 (child durable image) is proven**: a REAL `LocalAttachmentStore` admits
+  a PNG, the ref rides a real child turn, and the mounted viewer reads the bytes
+  through the CHILD Session's `readAttachment` (routing spy records exactly
+  `{sessionId: child, attachmentId}`, the real parent binding is NEVER asked, and
+  the bytes compare equal) — with the F7 same-tick-exit negative (the deferred read
+  still addresses the asking child, the parent is never asked) and a
+  non-vacuity control (with no viewer mounted the SAME seam routes to the parent).
+  **Step 14 (in-flight child operation vs. a main-Session switch)**: the LIVE
+  switch/late-event fence is proven by L6 — the child viewer is requested while the
+  open is still pending, the switch later lands on the MOUNTED viewer, and then the
+  child generation is `{referenceCount: 0}`, the viewer generation bumps, the
+  committed subject is the new main Session, a child turn appended AFTER the swap
+  never paints and never re-retains, and switching back and reopening the child
+  DOES paint it (a fence, not a lost event). The independent variant
+  **`L6 pending-at-actual-swap` is NOT_PROVEN**: the fixture's measured race puts
+  the switch's Task-Center reset ~20 ms after the submit while the child open
+  commits in 76–91 ms, so the swap never lands before the commit in this fixture,
+  and the test records that measured scope verbatim instead of overclaiming. The
+  PENDING-OPEN cancellation itself is instead proven by three complementary pieces
+  of evidence, and the ledger claims exactly those: (1) the real-viewer L6 `Esc`
+  on a still-pending open aborts its own retain signal (`false → true`), retires
+  the retained generation and commits nothing; (2) the structural reachability
+  guards (swap abort BEFORE the mounted-only helper, `exitView` abort before its
+  early return, `dispose` abort before the release); and (3) a production-class
+  probe (real `ViewerRuntime` + real Remote child-view source + a cancellable
+  reference stand-in) showing an unmounted swap aborts immediately and releases the
+  generation exactly once with no commit. F1/F2 are additionally pinned by real
+  `retainInfo` counts. Negative controls: no Remote Task/child path enters
+  `ctx.subagents.listDescendants` (behavioral spy, 0 calls) nor any process-local
+  `ctx.(subagents|agents|jobs|attachments)` in the three Remote modules; the viewed
+  child never falls back to a parent fact its own Session lacks (the parent's real
+  `todo/write` count stays 1 on main and 0 on the child, whose project/usage/turns
+  are its own, and returns to 1 after Esc); and child A → B leaves no cross-child
+  residue (transcript text, workspace, subject, retained `tuiChildView` count).
+- `test/remote-task-activity.test.ts` additionally pins the commit-time activity
+  read to the official Session-LIST fact (`list.byId[id].running`) and proves it
+  borrows NO binding — the regression lock for the "every unretained Remote child
+  rendered `inactive`" defect found and fixed during this PR. The fix round's
+  other regression locks: the full-roster read at EVERY commit (never a stale
+  catalog snapshot; `test/task-browser-runtime.test.ts`), `ready`-without-catalog
+  and the bounded official projection retry (`test/remote-task-read.test.ts`),
+  the official `openState: 'error'` child open (`test/remote-child-view.test.ts`),
+  and the ask-time display-subject capture for image reads
+  (`test/image-loader.test.ts`).
+
+**Released-wire taxonomy limit (recorded, not papered over).** The official
+`session.projections` Host handler collapses a corrupt / source-conflicting
+SessionQuery failure into `gateway/internal`, and the wire carries only the
+fixed `RemoteErrorCode` union, so the upstream reason cannot cross the carrier:
+
+```text
+official Subagent semantics   branch unreadable -> diagnostic -> corrupt | unavailable
+rc.2 Client carrier            deterministic corrupt source -> gateway/internal (provenance lost)
+pi-tui Remote adapter          -> unavailable
+```
+
+`gateway/internal` is mapped conservatively to `unavailable`; `corrupt` is NEVER
+inferred from messages, causes, child state or log shape, and the semantic DTO
+keeps `corrupt` (it is official Subagent vocabulary, not a Direct historical
+artifact). Direct's own `corrupt` is NOT downgraded to manufacture a tidy parity.
+The adapter-shaped `SESSION_QUERY_*` cases are labelled DTO/adapter-level
+evidence; the rc.2-carrier-shaped (`gateway/internal`) and the real-wire
+missing-Session (`SESSION_QUERY_SESSION_NOT_FOUND` → `unavailable`, branch-scoped,
+siblings surviving) cases are the wire-level evidence, the latter proven end to
+end by `pnpm smoke:remote-task-read-parity`.
+
+**UI disposition (M3-5 PR2).** Backend closure and presentation closure are
+answered separately; a green adapter/test is not a UI verdict:
+
+| Surface change | UI disposition |
+|---|---|
+| Task descendant tree (Remote) | IMPLEMENTED (rows/tree/mode/depth render) |
+| Remote child viewer | IMPLEMENTED (child transcript/status/pending subject) |
+| child pending-input pane | IMPLEMENTED (interactive direct continuable child only) |
+| child current-batch / queue-steer | IMPLEMENTED (existing-equivalent Ctrl+S path) |
+| per-occurrence Queue UI (edit/remove/single-steer) | DEFERRED_WITH_OWNER = Post-M3 Q1 (main + continuable child) |
+| `corrupt` vs `unavailable` diagnostic reason presentation | NO_USER_VISIBLE_CHANGE — `buildTaskRows()` projects only `kind: 'child'` catalog entries into visible subagent rows, so the diagnostic reason never reaches a Task Center row/label/action today |
+
+**Remaining L6 coverage limits (reported, not hidden).** Three variants are NOT
+proven, and none is papered over: (1) the independent
+`L6 pending-at-actual-swap` — in this fixture the swap lands after the child open
+has already committed (measured: the switch's Task-Center reset ~20 ms after the
+submit vs. a 76–91 ms child open), so the L6 switch proves the mounted
+retirement/late-event fence while the pending-open cancellation is carried by the
+real pending-`Esc` L6 plus the structural reachability guards and the
+production-class pending-swap probe (see the step-14 entry above); (2) the literal
+"child whose own SessionStatus/projection answers nothing" is unreachable in this
+fixture — a lineage-only, cwd-less child selects but its addressed Client open
+never reaches `retain`, so `Enter` commits nothing; the parent-fallback fence is
+therefore proven with the parent-observable facts
+(subject/workspace/usage/turns/`todoCount`) and the `composition`
+model/preset/goal leak assertions were DELIBERATELY OMITTED as non-discriminative
+here (the main subject's `composition` is `{}` in this fixture, and
+`plan.effective` is false for both subjects — they would have been witnesses that
+cannot fail); (3) a viewer-MOUNTED main-session switch is not editor-reachable (an
+interactive viewer routes every submit, including `/resume`, to the child
+follow-up), so that path is covered by the F2 teardown lock instead.
+
+### Remaining M3-5 obligations
+
+PR3 (Remote Job viewer: Job-row detail reachability, selected-Job live
+observation, Job Stop and its outcome taxonomy, and the post-PR2 L6),
+PR5 (writer-held caller recovery + remaining secondary presentation) and
+PR6 (stage closure) remain. `M3-5 DONE` is not claimed anywhere in this PR.

@@ -8,13 +8,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
+import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerDeps, type SteerSubjectLike } from '../src/steer.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
 import { SessionTransitionGate } from '../src/transition-gate.ts'
 import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
-interface FakeAgent extends SteerAgentLike {
+interface FakeAgent extends SteerSubjectLike {
   status: 'idle' | 'running'
   steer(message: unknown): void
   followup(message: unknown): void
@@ -56,7 +56,7 @@ function fakeAgent(ids: string[], sessionId = 'session-steer'): FakeAgent {
 /** Test-only semantic reader: production code never receives the fake Agent's
  * inbox; the reader exposes the same placement projection as the Direct
  * adapter. */
-function pendingReaderFor(getAgent: () => SteerAgentLike | undefined): PendingInputReader {
+function pendingReaderFor(getAgent: () => SteerSubjectLike | undefined): PendingInputReader {
   return {
     snapshot: (sessionId) => {
       const agent = getAgent() as FakeAgent | undefined
@@ -73,7 +73,7 @@ function pendingReaderFor(getAgent: () => SteerAgentLike | undefined): PendingIn
 }
 
 /** Test-only semantic writer used by the default dependency fixture. */
-function writerFor(getAgent: () => SteerAgentLike | undefined): SteerDeps['writer'] {
+function writerFor(getAgent: () => SteerSubjectLike | undefined): SteerDeps['writer'] {
   return {
     prompt: async (sessionId, message, mode) => {
       const agent = getAgent() as FakeAgent | undefined
@@ -123,7 +123,7 @@ function switchingIdentities(options: {
   let agentReads = 0
   let generation = options.firstGeneration ?? 1
   return () => ({
-    currentAgent: () => {
+    currentSubject: () => {
       agentReads += 1
       return agentReads <= 2 ? options.first : options.second
     },
@@ -143,14 +143,14 @@ function switchingIdentities(options: {
 }
 
 function makeDeps(options: {
-  agent: () => SteerAgentLike | undefined
+  agent: () => SteerSubjectLike | undefined
   generation?: () => number
   notices?: string[]
   restored?: string[]
   writerSection?: <T>(task: () => Promise<T>) => Promise<T>
 }): SteerDeps {
   return {
-    currentAgent: options.agent,
+    currentSubject: options.agent,
     currentGeneration: options.generation ?? (() => 1),
     pendingInputReader: pendingReaderFor(options.agent),
     writer: writerFor(options.agent),
@@ -168,7 +168,7 @@ function makeDeps(options: {
  * draft. `restored` records every restore call, to prove each operation
  * restores exactly once. */
 function editorRestoreDeps(options: {
-  agent: () => SteerAgentLike | undefined
+  agent: () => SteerSubjectLike | undefined
   generation?: () => number
   editor: () => string
   setEditor: (text: string) => void
@@ -683,12 +683,12 @@ test('P0: draftHasPayload undefined derives an empty draft and sweeps the queue'
   assert.deepEqual(agent.steered.map(m => m.id), ['a'], 'an absent verdict derives queue-only semantics for empty text')
 })
 
-test('sessionUnchanged requires the same agent object and generation', () => {
-  const a = { id: 'a' }
-  assert.equal(sessionUnchanged({ agent: a, generation: 1 }, a, 1), true)
-  assert.equal(sessionUnchanged({ agent: a, generation: 1 }, a, 2), false, 'generation bump')
-  assert.equal(sessionUnchanged({ agent: a, generation: 1 }, { id: 'b' }, 1), false, 'agent switch')
-  assert.equal(sessionUnchanged({ agent: a, generation: 1 }, undefined, 1), false, 'agent gone')
+test('sessionUnchanged requires the same writer subject and generation', () => {
+  const a = { session: { id: 'a' } }
+  assert.equal(sessionUnchanged({ subject: a, generation: 1 }, a, 1), true)
+  assert.equal(sessionUnchanged({ subject: a, generation: 1 }, a, 2), false, 'generation bump')
+  assert.equal(sessionUnchanged({ subject: a, generation: 1 }, { session: { id: 'b' } }, 1), false, 'subject switch')
+  assert.equal(sessionUnchanged({ subject: a, generation: 1 }, undefined, 1), false, 'subject gone')
 })
 
 test('mergeDraft preserves BOTH texts when the editor changed mid-send', () => {

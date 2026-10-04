@@ -29,6 +29,14 @@ export type ImageLoadState =
   | { readonly state: 'ready'; readonly bytes: Uint8Array; readonly base64: string }
   | { readonly state: 'error'; readonly error: Error }
 
+/** The read seam: the requesting presentation's captured context travels with
+ *  the ref, so a subject switch between the ask and the deferred read can never
+ *  re-route the bytes to another Session. */
+export type ReadImage = (
+  ref: ImageAttachmentRefLike,
+  context?: unknown,
+) => Promise<{ ref: unknown; data: Uint8Array }>
+
 /** Structural subset of `ctx.attachments.readImage`. */
 export interface ReadImageLike {
   readImage(ref: ImageAttachmentRefLike, signal?: AbortSignal): Promise<{ ref: unknown; data: Uint8Array }>
@@ -43,7 +51,11 @@ export class ImageLoader {
    * care, so N thumbnails loading in parallel never invalidate each other
    * (review finding 8 — no O(N²) repaint churn). */
   private readonly listeners = new Map<string, Set<() => void>>()
-  private readonly read: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>
+  private readonly read: ReadImage
+  /** Captures the REQUESTING presentation's context synchronously at `load()`
+   *  time (the active display subject), so the deferred read cannot be
+   *  re-routed by a viewer exit/switch in the meantime. */
+  private readonly captureContext: () => unknown
   /**
    * Invalidation generations (review finding 3): `invalidate(id)` bumps
    * ONLY that attachment's local generation, so a settle of an unrelated
@@ -72,12 +84,14 @@ export class ImageLoader {
   }
 
   constructor(
-    read: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>,
+    read: ReadImage,
     cache: ImageCache = new ImageCache(),
+    captureContext: () => unknown = () => undefined,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.read = read
     this.cache = cache
+    this.captureContext = captureContext
   }
 
   /** The synchronous state view for one ref (never awaits). */
@@ -111,10 +125,14 @@ export class ImageLoader {
     const id = ref.attachmentId
     if (this.cache.has(id) || this.inflight.has(id)) return
     const epoch = this.epochOf(id)
+    // The requesting presentation is captured HERE, synchronously: the read is
+    // deferred, so resolving the subject later could send a child-only
+    // attachment to whichever Session is displayed by then.
+    const context = this.captureContext()
     // `Promise.resolve().then(...)` defers the read call: a SYNCHRONOUS
     // throw from `read` becomes a rejection instead of escaping into a
     // render() call stack (round-2 finding 1).
-    const pending = Promise.resolve().then(() => this.read(ref)).then((stored) => {
+    const pending = Promise.resolve().then(() => this.read(ref, context)).then((stored) => {
       // A stale settlement (the attachment was invalidated, or the whole
       // cache cleared) is dropped — it must not repopulate the cache
       // (round-4 finding 4; per-id generations, review finding 3).

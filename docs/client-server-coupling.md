@@ -263,7 +263,7 @@ and no `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session` import). Every
 Direct fact they read arrives as a narrow injected surface hook, and the
 session/skill writes go through `SessionRuntime.withWriter` / the semantic
 `SkillCatalogCapability` port. The boundary gate therefore still reports
-26 coupled files, and `scripts/client-boundary-baseline.json` is unchanged.
+the unchanged `scripts/client-boundary-baseline.json` (28 coupled files).
 
 The A4 surface owner confirms the same boundary: `src/app/surface/**` holds NO
 Host coupling (no `ctx.get`/`ctx.<service>`, no `@deepseek-ai/dsh-agent` /
@@ -271,16 +271,26 @@ Host coupling (no `ctx.get`/`ctx.<service>`, no `@deepseek-ai/dsh-agent` /
 constructs no Direct adapter. Every Host/Direct fact it needs arrives as a
 narrow injected capability or a semantic port. The Task Center consumes
 `TaskSurfaceSource` — the production capability of the A4 plan §15.2, not a new
-`Backend` port and not a second task model (`TaskSurfaceAgents` is derived from
-the existing `TaskBrowserRuntimeHooks`): the runner keeps `jobs.list/get/kill/
-subscribe`, `agents.get`/`listDescendants`, the `SessionId`/`JobId` casts, the
-retained-snapshot session fence, the `ownership` subject fences, the
-`SessionRuntime.withWriter` interruption admission and the `cleanedUp` latch.
-The runner also keeps the semantic status DERIVATION, because the `status/derive-*`
-seam is the sanctioned Host-reading path (`planMode` / `sandboxPolicy` /
-`permissionPresets` / `sessionProjections`); the surface owns the store instance
-and the app's own projection. The boundary gate therefore still reports
-26 coupled files, and `scripts/client-boundary-baseline.json` is unchanged.
+`Backend` port and not a second task model. M3-5 PR2 replaced the old
+`TaskSurfaceAgents` group with the SELECTED `TaskSurfaceRead` bundle
+(`currentKey` + `currentSessionId` + the semantic `readTask` + the commit-time
+`activityOf`), renamed the jobs half's `get`/`kill` to OPTIONAL selected-Job
+capabilities (Remote advertises neither until PR3), and made
+`TaskSurfaceSource.sessionId()` the transport-neutral ownership read: the runner
+keeps the `SessionId`/`JobId` casts, the retained-snapshot session fence, the
+`ownership` subject fences, the `SessionRuntime.withWriter` interruption
+admission and the `cleanedUp` latch. On the Remote branch the Task rows/activity
+come exclusively from `RemoteApplicationSources.task`
+(`readDescendants`/`jobs`/`subscribeJobs`/`subscribeSessions`) and the child
+viewer from `RemoteApplicationSources.childView`; the Host `subagent/start|end`
+and `agent/status` channels are registered on the Direct branch only, so no Host
+event doubles as a Remote Task authority. The runner also keeps the semantic
+status DERIVATION, because the `status/derive-*` seam is the sanctioned
+Host-reading path (`planMode` / `sandboxPolicy` / `permissionPresets` /
+`sessionProjections`); the surface owns the store instance and the app's own
+projection. The boundary gate therefore still reports the unchanged
+`scripts/client-boundary-baseline.json` (28 coupled files), and the A5b-0 root
+matrix is regenerated for the M3-5 PR2 root declarations.
 
 ## Categories
 
@@ -346,10 +356,12 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/runtime/direct/surface-authority-direct.ts` | (none; reuses `surface-catalog`) | Direct M2/D1.2 adapter over the existing effective live surface collector; it resolves an already-live Agent and does not create or mutate Host state. |
 | `src/runtime/remote/surface-authority-remote.ts` | (none) | Experimental M2/D1.2 adapter over official generated `commands.list` and `skills.list` Remotes; explicit detached whitelist, no Host imports, no writes or execution. M3-4 PR4 added a commands-only, generation-fenced `readCommands` metadata read so the command provider and the skill provider degrade independently (one absent skill registry must not zero the Host command catalog). |
 | `src/runtime/remote/surface-authority-shadow.ts` | (none) | Experimental M2/D1.2 generation-fenced Direct-vs-Remote comparator; bounded command/skill mismatches and metadata-derived claim diagnostics only. |
-| `src/runtime/task-read-port.ts` | (none) | Structural D1.3 Task read contract; carries only detached direct-child and status-only job facts, with the complete descendant tree deliberately outside the D1 port. |
-| `src/runtime/direct/task-read-direct.ts` | (none) | Direct D1.3 Task read adapter; composes injected official child-list, live-Agent activity, and `jobs.list` faces without exposing Host objects or creating Agents. |
-| `src/runtime/remote/task-read-remote.ts` | (none) | Experimental D1.3 adapter over the official Client Session projections (`projectionsBySession`/`subagentCatalog`, `refreshProjections`) and the ClientJobs retained `watchRows` roster; generation/cancellation/operation-fenced, read-only, and detached/frozen. |
-| `src/runtime/remote/task-read-shadow.ts` | (none) | Experimental D1.3 Task comparator; compares direct-child/jobs semantics and `buildTaskRows`, with bounded diagnostics and an explicit descendant-tree skip. |
+| `src/runtime/task-read-port.ts` | (none) | Structural Task read contract (M3-5 PR2): the FULL Task Center dataset — one root Session, its complete descendant catalog in stable DFS pre-order (`parentId` + `depth` + mode/label/activity/`hasChildren`/diagnostic per entry) and the root's status-only job roster. `readDescendants()` replaced the old direct-child read; the descendant tree is no longer an upstream gap. |
+| `src/runtime/direct/task-read-direct.ts` | (none) | Direct Task read adapter (M3-5 PR2); composes the injected official `listDescendants`, the live-Agent registry activity, and `jobs.list` faces without exposing Host objects or creating Agents. |
+| `src/runtime/remote/task-read-remote.ts` | (none) | Experimental Task read adapter (M3-5 PR2) over the official Client Session projections: a RECURSIVE `subagentCatalog` walk (`projectionsBySession` + `refreshProjections`, root failure throws, a child branch failure becomes a `corrupt`/`unavailable` diagnostic, an `unknown` mode an `unsupported` diagnostic whose children are still traversed), activity from the official Session-list `running` bit, and the ClientJobs retained `watchRows` roster; generation/cancellation/operation-fenced, read-only, detached/frozen, and it never retains or opens a child log. |
+| `src/runtime/remote/task-read-shadow.ts` | (none) | Experimental Task comparator (M3-5 PR2); compares the FULL descendant tree (ids/order/kind/label/mode/activity/`hasChildren`/`parentId`/`depth`, diagnostics, job roster) plus `buildTaskRows`, with bounded diagnostics. The former `subagent.descendantTree` skip is REMOVED: nothing is skipped. |
+| `src/app/direct/child-view.ts` | (none) | Direct child-view source (M3-5 PR2): composes the live/cold child Session read, the Agent registry activity, and the live assistant-stream baseline into the viewer's `ViewerChildSource`. Constructed only on the Direct branch; no Host object escapes and no per-child subscription exists (the Host firehose already routes the viewed child). |
+| `src/app/remote/child-view.ts` | official Client `ISessions`/`PresentationReader`/`SessionFace`/eventSource, through the ONE Remote aggregate | Remote child-view source (M3-5 PR2): acquires ONE `tuiChildView` `SessionReference` from the exact durable `SubagentAddress` (parent + child + catalog mode, never a plain id, never a Host Agent), awaits its open, hydrates through the SHARED `PresentationReader`, subscribes the SHARED `RemoteLiveIngress`, pages via `loadOlder`, and releases exactly once with the ingress disposed first. |
 | `src/runtime/presentation-read-port.ts` | (none) | Structural D1.3 presentation read contract; keeps durable history and live inputs as separate detached planes, plus window flags and open state, without a TUI or transport object. |
 | `src/runtime/direct/presentation-read-direct.ts` | (none) | Direct D1.3 presentation reference adapter over existing Session event snapshots and assistant stream baseline; no duplicate history or stream tracker. |
 | `src/runtime/remote/presentation-read-remote.ts` | (none) | Experimental D1.3 adapter over official `SessionBinding.eventSource`, `SessionFace` snapshots, and `loadOlder()` only; it preserves source order within each plane and protects detached payloads. |
@@ -379,7 +391,7 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/runtime/remote/model-remote.ts` | (none) | Experimental M2/D2.3 `ModelCatalog` adapter over the official `session.modelCatalog` / `session.selectModel` Remotes and the Session binding's `modelSelection` projection. Host-free structural inputs, a Connection-generation fence before/after dispatch, and operation-specific settlement (only a proven pre-commit code is `rejected`; no reuse of the D2.2 broad refusal helper). No second global-default write and no custom reasoning normalization. `defaultSelection()` is the CURRENT-generation directory-cache default (invalidated on a reconnect); `sessionSelection()` reads the Client binding's `modelSelection` projection and falls back to that cached default; `listProviders()`/`listModels()` are UNAVAILABLE (empty) in Remote D2.3 — provider-endpoint discovery has no official Remote capability and is never faked from the directory cache (the subagent allowlist that consumes it is a Direct-only surface). |
 | `src/runtime/remote/preset-remote.ts` | (none) | Experimental M2/D2.3 `PresetCatalog` adapter over the official `agentPresets.list` roster and `agentPresets.select(sessionId, presetId)` blank-Session write. Host-free structural inputs, generation fence, and operation-specific settlement (`agent-preset/locked` etc. are proven rejections). No local blank reducer or recompose logic. |
 | `src/runtime/remote/session-lifecycle-remote.ts` | (none) | Experimental M2/D2.4 `SessionLifecycle` adapter, aligned to the alpha.2 reference contract: ordinary create via official `ClientSessions.create()` + one explicit `retain`, guaranteed-fresh explicit-preset create via generated `session.create({sessionId, cwd, agentPreset})` + public `refresh()` reconciliation + `retain`, open via `retain()` (`binding()` is borrow-only; there is no Client-global selection verb), and Host-owned fork via exactly one `ClientSessions.fork({sessionId, atSeq?})` with NO retain (publication is independent from navigation adoption, which is the separate `open()` call). A post-publication retain/reconcile failure preserves the published identity as `published-with-error`; fork failures preserve published identity or become indeterminate without retry. No Host imports and no invented Host resume RPC. |
-| `src/runtime/remote/session-reference.ts` | (none) | The alpha.2 Client reference-ownership seam — the only place the TUI declares its own `SessionReferenceSourceMap` labels (`tuiMainView`, `tuiOperation`) through a type-only import of the public `@deepseek-ai/dsh-api-session-controller/client` entry. It owns the two lifetime patterns: `acquireMainSurfaceReference()` (navigation create/open; may materialize a generation and never awaits `ready`) and `pinExistingGeneration()` (borrow an existing generation first, then retain it with `tuiOperation`, so a plain read/write can never cold-open a Session). Release is exactly once. No concrete Client implementation, Host implementation, or runtime import. |
+| `src/runtime/remote/session-reference.ts` | (none) | The alpha.2 Client reference-ownership seam — the only place the TUI declares its own `SessionReferenceSourceMap` labels (`tuiMainView`, `tuiOperation`, and M3-5 PR2's `tuiChildView`) through a type-only import of the public `@deepseek-ai/dsh-api-session-controller/client` entry. It owns the three lifetime patterns: `acquireMainSurfaceReference()` (navigation create/open; may materialize a generation and never awaits `ready`), `acquireChildViewReference()` (one subagent child viewer's exact generation, addressed by its durable `SubagentAddress` and never materializing a Host Agent) and `pinExistingGeneration()` (borrow an existing generation first, then retain it with `tuiOperation`, so a plain read/write can never cold-open a Session). Release is exactly once (idempotent). No concrete Client implementation, Host implementation, or runtime import. |
 | `src/runtime/interaction-port.ts` | (type-only peer imports) | The interaction port interface (M1.6) — uses the official dsh-user-approval / dsh-user-questions types (declared peers). |
 | `src/runtime/direct/interaction-direct.ts` | `approval`, `userQuestions`, `sessionProjections` | The Direct `InteractionPort` adapter (M1.6; M3-3B Question reconvergence) — owns the `userQuestions` / `approval` service access, the `approval/request` subscription, and the `sessionProjections` read that maps the official `userQuestions` + `inbox` durable state (the SAME semantics the Remote adapter maps over the wire); the listeners/providers are registered by the surface owner (`SurfaceRuntime.attachInteraction`). Baseline entries added by the M1.6 relocation (commands.ts and index.ts drop `approval` / `userQuestions`) plus the M3-3B `sessionProjections` read. |
 | `src/runtime/direct/catalog-direct.ts` | `llm`, `agentDefaultModel`, `agentPresets`, `tools` (the row also takes a type-only `AgentPreset` from `dsh-agent-preset-registry`; the base-package matchers track neither that package nor this file) | The Direct `Catalog` adapter (M1.8; D2.3 convergence) — owns the model directory (`loadDirectory()` = the official `session.modelCatalog` generation snapshot; `listProviders()`/`listModels()` remain the provider-discovery capability), the Session-local model write (`selectSessionModel()` → `WriteOutcome`, best-effort default save never undoing a committed Session choice), the preset roster + official blank-Session write (`roster()`/`selectSessionPreset()`), and the skill sub-domain's service discovery. Consumers depend on the port DTOs. Baseline entries added by the M1.8 relocation (commands.ts drops `llm`/`agentDefaultModel`/`agentPresets`/`tools` access). |
