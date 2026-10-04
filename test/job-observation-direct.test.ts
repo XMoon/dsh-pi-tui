@@ -264,7 +264,11 @@ test('stop proves the row through the registry then maps its kill admission', as
   assert.deepEqual(getCalls, [['job-1', 's1']])
   assert.equal(killCalls.length, 1)
   assert.deepEqual([killCalls[0]?.[0], killCalls[0]?.[1]], ['job-1', 's1'])
-  assert.equal(typeof killCalls[0]?.[2], 'string', 'the registry records a kill reason')
+  assert.equal(
+    killCalls[0]?.[2],
+    'cancelled by the user',
+    'the unified human-kill reason is the same wording the official Host JobController records over the wire',
+  )
 
   const finished = new DirectJobObservationPort(registryHost({ kill: () => 'already-finished' }).host, diag)
   assert.deepEqual(await finished.stop('s1', 'job-1'), { kind: 'already-finished' })
