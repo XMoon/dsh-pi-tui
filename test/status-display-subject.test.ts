@@ -172,9 +172,11 @@ test('M3-5 PR1: every child Session-owned section comes from SessionStatus(child
     todos: [{ content: 'child todo', status: 'in_progress' }],
     goal: 'goal ● fix the build',
   })
-  // A child commit carries NO legacy display fields: the legacy `status` slot
-  // (and the extension's v2 live-session snapshot) stays the LIVE session's.
-  assert.equal(commit.legacy, undefined, 'a child subject must not re-point the live-session legacy fields')
+  // The legacy display fields are the LIVE session's (their own facts — here the
+  // Agent-less harness: the client cwd and no model), never the child's: the
+  // extension's v2 live-session snapshot stays truthful while a child is shown.
+  assert.equal(commit.legacy?.cwd, '/client', 'the live-session legacy slot keeps the LIVE cwd')
+  assert.equal(commit.legacy?.model, 'no model', 'and the LIVE model, never the child’s')
   assert.match(commit.presentation?.goal ?? '', /^goal ● fix the build$/u,
     'the child goal badge is a display-subject presentation fact')
 })
@@ -205,7 +207,7 @@ test('M3-5 PR1: an unavailable child SessionStatus leaves the Session-owned fiel
   assert.deepEqual(snap.workspace, { cwd: '' }, 'no parent cwd may fill the child’s workspace')
   assert.equal(snap.usage.tokens, undefined, 'no fold total may stand in for the child’s cumulative usage')
   assert.equal(snap.usage.context, undefined)
-  assert.equal(commit.legacy, undefined, 'the live-session legacy fields are untouched')
+  assert.equal(commit.legacy?.cwd, '/client', 'the live-session legacy fields still describe the LIVE session')
   assert.deepEqual(commit.presentation, {
     sessionId: 'cold-child',
     workspaceRoot: '',
@@ -240,7 +242,7 @@ test('M3-5 PR1: child A → child B keeps no A residue', () => {
   assert.equal(snap.access.permissionPreset, undefined, 'B has no permission — A’s must not survive')
   assert.equal(snap.workspace.cwd, '/b')
   assert.deepEqual(commit.presentation?.todos, [])
-  assert.equal(commit.legacy, undefined, 'the live-session legacy fields stay untouched')
+  assert.equal(commit.legacy?.cwd, '/client', 'the live-session legacy fields still describe the LIVE session')
   assert.equal(snap.usage.tokens, undefined)
 })
 

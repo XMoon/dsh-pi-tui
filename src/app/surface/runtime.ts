@@ -167,45 +167,6 @@ import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 const REPAINT_FLUSH_MS = 50
 
 /**
- * Whether one DURABLE event of the VIEWED child can change the display
- * subject's SessionStatus or presentation (M3-5 PR1 §9.7).
- *
- * The child's Session-owned facts are read from the official Session
- * projections, so the re-read must follow EVERY event family that can move
- * them — not only the turn/step counters the viewer's StatsFolder owns:
- *
- * - the turn/step boundaries the viewer already refreshed on;
- * - the projection writes: `todo/write` (todos), `session/title` (title),
- *   `goal/change` (goal);
- * - the permission knobs (`permissions`), which the main subject also folds
- *   immediately;
- * - the child's own `compaction/end` (its context pressure/breakdown).
- *
- * `step/start` is deliberately NOT here: the child has no context-measurement
- * cache, and the preceding `step/end` already re-read the projections. The
- * transient assistant-stream frames never reach this durable path at all.
- * @param eventType - the durable Session event type of the viewed child.
- * @returns whether the display-subject status must be re-derived.
- */
-function invalidatesDisplaySubjectStatus(eventType: string): boolean {
-  switch (eventType) {
-    case 'turn/start':
-    case 'step/end':
-    case 'turn/end':
-    case 'todo/write':
-    case 'session/title':
-    case 'goal/change':
-    case 'permission/preset':
-    case 'approval/policy':
-    case 'sandbox/mode':
-    case 'compaction/end':
-      return true
-    default:
-      return false
-  }
-}
-
-/**
  * Whether the opt-in Task Center catalog refresh profiler is enabled for this
  * process (`DSH_TUI_TASK_REFRESH_PROFILE=1`). Off by default: the coalescing
  * gate then emits no diagnostics, so the TUI log stays clean.
@@ -708,7 +669,8 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   commitStatus(
     patch: StatusPatch,
-    legacyFacts: Partial<StatusData> | undefined,
+    /** The LIVE session's legacy display fields (see `StatusRuntimeDeps`). */
+    legacyFacts: Partial<StatusData>,
     presentation: DisplaySubjectPresentation | undefined,
   ): void
   /** The notification settings write path (`/notify`, `agent/status` policy). */
@@ -2309,12 +2271,22 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           viewer.beginTurn()
         } else if (event.type === 'turn/end') viewer.endTurn()
         schedulePaint()
-        // The display subject's Session-owned facts come from the official
-        // projections: re-derive them for EVERY event family that can have
-        // moved them (turn/step boundaries, todo/title/goal writes, the
-        // permission knobs and the child's own compaction), never only the
-        // turn/step counters — and never on every streaming delta.
-        if (invalidatesDisplaySubjectStatus(event.type)) viewer.refreshFooter()
+        // The display subject's Session-owned facts all come from the official
+        // Session projections, and ANY durable event of the viewed Session can
+        // move one of them: `model/selection` + `request/header` (modelSelection),
+        // `agent-preset/selected` (agentPreset), `request/context` (context
+        // window), usage-bearing `assistant/message`/`assistant/attempt`
+        // (tokenUsage/pressure), the `surfaceOp` message/tool-result family
+        // (contextPressure/contextBreakdown), `todo/write`/`session/title`/
+        // `goal/change`, the permission knobs, the turn/step counters and the
+        // child's own compaction. Enumerating that family set proved fragile
+        // (three separate projection-moving folds were missed), so the viewed
+        // child re-derives its display subject on EVERY durable event — the
+        // projections are cache reads, cheap beside the transcript fold applied
+        // just above, and both stores keep their content-equality no-notify
+        // discipline. Transient assistant-stream frames never reach this durable
+        // path at all, so no per-token work is added.
+        viewer.refreshFooter()
         if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(() => refreshPendingInput())
         if (event.type === 'turn/end') paintNow()
         return

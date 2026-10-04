@@ -40,6 +40,37 @@ test('snapshots are immutable and deep-frozen', () => {
   assert.throws(() => { (state as { surface: unknown }).surface = {} }, TypeError)
 })
 
+test('the nested display-subject snapshot is deep-frozen and content-stable (M3-5 PR1)', async () => {
+  // The additive `session.displaySubject` is the first NESTED snapshot on the
+  // Stable surface state: the "deeply frozen snapshots" contract must cover it,
+  // and a content-equal republish must not churn the slice identity.
+  const { store } = makeStore()
+  const base = {
+    workspaceRoot: '/w', cwd: '/w', planMode: false, busy: false, viewerMode: true, turns: 1, steps: 1,
+  }
+  const subject = () => ({
+    sessionId: 'child-1', title: 'child', workspaceRoot: '/w', cwd: '/w', turns: 1, steps: 1, todoCount: 1,
+  })
+  store.set({ session: { ...base, displaySubject: subject() } })
+  const first = store.get().session
+  const nested = first.displaySubject
+  assert.ok(nested !== undefined, 'the display subject must be published')
+  assert.ok(Object.isFrozen(nested), 'the nested displaySubject must be frozen (deep-frozen snapshots)')
+  assert.throws(() => { (nested as { todoCount: number }).todoCount = 9 }, TypeError)
+  assert.equal(first.displaySubject?.todoCount, 1, 'the rejected mutation must not reach later readers')
+  // A content-equal republish reuses the published nested object: the slice
+  // identity stays and no notification fires.
+  store.set({ session: { ...base, displaySubject: subject() } })
+  assert.equal(store.get().session, first, 'a content-equal nested republish must not break the slice identity')
+  // A REAL change still publishes.
+  store.set({ session: { ...base, displaySubject: { ...subject(), todoCount: 2 } } })
+  assert.notEqual(store.get().session, first, 'a real nested change must publish')
+  assert.equal(store.get().session.displaySubject?.todoCount, 2)
+  // Clearing the display subject publishes too (viewer exit).
+  store.set({ session: { ...base, viewerMode: false } })
+  assert.equal(store.get().session.displaySubject, undefined)
+})
+
 test('selectors fire only on slice CHANGE and delivery is batched', async () => {
   const { store, renders } = makeStore()
   const seen: Array<{ working: boolean; queuedCount: number }> = []

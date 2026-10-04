@@ -756,6 +756,32 @@ test('M3-5 PR1: the extension snapshot keeps v2 live-session semantics and publi
   assert.ok(panelA.includes('child-a todo'), `the open child todo panel must render the child list:\n${panelA}`)
   assert.ok(!panelA.includes('parent todo'), `the parent todo list must not render while viewing:\n${panelA}`)
 
+  // While the child is displayed the LIVE session's OWN facts must stay
+  // CURRENT: the same commit merges them into the live slot (the extension v2
+  // fields) without touching the child's sections (M3-5 PR1 review R5).
+  enterChildDisplaySubject(app, {
+    id: 'child-a', label: 'a', mode: 'continuable', activity: 'running',
+    cwd: '/child-a', turns: 5, steps: 7,
+    model: { provider: 'deepseek', model: 'child-a-model' },
+    permission: 'read-only',
+    todos: [{ content: 'child-a todo', status: 'in_progress' }],
+    title: 'child-a title',
+    live: { model: 'parent-model-v2', cwd: '/parent-v2', branch: 'main', turns: 9, steps: 11, permission: 'workspace-write' },
+  })
+  await settle()
+  await vt.waitForRender()
+  const advanced = host.state()
+  assert.equal(advanced.session.turns, 9, 'the LIVE counters must keep advancing while the child is displayed')
+  assert.equal(advanced.session.steps, 11)
+  assert.equal(advanced.session.model, 'parent-model-v2', 'the LIVE model must keep advancing')
+  assert.equal(advanced.session.cwd, '/parent-v2', 'the LIVE cwd must keep advancing')
+  assert.equal(advanced.session.branch, 'main')
+  assert.equal(advanced.session.permission, 'workspace-write', 'the LIVE permission must keep advancing')
+  assert.equal(advanced.session.sessionId, 'session-main', 'and the LIVE identity still must not re-point')
+  assert.equal(advanced.session.displaySubject?.turns, 5, 'the child’s own counters stay the child’s')
+  assert.equal(advanced.session.displaySubject?.steps, 7)
+  assert.equal(advanced.session.displaySubject?.model, 'deepseek/child-a-model')
+
   // The MAIN todo list keeps updating behind the child: the LIVE fields follow
   // it, the displaySubject does not.
   app.setTodoSummary([{ content: 'parent todo v2', status: 'pending' }])

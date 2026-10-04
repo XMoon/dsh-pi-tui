@@ -1934,11 +1934,13 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     { content: 'CHILD-A-TODO', status: 'in_progress' },
     { content: 'CHILD-A-TODO-2', status: 'pending' },
   ]
+  let childAModel: { readonly provider: string; readonly model: string } = { provider: 'deepseek', model: 'child-a-model' }
+  let childAPreset = 'child-a-preset'
   const statusValuesBySession: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
     get [childA.id]() {
       return {
-        modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-a-model' } },
-        agentPreset: 'child-a-preset',
+        get modelSelection() { return { lastUsed: childAModel } },
+        get agentPreset() { return childAPreset },
         permissions: { currentValue: 'read-only' },
         get title() { return childATitle },
         goal: { goal: { objective: 'child a objective', phase: 'active' } },
@@ -2035,12 +2037,13 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     { content: 'CHILD-A-TODO', status: 'in_progress' },
     { content: 'CHILD-A-TODO-2', status: 'pending' },
   ])
-  // A child commit carries NO legacy display fields: the extension's v2
-  // live-session snapshot (and the legacy `status` slot) must never re-point on
-  // a viewer transition (M3-5 PR1 contract decision). The child's own goal is a
+  // The legacy display fields describe the LIVE session (M3-5 PR1 contract
+  // decision) and never re-point to the child; the child's own goal is a
   // presentation fact.
-  assert.equal(probe.capturedDisplaySubject?.legacy, undefined,
+  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home,
     'a child subject must not re-point the live-session legacy fields')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.model, 'p/parent-model',
+    'the live-session legacy model stays the LIVE model')
   assert.match(aPresentation.goal ?? '', /^goal ● child a objective$/u)
   // The PARENT's facts are nowhere on the child subject.
   assert.notEqual(aStatus.workspace.cwd, home)
@@ -2105,10 +2108,35 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(viewTodoWrite.includes('child a retitled') === false,
     'the child title is not rendered by the chrome (it is an extension fact)')
 
+  // INVALIDATION (M3-5 PR1 review R4): a lone child `model/selection` — the
+  // durable model-selection commit, which can land outside a turn — and a lone
+  // `agent-preset/selected` must re-derive the display subject immediately. Both
+  // officially move `modelSelection` / `agentPreset`, which
+  // `DirectSessionReader.sessionStatus` reads.
+  childAModel = { provider: 'deepseek', model: 'child-a-model-v2' }
+  context.emit('session/event', childA as never, event('model/selection', { provider: 'deepseek', model: 'child-a-model-v2' }, 42))
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-model-v2',
+    'a lone child model/selection must reach the committed display subject')
+
+  childAPreset = 'child-a-preset-v2'
+  context.emit('session/event', childA as never, event('agent-preset/selected', { agentPreset: 'child-a-preset-v2' }, 43))
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.agentPreset?.id, 'child-a-preset-v2',
+    'a lone child agent-preset/selected must reach the committed display subject')
+
   // A LATE parent refresh (a main todo/write + a main turn boundary) while the
   // child is displayed must never repaint the child subject with parent facts.
   context.emit('session/event', parent as never, event('todo/write', { todos: [{ content: 'PARENT-TODO-V2', status: 'pending' }] }, 7))
+  // The LIVE parent's fold advances while the child owns the screen (an
+  // ordinary second turn: the main stats fold counts at step/end) and the
+  // status refresh keeps selecting the CHILD — the live legacy slot must still
+  // follow the parent's current facts.
   context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 8))
+  context.emit('session/event', parent as never, event('step/start', { turn: 1, step: 0 }, 81))
+  context.emit('session/event', parent as never, event('step/end', { turn: 1, step: 0 }, 82))
   // Force a fresh CHILD display-subject commit AFTER the parent write: the
   // child's own projection must be re-derived, not the parent's todo.
   context.emit('session/event', childA as never, event('step/end', { turn: 1, step: 0 }, 9))
@@ -2118,8 +2146,15 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     'the committed display subject must stay the child after a late parent refresh')
   assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos,
     'the parent todo write must not replace the child’s presentation projection')
-  assert.equal(probe.capturedDisplaySubject?.legacy, undefined,
-    'the live-session legacy fields stay untouched while the child is displayed')
+  // The legacy slot is the LIVE session's and must stay CURRENT: the parent
+  // fold advanced while the child was displayed, so the live counters follow
+  // (M3-5 PR1 review R5).
+  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home,
+    'the live-session legacy fields describe the LIVE session (its own cwd)')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.turns, 2,
+    'the LIVE turn counter must keep advancing while the child is displayed')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.steps, 2,
+    'the LIVE step counter must keep advancing while the child is displayed')
 
   // Child A → child B through the SAME real Task Center entry: no A residue.
   input('\x1b')
@@ -2148,7 +2183,7 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, [{ content: 'CHILD-B-TODO', status: 'pending' }])
   assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'child b title')
   assert.equal(probe.capturedDisplaySubject?.presentation?.goal, undefined, 'A’s goal must not survive into B')
-  assert.equal(probe.capturedDisplaySubject?.legacy, undefined)
+  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home, 'B’s commit keeps the LIVE legacy facts')
   const viewB = vt.getViewport().join('\n')
   assert.ok(viewB.includes('child display subject B'), `the rendered footer must show B’s identity:\n${viewB}`)
   assert.ok(viewB.includes('child-b-ws'), `the rendered footer must show B’s workspace:\n${viewB}`)

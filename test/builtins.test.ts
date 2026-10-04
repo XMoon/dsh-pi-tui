@@ -580,6 +580,25 @@ test('M3-5 PR1: the builtin todo dock renders the DISPLAY SUBJECT summary while 
     view = fixture.vt.getViewport().join('\n')
     assert.ok(view.includes('child todo'), `the dock must render the DISPLAY SUBJECT summary:\n${view}`)
     assert.ok(!view.includes('live todo'), `the live summary must not stay on the child chrome:\n${view}`)
+
+    // The choice is by SUBJECT, never by field presence: a mounted display
+    // subject with an EMPTY todo list has no summary, and the item must HIDE —
+    // never fall back to the live session's summary (which would print the
+    // parent's list on the child surface).
+    enterChildDisplaySubject(fixture.app, {
+      id: 'child-2', label: 'child two', mode: 'continuable', activity: 'running',
+      cwd: '/child-2-ws', turns: 1, steps: 1,
+      todos: [],
+    })
+    await settleRender(fixture.app, fixture.vt)
+    const emptyState = fixture.host.state()
+    assert.equal(emptyState.session.displaySubject?.todoCount, 0, 'an empty child list reads count 0')
+    assert.equal(emptyState.session.displaySubject?.todoSummary, undefined, 'and no summary')
+    assert.ok(emptyState.activity.todoSummary?.includes('live todo'),
+      `the LIVE summary is still the live session’s: ${emptyState.activity.todoSummary}`)
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(!view.includes('live todo'), `an empty child list must HIDE the dock, never show the parent’s summary:\n${view}`)
+    assert.ok(!view.includes('☑'), `the dock item must be hidden entirely:\n${view}`)
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
