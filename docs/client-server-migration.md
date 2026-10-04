@@ -4353,18 +4353,22 @@ Closure evidence:
 
 Explicitly NOT claimed by PR1:
 
-- **Remote child viewer L6: NOT YET CLAIMED.** The Remote child
-  SessionStatus authority is qualified (adapter-level semantic + projection
-  tests only); the Remote Task Center/child-viewer production composition is
-  PR2's ownership, so no Remote child-viewer L6 is asserted here.
-- Remote Task Center and a user-reachable Remote child viewer (PR2, merged), the
-  Remote Job viewer (PR3, landed and PR open), writer-held caller recovery (PR5)
-  and the child durable-image read (PR6 or its owning viewer PR) remain. The
-  Remote Plugin Manager is outside PR1's scope and is CLOSED by the M3-5 PR4
-  section below — no longer a remaining obligation.
+- **Remote child viewer L6: not claimed by PR1 (historical scope).** PR1
+  qualified the Remote child SessionStatus authority at adapter/projection level
+  only; the Remote Task Center/child-viewer production composition belonged to
+  PR2, so PR1 asserted no child-viewer L6. That L6 is now delivered by the
+  merged M3-5 PR2 section, which records its own coverage limits.
+- **Delivered since PR1 (NOT remaining):** the Remote Task Center + real child
+  viewer (PR2, MERGED), the child durable-image read (proven in the M3-5 PR2
+  section) and the Remote selected-Job viewer closure (PR3, LANDED / PR OPEN —
+  see the M3-5 PR3 section). **Still remaining for M3-5:** writer-held caller
+  recovery (PR5) and stage closure (PR6). The Remote Plugin Manager is outside
+  PR1's scope and is CLOSED by the M3-5 PR4 section below — no longer a
+  remaining obligation.
 
-Remote child SessionStatus authority: qualified. Remote child viewer L6: not
-yet claimed — owner M3-5 PR2.
+Remote child SessionStatus authority: qualified. PR1 claimed no Remote
+child-viewer L6 (that was owned by M3-5 PR2, now merged) — see the M3-5 PR2
+section for the delivered L6 and its coverage limits.
 
 ## M3-5 PR4 — Remote Plugin Manager closure (DONE)
 
@@ -4844,8 +4848,11 @@ mutation; an observer stream error is never treated as a Job settlement.
   confirmation; the subagent-Job detail fallback; same-Session Job A→B viewer
   replacement (success + error sinks); and the session-switch / teardown
   stale-settlement controls.
-- Direct behavior is unchanged (Direct remains the production default; no
-  public/config/env Remote selector).
+- Direct remains the production default and keeps the official Direct
+  observation/Stop authority. One deliberate, accepted change: the human-kill
+  reason is unified to `cancelled by the user` on both backends, and the shared
+  `jobStopNotice` settlement text applies on both. No public/config/env Remote
+  selector is added.
 
 ### Known limitation / debt
 
