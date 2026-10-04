@@ -247,6 +247,47 @@ a generic command failure.
   the future Remote writer-held recovery hangs off this ONE caller-side module
   rather than every writer site.
 
+### Known-rejection settlement inside the held writer (M3-5 PR5)
+
+The ordinary prompt's `WriteOutcome` settlement happens INSIDE the admitted
+writer section: `SessionRuntime.withWriter` wraps
+`withPromptAdmission → prepareMessage → isScopeCurrent → markDispatch → prompt
+→ settlement`. A proven rejection (`kind: 'rejected'`, e.g. the official
+`session/writer-held`) is a NORMAL terminal return from that body, not a throw:
+
+```text
+merge the submitted human text into the editor exactly once
+settle the local submission echo
+terminate this gesture's submit ack with the structural code
+notify the refusal's own message (the centralized writer-held guidance)
+return
+```
+
+Consequences that are part of the contract:
+
+- A Session transition that arrives after the writer is admitted WAITS for the
+  result AND the caller-side terminal settlement — the barrier is the
+  currentness/lifecycle authority for that interval. There is therefore
+  **intentionally no post-dispatch prompt currentness fence**; adding one would
+  duplicate authority over a state the barrier contract excludes. The existing
+  post-`prepareMessage()`/pre-dispatch fence is unchanged.
+- Because the body returns normally, the reserved-submit wrapper performs no
+  generic exception restore and `runOwned.onError` emits no generic
+  "submission failed" wrapper. A `cancelled` outcome still throws the
+  cancellation error, and an `unsupported` outcome still fails fast.
+- A writer-held refusal is restored/never-auto-retried according to the proven
+  pre-commit semantics: no lease takeover, no force-resume, no Direct fallback
+  and no optimistic success. An indeterminate post-dispatch result keeps its
+  existing settlement — the draft is NOT restored and nothing is retried.
+- Remote surfaces obey the same rule at their own owner. The Remote preset
+  adapter classifies only the EXACT `session/writer-held` (alongside its
+  operation-specific preset refusals) as a proven rejection, keeps the official
+  `details`, and uses the centralized guidance; a TRUE indeterminate typed
+  `/preset <id>` records `suppressed` so the command is not restored as
+  retry-ready intent. `/title` (whose official `rename` resolves the Agent
+  before the title mutation) restores the typed command with the guidance and
+  mutates no title.
+
 ### D2.1 write settlement
 
 D2.1 makes the current Direct writes asynchronous at the semantic boundary

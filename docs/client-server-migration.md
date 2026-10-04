@@ -31,7 +31,8 @@ M3-5 PR1 DONE      (child display-subject status foundation: Direct SessionStatu
 M3-5 PR4 DONE      (Remote Plugin Manager closure: lifecycle/qualification over an ALREADY backend-neutral surface — one invalidation hint on `PluginManagerPort`, Direct/Remote mappings, demand-aware controller rereads, latest-started read currentness, dispose hardening, real Remote `/plugins` + Settings dual-entry L6, external-change and reconnect invalidation L6 — see the M3-5 PR4 section)
 M3-5 PR2 DONE/MERGED (Remote Task Center + real child viewer: the Task read contract is the full descendant tree + root job roster on both backends, `TaskBrowserRuntime` consumes the SELECTED semantic Task read, Remote invalidation is observable-driven, `tuiChildView` owns one child SessionReference per viewer acquired from the exact SubagentAddress, the ONE viewer hydrates through the shared PresentationReader + RemoteLiveIngress, PageUp targets the active display subject, the child steer subject is transport-neutral, and durable images read through the owning presentation's exact scoped retained Session — MERGED as PR #216 into `next @ cd498a2f`; see the M3-5 PR2 section)
 M3-5 PR3 LANDED    (Remote selected-Job viewer closure: the selected-Job detail/Stop is the ONE semantic `jobObservation` port on BOTH backends, `TaskSurfaceJobs` is the roster feed only (`list`/`subscribe`), the viewer's facts come from the official Client `IJobs.observe` NON-CONSUMING stream and its Stop from the official `IJobs.kill`, the neutral surface carries no Direct registry `get`/`kill`, and the real post-PR2 Remote application L6 drives `/tasks` → Job row → OutputViewer → Stop → official roster/follow convergence. Direct records the same human-kill reason. rc.2 `JobView` still carries no stable child id, so a `kind:'subagent'` Job stays a detail view — see the M3-5 PR3 section. **PR open; mark DONE only after merge**)
-M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR2/PR4 merged, PR3 landed and PR open, PR5/PR6 remain — see the migration stage pointer)
+M3-5 PR5 LANDED    (writer-held caller recovery + remaining secondary presentation: the ordinary prompt consumes `WriteOutcome.rejected` INSIDE the held Session writer (restore once + terminal code-bearing ack + the actionable guidance, never a generic failure), the Remote preset adapter now classifies the exact `session/writer-held` as a proven refusal with preserved details and centralized guidance, a TRUE indeterminate typed `/preset <id>` records `suppressed` so no retry-ready command is restored, `/title` surfaces its own refusal notice on the Client-owned command path, and the real two-process kernel write lease is proven at L5 (lifecycle parity Flow F) and L6 (real runner prompt + `/title` + `/preset`, plus an explicit retry that commits only after the holder is killed) — see the M3-5 PR5 section. **PR open; mark DONE only after merge**)
+M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR2/PR4 merged, PR3 and PR5 landed and PR open, PR6 remains — see the migration stage pointer)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -48,9 +49,10 @@ Experimental backend:      ONE complete Backend(kind='remote') assembly (M3-3B:
                            public/config/env Remote selector exists
 Experimental Remote:        the M3-4 main-TUI application is closed on the wire
                            (Session reads/writes, interaction, status, command runtime,
-                           rewind, images, tool cards); secondary surfaces and
-                           writer-held recovery remain M3-5, and normal startup never
-                           selects it
+                           rewind, images, tool cards); the M3-5 secondary surfaces
+                           (child/Task Center, Job viewer, Plugin Manager) and the
+                           writer-held caller recovery (PR5) are landed, and PR6 stage
+                           closure remains; normal startup never selects it
 Remote writes:              available only through the experimental in-process wire
                            application path; no normal/default production Remote
                            selection
@@ -65,8 +67,9 @@ M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
 M3-5 = IN PROGRESS          (PR1 child display-subject status foundation,
                              PR2 Remote Task Center + real child viewer and
                              PR4 Remote Plugin Manager closure merged; PR3
-                             Remote selected-Job viewer closure landed, PR open;
-                             PR5/PR6 remain)
+                             Remote selected-Job viewer closure and PR5
+                             writer-held caller recovery landed, PR open;
+                             PR6 stage closure remains)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
@@ -4864,3 +4867,116 @@ behavior and no local correlation bridge exists.
 
 PR5 (writer-held caller recovery + remaining secondary presentation) and PR6
 (stage closure) remain. `M3-5 DONE` is not claimed here.
+
+## M3-5 PR5 — writer-held caller recovery + remaining secondary presentation (LANDED; PR OPEN)
+
+Scope note: this section records **M3-5 PR5 only**. M3-5 as a stage stays
+**IN PROGRESS**; PR6 (stage closure) remains. `M3-5 DONE` is not claimed.
+
+Authority contract: the semantic `session/writer-held` contract was already
+frozen (`docs/m3-entry-contract.md`, `docs/concurrency.md`). PR5 closes the
+CALLER/UI recovery and the remaining secondary presentation; it re-opens no
+architecture, adds no writer-held error taxonomy, and takes over no lease.
+
+### Implemented authority
+
+- **The ordinary prompt consumes `WriteOutcome.rejected` where it is
+  produced** (`src/app/submission/runtime.ts::submitPrompt`). The write body
+  already runs inside `SessionRuntime.withWriter`; a proven refusal now settles
+  as a NORMAL terminal return: the submitted human text is merged back into the
+  editor once, the local submission echo is settled, the gesture's submit ack
+  terminates with the structural code (`session write rejected: <code>`), the
+  outcome's own message (the centralized guidance for `session/writer-held`) is
+  notified, and the function returns. The reserved-submit wrapper therefore
+  never runs its generic exception restore and `runOwned.onError` never emits a
+  generic "submission failed" wrapper. Only `unsupported` still fails fast,
+  and `indeterminate` keeps its existing no-restore settlement.
+- **No post-dispatch currentness fence was added.** The writer admission
+  (`SessionRuntime.withWriter` + `SessionOperationBarrier`) is the
+  currentness/lifecycle authority for the interval between prompt dispatch and
+  its semantic settlement; a second fence would duplicate authority over a
+  state the contract excludes. The existing post-`prepareMessage()` fence
+  (before dispatch) is unchanged, and a transition that arrives after the
+  writer is admitted waits for the whole settlement (proven by the A3
+  barrier-order test).
+- **Remote preset classification is exact and centralized**
+  (`src/runtime/remote/preset-remote.ts`): `session/writer-held` joins the
+  proven pre-commit set (the pinned Host resolves the Agent BEFORE
+  `agentPresets.select` enters its mutation), the classified message comes from
+  `settledWriteMessage()` (so writer-held gets the actionable guidance, never
+  the Host's internal lease diagnostic), and `copyFailureDetails()` preserves
+  the official `details` (including `sessionId`). No `session/*` namespace
+  prefix is treated as proof and the D2.2 broad classifier is deliberately NOT
+  used.
+- **A true indeterminate typed `/preset <id>` no longer leaves retry-ready
+  intent** (`src/commands.ts`): the indeterminate branch records
+  `recordCommandDraftDisposition(commandId, 'suppressed')` before returning the
+  existing no-auto-retry error, so the outer command settlement consumes the
+  command instead of restoring it. A KNOWN rejection — including
+  `session/writer-held` — keeps its draft restoration.
+- **`/title <name>` keeps its production write semantics and now surfaces its
+  own refusal** (`src/commands.ts`): the `rejected` branch emits the same inline
+  `app.notify(...)` the `/preset` and `/model` handlers already use. On Remote
+  the TUI built-in runs in the Client-owned command registry, which renders no
+  official command card (no Host `command/run` row), so a refusal was otherwise
+  silent. See the plan-assumption correction below.
+- **Reachability stays truthful.** `/model` keeps its existing exact
+  writer-held mapping (no duplication); the Remote `commands.execute`
+  adapter classifies an explicit `session/writer-held` result correctly at L3,
+  but a cold writer-held Session has NO normal UI path to a Host command claim
+  (`commands.list(agent)` needs the same Agent lookup and fails first), so no
+  fake cold-holder Host-command L6 exists. Remote shell and ordinary child
+  follow-up remain NOT APPLICABLE (no `session/writer-held` contract on those
+  carriers) and gained no fake branch.
+
+### Plan-assumption correction (recorded, owner-visible)
+
+The frozen PR5 plan (§12 E3, FACT F9) expected "no production code change" for
+`/title` while asserting its guidance is visible. The real Remote runner proves
+that assumption wrong: a Client-owned TUI command's `{kind:'error'}` result has
+no presentation sink on the Remote path (the official Host executor's command
+card does not exist there), while `/preset` and `/model` were already visible
+only because their handlers notify inline. The minimal consistent correction is
+the one-line inline notice in the `/title` rejected branch — the same pattern
+its sibling handlers use — which changes no write, classification or retry
+semantics. It does add a transient notice beside the official command card on
+Direct; that duplication already exists for `/preset` and `/model`.
+
+### Real reachability / qualification
+
+| Requirement | L1/L2 | L3 | L5 | L6 |
+|---|---|---|---|---|
+| ordinary prompt structured rejection settlement | `test/a3-writer-admission.test.ts`: exact restore-once + code-bearing ack + guidance + no consume/no generic failure; indeterminate and unsupported negative controls; writer-barrier-order test | Remote `RemoteSessionWriter.prompt` mapping (existing) | real generated-Client rejected result (`Flow F`) | real Remote runner: draft restored exactly once, optimistic row settled, guidance visible, no durable `user/message`, no Host Agent activated |
+| Remote preset writer-held | existing preset port | `test/remote-preset-port.test.ts`: exact code + `details.sessionId` + guidance, empty details dropped, `session/post-commit-failed`/`gateway/internal` stay indeterminate | `Flow F` preset adapter rejected | real runner `/preset <alt>`: command restored, guidance visible, no durable `agent-preset/selected` |
+| `/preset` indeterminate draft suppression | `test/preset-command.test.ts`: the real outer command-settlement owner drives the real handler — the indeterminate case leaves the editor empty, the known writer-held rejection restores it (one semantic family) | `test/remote-preset-port.test.ts` result source | not required | real runner with a controlled Remote operation result: editor does not regain the command, exactly one dispatch, no durable preset commit |
+| `/title` writer-held | — | `test/remote-session-writer.test.ts`: rename rejected + code/details/guidance | `Flow F` rename rejected | real runner `/title`: command restored + guidance visible + no title mutation; explicit retry commits after the holder exits |
+| model writer-held | existing | existing exact mapping (`test/remote-model-port.test.ts`) | `Flow F` model adapter rejected | not duplicated (existing application evidence) |
+| Host command writer-held | existing | `test/remote-host-command.test.ts`: exact code/details/guidance, one dispatch | optional contract probe only | deliberately absent (not normally UI-reachable) |
+| real kernel write lease | — | — | `scripts/dsh-remote-session-lifecycle-parity-smoke.mjs` Flow F: an independent Node holder process owns the lease (`SessionAlreadyOwnedError`), cold read/open stays available, and after `SIGKILL` an explicit retry commits | same fixture shape in the real runner tests (`test/support/session-writer-holder.mjs`) |
+
+The L5 lane is `smoke:remote-session-lifecycle-parity`, already executed by
+`scripts/dsh-npm-verify.mjs` (no new package script). Its Flow F manifest
+records the reproduced production prerequisites, the test stand-ins (temporary
+persistence root, stub LLM route, deterministic fixture presets, process-local
+transport) and the deliberately absent parts (external provider/network/auth,
+public Remote selector, unrelated UI/plugins, reconnect/HMR).
+
+### Known limitations / debt (not PR5's)
+
+- A successful Client-owned TUI command renders no result text on Remote
+  either (`/title` reports no "title set:" confirmation). That is the same
+  missing Client-command-result presentation sink, not a recovery defect; PR5
+  fixes only the refusal path its acceptance requires.
+- The `/title` `stale`/`transitioning` branches remain silent on Remote for the
+  same reason.
+- A last-good Host-command claim after reconnect/ownership change, and Remote
+  reconnect/HMR/global-fatal recovery, stay M3-6.
+
+### Remaining M3-5 obligations
+
+PR6 (M3-5 hardening / stage closure) remains: reconcile every M3-5
+entry-contract bullet with implementation, finish the child durable image read
+through the child `session/attachment`, refresh the stale-generation matrix,
+audit remaining Remote `ctx.jobs`/`ctx.subagents` reachability and shadow state,
+and promote intentional leftovers with an explicit owner. `M3-5 DONE` is not
+claimed here.
