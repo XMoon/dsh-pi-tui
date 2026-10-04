@@ -22,7 +22,8 @@
  */
 
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../job-observation-port.ts'
-import { classifyRemoteWriteFailure, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
+import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
+import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 /** One official client-safe Job roster row (`JobView`) subset used here. */
 export interface RemoteObservedJobRow {
@@ -66,22 +67,30 @@ export type RemoteJobKillResult =
   | { readonly ok: false; readonly error: unknown }
 
 /**
- * Classify one failed `job.kill` `RemoteResult` into the Job-stop taxonomy.
+ * The Job-Stop operation-specific settlement table.
  *
- * `job/not-found` is the Job-stop-specific proven non-commit (the session's
- * list no longer carries a killable row); it must not be flattened into the
- * generic domain-code `rejected` bucket. Every other proven business or
- * pre-invocation refusal is `rejected`. A carrier/internal failure, a
- * dispatch-shaped cancellation, or a code-less failure cannot prove the kill
- * did not commit and stays `indeterminate` (never auto-replayed).
+ * It deliberately does NOT reuse the D2.2 write vocabulary's "any other domain
+ * code is a proven refusal" fallback (`../write-outcome.ts` SCOPE): Job Stop is
+ * a different operation family, and rc.2's PROVEN `job.kill` non-commit
+ * vocabulary is only `job/not-found` plus the pinned pre-invocation Gateway
+ * refusals. Any other code — an unknown or foreign domain code, an unproven
+ * `gateway/*`, or a code-less failure — leaves the commit state unproven and
+ * stays `indeterminate`; it is never reported as `rejected` and never replayed.
  */
 export function classifyJobStopFailure(error: unknown): JobStopOutcome {
-  if (remoteFailureCode(error) === 'job/not-found') return { kind: 'not-found' }
-  const failure = classifyRemoteWriteFailure(error)
-  if (failure.kind === 'rejected') return { kind: 'rejected', message: failure.error.message }
-  if (failure.kind === 'indeterminate') return { kind: 'indeterminate', message: failure.error.message }
-  // A post-dispatch cancellation is not proof of non-commit: the kill may
-  // already have been admitted.
+  const code = remoteFailureCode(error)
+  // The Job-Stop-specific proven non-commit: this session's list no longer
+  // carries a killable row under that id.
+  if (code === 'job/not-found') return { kind: 'not-found' }
+  // Proven PRE-DISPATCH refusals: the gateway's own admission rejection and the
+  // pinned infrastructure codes raised before the addressed business method
+  // runs.
+  if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+    return { kind: 'rejected', message: remoteFailureMessage(error) }
+  }
+  // `gateway/cancelled`, `gateway/internal`, `gateway/result-invalid`, any other
+  // `gateway/*`, an unknown/other domain code, and a code-less failure cannot
+  // prove the kill did not commit.
   return { kind: 'indeterminate', message: remoteFailureMessage(error) }
 }
 
