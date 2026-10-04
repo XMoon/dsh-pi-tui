@@ -167,6 +167,45 @@ import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 const REPAINT_FLUSH_MS = 50
 
 /**
+ * Whether one DURABLE event of the VIEWED child can change the display
+ * subject's SessionStatus or presentation (M3-5 PR1 §9.7).
+ *
+ * The child's Session-owned facts are read from the official Session
+ * projections, so the re-read must follow EVERY event family that can move
+ * them — not only the turn/step counters the viewer's StatsFolder owns:
+ *
+ * - the turn/step boundaries the viewer already refreshed on;
+ * - the projection writes: `todo/write` (todos), `session/title` (title),
+ *   `goal/change` (goal);
+ * - the permission knobs (`permissions`), which the main subject also folds
+ *   immediately;
+ * - the child's own `compaction/end` (its context pressure/breakdown).
+ *
+ * `step/start` is deliberately NOT here: the child has no context-measurement
+ * cache, and the preceding `step/end` already re-read the projections. The
+ * transient assistant-stream frames never reach this durable path at all.
+ * @param eventType - the durable Session event type of the viewed child.
+ * @returns whether the display-subject status must be re-derived.
+ */
+function invalidatesDisplaySubjectStatus(eventType: string): boolean {
+  switch (eventType) {
+    case 'turn/start':
+    case 'step/end':
+    case 'turn/end':
+    case 'todo/write':
+    case 'session/title':
+    case 'goal/change':
+    case 'permission/preset':
+    case 'approval/policy':
+    case 'sandbox/mode':
+    case 'compaction/end':
+      return true
+    default:
+      return false
+  }
+}
+
+/**
  * Whether the opt-in Task Center catalog refresh profiler is enabled for this
  * process (`DSH_TUI_TASK_REFRESH_PROFILE=1`). Off by default: the coalescing
  * gate then emits no diagnostics, so the TUI log stays clean.
@@ -669,7 +708,7 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   commitStatus(
     patch: StatusPatch,
-    legacyFacts: Partial<StatusData>,
+    legacyFacts: Partial<StatusData> | undefined,
     presentation: DisplaySubjectPresentation | undefined,
   ): void
   /** The notification settings write path (`/notify`, `agent/status` policy). */
@@ -2270,11 +2309,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           viewer.beginTurn()
         } else if (event.type === 'turn/end') viewer.endTurn()
         schedulePaint()
-        // The child's turn/step/stats counters move at step boundaries
-        // (the stats fold counts at step/end) — the footer follows then,
-        // never on every streaming delta. A turn START also refreshes so
-        // the activity flips to running the moment a cold resume begins.
-        if (event.type === 'turn/start' || event.type === 'step/end' || event.type === 'turn/end') viewer.refreshFooter()
+        // The display subject's Session-owned facts come from the official
+        // projections: re-derive them for EVERY event family that can have
+        // moved them (turn/step boundaries, todo/title/goal writes, the
+        // permission knobs and the child's own compaction), never only the
+        // turn/step counters — and never on every streaming delta.
+        if (invalidatesDisplaySubjectStatus(event.type)) viewer.refreshFooter()
         if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(() => refreshPendingInput())
         if (event.type === 'turn/end') paintNow()
         return

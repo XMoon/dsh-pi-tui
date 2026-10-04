@@ -214,7 +214,7 @@ import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
 import { UnstableMountedComponentAdapter } from './extension/internal/unstable-mount.ts'
 import { normalizeInputEvent } from './extension/internal/input-events.ts'
-import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
+import type { DisplaySubjectSnapshot, ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
@@ -2288,6 +2288,8 @@ export interface DisplaySubjectPresentation {
   /** The display subject's todo list ([] = nothing known here — the main
    *  durable list is never a stand-in). */
   readonly todos: readonly TodoItem[]
+  /** The display subject's rendered goal-badge text (undefined = no badge). */
+  readonly goal: string | undefined
 }
 
 /** Base callbacks every TuiApp host must provide; the external-editor
@@ -10997,10 +10999,9 @@ export class TuiApp {
   setSessionTitle(title: string | undefined): void {
     this.sessionTitleText = title ?? ''
     this.renderHeader()
-    // The extension snapshot's title belongs to the DISPLAY SUBJECT: while a
-    // child viewer is mounted the child's own title stays published, never the
-    // main session's (M3-5 PR1 §9.8).
-    this.extensionHost?.updateSession({ title: this.displayTitle() })
+    // The LIVE session's title (v2 semantics, M3-5 PR1 contract decision); the
+    // display subject's own title is `session.displaySubject.title`.
+    this.extensionHost?.updateSession({ title: title ?? '' })
     this.events.onTitleChanged?.()
   }
 
@@ -12767,7 +12768,7 @@ export class TuiApp {
    */
   commitDisplaySubject(
     patch: StatusPatch,
-    legacy: Partial<StatusData>,
+    legacy: Partial<StatusData> | undefined,
     presentation: DisplaySubjectPresentation | undefined,
   ): void {
     this.displaySubjectPresentation = presentation
@@ -12777,7 +12778,20 @@ export class TuiApp {
     // count — and a visible todo panel/extension count would keep rendering
     // the previous subject until an unrelated event.
     this.projectStatus({ ...patch, activity: this.activityStatus() })
-    this.setStatus(legacy)
+    if (presentation === undefined) {
+      // MAIN: the legacy display fields are the live session's own — merge
+      // them and let `setStatus` project + notify as before.
+      this.setStatus(legacy ?? {})
+    } else {
+      // CHILD: the legacy `StatusData` slot stays the LIVE MAIN session's.
+      // The extension v2 `SessionSnapshot` describes the live session owner, so
+      // a viewer transition must never re-point it; the display subject's own
+      // visible facts travel in the store patch above and in the presentation
+      // projection (todos/title/goal/identity) — see `displaySubject`.
+      this.renderDock()
+      this.renderGoalLine()
+      this.syncExtensionState()
+    }
     // A VISIBLE todo panel renders the projection that just changed: refresh
     // it inside the same commit (plain text — this publishes nothing), so the
     // open panel follows enter / child A→B / child todo changes / exit instead
@@ -12801,21 +12815,46 @@ export class TuiApp {
     return this.displaySubjectPresentation?.todos ?? this.todoItems
   }
 
-  /** The display subject's session title: the child projection while a child
-   *  viewer is mounted, else the durable MAIN title. */
-  private displayTitle(): string {
-    return this.displaySubjectPresentation?.title ?? this.sessionTitleText
+  /** The display subject's goal-badge text: the child projection while a child
+   *  viewer is mounted, else the live session's folded goal. */
+  private displayGoal(): string | undefined {
+    const projection = this.displaySubjectPresentation
+    return projection === undefined ? this.status.goal : projection.goal
   }
 
-  /** The display subject's extension identity (session id / workspace root /
-   *  title): the child projection while a child viewer is mounted, else the
-   *  MAIN session's committed identity. */
-  private displaySessionIdentity(): { sessionId?: string; workspaceRoot: string; title: string } {
+  /**
+   * The ADDITIVE display-subject projection of the extension snapshot (M3-5
+   * PR1 contract decision): `SessionSnapshot` keeps its v2 live-session
+   * semantics, and the session the user is LOOKING AT is published beside it,
+   * only while a child viewer is mounted. Every field comes from the SAME
+   * committed display-subject commit (the presentation projection + the
+   * StatusStore sections), never from the live/main session.
+   */
+  private displaySubjectSnapshot(): DisplaySubjectSnapshot | undefined {
     const projection = this.displaySubjectPresentation
+    if (projection === undefined) return undefined
+    const snapshot = this.statusStore.snapshot()
+    const model = snapshot.composition.model
+    const permission = snapshot.access.permissionPreset
+    const summary = this.todoSummaryText(projection.todos)
     return {
-      sessionId: projection?.sessionId ?? this.mainSessionIdText,
-      workspaceRoot: projection?.workspaceRoot ?? this.mainWorkspaceRootText ?? '',
-      title: projection?.title ?? this.sessionTitleText,
+      sessionId: projection.sessionId,
+      title: projection.title,
+      workspaceRoot: projection.workspaceRoot,
+      cwd: snapshot.workspace.cwd,
+      ...snapshot.workspace.branch === undefined ? {} : { branch: snapshot.workspace.branch },
+      ...model === undefined
+        ? {}
+        : {
+            model: model.reasoningEffort === undefined
+              ? `${model.provider ?? ''}/${model.id}`
+              : `${model.provider ?? ''}/${model.id} @${model.reasoningEffort}`,
+          },
+      ...permission === undefined ? {} : { permission: permission.id },
+      turns: snapshot.usage.turns,
+      steps: snapshot.usage.steps,
+      todoCount: projection.todos.length,
+      ...summary === '' ? {} : { todoSummary: summary },
     }
   }
 
@@ -12972,14 +13011,16 @@ export class TuiApp {
     this.mainSessionIdText = facts.sessionId
     this.mainWorkspaceRootText = facts.cwd
     this.extensionHost?.updateSession({
-      ...this.displaySessionIdentity(),
-      // The Session-owned STATUS fields (cwd/model) are only this identity
-      // writer's to commit while the MAIN session is the display subject:
-      // during a child viewer the status owner has already published the
-      // child's facts and this commit must not overwrite them.
-      ...this.displaySubjectPresentation === undefined
-        ? { cwd: facts.cwd, model: facts.model === '' ? undefined : facts.model }
-        : {},
+      sessionId: facts.sessionId,
+      workspaceRoot: facts.cwd,
+      title: this.sessionTitleText,
+      // The LIVE session's cwd/model: this identity commit is the live owner's,
+      // never a display-subject re-point (M3-5 PR1 contract decision).
+      cwd: facts.cwd,
+      model: facts.model === '' ? undefined : facts.model,
+      // The display subject rides along so the published state stays coherent
+      // in one update when a viewer is mounted.
+      displaySubject: this.displaySubjectSnapshot(),
     })
   }
 
@@ -16923,8 +16964,7 @@ export class TuiApp {
    * list is empty or the panel is expanded (the summary would sit on the
    * full list). Shared by renderDock and the extension state mirror
    * (P1-5). */
-  private todoSummaryText(): string {
-    const todos = this.displayTodos()
+  private todoSummaryText(todos: readonly TodoItem[] = this.displayTodos()): string {
     if (this.todoPanelVisible || todos.length === 0) return ''
     const active = todos.filter(todo => todo.status !== 'completed')
     const done = todos.length - active.length
@@ -17050,33 +17090,35 @@ export class TuiApp {
       queuedCount: this.queueItems.length,
       taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
       childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
-      // The todo count/summary follow the DISPLAY SUBJECT (M3-5 PR1): while a
-      // child viewer is mounted the child's own SessionStatus todo list is
-      // published — never the parent session's, which stays behind the
-      // projection.
-      todoCount: this.displayTodos().length,
+      // The LIVE session's todo facts (v2 semantics, M3-5 PR1 contract
+      // decision): the display subject's own list is published additively on
+      // `session.displaySubject`, and the first-party dock item renders it.
+      todoCount: this.todoItems.length,
       // The rendered todo summary (P1-5: the first-party builtin dock item
       // renders it through the public slot API; the host provides the
       // TEXT, the extension owns the presentation). Always written — an
       // empty string CLEARS a previous summary (the store merge is
       // per-field monotonic, so omitting it would leave the stale text).
-      todoSummary: this.todoSummaryText(),
+      todoSummary: this.todoSummaryText(this.todoItems),
     })
-    // The extension SessionSnapshot describes the CURRENT DISPLAY SUBJECT
-    // (M3-5 PR1 §9.8): the identity fields (sessionId/workspaceRoot/title)
-    // and the Session-owned status fields all follow the same committed
-    // subject as the host surface — never a main identity with child facts or
-    // the reverse.
+    // The extension `SessionSnapshot` describes the LIVE session owner (its v2
+    // semantics are unchanged, M3-5 PR1 contract decision): the identity fields
+    // (sessionId/workspaceRoot/title) and the status fields come from the LIVE
+    // session's own state — a viewer transition never re-points them. The
+    // display subject is published ADDITIVELY beside it.
     host.updateSession({
       planMode: this.planMode,
-      viewerMode: this.statusStore.snapshot().view.subject.kind === 'subagent',
+      viewerMode: this.viewerMode !== undefined,
       // The BUSY flag is the machine fact the runner pushes (setBusy), NOT
       // the working-row indicator (which compaction also drives): the
       // extension snapshot must report the same busy truth the runner
       // sees. `working.isActive()` conflates compaction with busy, so the
       // dedicated field is used.
       busy: this.busy,
-      ...this.displaySessionIdentity(),
+      sessionId: this.mainSessionIdText,
+      workspaceRoot: this.mainWorkspaceRootText ?? '',
+      title: this.sessionTitleText,
+      displaySubject: this.displaySubjectSnapshot(),
       turns: this.status.turns,
       steps: this.status.steps,
       // ALWAYS written (the `permission` rule below): an omitted field keeps
@@ -17639,7 +17681,7 @@ export class TuiApp {
   /** Rebuild the goal line: `goal ● <objective>` while a goal is set, hidden
    * otherwise (display-only — no verbs yet). */
   private renderGoalLine(): void {
-    const goal = this.status.goal
+    const goal = this.displayGoal()
     this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(goal))
     this.requestRender()
   }

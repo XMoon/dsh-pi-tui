@@ -87,7 +87,10 @@ export interface StatusSurface {
    *  projection describe the SAME subject. */
   commitStatus(
     patch: StatusPatch,
-    legacyFacts: Partial<StatusData>,
+    /** The legacy display fields of the committed subject; `undefined` for a
+     *  child display subject (its visible facts travel in `presentation` and
+     *  the store patch, and the legacy slot stays the LIVE session's). */
+    legacyFacts: Partial<StatusData> | undefined,
     presentation: import('../../tui-app.ts').DisplaySubjectPresentation | undefined,
   ): void
 }
@@ -273,18 +276,6 @@ function childAccessStatus(status: DisplaySessionStatus | undefined): {
   return permission === undefined
     ? {}
     : { permissionPreset: { id: permission, label: permission, matched: true } }
-}
-
-/** The child display subject's model label. `''` is the canonical unknown for
- *  the required legacy field — it is never the parent's model. */
-function childModelLabel(status: DisplaySessionStatus | undefined): string {
-  const model = status?.model
-  if (model === undefined) return ''
-  return modelLabelOf({
-    provider: model.provider,
-    model: model.model,
-    ...model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort },
-  })
 }
 
 /** The child display subject's goal badge text: an absent projection and the
@@ -749,6 +740,9 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           // projection both read "nothing known" — the parent's list is never
           // a stand-in.
           todos: childStatus?.todos ?? [],
+          // The goal badge is a display-subject presentation fact (the legacy
+          // `goalText` slot stays the LIVE session's).
+          goal: childGoalText(childStatus),
         }
     // A4-4 (plan §13.1): the semantic derivation stays here; the surface
     // owns the commit coordination. The three parts are ONE atomic
@@ -785,21 +779,12 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           contextTokens,
           contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
         }
-      : {
-          // The CHILD's legacy display fields describe the SAME display
-          // subject: every Session-owned field is written explicitly so a
-          // parent value cannot survive the merge.
-          model: childModelLabel(childStatus),
-          cwd: workspace.cwd,
-          branch: workspace.branch ?? '',
-          goal: childGoalText(childStatus),
-          turns: subjectStats.turns,
-          steps: subjectStats.steps,
-          statsLine: formatStats(subjectStats),
-          permission: childStatus?.permission,
-          contextTokens: childContextTokens,
-          contextWindow: childStatus?.context?.contextWindow,
-        }, presentation)
+      // A CHILD subject passes NO legacy fields: the extension's v2
+      // `SessionSnapshot` (and the legacy `status` slot) describes the LIVE
+      // session owner, so a viewer transition must never re-point them. The
+      // child's own visible facts are the store patch above plus the
+      // presentation projection (todos/title/goal/identity).
+      : undefined, presentation)
   }
 
   /**

@@ -1925,19 +1925,27 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   // child carries DIFFERENT facts so a leak is immediately visible; the child's
   // `tokenUsage` (11/5) deliberately differs from its own bounded log fold
   // (10/2) so the sink proves the projection path, not the fold.
+  // Child A's title/todos are MUTABLE: the invalidation regressions below move
+  // the official projection and commit the corresponding durable event (the
+  // real Host order), then require the display subject to follow WITHOUT a
+  // turn/step boundary.
+  let childATitle = 'child a title'
+  let childATodos: readonly { readonly content: string; readonly status: 'pending' | 'in_progress' | 'completed' }[] = [
+    { content: 'CHILD-A-TODO', status: 'in_progress' },
+    { content: 'CHILD-A-TODO-2', status: 'pending' },
+  ]
   const statusValuesBySession: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
-    [childA.id]: {
-      modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-a-model' } },
-      agentPreset: 'child-a-preset',
-      permissions: { currentValue: 'read-only' },
-      title: 'child a title',
-      goal: { goal: { objective: 'child a objective', phase: 'active' } },
-      contextPressure: { projectedTokens: 100, contextWindow: 2000 },
-      tokenUsage: { uncachedInputTokens: 11, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      todos: [
-        { content: 'CHILD-A-TODO', status: 'in_progress' },
-        { content: 'CHILD-A-TODO-2', status: 'pending' },
-      ],
+    get [childA.id]() {
+      return {
+        modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-a-model' } },
+        agentPreset: 'child-a-preset',
+        permissions: { currentValue: 'read-only' },
+        get title() { return childATitle },
+        goal: { goal: { objective: 'child a objective', phase: 'active' } },
+        contextPressure: { projectedTokens: 100, contextWindow: 2000 },
+        tokenUsage: { uncachedInputTokens: 11, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        get todos() { return childATodos },
+      }
     },
     [childB.id]: {
       modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-b-model' } },
@@ -2027,19 +2035,16 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     { content: 'CHILD-A-TODO', status: 'in_progress' },
     { content: 'CHILD-A-TODO-2', status: 'pending' },
   ])
-  const aLegacy = probe.capturedDisplaySubject?.legacy
-  assert.equal(aLegacy?.model, 'deepseek/child-a-model')
-  assert.equal(aLegacy?.cwd, childACwd)
-  assert.equal(aLegacy?.permission, 'read-only')
-  assert.equal(aLegacy?.contextTokens, 100)
-  assert.equal(aLegacy?.contextWindow, 2000)
-  assert.match(aLegacy?.goal ?? '', /^goal ● child a objective$/u)
-  assert.equal(aLegacy?.turns, 1)
-  assert.equal(aLegacy?.steps, 1)
+  // A child commit carries NO legacy display fields: the extension's v2
+  // live-session snapshot (and the legacy `status` slot) must never re-point on
+  // a viewer transition (M3-5 PR1 contract decision). The child's own goal is a
+  // presentation fact.
+  assert.equal(probe.capturedDisplaySubject?.legacy, undefined,
+    'a child subject must not re-point the live-session legacy fields')
+  assert.match(aPresentation.goal ?? '', /^goal ● child a objective$/u)
   // The PARENT's facts are nowhere on the child subject.
   assert.notEqual(aStatus.workspace.cwd, home)
   assert.notEqual(aStatus.composition.model?.id, 'parent-model')
-  assert.notEqual(aLegacy?.model, 'parent-model')
   // …and the child's OWN facts are ACTUALLY RENDERED (not merely captured):
   // model/provider, permission, the official cumulative tokens (11/5, never
   // the bounded fold's 10/2), the official context window, the child todo
@@ -2064,6 +2069,42 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(!viewA.includes('p/parent-model'), `the parent model must not render anywhere on the child surface:\n${viewA}`)
   assert.ok(!viewA.includes('display-subject-parent'), `the parent session identity must not render anywhere on the child surface:\n${viewA}`)
 
+  // INVALIDATION (M3-5 PR1 review R4): a child `session/title` alone — with NO
+  // step/end / turn/end boundary around it — must re-derive the display subject
+  // immediately. The Host commits the event AND its projection moves.
+  childATitle = 'child a retitled'
+  // The Host commits the durable event through its own Session append (the
+  // production shape: the fake session's `append` is the same primitive the
+  // other runner suites use).
+  context.emit('session/event', childA as never, childA.append!('session/title', { title: 'child a retitled' }) as SessionEvent)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'child a retitled',
+    'a lone child session/title must reach the display-subject presentation without a boundary')
+  const subjectAfterTitle = probe.displaySubject() as { readonly title?: string; readonly sessionId?: string } | undefined
+  assert.equal(subjectAfterTitle?.sessionId, childA.id)
+  assert.equal(subjectAfterTitle?.title, 'child a retitled',
+    'the EXTENSION-visible display-subject title must follow a lone child session/title immediately')
+
+  // The same for a child `todo/write`: the display-subject todo list (and the
+  // rendered summary line) must follow immediately.
+  childATodos = [
+    { content: 'CHILD-A-TODO-3', status: 'in_progress' },
+    { content: 'CHILD-A-TODO-4', status: 'pending' },
+    { content: 'CHILD-A-TODO-5', status: 'pending' },
+  ]
+  context.emit('session/event', childA as never, event('todo/write', { todos: [...childATodos] }, 41))
+  await settle()
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos,
+    'a lone child todo/write must reach the display-subject presentation without a boundary')
+  assert.equal(probe.capturedChildStatus?.activity.todoCount, 3)
+  const viewTodoWrite = vt.getViewport().join('\n')
+  assert.ok(viewTodoWrite.includes('3 active · CHILD-A-TODO-3'),
+    `the rendered child todo summary must follow the lone todo/write:\n${viewTodoWrite}`)
+  assert.ok(viewTodoWrite.includes('child a retitled') === false,
+    'the child title is not rendered by the chrome (it is an extension fact)')
+
   // A LATE parent refresh (a main todo/write + a main turn boundary) while the
   // child is displayed must never repaint the child subject with parent facts.
   context.emit('session/event', parent as never, event('todo/write', { todos: [{ content: 'PARENT-TODO-V2', status: 'pending' }] }, 7))
@@ -2075,12 +2116,10 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   await vt.waitForRender()
   assert.equal(probe.capturedChildStatus?.view.subject.kind, 'subagent',
     'the committed display subject must stay the child after a late parent refresh')
-  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, [
-    { content: 'CHILD-A-TODO', status: 'in_progress' },
-    { content: 'CHILD-A-TODO-2', status: 'pending' },
-  ], 'the parent todo write must not replace the child’s presentation projection')
-  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, childACwd,
-    'the re-committed legacy display fields must stay the child’s')
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos,
+    'the parent todo write must not replace the child’s presentation projection')
+  assert.equal(probe.capturedDisplaySubject?.legacy, undefined,
+    'the live-session legacy fields stay untouched while the child is displayed')
 
   // Child A → child B through the SAME real Task Center entry: no A residue.
   input('\x1b')
@@ -2107,9 +2146,9 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     'pressureTokens is B’s numerator when projectedTokens is absent')
   assert.equal(bStatus.composition.agentPreset, undefined, 'B records no preset — A’s must not survive')
   assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, [{ content: 'CHILD-B-TODO', status: 'pending' }])
-  assert.equal(probe.capturedDisplaySubject?.legacy?.model, 'deepseek/child-b-model')
-  assert.equal(probe.capturedDisplaySubject?.legacy?.permission, 'workspace-write')
-  assert.equal(probe.capturedDisplaySubject?.legacy?.goal, undefined, 'A’s goal must not survive into B')
+  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'child b title')
+  assert.equal(probe.capturedDisplaySubject?.presentation?.goal, undefined, 'A’s goal must not survive into B')
+  assert.equal(probe.capturedDisplaySubject?.legacy, undefined)
   const viewB = vt.getViewport().join('\n')
   assert.ok(viewB.includes('child display subject B'), `the rendered footer must show B’s identity:\n${viewB}`)
   assert.ok(viewB.includes('child-b-ws'), `the rendered footer must show B’s workspace:\n${viewB}`)

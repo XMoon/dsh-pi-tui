@@ -235,11 +235,13 @@ export interface SurfaceSnapshot {
   readonly themeRevision: number
 }
 
-/** The current DISPLAY SUBJECT's identity and mode (plan §7.2, M3-5 PR1):
- * the main session, or the viewed child session while a subagent viewer is
- * mounted. Every field describes that ONE subject — `viewerMode` tells which
- * one. Secrets, credentials, raw Context and live Agent objects are NEVER
- * included. */
+/** The LIVE (main/owner) session's identity and mode (plan §7.2). Its v2
+ * semantics are UNCHANGED (M3-5 PR1 contract decision): every field describes
+ * the live session owner, whether or not a subagent viewer is mounted. The
+ * session the user is currently LOOKING AT is a separate concept, published
+ * additively as {@link SessionSnapshot.displaySubject} — a viewer transition
+ * never re-points this snapshot. Secrets, credentials, raw Context and live
+ * Agent objects are NEVER included. */
 export interface SessionSnapshot {
   readonly sessionId?: string
   readonly title?: string
@@ -254,18 +256,48 @@ export interface SessionSnapshot {
   /** Completed turns and steps (footer t/s counters). */
   readonly turns: number
   readonly steps: number
+  /** The current DISPLAY SUBJECT (M3-5 PR1, ADDITIVE — the live-session fields
+   *  above keep their v2 meaning): the viewed child session while a child
+   *  viewer is mounted (`viewerMode`). Absent = no child viewer is mounted and
+   *  the live session above is what the user sees. */
+  readonly displaySubject?: DisplaySubjectSnapshot
 }
 
-/** Background activity counts (plan §7.3). */
+/** The session the user is currently looking at while a child viewer is
+ *  mounted (M3-5 PR1, ADDITIVE): the viewed child's identity plus the
+ *  Session-owned facts resolved from `SessionReader.sessionStatus(childId)`.
+ *  It never describes the live/main owner (that is {@link SessionSnapshot}) and
+ *  it is only ever present while `viewerMode` is true. */
+export interface DisplaySubjectSnapshot {
+  readonly sessionId: string
+  /** The child session's durable title ('' = none yet). */
+  readonly title: string
+  readonly workspaceRoot: string
+  readonly cwd: string
+  readonly branch?: string
+  /** The child's own model label (`provider/model [@effort]`). */
+  readonly model?: string
+  readonly permission?: string
+  /** The child's own completed turns/steps. */
+  readonly turns: number
+  readonly steps: number
+  /** The display subject's todo list count and rendered summary line. */
+  readonly todoCount: number
+  readonly todoSummary?: string
+}
+
+/** Background activity counts of the LIVE session (plan §7.3). */
 export interface ActivitySnapshot {
   readonly working: boolean
   readonly workingMessage?: string
   readonly queuedCount: number
   readonly taskCount: number
   readonly childAgentCount: number
+  /** The live session's active todo count; the display subject's own todo
+   *  facts are published on {@link SessionSnapshot.displaySubject}. */
   readonly todoCount: number
-  /** The rendered todo summary line (`☑ N active · first`), when the host
-   * provides one (the first-party builtin dock item renders it). */
+  /** The live session's rendered todo summary line (`☑ N active · first`); the
+   *  display subject's line is `session.displaySubject.todoSummary` (M3-5 PR1). */
   readonly todoSummary?: string
 }
 
