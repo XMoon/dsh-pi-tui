@@ -4301,12 +4301,18 @@ Closure evidence:
   snapshot is subject-consistent across enter/exit; a legacy parent `setStatus`
   while viewing never clobbers the child subject; absent child usage never
   leaks the parent token figures.
-- Todo + extension parity: `test/surface-host-app.test.ts` — across
-  main → A → B → main the extension session/activity slices name the current
-  display subject (identity + status fields + todo count/summary), the child
-  todo panel renders the child list, the LATEST main todo returns on exit, and
-  no published snapshot mixes a viewing flag with a main identity (or the
-  reverse).
+- Todo + extension subjects: `test/surface-host-app.test.ts` — across
+  main → A → B → main the EXTENSION session/activity fields keep describing the
+  live session (identity, status, todo count/summary), never re-point on a viewer
+  transition and stay CURRENT while the child is displayed, while the ADDITIVE
+  `session.displaySubject` carries the child's own identity/status/todo facts
+  (present only while a viewer is mounted, cleared by deletion, deep-frozen and
+  content-stable). The host's own StatusStore `activity` describes the VISIBLE
+  surface instead: its `todoCount` is the display-subject list length, so the
+  already-open child todo panel renders the child list and the LATEST live list
+  returns on exit. `test/builtins.test.ts` proves the first-party dock renders
+  the display-subject summary and hides when the mounted child has none (never
+  the live summary).
 - Direct application L6: `test/runner-viewer-task-integration.test.ts` — the
   REAL `/tasks` → Enter entry mounts the child; the committed child snapshot
   carries `SessionStatus(childId)`'s model/preset/permission/cwd/context/
@@ -4338,8 +4344,11 @@ Explicitly NOT claimed by PR1:
   SessionStatus authority is qualified (adapter-level semantic + projection
   tests only); the Remote Task Center/child-viewer production composition is
   PR2's ownership, so no Remote child-viewer L6 is asserted here.
-- Remote Task Center, Remote Job viewer, Remote Plugin Manager, writer-held
-  caller recovery and the child durable-image read remain M3-5 PR2–PR6.
+- Remote Task Center and a user-reachable Remote child viewer (PR2), the Remote
+  Job viewer (PR3), writer-held caller recovery (PR5) and the child durable-image
+  read (PR6 or its owning viewer PR) remain. The Remote Plugin Manager is outside
+  PR1's scope and is CLOSED by the M3-5 PR4 section below — no longer a remaining
+  obligation.
 
 Remote child SessionStatus authority: qualified. Remote child viewer L6: not
 yet claimed — owner M3-5 PR2.
@@ -4347,7 +4356,7 @@ yet claimed — owner M3-5 PR2.
 ## M3-5 PR4 — Remote Plugin Manager closure (DONE)
 
 Scope note: this section records **M3-5 PR4 only**. M3-5 as a stage is
-**IN PROGRESS** and must not be marked DONE from this PR (PR1/PR2/PR3/PR5/PR6
+**IN PROGRESS** and must not be marked DONE from this PR (PR2/PR3/PR5/PR6
 remain).
 
 ### Implemented authority
