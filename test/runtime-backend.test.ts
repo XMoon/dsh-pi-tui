@@ -185,6 +185,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   }
   const jobObservation = {
     open: () => () => {},
+    stop: async () => ({ kind: 'requested' as const }),
   }
   const hostUserShell: import('../src/runtime/host-user-shell-port.ts').HostUserShellPort = {
     availability: { supported: true, policies: ['bypass'] },

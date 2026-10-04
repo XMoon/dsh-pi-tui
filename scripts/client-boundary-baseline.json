@@ -71,7 +71,8 @@
     "userQuestions"
   ],
   "runtime/direct/job-observation-direct.ts": [
-    "jobController"
+    "jobController",
+    "jobs"
   ],
   "runtime/direct/model-selection-direct.ts": [
     "import:dsh-agent"
