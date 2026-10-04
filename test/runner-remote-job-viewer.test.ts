@@ -151,10 +151,11 @@ interface StartedJob {
 }
 
 interface KillControl {
-  mode: 'real' | 'inert' | 'indeterminate' | 'held'
+  mode: 'real' | 'inert' | 'indeterminate' | 'held' | 'reject'
   /** How many times the official `IJobs.kill` was invoked through the port. */
   calls: number
   resolveHeld: (() => void) | undefined
+  rejectHeld: ((error: unknown) => void) | undefined
 }
 
 interface JobViewerFixture {
@@ -245,7 +246,7 @@ async function mountJobViewerFixture(life: TestLifecycle): Promise<JobViewerFixt
     }
   }
 
-  const killControl: KillControl = { mode: 'real', calls: 0, resolveHeld: undefined }
+  const killControl: KillControl = { mode: 'real', calls: 0, resolveHeld: undefined, rejectHeld: undefined }
   const realKill = clientJobs.kill
   clientJobs.kill = function (this: unknown, sessionId: string, jobId: string): Promise<RemoteJobKillResult> {
     killControl.calls += 1
@@ -253,9 +254,11 @@ async function mountJobViewerFixture(life: TestLifecycle): Promise<JobViewerFixt
     if (killControl.mode === 'indeterminate') {
       return Promise.resolve({ ok: false, error: { code: 'gateway/internal', message: 'injected indeterminate kill' } })
     }
+    if (killControl.mode === 'reject') return Promise.reject(new Error('injected carrier rejection'))
     if (killControl.mode === 'held') {
-      return new Promise<RemoteJobKillResult>(resolve => {
+      return new Promise<RemoteJobKillResult>((resolve, reject) => {
         killControl.resolveHeld = () => resolve({ ok: true, value: { outcome: 'requested' } })
+        killControl.rejectHeld = (error: unknown) => reject(error)
       })
     }
     return realKill.call(this, sessionId, jobId)
@@ -661,4 +664,108 @@ test('L6 §15 step 12 (teardown variant): disposing the surface with a Stop in f
     'a stop settlement resolving after surface disposal must not notify the disposed surface')
   assert.equal(fx.observeReleases(), fx.observeAcquires(),
     'surface disposal must release the mounted selected-Job observer')
+})
+
+test('L6 §14/J12: a same-Session Job A -> Job B viewer replacement (with a browser close/reopen) drops A\'s stale Stop SUCCESS settlement and keeps the current viewer\'s Stop working', async (t) => {
+  const life = testLifecycle(t)
+  const fx = await mountJobViewerFixture(life)
+  const { app, view } = fx
+  const jobA = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_ONE_LABEL, text: 'pr3-a retained line\n' })
+  const jobB = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_TWO_LABEL, text: 'pr3-b retained line\n' })
+  submit(app, '/tasks')
+  await openJobRow(fx, JOB_ONE_LABEL)
+  await waitFor('the A viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the A body arrived', () => view().includes('pr3-a retained line'), 20_000)
+  const key = stopKey(app)
+
+  // Dispatch A's Stop and HOLD its settlement in flight.
+  fx.killControl.mode = 'held'
+  fx.fixture.vt.sendInput(key)
+  await waitFor('A Stop is in flight', () => fx.killControl.resolveHeld !== undefined, 10_000)
+  const noticesBefore = fx.notices.length
+  const acquiresBefore = fx.observeAcquires()
+
+  // Close A, close the browser, reopen /tasks and mount Job B — all in the
+  // SAME main Session, so the ownership subject NEVER changes and only the
+  // viewer-instance fence can drop A's late settlement.
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the A viewer closed', () => app.overlayGraphState().handles === 1, 10_000)
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the browser closed', () => app.overlayGraphState().handles === 0, 10_000)
+  submit(app, '/tasks')
+  await waitFor('the browser re-opened', () => app.overlayGraphState().handles === 1, 10_000)
+  await openJobRow(fx, JOB_TWO_LABEL)
+  await waitFor('the B viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the B body arrived', () => view().includes('pr3-b retained line'), 20_000)
+  assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main',
+    'the same main Session owns the replacement viewer')
+  assert.equal(fx.observeAcquires(), acquiresBefore + 1,
+    'the replacement viewer acquires exactly one selected-Job observer')
+
+  // Release A's settlement: it must not notify or paint the replacement viewer.
+  fx.killControl.resolveHeld?.()
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.deepEqual(
+    fx.notices.slice(noticesBefore).filter(message => message.includes(JOB_ONE_LABEL)),
+    [],
+    'a Stop settlement for the CLOSED viewer A must not notify the replacement surface',
+  )
+  assert.match(view(), /pr3-b retained line/, 'the replacement viewer body must be unchanged')
+  assert.equal(view().includes('pr3-a retained line'), false, 'A output must not paint the replacement viewer')
+
+  // Positive control: the CURRENT viewer's Stop still notifies and converges.
+  fx.killControl.mode = 'real'
+  fx.fixture.vt.sendInput(key)
+  await waitFor('the current viewer B converged', () => fx.rosterStatus(jobB.id) === 'killed', 20_000)
+  assert.equal(
+    fx.notices.slice(noticesBefore).some(message => message.includes(`stopping ${JOB_TWO_LABEL}`)),
+    true,
+    'the current viewer settlement must still notify — the instance fence is not over-broad',
+  )
+  assert.equal(fx.rosterStatus(jobA.id), 'running', 'the retired A Job must be untouched')
+})
+
+test('L6 §14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR settlement, while the current viewer\'s stop ERROR still notifies', async (t) => {
+  const life = testLifecycle(t)
+  const fx = await mountJobViewerFixture(life)
+  const { app, view } = fx
+  startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_ONE_LABEL, text: 'pr3-a retained line\n' })
+  startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_TWO_LABEL, text: 'pr3-b retained line\n' })
+  submit(app, '/tasks')
+  await openJobRow(fx, JOB_ONE_LABEL)
+  await waitFor('the A viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the A body arrived', () => view().includes('pr3-a retained line'), 20_000)
+  const key = stopKey(app)
+
+  fx.killControl.mode = 'held'
+  fx.fixture.vt.sendInput(key)
+  await waitFor('A Stop is in flight', () => fx.killControl.rejectHeld !== undefined, 10_000)
+  const noticesBefore = fx.notices.length
+
+  // Same-Session replacement: A closes, the browser closes/reopens, B mounts.
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the A viewer closed', () => app.overlayGraphState().handles === 1, 10_000)
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the browser closed', () => app.overlayGraphState().handles === 0, 10_000)
+  submit(app, '/tasks')
+  await waitFor('the browser re-opened', () => app.overlayGraphState().handles === 1, 10_000)
+  await openJobRow(fx, JOB_TWO_LABEL)
+  await waitFor('the B viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the B body arrived', () => view().includes('pr3-b retained line'), 20_000)
+
+  // Reject A's held settlement: the retired viewer's ERROR notice must be dropped.
+  fx.killControl.rejectHeld?.(new Error('injected carrier rejection'))
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.deepEqual(
+    fx.notices.slice(noticesBefore).filter(message => message.includes(JOB_ONE_LABEL)),
+    [],
+    'a Stop ERROR settlement for the CLOSED viewer A must not notify the replacement surface',
+  )
+  assert.equal(view().includes('pr3-a retained line'), false, 'A output must not paint the replacement viewer')
+
+  // Positive control: the CURRENT viewer's stop ERROR still notifies.
+  fx.killControl.mode = 'reject'
+  fx.fixture.vt.sendInput(key)
+  await waitFor('the current viewer stop error notified', () =>
+    fx.notices.slice(noticesBefore).some(message => message.includes(`could not stop ${JOB_TWO_LABEL}`)), 10_000)
 })

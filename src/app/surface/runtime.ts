@@ -924,6 +924,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   /** The controller's attention subscription, released with the surface. */
   let questionAttentionDisposal: (() => void) | undefined
   let activeJobViewerClose: (() => void) | undefined
+  /**
+   * The CURRENT selected-Job viewer instance. The ownership SessionSubject is
+   * NOT viewer currentness: a Job viewer is an overlay that never changes the
+   * main owner/generation, so a Stop settlement that resolves after THIS
+   * viewer was closed or replaced must be dropped by instance identity.
+   */
+  let activeJobViewerToken: object | undefined
   let jobsEventsDispose: (() => void) | undefined
   // The surface-owned CATALOG refresh GATE (coalescing): every production Task
   // Center catalog invalidation funnels through `refreshAgents()`, which starts
@@ -1769,6 +1776,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // The destructive-intent fence is captured at OPEN time (like the browser
     // fence): a Stop confirmed later belongs to THIS viewer's subject.
     const viewerSubject = source.captureSubject()
+    // …and the viewer INSTANCE token is the currentness fence: the ownership
+    // subject alone stays current across a same-Session Job A -> Job B
+    // replacement, so a stale settlement is dropped by identity.
+    const viewerToken = {}
+    activeJobViewerToken = viewerToken
+    const viewerCurrent = (): boolean => activeJobViewerToken === viewerToken
     const fallbackText = row.jobKind === 'subagent'
       ? source.subagentJobViewHint(row.status, row.detail)
       : jobStatusHint(row.status, row.detail)
@@ -1795,11 +1808,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         ? fallbackText
         : `${fallbackText}\nlive observation unavailable: ${observationError}`
     }
-    // The Stop key and its hint share ONE live capability source: the latest
-    // OBSERVED status (the opening row before the first snapshot) AND the
-    // captured viewer subject still current.
+    // The Stop key and its hint share ONE live capability source: THIS viewer
+    // instance still current, the captured subject still current, and the
+    // latest OBSERVED status (the opening row before the first snapshot).
     const activeForStop = (): boolean =>
-      source.subjectMatches(viewerSubject) && isActiveJobStatus(observed?.status ?? row.status)
+      viewerCurrent()
+      && source.subjectMatches(viewerSubject)
+      && isActiveJobStatus(observed?.status ?? row.status)
     activeJobViewerClose = mounted().openOutputViewer({
       title,
       initial: fallbackText,
@@ -1812,12 +1827,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           diag: taskDiag(),
           sessionId: () => ownerSessionId,
           onResult: (outcome) => {
-            if (isCleanedUp() || !source.subjectMatches(viewerSubject)) return
+            if (isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
             const notice = jobStopNotice(outcome, row.label)
             mounted().notify(notice.message, notice.level)
           },
           onError: (error) => {
-            if (isCleanedUp() || !source.subjectMatches(viewerSubject)) return
+            if (isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
             mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
           },
         })
@@ -1829,6 +1844,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // to the parent browser, not to the editor.
       closeHint: 'back',
       onClose: () => {
+        // Invalidate THIS viewer's instance fence BEFORE releasing, so a Stop
+        // settlement still in flight can never notify a replacement surface.
+        if (activeJobViewerToken === viewerToken) activeJobViewerToken = undefined
         // Closing the viewer always releases the observer (Esc, the parent
         // browser closing, a session transition, or surface teardown).
         closeObserver()
