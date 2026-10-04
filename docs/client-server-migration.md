@@ -4251,7 +4251,8 @@ What landed:
   `permission`/`turns`/`steps`, and the activity `todoCount`/`todoSummary` keep
   describing the LIVE session. Those live fields also stay CURRENT while a
   child is displayed: the same display-subject commit merges the live session's
-  fresh facts into the live slot without re-projecting the store. The display
+  fresh facts into the live slot without re-projecting the store, and every
+  durable LIVE-session event triggers that refresh while a viewer is mounted. The display
   subject is published beside it as the optional `session.displaySubject`
   (identity plus the child's own status/counters/todo facts), present only while
   a child viewer is mounted; the first-party todo dock item renders its
@@ -4269,7 +4270,12 @@ What landed:
   the `surfaceOp` message/tool-result family, so any hand-written list drifts
   from the installed DSH. A lone `session/title`, `todo/write`,
   `model/selection` or `agent-preset/selected` between turns now reaches the
-  display subject immediately (no next-step boundary required).
+  display subject immediately (no next-step boundary required). The LIVE sibling
+  is refreshed by the same rule: while a child viewer is mounted, every durable
+  LIVE-session event refreshes the status, so the extension's v2 live-session
+  snapshot cannot lag behind the live fold (the refresh writes the child's store
+  sections — content-equal, no publish — the presentation and the live legacy
+  slot, never the live sections into the child store).
 - **Remote main permission retention is subject-scoped.** The Remote branch's
   "an unavailable projection keeps its last value" rule now retains only a
   value the PREVIOUS committed snapshot carried for the SAME (main) subject —
