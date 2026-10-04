@@ -782,6 +782,24 @@ test('M3-5 PR1: the extension snapshot keeps v2 live-session semantics and publi
   assert.equal(advanced.session.displaySubject?.steps, 7)
   assert.equal(advanced.session.displaySubject?.model, 'deepseek/child-a-model')
 
+  // A same-child republish that CLEARS the optional child facts (here: the model
+  // and permission projections become unavailable) must clear them from the
+  // published projection — a deletion-only change, never a stale reuse
+  // (M3-5 PR1 review R8).
+  enterChildDisplaySubject(app, {
+    id: 'child-a', label: 'a', mode: 'continuable', activity: 'running',
+    cwd: '/child-a', turns: 5, steps: 7,
+    title: 'child-a title',
+    todos: [{ content: 'child-a todo', status: 'in_progress' }],
+  })
+  await settle()
+  await vt.waitForRender()
+  const clearedSubject = host.state().session.displaySubject
+  assert.equal(clearedSubject?.sessionId, 'child-a')
+  assert.equal(clearedSubject?.model, undefined, 'the unavailable child model must be cleared')
+  assert.equal(clearedSubject?.permission, undefined, 'the unavailable child permission must be cleared')
+  assert.equal(clearedSubject?.todoCount, 1, 'the required child facts stay')
+
   // The MAIN todo list keeps updating behind the child: the LIVE fields follow
   // it, the displaySubject does not.
   app.setTodoSummary([{ content: 'parent todo v2', status: 'pending' }])
