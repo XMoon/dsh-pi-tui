@@ -8,8 +8,17 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-/** Current git branch from the nearest .git/HEAD, or empty outside a checkout. */
+/**
+ * Current git branch from the nearest .git/HEAD, or empty outside a checkout.
+ *
+ * An EMPTY cwd means "no known directory" and always answers empty: `join('',
+ * '.git', 'HEAD')` is a RELATIVE path, which `readFileSync` would resolve
+ * against `process.cwd()` — the TUI's own checkout would then speak for a
+ * subject whose workspace is unknown (an unavailable child SessionStatus, a
+ * Remote live session without a cwd fact).
+ */
 export function gitBranch(cwd: string): string {
+  if (cwd === '') return ''
   let dir = cwd
   for (let depth = 0; depth < 10; depth += 1) {
     try {
