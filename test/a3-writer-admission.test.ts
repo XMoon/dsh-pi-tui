@@ -180,6 +180,103 @@ test('a stale scope refused at admission takes the distinct stale path and runs 
   ], 'a stale capture takes the stale path — never the transition refusal')
 })
 
+test('PR5: a proven prompt rejection settles structurally inside the writer — restore, ack code, guidance, no throw', async () => {
+  // The ordinary prompt must consume `WriteOutcome.rejected` at the submission
+  // settlement owner instead of throwing its message: the reserved-submit
+  // wrapper then never performs its generic restore and `runOwned.onError`
+  // never emits a generic "submission failed" notice.
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({
+      kind: 'rejected' as const,
+      error: {
+        code: 'session/writer-held',
+        message: SESSION_WRITER_HELD_GUIDANCE,
+        details: { sessionId: 's1' },
+      },
+    }),
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION)
+  assert.deepEqual(calls, [
+    'dispatch',
+    'merge',
+    'settleLocal',
+    'ack:session write rejected: session/writer-held',
+    `notify:error:${SESSION_WRITER_HELD_GUIDANCE}`,
+  ], 'the rejection restores intent, settles echo + code-bearing ack, shows the guidance and returns')
+  assert.ok(calls.every(call => call !== 'consume'),
+    'a refused write never consumes the referenced drafts')
+  assert.ok(calls.every(call => !call.includes('try again') && !call.includes('submission failed')),
+    'a proven pre-commit refusal is never reported as a stale retry or a generic failure')
+})
+
+test('PR5: the admitted prompt writer owns the settlement interval — a transition waits through rejection settlement', async () => {
+  // DECISION D3: no post-dispatch currentness fence exists because the writer
+  // barrier IS the currentness authority for that interval. Prove it with the
+  // real `SessionRuntime.withWriter` + `SessionOperationBarrier`.
+  const { runtime: sessionRuntime, barrier } = bind(() => true)
+  let resolvePrompt!: (outcome: Awaited<ReturnType<SubmissionRuntimeSurface['prompt']>>) => void
+  const promptGate = new Promise<Awaited<ReturnType<SubmissionRuntimeSurface['prompt']>>>(resolve => {
+    resolvePrompt = resolve
+  })
+  const { surface, calls } = recordingSurface({
+    withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
+    prepareMessage: async () => undefined,
+    prompt: () => promptGate,
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  const pending = runtime.submitPrompt(SUBMISSION)
+  await flush()
+  assert.equal(barrier.activeWriters, 1, 'the prompt writer is admitted across the unresolved outcome')
+  let transitionDone = false
+  const transition = barrier.runTransition(async () => { transitionDone = true })
+  await flush()
+  assert.equal(transitionDone, false, 'a transition cannot replace the Session while the writer is held')
+  resolvePrompt({
+    kind: 'rejected',
+    error: { code: 'session/writer-held', message: SESSION_WRITER_HELD_GUIDANCE, details: { sessionId: 's1' } },
+  })
+  await pending
+  assert.deepEqual(calls.slice(-4), [
+    'merge',
+    'settleLocal',
+    'ack:session write rejected: session/writer-held',
+    `notify:error:${SESSION_WRITER_HELD_GUIDANCE}`,
+  ], 'the caller-side settlement completed before the writer released')
+  await transition
+  assert.equal(transitionDone, true, 'the transition may complete only after the settlement finished')
+  assert.equal(barrier.activeWriters, 0)
+})
+
+test('PR5 negative control: an indeterminate prompt result never restores the draft', async () => {
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({
+      kind: 'indeterminate' as const,
+      error: { code: 'session/write-indeterminate', message: 'the transport failed after dispatch' },
+    }),
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION)
+  assert.deepEqual(calls, [
+    'dispatch',
+    'settleLocal',
+    'ack:session write result indeterminate',
+    'notify:error:session write result is indeterminate — do not retry automatically',
+  ], 'an unproven post-dispatch result is not restored and not reclassified as a rejection')
+})
+
+test('PR5 negative control: an unsupported prompt result keeps its generic failure path', async () => {
+  const { surface } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({ kind: 'unsupported' as const, reason: 'prompt is not supported here' }),
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await assert.rejects(runtime.submitPrompt(SUBMISSION), /prompt is not supported here/,
+    'only a proven rejection is settled locally; any other outcome still fails fast')
+})
+
 test('a committed transition settles the queue recall; a failed one restores it', () => {
   const { surface } = recordingSurface({})
   const runtime = bindSubmissionRuntime({ surface })
