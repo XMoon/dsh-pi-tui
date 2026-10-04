@@ -214,22 +214,33 @@ test('PR5: a proven prompt rejection settles structurally inside the writer — 
 test('PR5: the admitted prompt writer owns the settlement interval — a transition waits through rejection settlement', async () => {
   // DECISION D3: no post-dispatch currentness fence exists because the writer
   // barrier IS the currentness authority for that interval. Prove it with the
-  // real `SessionRuntime.withWriter` + `SessionOperationBarrier`.
+  // real `SessionRuntime.withWriter` + `SessionOperationBarrier`: EVERY
+  // caller-side settlement step must run while the admitted writer still holds
+  // the barrier (`activeWriters === 1`) and BEFORE the waiting transition runs.
+  // A broken implementation that released the writer as soon as the prompt
+  // outcome resolved and only then restored/acked/notified would fail here.
   const { runtime: sessionRuntime, barrier } = bind(() => true)
   let resolvePrompt!: (outcome: Awaited<ReturnType<SubmissionRuntimeSurface['prompt']>>) => void
   const promptGate = new Promise<Awaited<ReturnType<SubmissionRuntimeSurface['prompt']>>>(resolve => {
     resolvePrompt = resolve
   })
+  let transitionDone = false
+  /** One settlement step's ordering facts: writer occupancy + transition state. */
+  const settlementFacts: string[] = []
+  const fact = (label: string): string => `${label}|writers=${barrier.activeWriters}|transitionDone=${transitionDone}`
   const { surface, calls } = recordingSurface({
     withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
     prepareMessage: async () => undefined,
     prompt: () => promptGate,
+    mergeDraftIntoEditor: () => { settlementFacts.push(fact('merge')); calls.push('merge'); return true },
+    settleLocalSubmission: () => { settlementFacts.push(fact('settleLocal')); calls.push('settleLocal') },
+    settleSubmitAck: (reason) => { settlementFacts.push(fact('ack')); calls.push(`ack:${reason}`) },
+    notify: (message, kind) => { settlementFacts.push(fact('notify')); calls.push(`notify:${kind}:${message}`) },
   })
   const runtime = bindSubmissionRuntime({ surface })
   const pending = runtime.submitPrompt(SUBMISSION)
   await flush()
   assert.equal(barrier.activeWriters, 1, 'the prompt writer is admitted across the unresolved outcome')
-  let transitionDone = false
   const transition = barrier.runTransition(async () => { transitionDone = true })
   await flush()
   assert.equal(transitionDone, false, 'a transition cannot replace the Session while the writer is held')
@@ -244,6 +255,12 @@ test('PR5: the admitted prompt writer owns the settlement interval — a transit
     'ack:session write rejected: session/writer-held',
     `notify:error:${SESSION_WRITER_HELD_GUIDANCE}`,
   ], 'the caller-side settlement completed before the writer released')
+  assert.deepEqual(settlementFacts, [
+    'merge|writers=1|transitionDone=false',
+    'settleLocal|writers=1|transitionDone=false',
+    'ack|writers=1|transitionDone=false',
+    'notify|writers=1|transitionDone=false',
+  ], 'every settlement step ran inside the held writer, before the waiting transition could run')
   await transition
   assert.equal(transitionDone, true, 'the transition may complete only after the settlement finished')
   assert.equal(barrier.activeWriters, 0)
