@@ -221,6 +221,9 @@ function stubRunner(options: {
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   /** Defaults to a pass-through capture (the test themes use id === name). */
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
+  /** The runner's displayed/current Session preset read (`/preset status`, the
+   *  picker's "← current" mark). Absent = undefined (no live subject). */
+  currentPreset?: () => string | undefined
   /** Replace the preset catalog sub-domain with a scripted port (the /preset
    *  handler's only business authority). Used by the command-settlement
    *  family to script exact `WriteOutcome`s without a Host. */
@@ -310,7 +313,7 @@ function stubRunner(options: {
       await steps.prepare?.()
       return { ok: true, next: await steps.create() }
     },
-    currentPreset: () => undefined,
+    currentPreset: () => options.currentPreset?.(),
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
     get effectivePresetId() { return pending.value ?? options.effectivePresetId },
@@ -411,6 +414,8 @@ function setup(options: {
   noPresets?: boolean
   /** Replace the preset catalog sub-domain with a scripted port. */
   presetsPort?: PresetCatalog
+  /** The runner's displayed/current Session preset read. */
+  currentPreset?: () => string | undefined
   width?: number
   /** Viewport height; a taller screen keeps the whole `/help` list on one page. */
   height?: number
@@ -457,6 +462,7 @@ function setup(options: {
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
     presetsPort: options.presetsPort,
+    currentPreset: options.currentPreset,
   })
   const surface = registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'preset')
@@ -1359,12 +1365,21 @@ async function settlePresetThroughOuterOwner(
   readonly handlerText: string
   readonly selects: number
   readonly view: string
+  /** The runner's displayed/current Session preset AFTER the settlement. */
+  readonly displayedPreset: string | undefined
+  /** The runner's run-local pending preset AFTER the settlement. */
+  readonly pendingPreset: string | undefined
 }> {
   const commandId = 'cmd-preset-exec'
   const selects: unknown[] = []
+  // The authoritative displayed/current preset baseline the command reads
+  // (`/preset status`, the picker's "← current" mark). It must never become the
+  // requested alternate on a refused or indeterminate switch.
+  const displayed = { preset: 'standard' as string | undefined }
   const t = setup({
     agent: fakeAgent('s1', []),
     width: 200,
+    currentPreset: () => displayed.preset,
     presetsPort: {
       available: () => true,
       roster: async () => ({ presets: [{ id: 'standard' }, { id: 'alternate' }], defaultId: 'standard' }),
@@ -1459,6 +1474,8 @@ async function settlePresetThroughOuterOwner(
     handlerText,
     selects: selects.length,
     view: await t.view(),
+    displayedPreset: displayed.preset,
+    pendingPreset: t.pending.value,
   }
 }
 
@@ -1472,6 +1489,12 @@ test('PR5: a TRUE indeterminate /preset <id> does not restore the typed command 
   assert.equal(result.fallbacks, 0, 'no agent-facing fallback prompt is launched')
   assert.equal(result.selects, 1, 'the switch dispatched exactly once (no implicit retry)')
   assert.match(result.view, /do not retry/)
+  // AC4: the displayed/current preset stays the authoritative Session value and
+  // no run-local retry-ready preset intent is staged.
+  assert.equal(result.displayedPreset, 'standard',
+    'an indeterminate switch must not repaint the displayed preset as the requested alternate')
+  assert.equal(result.pendingPreset, undefined,
+    'an indeterminate switch must not stage a run-local pending preset')
 })
 
 test('PR5: a KNOWN writer-held /preset <id> rejection restores the typed command at the outer settlement owner', async () => {
@@ -1484,6 +1507,12 @@ test('PR5: a KNOWN writer-held /preset <id> rejection restores the typed command
   assert.equal(result.fallbacks, 0, 'a restored command is never additionally submitted as a prompt')
   assert.equal(result.selects, 1, 'the refused switch is not retried')
   assert.match(result.view, /already in use/, 'the centralized writer-held guidance is rendered')
+  // AC4 negative control: the same family also proves a KNOWN rejection leaves
+  // the authoritative/displayed preset exactly where it was.
+  assert.equal(result.displayedPreset, 'standard',
+    'a refused switch must not repaint the displayed preset as the requested alternate')
+  assert.equal(result.pendingPreset, undefined,
+    'a refused switch must not stage a run-local pending preset')
 })
 
 test('/preset commits a Host-blank selection even when the transcript has a turn', async () => {

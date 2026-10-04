@@ -1586,6 +1586,11 @@ test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title a
     getDraft(): string
   }
   const viewport = (): string => fixture.vt.getViewport().join('')
+  /** The displayed/current Session preset authority the runner reads on Remote
+   *  (`SessionReader.sessionStatus(id).preset` — the same read `/preset status`
+   *  and the picker's "← current" mark consume). */
+  const displayedPreset = (sessionId: string): string | undefined =>
+    fixture.aggregate.presentation.sessionFacts.sessionStatus(sessionId)?.preset
 
   // ---- E2: ordinary prompt source -> decision -> sink --------------------
   editor.setDraft(promptText)
@@ -1613,6 +1618,14 @@ test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title a
     'the refused rename mutated no durable title state')
 
   // ---- E4: /preset <id> (secondary surface) ------------------------------
+  // The displayed/current preset baseline BEFORE the refused switch (an
+  // intentionally ABSENT value is a real baseline here: the externally created
+  // Session carries no preset row, so the guard is "it never becomes the
+  // requested alternate"; the durable-log assertion below is the authoritative
+  // proof that the switch never committed).
+  const heldDisplayBefore = displayedPreset(heldId)
+  assert.notEqual(heldDisplayBefore, altPreset,
+    'the held Session must not already display the requested alternate preset')
   editor.setDraft(`/preset ${altPreset}`)
   editor.submitDraft()
   await waitFor('the held /preset restores the command with the guidance', () =>
@@ -1621,21 +1634,27 @@ test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title a
     'no optimistic preset selection on a refused switch')
   assert.deepEqual(await readDurableEventTypes(host, heldId), ['turn/start', 'turn/end'],
     'the refused preset switch appended no agent-preset/selected')
+  assert.equal(displayedPreset(heldId), heldDisplayBefore,
+    'the refused switch did not repaint the displayed Session preset')
 
   // ---- D4: explicit recovery positive control ----------------------------
   await holder.kill()
   editor.setDraft('/title recovered-title')
   editor.submitDraft()
-  await waitFor('the explicit retry commits once the holder is gone', () => {
-    const session = host.ctx.sessions.get(SessionId(heldId)) as unknown as {
-      snapshotEvents(): Array<{ type: string }>
-    } | undefined
-    return (session?.snapshotEvents().length ?? 0) > 2
-  }, 40_000)
-  assert.equal(editor.getDraft(), '', 'a committed /title consumes the typed command')
-  const recovered = await readDurableEventTypes(host, heldId)
-  assert.ok(recovered.length > 2,
-    `the explicit retry appended durable title state after the lease was released: ${JSON.stringify(recovered)}`)
+  const recoveredTitleRow = (): { readonly type: string; readonly data: unknown } | undefined =>
+    (host.ctx.sessions.get(SessionId(heldId)) as unknown as {
+      snapshotEvents(): Array<{ readonly type: string; readonly data: unknown }>
+    } | undefined)?.snapshotEvents().find(event => event.type === 'session/title'
+      && (event.data as { readonly title?: unknown } | undefined)?.title === 'recovered-title')
+  await waitFor('the explicit retry commits the exact recovered title', () =>
+    recoveredTitleRow() !== undefined, 40_000)
+  assert.equal((recoveredTitleRow()!.data as { readonly source?: { readonly kind?: string } }).source?.kind, 'user',
+    'the committed title is the real user rename, never a generated one')
+  assert.notEqual(displayedPreset(heldId), altPreset,
+    'the explicit recovery must not surface the refused alternate preset')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(editor.getDraft(), '',
+    'the settled successful /title command is consumed, not restored')
 })
 
 test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer settlement and never restored', async (t) => {
@@ -1648,7 +1667,8 @@ test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer 
   const life = testLifecycle(t)
   const mainId = 'm3-5-pr5-preset-indeterminate'
   const hostPreset = 'm3-4-pr2-preset'
-  const altPreset = 'm3-5-pr5-alt-preset'
+  const committedPreset = 'm3-5-pr5-preset-a'
+  const altPreset = 'm3-5-pr5-preset-b'
   const host = await mountRemotePresentationHost(life, hostPreset)
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const fixture = await mountRemoteRunner(life, {
@@ -1656,13 +1676,36 @@ test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer 
     resumeSessionId: mainId,
     host,
     productionSerializer: true,
-    extraPresetIds: [altPreset],
+    extraPresetIds: [committedPreset, altPreset],
   })
   const editor = fixture.runnerApp() as unknown as {
     setDraft(text: string): void
     submitDraft(): void
     getDraft(): string
   }
+  const sessionEvents = (): Array<{ readonly type: string }> =>
+    (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ readonly type: string }>
+    }).snapshotEvents()
+  /** The displayed/current Session preset authority (`/preset status`, the
+   *  picker's "← current" mark). */
+  const displayedPreset = (): string | undefined =>
+    fixture.aggregate.presentation.sessionFacts.sessionStatus(mainId)?.preset
+
+  // A REAL, committed switch first: it gives the displayed/current preset a
+  // DEFINED authoritative baseline (the guard below is then non-trivial).
+  editor.setDraft(`/preset ${committedPreset}`)
+  editor.submitDraft()
+  await waitFor('the real preset switch commits', () => displayedPreset() === committedPreset, 40_000)
+  const baselinePreset = displayedPreset()
+  assert.equal(baselinePreset, committedPreset,
+    'the live Session displays its authoritative committed preset before the indeterminate switch')
+  const commitsBefore = sessionEvents().filter(event => event.type === 'agent-preset/selected').length
+  assert.equal(commitsBefore, 1, 'the real baseline switch committed exactly one durable selection')
+
+  // Only now replace the Remote preset operation result with a TRUE
+  // indeterminate one: the fact under test is the application draft
+  // disposition, not Host writer ownership.
   const presets = fixture.aggregate.selected.backend.catalog.presets
   let dispatches = 0
   Object.assign(fixture.aggregate.selected.backend.catalog, {
@@ -1693,9 +1736,10 @@ test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer 
     'a true indeterminate result must NOT restore the typed command as retry-ready intent')
   assert.ok(!fixture.vt.getViewport().join('').includes('preset switched to'),
     'no optimistic preset selection is presented')
-  const sessionTypes = (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
-    snapshotEvents(): Array<{ type: string }>
-  }).snapshotEvents().map(event => event.type)
-  assert.ok(!sessionTypes.includes('agent-preset/selected'),
+  assert.equal(displayedPreset(), baselinePreset,
+    'an indeterminate switch leaves the displayed/current Session preset at its authoritative value')
+  assert.notEqual(displayedPreset(), altPreset,
+    'the requested alternate preset must never become the displayed Session preset')
+  assert.equal(sessionEvents().filter(event => event.type === 'agent-preset/selected').length, commitsBefore,
     'an indeterminate switch commits no durable preset selection')
 })

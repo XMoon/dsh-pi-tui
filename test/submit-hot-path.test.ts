@@ -1108,7 +1108,16 @@ test('a failed submit clears the pending row and surfaces the error', async (t) 
   }
   const settled = vt.getViewport().join('\n')
   assert.ok(!settled.includes('Submitting…'), `the failed submit must clear the ack row:\n${settled}`)
-  assert.ok(settled.includes('submission failed'), `the failure must be surfaced:\n${settled}`)
+  // PR5 slice A: a PROVEN rejection (`session/agent-busy` for a refused Direct
+  // prompt admission) is settled structurally by the submission owner — the
+  // refusal's OWN message is surfaced, never the generic "submission failed"
+  // wrapper. The underlying reason stays in the structured `details`.
+  assert.ok(settled.includes('prompt rejected'),
+    `the refusal's own message must be surfaced:\n${settled}`)
+  assert.ok(!settled.includes('submission failed'),
+    'a proven rejection never takes the generic submission-failure path')
+  assert.equal(mounted.app.getDraft(), 'hello boom', 'the refused prompt restores the submitted draft')
+  assert.equal(harness.host.followedUp.length, 0, 'nothing was written')
 })
 
 test('a shell close and throttled tail flush after disposal are inert', async (t) => {
@@ -1222,8 +1231,8 @@ test('a cancellation-shaped prompt admission failure maps to agent-busy rejectio
   const settled = vt.getViewport().join('\n')
   assert.ok(!settled.includes('Submitting…'),
     `the cancelled submit must clear the ack row (never stuck pending):\n${settled}`)
-  assert.ok(settled.includes('submission failed'),
-    'a Direct prompt admission failure must surface as a rejection')
+  assert.ok(!settled.includes('submission failed'),
+    'a proven refusal is settled structurally, never via the generic submission-failure path')
   assert.ok(settled.includes('prompt rejected'),
     'the official agent-busy rejection message must be surfaced')
   assert.equal(mounted.app.getDraft(), 'hello cancel', 'a rejected prompt admission restores the submitted draft')
