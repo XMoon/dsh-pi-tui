@@ -4249,19 +4249,27 @@ What landed:
   session's identity and mode" — are UNCHANGED: a viewer transition never
   re-points `sessionId`/`workspaceRoot`/`title`/`model`/`cwd`/`branch`/
   `permission`/`turns`/`steps`, and the activity `todoCount`/`todoSummary` keep
-  describing the LIVE session. The display subject is published beside it as
-  the optional `session.displaySubject` (identity + the Session-owned status of
-  the viewed child), present only while a child viewer is mounted; the
-  first-party todo dock item prefers its `todoSummary`, so the chrome follows
-  the subject. Additive only — no version bump, no silently changed field. See
-  the explicit decision note in `docs/extension-api.md`.
+  describing the LIVE session. Those live fields also stay CURRENT while a
+  child is displayed: the same display-subject commit merges the live session's
+  fresh facts into the live slot without re-projecting the store. The display
+  subject is published beside it as the optional `session.displaySubject`
+  (identity plus the child's own status/counters/todo facts), present only while
+  a child viewer is mounted; the first-party todo dock item renders its
+  `todoSummary` when the projection exists and hides when the mounted child has
+  none (never falling back to the live summary). Additive only — no version
+  bump, no silently changed field. See the explicit decision note in
+  `docs/extension-api.md`.
 - **Display-subject invalidation.** The child's Session-owned facts come from
-  the official projections, so the re-read follows every durable event family
-  that can move them (`invalidatesDisplaySubjectStatus` in
-  `app/surface/runtime.ts`): the turn/step boundaries, `todo/write`,
-  `session/title`, `goal/change`, the permission knobs and the child's own
-  `compaction/end`. A lone `session/title` or `todo/write` between turns now
-  reaches the display subject immediately (no next-step boundary required).
+  the official projections, so the viewer branch re-reads them on EVERY durable
+  event of the viewed child (`app/surface/runtime.ts`); streaming deltas never
+  reach that path. A family enumeration was tried and rejected: the official
+  reducers move `modelSelection` on `model/selection` + `request/header`,
+  `agentPreset` on `agent-preset/selected`, and the context/token projections on
+  `request/context`, usage-bearing `assistant/message`/`assistant/attempt` and
+  the `surfaceOp` message/tool-result family, so any hand-written list drifts
+  from the installed DSH. A lone `session/title`, `todo/write`,
+  `model/selection` or `agent-preset/selected` between turns now reaches the
+  display subject immediately (no next-step boundary required).
 - **Remote main permission retention is subject-scoped.** The Remote branch's
   "an unavailable projection keeps its last value" rule now retains only a
   value the PREVIOUS committed snapshot carried for the SAME (main) subject —

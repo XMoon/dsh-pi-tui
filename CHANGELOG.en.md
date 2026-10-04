@@ -40,28 +40,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `space toggle · ↵ continue/review`, with the last question and the review
   page distinguishing continue/review/submit.
 
-- The subagent viewer is now a real display subject: while a viewed child
-  session is on screen, its model/preset/permission, context pressure and
-  window, cumulative token usage, todos and working directory all come from
-  that child session's own session state — never from the parent session and
-  never from the child's local stats fold. The parent's corresponding facts
-  no longer appear on the child surface, and leaving the viewer restores the
-  parent state (including any todo written while viewing) immediately. The
-  extension session snapshot follows the same display subject: `sessionId`/
-  `workspaceRoot`/`title` and `model`/`cwd`/`permission`/`turns`/`steps` plus
-  the activity `todoCount`/`todoSummary` always describe one subject, with
-  While a child is viewed, the main session's identity head card (model /
-  working directory / session id) is no longer shown, and the main session's
-  latest identity returns immediately on exit. The child's own todo / title /
-  goal / permission / context facts — "the subject currently on screen" — are
-  published through the new optional `session.displaySubject` projection, which
-  exists only while a child viewer is mounted; the released extension
-  `SessionSnapshot` semantics (the live session's identity/status, and the
-  activity todo facts) are unchanged, so entering or leaving a viewer never makes
-  a plugin observe a session switch, and the first-party todo dock item renders
-  `displaySubject`'s summary. A child's todo / title / goal / permission now
-  update the moment their event lands, without waiting for a turn/step
-  boundary.
+- The subagent viewer is now a real display subject: while a viewed child session
+  is on screen, its model/preset/permission, context pressure and window,
+  cumulative token usage, todos and working directory all come from that child
+  session's own session state — never from the parent session and never from the
+  child's local stats fold. Those child facts update the moment their session
+  event lands, without waiting for a turn/step boundary. The parent's
+  corresponding facts no longer appear on the child surface, and while a child is
+  viewed the main session's identity head card (model / working directory /
+  session id) is hidden, returning with the main session's latest identity and
+  status (including any todo written while viewing) on exit. The released
+  extension snapshot semantics are unchanged: the session snapshot and the
+  activity todo facts still describe only the **live/main session**, so entering
+  or leaving a viewer never makes a plugin observe a session switch, and the live
+  model/permission/turns/steps keep updating while a child is displayed. The
+  session the user is currently looking at is published through the new optional
+  `session.displaySubject` projection (its identity — session id, title,
+  workspace root — plus its own model, permission, cwd, branch, turn/step
+  counters and todo count/summary, present only while a child viewer is
+  mounted); the
+  first-party todo dock item renders that projection when it exists and hides
+  when the mounted child has no todo to show — never falling back to the parent's
+  summary.
 
 ### Fixed
 
