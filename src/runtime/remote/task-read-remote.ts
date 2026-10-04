@@ -280,8 +280,10 @@ export class RemoteTaskReader implements TaskReader {
       const { entry, parentId, depth } = position
       if (visited.has(entry.id)) continue
       visited.add(entry.id)
-      // The child's OWN catalog settles `hasChildren` and drives recursion;
-      // its failure stops only this branch (siblings survive).
+      // The child's OWN catalog settles `hasChildren` and drives recursion. Its
+      // failure stops only this branch for the foreign-failure shapes; a
+      // SubagentError-class failure (see the catch below) aborts the traversal,
+      // exactly like upstream `listDescendants`.
       let children: readonly RemoteSubagentCatalogEntry[] | undefined
       try {
         children = await this.readCatalog(entry.id, capturedGeneration, epoch, signal)
@@ -289,16 +291,29 @@ export class RemoteTaskReader implements TaskReader {
         // A caller cancellation propagates; it is never a branch diagnostic.
         signal?.throwIfAborted()
         if (!this.isCurrent(capturedGeneration, epoch)) return undefined
-        // RELEASED-WIRE TAXONOMY LIMIT (recorded, not papered over): the official
-        // `session.projections` Host handler collapses a corrupt /
-        // source-conflicting SessionQuery failure into `gateway/internal`, and the
-        // rc.2 wire carries only the fixed `RemoteErrorCode` union — it does NOT
-        // carry the legacy `SESSION_QUERY_*` taxonomy. A real branch failure
-        // therefore presents as `unavailable`; `corrupt` is only reachable when the
-        // upstream reason survives structurally (in-process fixtures, or a future
-        // wire that preserves it). Never infer corrupt from messages, causes, child
-        // state or log shape, and never widen the vocabulary.
         const code = error instanceof Error && 'code' in error ? error.code : undefined
+        // BRANCH-LOCAL DEGRADATION (M3-5 PR2 owner ruling): every shape of "this
+        // child's catalog cannot be read" — the missing-Session `ready` baseline
+        // (see `readCatalog`), a `session/projections-unavailable` projection
+        // failure, and any foreign wire failure — degrades to a branch-scoped
+        // diagnostic whose siblings stay visible. The released Client/Web catalog
+        // contract keeps an unreadable/absent child catalog EXPANDABLE and
+        // retryable and only treats `ready + empty` as a known leaf, so the TUI
+        // follows the branch-isolation product semantic instead of reproducing the
+        // current Host `listDescendants()` propagation of
+        // `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` (a whole-traversal abort) —
+        // that rethrow is a Host-implementation/contract tension, not the shared
+        // semantic. Caller cancellation is the ONE exception (handled above).
+        //
+        // CARRIER LIMIT (recorded, not papered over): the rc.2 Client collapses the
+        // Host `null` (missing Session) and a non-null baseline that omits
+        // `subagentCatalog` into the SAME `ready + key absent` state, so exact
+        // failure-scope parity with the Host rethrow is NOT representable, and its
+        // provenance MUST NOT be inferred from Session-list membership, catalog
+        // presence, messages, logs or any other authority. Corrupt /
+        // source-conflicting SessionQuery failures likewise collapse to
+        // `gateway/internal`, so `corrupt` is never inferred from shape: the
+        // representable answer is `unavailable`.
         descendants.push(detachDiagnostic(
           entry.id,
           code === 'SESSION_QUERY_CORRUPT_SESSION' || code === 'SESSION_QUERY_SOURCE_CONFLICT'

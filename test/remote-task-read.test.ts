@@ -362,14 +362,75 @@ test('F4 regression: ready without the catalog on a BRANCH becomes an unavailabl
   ], 'a ghost branch must never present as a normal inactive child with hasChildren:false')
 })
 
+test('F4d/OWNER-RULED: a BRANCH whose projections are unavailable degrades BRANCH-LOCALLY (siblings survive)', async () => {
+  const generations = createSnapshotGenerationHarness()
+  // The official `session.projections` handler answers
+  // `session/projections-unavailable` when the Session is readable but its
+  // projections are not — Direct's `listChildren`
+  // SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE, which the CURRENT Host
+  // `listDescendants` re-throws (a whole-traversal abort). That propagation is a
+  // Host-implementation/contract tension, NOT the shared semantic: the released
+  // Client/Web catalog contract keeps an unreadable child catalog expandable and
+  // retryable and only treats `ready + empty` as a known leaf. The plan owner
+  // RULED (F4d) that the Remote adapter follows the branch-isolation product
+  // semantic: a branch-local `unavailable` diagnostic, siblings survive. Exact
+  // failure-scope parity is NOT representable on rc.2 (recorded carrier
+  // limitation) — do not "fix" this back into a whole-traversal abort.
+  const wireFailure = Object.assign(new Error('Session projections are unavailable'), {
+    code: 'session/projections-unavailable',
+  })
+  const client = sessionsFixture({
+    byId: { parent: { running: false } },
+    projections: {
+      parent: { entries: [catalogEntry('child-x'), catalogEntry('child-ok')], state: 'ready' },
+      'child-x': { entries: [], state: 'error', error: wireFailure },
+      'child-ok': { entries: [], state: 'ready' },
+    },
+  })
+  const reader = new RemoteTaskReader(client, jobsFixture({}), generations.source)
+  const snapshot = await reader.readDescendants('parent')
+  assert.deepEqual(snapshot?.descendants, [
+    { kind: 'diagnostic', id: 'child-x', reason: 'unavailable', parentId: 'parent', depth: 1 },
+    child('child-ok', 'parent', 1, { label: 'child child-ok' }),
+  ], 'the unreadable branch degrades locally and its sibling stays visible')
+})
+
+test('F4d: a `ready` baseline without the catalog stays branch-scoped for BOTH provenances (carrier cannot distinguish them)', async () => {
+  const generations = createSnapshotGenerationHarness()
+  // The official handler returns NULL for a missing Session and a non-null
+  // `{asOfSeq, values}` for a readable Session whose baseline omits the catalog;
+  // the rc.2 Client collapses both into `ready` + key absent (it never exposes the
+  // provenance), so the adapter cannot tell them apart and MUST NOT guess from
+  // Session-list membership/catalog presence. The ruled policy is branch-local for
+  // both; this test pins the missing-Session provenance (the one the real-wire
+  // ghost L5 proves), and the non-null provenance reaches the SAME observable.
+  const client = sessionsFixture({
+    byId: { parent: { running: false } },
+    projections: {
+      parent: { entries: [catalogEntry('ghost'), catalogEntry('child-ok')], state: 'ready' },
+      ghost: { entries: undefined, state: 'ready' },
+      'child-ok': { entries: [], state: 'ready' },
+    },
+  })
+  const reader = new RemoteTaskReader(client, jobsFixture({}), generations.source)
+  const snapshot = await reader.readDescendants('parent')
+  assert.deepEqual(snapshot?.descendants, [
+    { kind: 'diagnostic', id: 'ghost', reason: 'unavailable', parentId: 'parent', depth: 1 },
+    child('child-ok', 'parent', 1, { label: 'child child-ok' }),
+  ], 'a missing/absent child baseline loses only its own branch and the sibling survives')
+})
+
 test('rc.2 CARRIER shape: a REAL wire branch failure (RemoteError code=gateway/internal) is unavailable, never corrupt', async () => {
   const generations = createSnapshotGenerationHarness()
   // The official `session.projections` handler collapses corrupt /
   // source-conflicting SessionQuery failures into `gateway/internal`, and the
-  // wire only carries the fixed RemoteErrorCode union. `gateway/internal` is
-  // therefore the ONLY shape a real rc.2 Remote branch failure can arrive in —
-  // it must map to `unavailable`, and `corrupt` must never be inferred from
-  // messages, causes, child state or log shape.
+  // wire only carries the fixed RemoteErrorCode union — the legacy
+  // SESSION_QUERY_* taxonomy never crosses the carrier. Such a FOREIGN branch
+  // failure maps to `unavailable`, and `corrupt` must never be inferred from
+  // messages, causes, child state or log shape. (This is one of several wire
+  // shapes, not the only one: `session/projections-unavailable` and
+  // `gateway/cancelled` are the SubagentError-class shapes that abort the whole
+  // traversal — see the F4c regressions above.)
   const wireFailure = Object.assign(new Error('internal failure'), { code: 'gateway/internal' })
   const client = sessionsFixture({
     byId: { parent: { running: false } },

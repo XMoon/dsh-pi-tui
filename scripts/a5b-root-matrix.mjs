@@ -152,6 +152,10 @@ const CLASSIFICATION = {
   // the Remote `tuiChildView` reference source), the ONE semantic Task read
   // source, its fence-key helper and the branch-selected Task read bundle.
   childView: BIND, directTaskReader: BIND, taskReadKey: CONN, taskRead: BIND,
+  // M3-5 PR2: the image-read presentation-lifetime token holder for the main
+  // surface and for the viewed child; the image loader scopes its
+  // bytes/in-flight/error state (and its subscribers) by these objects.
+  imageScopeMain: BIND, imageScopeChild: BIND,
   // M3-4 PR3: the Remote live-session facts projection (transport-neutral
   // {status, session.id} for the controller's liveAgent + the echo install)
   // and its scope-checked read — branch connectors over the aggregate bundle.
@@ -231,6 +235,8 @@ const LIFECYCLE = {
   directTaskReader: 'branch-selected at startup (Direct Task read over listDescendants + Agent status + Job registry); read-only thereafter',
   taskReadKey: 'pure fence-key read (generation + owner session id); no state',
   taskRead: 'branch-selected at startup (the selected Task read source bundle); read-only thereafter',
+  imageScopeMain: 'the MAIN presentation lifetime token holder (owner generation + session id); one small stable object per lifetime',
+  imageScopeChild: 'the VIEWED CHILD presentation lifetime token holder (viewer generation + child id); one small stable object per lifetime',
 }
 const CAPABILITIES = {
   surfaceEvents: 'SubmissionController, CommandSurface, presentation/status/settings owners, SurfaceRuntime, extension semantic hooks, lifecycle/exit callbacks (A5b-5: app/surface/application-events.ts; must not become a callback bag)',
@@ -347,6 +353,8 @@ const SWEEP_NOTES = {
   directTaskReader: 'The Direct Task read: official subagents.listDescendants + the Agent registry activity + the parent Session Job roster, mapped onto the semantic TaskReadSnapshot. Constructed once at startup; read-only thereafter.',
   taskReadKey: 'Pure fence key: `${ownership.generation()}:${ownership.currentSessionId()}`. It reads the ownership core and returns a string; it owns no state.',
   taskRead: 'The SELECTED Task read bundle ({currentKey, currentSessionId, readTask, activityOf}) consumed by the Task Center owner. Direct composes the in-process reads; Remote composes the aggregate\'s task source. Read-only thereafter.',
+  imageScopeMain: 'The MAIN presentation lifetime token for image reads ({key, sessionId}): the image loader scopes its bytes/in-flight/error state and subscribers by this object, and it is replaced only when the owner generation changes. It holds no Session data — only the identity the read was authorized under.',
+  imageScopeChild: 'The VIEWED CHILD presentation lifetime token for image reads ({key, sessionId}): a same-id reopen is a new viewer generation and therefore a new scope; the main slot is never re-minted by a child visit.',
   remoteIngressHandleLifecycle: 'per-owner: replaced on every owner commit, disposed on rollover/abort.',
   startupAgent: 'agentNow() snapshot deciding the resume vs deferred startup surface; startup orchestration.',
   flushTurn: 'turn-persistence hook invoked by the surface routing; Direct/domain persistence seam.',

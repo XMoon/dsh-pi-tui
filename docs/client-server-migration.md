@@ -4465,13 +4465,34 @@ Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
   failure, exactly the one upstream `listChildren` reports as
   `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE`, never an authoritative empty
   catalog), a ROOT read failure rejects (never an authoritative empty catalog), a
-  child branch read failure becomes a bounded `corrupt`/`unavailable` diagnostic
-  whose siblings survive, an `unknown` mode becomes an `unsupported` diagnostic
-  whose children are STILL traversed, `hasChildren` comes from the child's own
-  catalog, and activity comes from the official Session-list `running` bit —
-  never from catalog presence. Listing retains no Session and opens no child
-  log. The operation epoch + Connection generation + caller-session fences are
-  unchanged.
+  FOREIGN child branch read failure (the shape a MISSING Session produces: the
+  Host handler answers `null`, the Client settles `ready` without the key, and
+  Direct's `observeSession` throws the foreign `SESSION_QUERY_SESSION_NOT_FOUND`)
+  becomes a bounded `corrupt`/`unavailable` diagnostic whose siblings survive, an
+  `unknown` mode becomes an `unsupported` diagnostic whose children are STILL
+  traversed, `hasChildren` comes from the child's own catalog, and activity comes
+  from the official Session-list `running` bit — never from catalog presence.
+  Listing retains no Session and opens no child log. The operation epoch +
+  Connection generation + caller-session fences are unchanged.
+- **Branch failure is BRANCH-LOCAL (owner-ruled), with a recorded carrier limitation.**
+  Every shape of "this child's catalog cannot be read" — the missing-Session
+  `ready` baseline, a `session/projections-unavailable` projection failure (Direct's
+  `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE`) and any foreign wire failure —
+  degrades to a branch-scoped `corrupt`/`unavailable` diagnostic whose siblings stay
+  visible; only a genuine CALLER cancellation propagates. The CURRENT Host
+  `listDescendants()` re-throws the `SubagentError` and aborts the whole traversal,
+  but that propagation is a Host-implementation/contract tension, not the shared
+  semantic: the released Client/Web catalog contract keeps an unreadable/absent
+  child catalog expandable and retryable and only treats `ready + empty` as a known
+  leaf. **Carrier/provenance limitation (explicitly user-visible, not
+  `NO_USER_VISIBLE_CHANGE`):** the rc.2 Client collapses the Host `null` (missing
+  Session) and a non-null baseline that omits `subagentCatalog` into the SAME
+  `ready` + key-absent state, so **exact failure-scope parity is not representable**
+  — on the Direct special case the whole Task read fails, while the Remote user
+  state degrades the bad branch and keeps the healthy siblings visible. Provenance
+  MUST NOT be inferred from Session-list membership, catalog presence, messages or
+  logs. An upstream follow-up may report both the lost provenance and the
+  `listDescendants()` rethrow/contract tension; it is non-blocking for PR2.
 - **`TaskBrowserRuntime` consumes the selected semantic Task read.** The
   coordinator's hooks are now `currentKey` + `readTask` + `readJobs` +
   `activityOf` (commit-time), so no process-local Agent/Job object is its
@@ -4561,17 +4582,24 @@ Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
   stable token created with the viewer session (never a fabricated Agent). The
   write itself stays `PendingInputReader(childId)` +
   `SessionWriter.updateQueue(childId, occurrence, {kind:'steer'})`.
-- **Durable images read through the ACTIVE retained Session**
-  (`src/app/remote/presentation-source.ts` + `src/app/bootstrap.ts`): the image
-  loader captures the requesting presentation's display subject SYNCHRONOUSLY at
-  the moment the component asks for bytes (`activeImageSubject`, a REQUIRED mount
-  input, resolved before the deferred read) and the ref travels with that captured
-  subject, so a viewer exit/switch in the same tick can never re-route a child-only
-  attachment to the parent. A mount that cannot supply a captured subject FAILS
-  CLOSED (a visible load failure) instead of late-selecting whichever subject is
-  displayed by then. On Remote the read borrows that exact retained binding, reads
-  `binding.session.readAttachment(attachmentId)`, unwraps the `RemoteResult` and
-  re-checks the Connection generation + binding identity before the bytes are
+- **Durable images read through the OWNING presentation's retained Session**
+  (`src/image/loader.ts` + `src/components/media/image-thumbnail.ts` +
+  `src/tui-app.ts` + `src/app/bootstrap.ts`): the read AUTHORITY belongs to the
+  attachment ref's owning presentation, not to whichever Session is on screen when
+  the read runs. `TuiApp` stamps each thumbnail with the presentation scope sampled
+  ONCE at construction, the component keeps it IMMUTABLE for its whole life
+  (`get`/`load`/`subscribe` all use it), and the loader keys the bytes, the
+  in-flight read, the recorded failure AND the subscribers by `(scope, attachmentId)`
+  — it never resolves an ambient subject itself. The scope is a presentation
+  LIFETIME token (main owner generation | child viewer generation, carrying the
+  Session id), mirroring the official Web client's `WeakMap<SessionBinding, …>`
+  history-image cache. Consequences: a cached main image can never satisfy a child
+  component; a same-id binding rollover is a new scope; and a stale component of a
+  replaced presentation reads through its OWN (possibly released) binding and fails
+  closed instead of asking the parent. A mount that supplies no scope FAILS CLOSED
+  (a visible load failure). On Remote the read borrows that exact retained binding,
+  reads `binding.session.readAttachment(attachmentId)`, unwraps the `RemoteResult`
+  and re-checks the Connection generation + binding identity before the bytes are
   committed. There is no `retain()` on this path and no Host attachment access on
   the Remote branch; Direct keeps `ctx.attachments.readImage`.
 
@@ -4696,6 +4724,7 @@ answered separately; a green adapter/test is not a UI verdict:
 | child current-batch / queue-steer | IMPLEMENTED (existing-equivalent Ctrl+S path) |
 | per-occurrence Queue UI (edit/remove/single-steer) | DEFERRED_WITH_OWNER = Post-M3 Q1 (main + continuable child) |
 | `corrupt` vs `unavailable` diagnostic reason presentation | NO_USER_VISIBLE_CHANGE — `buildTaskRows()` projects only `kind: 'child'` catalog entries into visible subagent rows, so the diagnostic reason never reaches a Task Center row/label/action today |
+| descendant-catalog failure SCOPE (whole read fails vs. bad branch degrades) | **USER-VISIBLE DIVERGENCE, `INTENTIONALLY_UNSUPPORTED_IN_M3`** — the Direct special case (a readable Session whose projection baseline omits the catalog, which the current Host `listDescendants()` turns into a whole-traversal abort) cannot be represented on rc.2 (the Client loses the `null` vs non-null provenance), so Remote keeps the bad branch as a diagnostic with its healthy siblings visible. Not a Post-M3 feature defer, and no private protocol is introduced to hide it |
 
 **Remaining L6 coverage limits (reported, not hidden).** Three variants are NOT
 proven, and none is papered over: (1) the independent

@@ -2966,6 +2966,14 @@ export interface TuiAppOptions {
    * production intake surface. Never read by production code paths. */
   draftImageStoreForTest?: import('./image/draft-store.ts').DraftImageStore
   imageTheme?: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme
+  /**
+   * The presentation scope the transcript being built belongs to (M3-5 PR2
+   * review, P1). The SURFACE supplies it; the renderer samples it ONCE per
+   * `ImageThumbnail` construction and the component keeps that value for its whole
+   * life, so a read always carries the OWNING presentation's authorization instead
+   * of whichever subject is displayed when the (possibly deferred) read runs.
+   */
+  imageScope?: () => unknown
   /** Working-indicator frame interval in ms; injectable so tests stay fast. */
   workingIntervalMs?: number
   /**
@@ -4154,6 +4162,7 @@ export class TuiApp {
   readonly draftImageStoreForTest: import('./image/draft-store.ts').DraftImageStore | undefined
   /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
   private readonly imageTheme: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
+  private readonly imageScope: (() => unknown) | undefined
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
   /** The structural icon palette (emoji | symbols | minimal). The runtime
@@ -4835,6 +4844,7 @@ export class TuiApp {
     // The host default editor is the adapter source; a plugin editor
     // (single-winner from the editor registry) can replace it.
     this.imageLoader = options.imageLoader
+    this.imageScope = options.imageScope
     this.draftImageStoreForTest = options.draftImageStoreForTest
     this.imageTheme = options.imageTheme
     this.historySearchSource = options.historySearchSource
@@ -10633,6 +10643,28 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /**
+   * Build one transcript thumbnail carrying the IMMUTABLE scope of the
+   * presentation currently being rendered (M3-5 PR2 review, P1). The scope is
+   * sampled ONCE here and the component keeps it for life, so a deferred or stale
+   * re-render always reads through the OWNING presentation's authorization instead
+   * of whichever subject is displayed by then.
+   */
+  private imageThumbnail(
+    ref: import('./image/admission.ts').ImageAttachmentRefLike,
+    collapsedRef?: () => boolean,
+  ): ImageThumbnail {
+    // Callers gate on the loader/theme; the assertions mirror the call sites.
+    return new ImageThumbnail(
+      ref,
+      this.imageLoader!,
+      this.imageTheme!,
+      () => this.settleThumbnailRender(),
+      collapsedRef,
+      this.imageScope?.(),
+    )
+  }
+
   /** The live collapse flag for ONE image-block occurrence (message object
    * + image index within its content). Read at render time — a fullscreen
    * click only repaints. */
@@ -14858,11 +14890,8 @@ export class TuiApp {
           textBlocks.push(block)
         } else {
           flushText()
-          const thumbnail = new ImageThumbnail(
+          const thumbnail = this.imageThumbnail(
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-            this.imageLoader!,
-            this.imageTheme!,
-            () => this.settleThumbnailRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -14928,11 +14957,8 @@ export class TuiApp {
       for (const block of content) {
         if (block.type === 'image') {
           if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-            const thumbnail = new ImageThumbnail(
+            const thumbnail = this.imageThumbnail(
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-              this.imageLoader,
-              this.imageTheme,
-              () => this.settleThumbnailRender(),
               this.occurrenceCollapsedRef(message, imageIndex),
             )
             this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -14959,11 +14985,8 @@ export class TuiApp {
         textBlocks.push(block)
         flushText()
         if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-          const thumbnail = new ImageThumbnail(
+          const thumbnail = this.imageThumbnail(
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-            this.imageLoader,
-            this.imageTheme,
-            () => this.settleThumbnailRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -16295,12 +16318,7 @@ export class TuiApp {
                   buffer += block.text
                 } else if (block.type === 'image') {
                   flush()
-                  card.addChild(new ImageThumbnail(
-                    block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-                    this.imageLoader,
-                    this.imageTheme,
-                    () => this.settleThumbnailRender(),
-                  ))
+                  card.addChild(this.imageThumbnail(block.attachment as import('./image/admission.ts').ImageAttachmentRefLike))
                 } else {
                   // Known process blocks keep their legacy JSON form;
                   // file and unknown blocks use their bounded presentation,
@@ -16448,12 +16466,7 @@ export class TuiApp {
             buffer += block.text
           } else if (block.type === 'image') {
             flush()
-            card.addChild(new ImageThumbnail(
-              block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-              this.imageLoader,
-              this.imageTheme,
-              () => this.settleThumbnailRender(),
-            ))
+            card.addChild(this.imageThumbnail(block.attachment as import('./image/admission.ts').ImageAttachmentRefLike))
           } else {
             // Known process blocks keep their legacy JSON form; file and
             // unknown blocks use their bounded presentation, in order.
@@ -16494,12 +16507,7 @@ export class TuiApp {
     if (blocks === undefined || this.imageLoader === undefined || this.imageTheme === undefined) return
     for (const block of blocks) {
       if (block.type === 'image') {
-        card.addChild(new ImageThumbnail(
-          block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
-          this.imageLoader,
-          this.imageTheme,
-          () => this.settleThumbnailRender(),
-        ))
+        card.addChild(this.imageThumbnail(block.attachment as import('./image/admission.ts').ImageAttachmentRefLike))
       }
     }
   }
