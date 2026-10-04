@@ -2137,24 +2137,29 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 8))
   context.emit('session/event', parent as never, event('step/start', { turn: 1, step: 0 }, 81))
   context.emit('session/event', parent as never, event('step/end', { turn: 1, step: 0 }, 82))
-  // Force a fresh CHILD display-subject commit AFTER the parent write: the
-  // child's own projection must be re-derived, not the parent's todo.
-  context.emit('session/event', childA as never, event('step/end', { turn: 1, step: 0 }, 9))
+  // NO child event is emitted here: the parent's OWN `step/end` (a cheap event
+  // that advances the live fold but triggers no other refresh path) must refresh
+  // the status and carry the LIVE sibling facts forward (M3-5 PR1 review R9).
   await settle()
   await vt.waitForRender()
   assert.equal(probe.capturedChildStatus?.view.subject.kind, 'subagent',
     'the committed display subject must stay the child after a late parent refresh')
   assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos,
     'the parent todo write must not replace the child’s presentation projection')
-  // The legacy slot is the LIVE session's and must stay CURRENT: the parent
-  // fold advanced while the child was displayed, so the live counters follow
-  // (M3-5 PR1 review R5).
+  // The legacy slot is the LIVE session's and must stay CURRENT: the parent fold
+  // advanced while the child was displayed and the LAST parent event was a cheap
+  // `step/end` with no child event after it, so only the LIVE-event trigger can
+  // have refreshed these (M3-5 PR1 reviews R5/R9).
   assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home,
     'the live-session legacy fields describe the LIVE session (its own cwd)')
   assert.equal(probe.capturedDisplaySubject?.legacy?.turns, 2,
     'the LIVE turn counter must keep advancing while the child is displayed')
   assert.equal(probe.capturedDisplaySubject?.legacy?.steps, 2,
-    'the LIVE step counter must keep advancing while the child is displayed')
+    'the LIVE step counter must keep advancing on a lone parent step/end')
+  // …while the child's OWN sections and presentation are untouched by the parent.
+  assert.equal(probe.capturedChildStatus?.workspace.cwd, childACwd)
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-model-v2')
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos)
 
   // Child A → child B through the SAME real Task Center entry: no A residue.
   input('\x1b')

@@ -75,10 +75,32 @@ function publishSession(
 ): SurfaceStateValues['session'] {
   const subject = next.displaySubject
   if (subject === undefined) return Object.freeze({ ...next })
-  const frozen = current.displaySubject !== undefined && shallowEqual(subject, current.displaySubject)
+  const frozen = current.displaySubject !== undefined && sameDisplaySubject(subject, current.displaySubject)
     ? current.displaySubject
     : Object.freeze({ ...subject })
   return Object.freeze({ ...next, displaySubject: frozen })
+}
+
+/**
+ * Whether two display-subject snapshots carry the SAME facts.
+ *
+ * Both optional shapes are encoded by OMISSION — an unavailable model /
+ * permission / branch and a hidden todo summary all read as an ABSENT key — so
+ * the comparison must cover the UNION of the two key sets. A next-only key walk
+ * (`shallowEqual`) would treat that legal CLEAR as "unchanged", keep the stale
+ * facts and skip the notification.
+ */
+function sameDisplaySubject(
+  next: NonNullable<SurfaceStateValues['session']['displaySubject']>,
+  current: NonNullable<SurfaceStateValues['session']['displaySubject']>,
+): boolean {
+  const left = next as unknown as Record<string, unknown>
+  const right = current as unknown as Record<string, unknown>
+  const keys = new Set<string>([...Object.keys(left), ...Object.keys(right)])
+  for (const key of keys) {
+    if (left[key] !== right[key]) return false
+  }
+  return true
 }
 
 /** The immutable surface state store. */

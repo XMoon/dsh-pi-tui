@@ -581,6 +581,22 @@ test('M3-5 PR1: the builtin todo dock renders the DISPLAY SUBJECT summary while 
     assert.ok(view.includes('child todo'), `the dock must render the DISPLAY SUBJECT summary:\n${view}`)
     assert.ok(!view.includes('live todo'), `the live summary must not stay on the child chrome:\n${view}`)
 
+    // Opening the child's todo panel hides the summary: the deletion-only
+    // republish (the summary key disappears) must reach the dock, not reuse the
+    // stale nested snapshot (M3-5 PR1 review R8).
+    fixture.app.toggleTodoPanel()
+    await settleRender(fixture.app, fixture.vt)
+    const panelState = fixture.host.state()
+    assert.equal(panelState.session.displaySubject?.todoSummary, undefined,
+      'the open panel clears the published display-subject summary')
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(!view.includes('☑'), `the dock summary must hide while the child panel is open:\n${view}`)
+    assert.ok(view.includes('child todo'), `the panel itself still renders the child list:\n${view}`)
+    fixture.app.toggleTodoPanel()
+    await settleRender(fixture.app, fixture.vt)
+    assert.ok(fixture.host.state().session.displaySubject?.todoSummary?.includes('child todo'),
+      'closing the panel restores the published summary')
+
     // The choice is by SUBJECT, never by field presence: a mounted display
     // subject with an EMPTY todo list has no summary, and the item must HIDE —
     // never fall back to the live session's summary (which would print the

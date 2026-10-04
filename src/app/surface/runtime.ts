@@ -2335,7 +2335,17 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // A permission switch (command, Shift+Tab, settings panel) lands as
     // knob events between turns: refresh the footer mode badge right away
     // instead of waiting for the next step/turn boundary.
-    if (isKnob) {
+    //
+    // While a CHILD viewer is displayed, every durable LIVE-session event must
+    // refresh the status too (M3-5 PR1 review R9): the extension's v2
+    // live-session snapshot is derived from the same status refresh, and a cheap
+    // event such as `step/end` advances the live fold without any other refresh
+    // path. With a child mounted that refresh writes the child's store sections
+    // (content-equal → no publish), the display-subject presentation and the LIVE
+    // legacy slot — it never re-projects the live sections into the child store.
+    // The store's content-equality discipline suppresses churn on the extra
+    // derives (measure-kind events refresh again through the context path below).
+    if (isKnob || viewedId !== undefined) {
       // Knob events are UI-only: the permission badge repaints from
       // cached facts — never a context measurement.
       source.refreshStatusCheap()

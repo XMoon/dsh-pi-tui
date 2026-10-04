@@ -40,7 +40,7 @@ test('snapshots are immutable and deep-frozen', () => {
   assert.throws(() => { (state as { surface: unknown }).surface = {} }, TypeError)
 })
 
-test('the nested display-subject snapshot is deep-frozen and content-stable (M3-5 PR1)', async () => {
+test('the nested display-subject snapshot is deep-frozen, content-stable and clear-aware (M3-5 PR1)', async () => {
   // The additive `session.displaySubject` is the first NESTED snapshot on the
   // Stable surface state: the "deeply frozen snapshots" contract must cover it,
   // and a content-equal republish must not churn the slice identity.
@@ -69,6 +69,38 @@ test('the nested display-subject snapshot is deep-frozen and content-stable (M3-
   // Clearing the display subject publishes too (viewer exit).
   store.set({ session: { ...base, viewerMode: false } })
   assert.equal(store.get().session.displaySubject, undefined)
+
+  // A DELETION-ONLY republish is a REAL change (M3-5 PR1 review R8): the
+  // production snapshot encodes "fact unavailable" / "summary hidden" by
+  // OMITTING the optional key, so dropping `model`/`permission`/`branch`/
+  // `todoSummary` while the required facts stay identical must publish a fresh
+  // frozen nested object and NOT reuse the stale one.
+  const rich = {
+    sessionId: 'child-1', title: 'child', workspaceRoot: '/w', cwd: '/w',
+    model: 'deepseek/x', permission: 'read-only', branch: 'main',
+    turns: 1, steps: 1, todoCount: 2, todoSummary: '2 active · a',
+  }
+  store.set({ session: { ...base, displaySubject: rich } })
+  const richSlice = store.get().session
+  assert.equal(richSlice.displaySubject?.todoSummary, '2 active · a')
+  let notifications = 0
+  store.subscribe({ select: state => state.session, notify: () => { notifications += 1 } })
+  store.set({
+    session: {
+      ...base,
+      displaySubject: { sessionId: 'child-1', title: 'child', workspaceRoot: '/w', cwd: '/w', turns: 1, steps: 1, todoCount: 2 },
+    },
+  })
+  const clearedSlice = store.get().session
+  assert.notEqual(clearedSlice, richSlice, 'a deletion-only republish must publish a new slice')
+  assert.equal(clearedSlice.displaySubject?.model, undefined, 'the cleared model must not survive')
+  assert.equal(clearedSlice.displaySubject?.permission, undefined)
+  assert.equal(clearedSlice.displaySubject?.branch, undefined)
+  assert.equal(clearedSlice.displaySubject?.todoSummary, undefined, 'the hidden summary must not survive')
+  assert.ok(!('todoSummary' in (clearedSlice.displaySubject ?? {})), 'the stale optional key must be gone')
+  assert.ok(Object.isFrozen(clearedSlice.displaySubject))
+  await settle()
+  assert.ok(notifications >= 1, 'the deletion-only change must notify its subscribers')
 })
 
 test('selectors fire only on slice CHANGE and delivery is batched', async () => {
