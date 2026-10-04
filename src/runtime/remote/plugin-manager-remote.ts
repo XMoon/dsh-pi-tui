@@ -9,7 +9,11 @@
  * controller's operation-failure entry point) and the official Host remains
  * the only authority for installed/enabled truth.
  *
- * NOT composed into production: M3 owns Remote backend composition.
+ * Composed by the experimental M3 Remote application runtime
+ * (`src/app/remote/m3a-semantics.ts`) and served through
+ * `Backend.pluginManager` to the one existing Plugin Manager surface. Direct
+ * remains the production/default backend and there is still no public Remote
+ * selector, so no normal startup reaches this adapter.
  *
  * Full contract: docs/client-server-migration.md §P1 capability ledger and
  * docs/client-server-coupling.md.
