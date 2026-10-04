@@ -688,7 +688,12 @@ test('runner permission projection clears on service/agent absence (runner-level
     'a missing live agent must yield undefined (clear)')
 })
 
-test('M3-5 PR1: the extension snapshot follows the display subject across main → A → B → main (no mixed publish)', async () => {
+test('M3-5 PR1: the extension snapshot keeps v2 live-session semantics and publishes the display subject additively', async () => {
+  // Contract decision (M3-5 PR1): `SessionSnapshot` (v2, released) describes the
+  // LIVE session owner everywhere — a viewer transition must NOT re-point it.
+  // The session the user is looking at is published additively as
+  // `session.displaySubject`, which is present only while a child viewer is
+  // mounted. The first-party todo dock renders the display subject's summary.
   const ledger = new ExtensionLedger(() => {})
   const { vt, app, host } = makeApp(ledger)
   await vt.waitForRender()
@@ -704,17 +709,15 @@ test('M3-5 PR1: the extension snapshot follows the display subject across main �
   app.setTodoSummary([{ content: 'parent todo', status: 'in_progress' }])
   app.setSessionTitle('parent title')
   app.setWelcomeCard({ cwd: '/parent', sessionId: 'session-main', model: 'parent-model', version: '0.0.0' })
-  // The todo panel is opened on the MAIN subject BEFORE the viewer transition
-  // (the production-reachable order the display-subject commit must handle).
   app.toggleTodoPanel()
   await settle()
   await vt.waitForRender()
   assert.equal(host.state().session.sessionId, 'session-main')
+  assert.equal(host.state().session.displaySubject, undefined, 'no display subject without a viewer')
   assert.equal(host.state().activity.todoCount, 1)
-  assert.ok(vt.getViewport().join('\n').includes('parent todo'), 'the open panel shows the main list first')
 
-  // CHILD A: the extension SessionSnapshot describes the CHILD — identity
-  // (sessionId/workspaceRoot/title) AND every Session-owned status field.
+  // CHILD A: the LIVE-session fields keep their v2 meaning; the child appears
+  // only in the additive displaySubject projection.
   enterChildDisplaySubject(app, {
     id: 'child-a', label: 'a', mode: 'continuable', activity: 'running',
     cwd: '/child-a', turns: 5, steps: 7,
@@ -722,39 +725,60 @@ test('M3-5 PR1: the extension snapshot follows the display subject across main �
     permission: 'read-only',
     todos: [{ content: 'child-a todo', status: 'in_progress' }],
     title: 'child-a title',
+    goal: 'goal ● child-a objective',
   })
   await settle()
   await vt.waitForRender()
   const a = host.state()
   assert.equal(a.session.viewerMode, true)
-  assert.equal(a.session.sessionId, 'child-a')
-  assert.equal(a.session.workspaceRoot, '/child-a')
-  assert.equal(a.session.cwd, '/child-a')
-  assert.equal(a.session.model, 'deepseek/child-a-model')
-  assert.equal(a.session.permission, 'read-only')
-  assert.equal(a.session.turns, 5)
-  assert.equal(a.session.steps, 7)
-  assert.equal(a.session.title, 'child-a title')
-  assert.equal(a.activity.todoCount, 1)
-  // The panel is open, so the host-provided dock SUMMARY is deliberately empty
-  // (the panel replaces it) — the count and the panel text are the visible facts.
-  assert.equal(a.activity.todoSummary, '', 'the dock summary hides while the panel is open')
-  // The ALREADY-OPEN todo panel follows the same display-subject list (it must
-  // not keep rendering the parent list until an unrelated event).
+  assert.equal(a.session.sessionId, 'session-main', 'the live owner must not re-point while viewing')
+  assert.equal(a.session.workspaceRoot, '/parent')
+  assert.equal(a.session.cwd, '/parent')
+  assert.equal(a.session.model, 'parent-model')
+  assert.equal(a.session.permission, 'danger-full-access')
+  assert.equal(a.session.title, 'parent title')
+  assert.equal(a.session.turns, 2)
+  assert.equal(a.session.steps, 3)
+  assert.equal(a.activity.todoCount, 1, 'the live session’s todo count (v2)')
+  assert.deepEqual(a.session.displaySubject, {
+    sessionId: 'child-a',
+    title: 'child-a title',
+    workspaceRoot: '/child-a',
+    cwd: '/child-a',
+    model: 'deepseek/child-a-model',
+    permission: 'read-only',
+    turns: 5,
+    steps: 7,
+    todoCount: 1,
+  }, 'the display subject carries the child’s own identity and status')
+  // The ALREADY-OPEN todo panel follows the display-subject list.
   const panelA = vt.getViewport().join('\n')
   assert.ok(panelA.includes('child-a todo'), `the open child todo panel must render the child list:\n${panelA}`)
   assert.ok(!panelA.includes('parent todo'), `the parent todo list must not render while viewing:\n${panelA}`)
 
-  // The MAIN todo list keeps updating behind the child — the child projection
-  // must not follow it.
+  // The MAIN todo list keeps updating behind the child: the LIVE fields follow
+  // it, the displaySubject does not.
   app.setTodoSummary([{ content: 'parent todo v2', status: 'pending' }])
   await settle()
   await vt.waitForRender()
-  assert.equal(host.state().activity.todoCount, 1, 'the hidden main write must not replace the child count')
+  const afterMainWrite = host.state()
+  assert.equal(afterMainWrite.activity.todoCount, 1, 'the live session follows the hidden main write')
+  assert.equal(afterMainWrite.session.displaySubject?.todoCount, 1, 'the display subject keeps the child list')
   assert.ok(vt.getViewport().join('\n').includes('child-a todo'),
     'the open panel must keep the child list after the hidden main write')
 
-  // CHILD B: no A residue anywhere.
+  // With the panel closed both summary texts exist: the LIVE activity keeps the
+  // main summary (v2) and the display subject carries the child's own.
+  app.toggleTodoPanel()
+  await settle()
+  await vt.waitForRender()
+  const closed = host.state()
+  assert.ok(closed.activity.todoSummary?.includes('parent todo v2'),
+    `the live summary must stay the main’s: ${closed.activity.todoSummary}`)
+  assert.ok(closed.session.displaySubject?.todoSummary?.includes('child-a todo'),
+    `the display subject must carry the child summary: ${closed.session.displaySubject?.todoSummary}`)
+
+  // CHILD B: no A residue in the additive projection.
   enterChildDisplaySubject(app, {
     id: 'child-b', label: 'b', mode: 'one-shot', activity: 'inactive',
     cwd: '/child-b', turns: 1, steps: 1,
@@ -765,45 +789,47 @@ test('M3-5 PR1: the extension snapshot follows the display subject across main �
   await settle()
   await vt.waitForRender()
   const b = host.state()
-  assert.equal(b.session.sessionId, 'child-b')
-  assert.equal(b.session.model, 'deepseek/child-b-model')
-  assert.equal(b.session.permission, undefined, 'B has no permission — A’s must not survive')
-  assert.equal(b.session.title, 'child-b title')
-  assert.equal(b.session.cwd, '/child-b')
-  assert.equal(b.activity.todoCount, 1)
-  const panelB = vt.getViewport().join('\n')
-  assert.ok(panelB.includes('child-b todo'), `B's todo list must render in the open panel:\n${panelB}`)
-  assert.ok(!panelB.includes('child-a todo'), `A's todo list must not survive into B:\n${panelB}`)
+  assert.equal(b.session.displaySubject?.sessionId, 'child-b')
+  assert.equal(b.session.displaySubject?.model, 'deepseek/child-b-model')
+  assert.equal(b.session.displaySubject?.permission, undefined, 'B has no permission — A’s must not survive')
+  assert.equal(b.session.displaySubject?.title, 'child-b title')
+  assert.equal(b.session.displaySubject?.cwd, '/child-b')
+  assert.equal(b.session.displaySubject?.todoCount, 1)
+  assert.equal(b.session.sessionId, 'session-main', 'the live owner still must not re-point')
+  assert.ok(b.session.displaySubject?.todoSummary?.includes('child-b todo'),
+    `B's own todo summary must be published: ${b.session.displaySubject?.todoSummary}`)
 
-  // EXIT: the LATEST main state returns (the todo write that landed while the
-  // child was displayed — never an enter-time copy).
+  // EXIT: the additive projection disappears and the LIVE fields carry the
+  // LATEST main state.
   exitChildDisplaySubject(app, { model: 'parent-model', cwd: '/parent', branch: 'main', turns: 2, steps: 3, permission: 'danger-full-access' })
+  app.setTodoSummary([{ content: 'parent todo v3', status: 'in_progress' }])
   await settle()
   await vt.waitForRender()
   const main = host.state()
   assert.equal(main.session.viewerMode, false)
+  assert.equal(main.session.displaySubject, undefined, 'the additive projection clears on exit')
   assert.equal(main.session.sessionId, 'session-main')
   assert.equal(main.session.cwd, '/parent')
   assert.equal(main.session.model, 'parent-model')
   assert.equal(main.session.permission, 'danger-full-access')
   assert.equal(main.session.title, 'parent title')
-  assert.equal(main.activity.todoCount, 1, 'the LATEST main todo count must return')
-  const panelMain = vt.getViewport().join('\n')
-  assert.ok(panelMain.includes('parent todo v2'), `the LATEST main todo list must return in the open panel:\n${panelMain}`)
+  assert.equal(main.activity.todoCount, 1, 'the LATEST main todo count')
+  assert.ok(main.activity.todoSummary?.includes('parent todo v3'),
+    `the latest main todo summary returns: ${main.activity.todoSummary}`)
 
-  // Every published snapshot is subject-consistent: a viewing snapshot never
-  // carries a main identity, and a main snapshot never carries a child one.
+  // Every published snapshot keeps the two concepts separate: the LIVE fields
+  // name the main session in EVERY state, and the display subject appears only
+  // while a viewer is mounted, naming a child.
   for (const state of published) {
-    if (state.session.viewerMode) {
-      assert.ok((state.session.sessionId ?? '').startsWith('child-'),
-        `a viewing snapshot must name a child session: ${JSON.stringify(state.session)}`)
-      assert.ok(state.session.cwd.startsWith('/child-'),
-        `a viewing snapshot must carry the child workspace: ${JSON.stringify(state.session)}`)
-      assert.notEqual(state.session.model, 'parent-model',
-        `a viewing snapshot must never carry the parent model: ${JSON.stringify(state.session)}`)
-    } else {
-      assert.ok(!(state.session.sessionId ?? '').startsWith('child-'),
-        `a main snapshot must never name a child session: ${JSON.stringify(state.session)}`)
+    assert.ok(state.session.sessionId === undefined || state.session.sessionId === 'session-main',
+      `the live session identity must never re-point: ${JSON.stringify(state.session)}`)
+    if (state.session.displaySubject !== undefined) {
+      assert.ok(state.session.viewerMode, 'a display subject is only published while a viewer is mounted')
+      assert.ok(state.session.displaySubject.sessionId.startsWith('child-'),
+        `the display subject must name the child: ${JSON.stringify(state.session.displaySubject)}`)
+      assert.ok(state.session.displaySubject.cwd.startsWith('/child-'),
+        `the display subject must carry the child workspace: ${JSON.stringify(state.session.displaySubject)}`)
+      assert.notEqual(state.session.displaySubject.model, 'parent-model')
     }
   }
   app.stop()

@@ -79,8 +79,15 @@ export function apply(ctx: Context): void {
     description: 'The todo summary line (first-party builtin).',
   }, { label: [] })
 
-  const renderTodoDock = (state: { activity: { todoSummary?: string } }): void => {
-    const summary = state.activity.todoSummary
+  const renderTodoDock = (state: {
+    readonly activity: { readonly todoSummary?: string }
+    readonly session: { readonly displaySubject?: { readonly todoSummary?: string } }
+  }): void => {
+    // The chrome follows the DISPLAY SUBJECT (M3-5 PR1): while a child viewer
+    // is mounted the host publishes the child's own summary additively on
+    // `session.displaySubject` and the live-session `activity.todoSummary`
+    // keeps its v2 meaning (the live session's list).
+    const summary = state.session.displaySubject?.todoSummary ?? state.activity.todoSummary
     if (summary === undefined || summary === '') {
       todoDock.replace({ label: [] })
       return

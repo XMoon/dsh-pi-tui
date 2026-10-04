@@ -98,9 +98,17 @@ export interface RunnerProbe {
   capturedChildStatus: StatusSnapshot | undefined
   /** The most recent subagent display-subject commit payload. */
   capturedDisplaySubject: {
-    readonly legacy: Partial<StatusData>
+    readonly legacy: Partial<StatusData> | undefined
     readonly presentation: DisplaySubjectPresentation | undefined
   } | undefined
+  /**
+   * The mounted app's OWN current additive display-subject projection — the
+   * exact value `syncExtensionState` publishes to the extension surface when a
+   * host is attached (`session.displaySubject`). Read through the production
+   * method so a runner suite without an extension host can still observe the
+   * extension-visible facts.
+   */
+  displaySubject(): unknown
   capturedViewerMode: unknown
   capturedApproval: { toolName?: string; arguments?: string; danger?: boolean } | undefined
   scrollToBottomCount: number
@@ -125,6 +133,7 @@ export function installProbe(): RunnerProbe {
     capturedViewerUsage: undefined,
     capturedChildStatus: undefined,
     capturedDisplaySubject: undefined,
+    displaySubject: () => undefined,
     capturedViewerMode: undefined,
     capturedApproval: undefined,
     scrollToBottomCount: 0,
@@ -214,6 +223,10 @@ export function installProbe(): RunnerProbe {
   TuiApp.prototype.notify = function (...args: Parameters<typeof originalNotify>) {
     probe.notices.push(`${args[1] ?? 'info'}:${String(args[0])}`)
     return originalNotify.apply(this, args)
+  }
+  probe.displaySubject = () => {
+    const current = probe.apps.at(-1) as unknown as { displaySubjectSnapshot?: () => unknown } | undefined
+    return current?.displaySubjectSnapshot?.()
   }
   probe.restore = () => {
     TranscriptFolder.prototype.apply = originalTranscriptApply

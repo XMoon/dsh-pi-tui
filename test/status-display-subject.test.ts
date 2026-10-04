@@ -170,13 +170,13 @@ test('M3-5 PR1: every child Session-owned section comes from SessionStatus(child
     workspaceRoot: '/child-a/ws',
     title: 'child title',
     todos: [{ content: 'child todo', status: 'in_progress' }],
+    goal: 'goal ● fix the build',
   })
-  assert.equal(commit.legacy.model, 'deepseek/child-model @high')
-  assert.equal(commit.legacy.cwd, '/child-a/ws')
-  assert.equal(commit.legacy.permission, 'read-only')
-  assert.match(commit.legacy.goal ?? '', /^goal ● /u)
-  assert.equal(commit.legacy.contextTokens, 100)
-  assert.equal(commit.legacy.contextWindow, 2000)
+  // A child commit carries NO legacy display fields: the legacy `status` slot
+  // (and the extension's v2 live-session snapshot) stays the LIVE session's.
+  assert.equal(commit.legacy, undefined, 'a child subject must not re-point the live-session legacy fields')
+  assert.match(commit.presentation?.goal ?? '', /^goal ● fix the build$/u,
+    'the child goal badge is a display-subject presentation fact')
 })
 
 test('M3-5 PR1: an unavailable child SessionStatus leaves the Session-owned fields ABSENT (never the parent’s)', () => {
@@ -205,15 +205,13 @@ test('M3-5 PR1: an unavailable child SessionStatus leaves the Session-owned fiel
   assert.deepEqual(snap.workspace, { cwd: '' }, 'no parent cwd may fill the child’s workspace')
   assert.equal(snap.usage.tokens, undefined, 'no fold total may stand in for the child’s cumulative usage')
   assert.equal(snap.usage.context, undefined)
-  assert.equal(commit.legacy.model, '')
-  assert.equal(commit.legacy.permission, undefined)
-  assert.equal(commit.legacy.cwd, '')
-  assert.equal(commit.legacy.contextTokens, undefined)
+  assert.equal(commit.legacy, undefined, 'the live-session legacy fields are untouched')
   assert.deepEqual(commit.presentation, {
     sessionId: 'cold-child',
     workspaceRoot: '',
     title: '',
     todos: [],
+    goal: undefined,
   })
 })
 
@@ -242,7 +240,7 @@ test('M3-5 PR1: child A → child B keeps no A residue', () => {
   assert.equal(snap.access.permissionPreset, undefined, 'B has no permission — A’s must not survive')
   assert.equal(snap.workspace.cwd, '/b')
   assert.deepEqual(commit.presentation?.todos, [])
-  assert.equal(commit.legacy.permission, undefined)
+  assert.equal(commit.legacy, undefined, 'the live-session legacy fields stay untouched')
   assert.equal(snap.usage.tokens, undefined)
 })
 

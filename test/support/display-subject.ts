@@ -32,6 +32,8 @@ export interface ChildDisplaySubject {
   readonly usage?: UsageStatus
   readonly todos?: readonly TodoItem[]
   readonly title?: string
+  /** The child's rendered goal-badge text. */
+  readonly goal?: string
   readonly model?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
   readonly permission?: string
   readonly parentSessionId?: string
@@ -89,23 +91,16 @@ export function enterChildDisplaySubject(app: TuiApp, child: ChildDisplaySubject
         steps: child.steps,
       },
     },
-    {
-      model: model === undefined ? '' : `${model.provider}/${model.model}`,
-      cwd: child.cwd,
-      branch: '',
-      goal: undefined,
-      turns: child.turns,
-      steps: child.steps,
-      statsLine: '',
-      permission: child.permission,
-      contextTokens: undefined,
-      contextWindow: undefined,
-    },
+    // A child commit carries NO legacy display fields: the legacy slot stays
+    // the LIVE session's (M3-5 PR1 contract decision) — the child's visible
+    // facts are the store patch above plus the presentation projection.
+    undefined,
     {
       sessionId: child.id,
       workspaceRoot: child.cwd,
       title: child.title ?? '',
       todos: child.todos ?? [],
+      goal: child.goal,
     },
   )
 }

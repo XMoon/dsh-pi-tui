@@ -22,6 +22,7 @@ import { Text } from '@xmoon76/pi-tui'
 import { apply as applyExtensionHost } from '../src/extensions.ts'
 import type { PiTuiExtensionService } from '../src/extensions.ts'
 import { apply as applyBuiltins } from '../src/builtins.ts'
+import { enterChildDisplaySubject } from './support/display-subject.ts'
 import type { HeaderBadge } from '../src/extension/public-types.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -548,5 +549,40 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
     }
   } finally {
     process.argv[1] = previousArgv
+  }
+})
+
+test('M3-5 PR1: the builtin todo dock renders the DISPLAY SUBJECT summary while a child viewer is mounted', async () => {
+  // Contract decision (M3-5 PR1): `activity.todoSummary` keeps its v2 meaning
+  // (the LIVE session's list). The chrome follows the display subject through
+  // the ADDITIVE `session.displaySubject` projection, which the first-party
+  // builtin dock item prefers while a child viewer is mounted.
+  const ctx = new Context()
+  let fixture: LiveBuiltinApp | undefined
+  try {
+    fixture = await attachBuiltinApp(ctx)
+    fixture.app.setTodoSummary([{ content: 'live todo', status: 'in_progress' }])
+    await settleRender(fixture.app, fixture.vt)
+    let view = fixture.vt.getViewport().join('\n')
+    assert.ok(view.includes('live todo'), `the live summary renders first:\n${view}`)
+
+    enterChildDisplaySubject(fixture.app, {
+      id: 'child-1', label: 'child', mode: 'continuable', activity: 'running',
+      cwd: '/child-ws', turns: 1, steps: 1,
+      todos: [{ content: 'child todo', status: 'in_progress' }],
+    })
+    await settleRender(fixture.app, fixture.vt)
+    const state = fixture.host.state()
+    assert.ok(state.activity.todoSummary?.includes('live todo'),
+      `the live session keeps its own summary (v2): ${state.activity.todoSummary}`)
+    assert.ok(state.session.displaySubject?.todoSummary?.includes('child todo'),
+      `the display subject carries the child summary: ${state.session.displaySubject?.todoSummary}`)
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(view.includes('child todo'), `the dock must render the DISPLAY SUBJECT summary:\n${view}`)
+    assert.ok(!view.includes('live todo'), `the live summary must not stay on the child chrome:\n${view}`)
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
   }
 })
