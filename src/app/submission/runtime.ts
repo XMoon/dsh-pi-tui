@@ -217,8 +217,20 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             return
           }
           if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
-          const failure = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
-          throw new Error(failure)
+          if (outcome.kind === 'rejected') {
+            // A PROVEN pre-commit refusal (e.g. `session/writer-held`): the
+            // submission owner settles it HERE as a normal terminal return, so
+            // the reserved-submit wrapper never performs its generic exception
+            // restore and the structural code/details survive to the ack. The
+            // refused outcome's own message is the user copy (the writer-held
+            // guidance), never a generic "submission failed" wrapper.
+            surface.mergeDraftIntoEditor(text)
+            surface.settleLocalSubmission(requestId)
+            surface.settleSubmitAck(`session write rejected: ${outcome.error.code}`, { token: ackToken, terminal: true })
+            surface.notify(outcome.error.message, 'error')
+            return
+          }
+          throw new Error(outcome.reason)
         }
         // Consume ONLY the referenced drafts — a concurrent intake's newer
         // image survives.
