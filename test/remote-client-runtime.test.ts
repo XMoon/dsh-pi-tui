@@ -591,9 +591,10 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
       assert.equal(settled.error, undefined, 'a terminal settlement is not an observation failure')
       assert.match(settled.text, /l5 retained output/)
       assert.match(settled.text, /l5 live output/)
-      assert.ok(
-        typeof settled.detail === 'string' && settled.detail.length > 0,
-        'the terminal follow projection carries the merged kill detail',
+      assert.equal(
+        settled.detail,
+        'cancelled by the user',
+        'the terminal follow projection carries the unified human-kill reason the official Host records',
       )
       // A row that already settled is an already-finished admission; a row the
       // session can no longer see is a proven non-commit.

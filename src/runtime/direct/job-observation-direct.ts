@@ -193,9 +193,12 @@ export class DirectJobObservationPort implements JobObservationPort {
     }
     let outcome: 'requested' | 'already-finished'
     try {
-      // The recorded reason stays the Task-surface wording this adapter
-      // replaced; the official registry merges it into a terminal detail.
-      outcome = registry.kill(jobId, sessionId, 'stopped from the task browser')
+      // The reason is DELIBERATELY the same human-kill wording the official
+      // Host `JobController.kill` records over the wire ("cancelled by the
+      // user"): the Direct and Remote paths then converge on ONE intentional
+      // durable detail instead of per-surface strings. The official registry
+      // merges it into a `killed` settlement's detail.
+      outcome = registry.kill(jobId, sessionId, 'cancelled by the user')
     } catch (error) {
       return { kind: 'rejected', message: safeErrorMessage(error) }
     }
