@@ -14,6 +14,7 @@ import {
   type RemotePresetRemotes,
   type RemotePresetRoster,
 } from '../src/runtime/remote/preset-remote.ts'
+import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 import { createSnapshotGenerationHarness, type GenerationHarness } from './support/remote-generation.ts'
 
 /** A structural official Remote failure (code is the only discriminator). */
@@ -154,6 +155,40 @@ test('a reconnect invalidates the cached Host-effective default', async () => {
   assert.equal(harness.catalog.defaultId(), 'standard')
   harness.generation.set({ id: 2 })
   assert.equal(harness.catalog.defaultId(), undefined, 'a stale Host default must not leak after reconnect')
+})
+
+test('a session/writer-held preset refusal is a PROVEN rejection with exact code, details and guidance', async () => {
+  // The pinned Host resolves the Agent via `resolveAgent()` BEFORE
+  // `agentPresets.select` enters its mutation, so `session/writer-held` proves
+  // the switch did not commit. The user copy is the centralized recovery
+  // guidance (never the Host's internal lease diagnostic), while the
+  // machine-readable code/details stay intact.
+  const harness = presetHarness()
+  harness.setSelectResult({
+    ok: false,
+    error: failure('session/writer-held', 'SessionAlreadyOwnedError: lease held', { sessionId: 'session-a' }),
+  })
+  const { outcome } = await harness.catalog.selectSessionPreset('session-a', 'minimal')
+  assert.equal(harness.calls.selects.length, 1, 'the switch is attempted exactly once')
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') {
+    assert.equal(outcome.error.code, 'session/writer-held', 'the exact official code is preserved')
+    assert.deepEqual(outcome.error.details, { sessionId: 'session-a' }, 'the official failure details are preserved')
+    assert.equal(outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'the shared actionable guidance is the user copy')
+    assert.ok(!/SessionAlreadyOwnedError|lease held/.test(outcome.error.message),
+      'the Host-internal lease diagnostic is never the user copy')
+  }
+})
+
+test('a same-namespace session/* preset failure is NOT blindly rejected; gateway/internal stays indeterminate', () => {
+  // Negative control: the classifier is an EXACT code set, never a namespace
+  // prefix. A future/unproven `session/*` code may follow a real mutation.
+  assert.equal(classifyRemotePresetFailure(failure('session/writer-held', 'held')).kind, 'rejected')
+  assert.equal(classifyRemotePresetFailure(failure('session/post-commit-failed', 'x')).kind, 'indeterminate')
+  const unknown = classifyRemotePresetFailure(failure('session/writer-held', 'held', {}))
+  assert.equal(unknown.kind, 'rejected')
+  if (unknown.kind === 'rejected') assert.equal(unknown.error.details, undefined, 'an empty details record is dropped')
+  assert.equal(classifyRemotePresetFailure(failure('gateway/internal', 'x')).kind, 'indeterminate')
 })
 
 test('an unknown agent-preset/* code stays indeterminate, never a blind rejection', () => {
