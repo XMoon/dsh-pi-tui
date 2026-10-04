@@ -62,10 +62,11 @@ Direct rollback:           available
 
 ```text
 M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
-M3-5 = IN PROGRESS          (PR1 child display-subject status foundation and
-                             PR4 Remote Plugin Manager closure merged; PR2 Remote
-                             Task Center + real child viewer landed, PR open;
-                             PR3/PR5/PR6 remain)
+M3-5 = IN PROGRESS          (PR1 child display-subject status foundation,
+                             PR2 Remote Task Center + real child viewer and
+                             PR4 Remote Plugin Manager closure merged; PR3
+                             Remote selected-Job viewer closure landed, PR open;
+                             PR5/PR6 remain)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
@@ -4356,11 +4357,11 @@ Explicitly NOT claimed by PR1:
   SessionStatus authority is qualified (adapter-level semantic + projection
   tests only); the Remote Task Center/child-viewer production composition is
   PR2's ownership, so no Remote child-viewer L6 is asserted here.
-- Remote Task Center and a user-reachable Remote child viewer (PR2), the Remote
-  Job viewer (PR3), writer-held caller recovery (PR5) and the child durable-image
-  read (PR6 or its owning viewer PR) remain. The Remote Plugin Manager is outside
-  PR1's scope and is CLOSED by the M3-5 PR4 section below — no longer a remaining
-  obligation.
+- Remote Task Center and a user-reachable Remote child viewer (PR2, merged), the
+  Remote Job viewer (PR3, landed and PR open), writer-held caller recovery (PR5)
+  and the child durable-image read (PR6 or its owning viewer PR) remain. The
+  Remote Plugin Manager is outside PR1's scope and is CLOSED by the M3-5 PR4
+  section below — no longer a remaining obligation.
 
 Remote child SessionStatus authority: qualified. Remote child viewer L6: not
 yet claimed — owner M3-5 PR2.
@@ -4368,8 +4369,8 @@ yet claimed — owner M3-5 PR2.
 ## M3-5 PR4 — Remote Plugin Manager closure (DONE)
 
 Scope note: this section records **M3-5 PR4 only**. M3-5 as a stage is
-**IN PROGRESS** and must not be marked DONE from this PR (PR2/PR3/PR5/PR6
-remain).
+**IN PROGRESS** and must not be marked DONE from this PR (PR5/PR6 remain; PR2
+merged, PR3 landed and PR open).
 
 ### Implemented authority
 
@@ -4432,14 +4433,14 @@ in this PR is labelled L6 for installation.
 
 ### Remaining M3-5 obligations
 
-PR2 (Remote Task Center + real child viewer), PR3 (Remote Job viewer), PR5
-(writer-held recovery) and PR6 (stage closure) remain. `M3-5 DONE` is not
+PR5 (writer-held recovery) and PR6 (stage closure) remain. `M3-5 DONE` is not
 claimed anywhere in this PR.
 
 ## M3-5 PR2 — Remote Task Center + real child viewer
 
 Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
-**IN PROGRESS** and must not be marked DONE from this PR (PR3/PR5/PR6 remain).
+**IN PROGRESS** and must not be marked DONE from this PR (PR5/PR6 remain; PR3
+landed and PR open — see the M3-5 PR3 section at the end of this file).
 
 ### Implemented authority
 
@@ -4529,25 +4530,12 @@ Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
 - **The Remote Task reader's retained root Job-roster watch is released by its
   owner**: `RemoteApplicationRuntime.disposeTransport()` disposes the
   presentation/task bundle before the backend adapters and the Client Context.
-- **PR3's Job closure (supersedes PR2's Job-action boundary).**
-  `TaskSurfaceJobs` is now the roster feed ONLY (`list`/`subscribe`); the
-  selected-Job detail and Stop are the ONE semantic `backend.jobObservation`
-  port on BOTH backends, so the neutral Task/Job UI carries no Direct registry
-  `get`/`kill`. `openJobView` resolves the selected row from the CURRENT Task
-  projection (never a fresh registry read); the viewer's facts come from the
-  official Client `IJobs.observe` NON-CONSUMING stream (the opening row is only
-  the pre-first-snapshot fallback) and its Stop from the official `IJobs.kill`;
-  both the viewer Stop and the Task-Center row Stop dispatch that same
-  operation behind the existing subject/browser fences and render the
-  `JobStopOutcome` taxonomy truthfully (no optimistic local status, no retry).
-  The Direct adapter records the same human-kill reason (`cancelled by the
-  user`) as the official Host `JobController.kill`, so the two backends
-  converge on one durable detail. rc.2 `JobView` still carries no stable child
-  id, so a `kind:'subagent'` Job stays a detail view (the child row in the Task
-  Center is the transcript entry; no label/time/order matching). Evidence: the
-  PR3 L1-L4 adapter/parity suites, the L5 real generated-wire observe+kill
-  case, and the post-PR2 real Remote application L6
-  (`test/runner-remote-job-viewer.test.ts`).
+- **PR3's Job closure supersedes PR2's Job-action boundary.** `TaskSurfaceJobs`
+  is now the roster feed ONLY (`list`/`subscribe`); the selected-Job detail and
+  Stop are the ONE semantic `backend.jobObservation` port on BOTH backends, so
+  the neutral Task/Job UI carries no Direct registry `get`/`kill`. The full
+  authority, taxonomy, application wiring and qualification evidence are in the
+  **M3-5 PR3 section at the end of this file**.
 - **`tuiChildView` is a third TUI-owned SessionReference source**
   (`src/runtime/remote/session-reference.ts`). `acquireChildViewReference()`
   owns one child generation from the exact durable `SubagentAddress`
@@ -4775,7 +4763,97 @@ follow-up), so that path is covered by the F2 teardown lock instead.
 
 ### Remaining M3-5 obligations
 
-PR3 (Remote Job viewer: Job-row detail reachability, selected-Job live
-observation, Job Stop and its outcome taxonomy, and the post-PR2 L6),
-PR5 (writer-held caller recovery + remaining secondary presentation) and
-PR6 (stage closure) remain. `M3-5 DONE` is not claimed anywhere in this PR.
+PR5 (writer-held caller recovery + remaining secondary presentation) and PR6
+(stage closure) remain. PR3 is landed and PR open (see the M3-5 PR3 section
+below). `M3-5 DONE` is not claimed anywhere in this PR.
+
+## M3-5 PR3 — Remote selected-Job viewer closure (LANDED; PR OPEN)
+
+Scope note: this section records **M3-5 PR3 only**. M3-5 as a stage stays
+**IN PROGRESS** and must not be marked DONE from this PR (PR5/PR6 remain).
+
+### Baseline
+
+- Merged dependency: **M3-5 PR2 (#216, merge `cd498a2f`)**. PR3 is rebased onto
+  the post-PR2 `next` (`e2756518`).
+- The rebase was clean: the previously accepted Phase A source / test / boundary
+  files are byte-identical to the pre-rebase checkpoints; only the live
+  migration/coupling documents merged PR2's baseline.
+
+### Authority / mapping
+
+- The selected-Job detail and Stop are the ONE semantic
+  `backend.jobObservation` (`JobObservationPort`) on BOTH backends. The neutral
+  Task/Job UI carries no backend-specific Job authority:
+  `TaskSurfaceJobs` is the roster feed ONLY (`list`/`subscribe`).
+- `openJobView` resolves the selected row from the CURRENT Task projection (the
+  PR2 Task-runtime row identity) — never a fresh registry read.
+- Direct maps the official local `JobRegistry` (the caller-fenced `get`, then
+  `kill`); Remote maps the official Client `IJobs` (`watchRows` /
+  `state.rows` / `state.observed` for observation, `kill` for Stop).
+- Both backends record the same human-kill reason (`cancelled by the user`) as
+  the official Host `JobController.kill`, so one durable detail is produced.
+
+### Stop settlement taxonomy (`JobStopOutcome`)
+
+```text
+requested / already-finished / not-found / rejected / indeterminate
+```
+
+Remote uses a Job-Stop-SPECIFIC settlement table: only `job/not-found` plus the
+pinned pre-dispatch Gateway refusals are proven; every other code — an unknown
+or foreign domain code, `gateway/internal` / `gateway/cancelled` /
+`gateway/result-invalid`, an unknown `gateway/*`, or a code-less failure —
+stays `indeterminate`. No automatic retry; no optimistic local roster/status
+mutation; an observer stream error is never treated as a Job settlement.
+
+### Application wiring (J7–J12)
+
+- The viewer's facts come from the official Client `IJobs.observe`
+  NON-CONSUMING stream; the opening Task row is only the pre-first-snapshot
+  fallback, and the viewer timer never reads Host/Client Job output.
+- `canStop` follows the latest OBSERVED status + the captured ownership subject
+  + the viewer-INSTANCE token.
+- Both the viewer Stop and the Task-Center row Stop dispatch the ONE
+  `jobObservation.stop` behind their existing fences and render the settlement
+  via `jobStopNotice` (`indeterminate` is never reported as a proven
+  non-commit).
+- Lifecycle: one viewer at a time; the observer releases exactly once on any
+  close (Esc, parent-browser close, session transition, surface teardown); a
+  superseded viewer's in-flight Stop settlement (success OR error) can never
+  notify or paint the replacement surface (viewer-instance token with a single
+  `onClose` invalidation owner).
+- rc.2 `JobView` carries no stable child id: a `kind:'subagent'` Job stays a Job
+  detail view. The child row in the Task Center is the transcript entry; no
+  label/time/order matching, and no local correlation bridge.
+
+### Qualification evidence
+
+- **L1-L4**: `test/remote-job-observation.test.ts` (taxonomy + no-retry),
+  `test/job-observation-direct.test.ts` (Direct mapping + the unified reason),
+  `test/job-observation-parity.test.ts` (Direct↔Remote parity across the live
+  and terminal stages), `test/job-stop-notice.test.ts` (the user-facing
+  settlement text).
+- **L5**: the real generated-wire `observe`+`kill` case in
+  `test/remote-client-runtime.test.ts` (roster AND follow convergence in one
+  Client graph).
+- **L6 (post-PR2 real Remote application)**: `test/runner-remote-job-viewer.test.ts`
+  — real `/tasks` → Job row → OutputViewer over the official `IJobs.observe` →
+  live append/progress/status → the real `tasks.stop` key → official
+  `IJobs.kill` → roster/follow convergence; the Task-Center row two-step
+  confirmation; the subagent-Job detail fallback; same-Session Job A→B viewer
+  replacement (success + error sinks); and the session-switch / teardown
+  stale-settlement controls.
+- Direct behavior is unchanged (Direct remains the production default; no
+  public/config/env Remote selector).
+
+### Known limitation / debt
+
+rc.2 `JobView` has no stable child Session identity, so a subagent Job cannot
+be linked to its child transcript; the Job-detail fallback is the truthful
+behavior and no local correlation bridge exists.
+
+### Remaining M3-5 obligations
+
+PR5 (writer-held caller recovery + remaining secondary presentation) and PR6
+(stage closure) remain. `M3-5 DONE` is not claimed here.
