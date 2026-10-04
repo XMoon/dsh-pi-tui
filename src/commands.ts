@@ -5006,6 +5006,11 @@ export function registerTuiCommands(
             return { kind: 'error', text: message }
           }
           if (outcome.kind === 'indeterminate') {
+            // True indeterminate: the Host may have committed the switch, so
+            // restoring the typed command would arm an implicit retry. Suppress
+            // it; a KNOWN rejection (writer-held included) settles through
+            // `outcome.kind === 'rejected'` below and is restored.
+            recordCommandDraftDisposition(invocation.commandId, 'suppressed')
             const message = `${outcome.message} — the displayed preset reconciles from the Session; do not retry`
             app.notify(message, 'error')
             return { kind: 'error', text: message }
@@ -5142,6 +5147,14 @@ export function registerTuiCommands(
             }
           }
           const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+          // PR5 (Slice C1): the Remote Client-owned command path renders no
+          // official command card (the Host executor's `command/run` row does
+          // not exist there), so the handler surfaces its own refusal — the
+          // same inline notice the `/preset` and `/model` handlers already
+          // emit. On Direct this is a transient notice beside the command card.
+          // The rejected branch is the writer-held (`session/writer-held`)
+          // proven pre-commit refusal: its message is the centralized guidance.
+          app.notify(message, 'error')
           return { kind: 'error', text: message }
         }
       } catch (error) {

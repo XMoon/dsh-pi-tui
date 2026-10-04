@@ -18,6 +18,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
+import {
+  executeHostCommandSubmission,
+  type HostCommandSubmissionDeps,
+} from '../src/app/submission/runtime.ts'
+import type { PresetCatalog } from '../src/runtime/catalog-port.ts'
+import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
+import { mergeDraft } from '../src/steer.ts'
 import { KeybindingEditorController } from '../src/keybinding-ui/controller.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
@@ -214,9 +221,18 @@ function stubRunner(options: {
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   /** Defaults to a pass-through capture (the test themes use id === name). */
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
+  /** Replace the preset catalog sub-domain with a scripted port (the /preset
+   *  handler's only business authority). Used by the command-settlement
+   *  family to script exact `WriteOutcome`s without a Host. */
+  presetsPort?: PresetCatalog
 }): { runner: TuiCommandRunner; pending: { value: string | undefined }; refreshes: CatalogRefreshRequest[] } {
   const pending = { value: undefined as string | undefined }
   const refreshes: CatalogRefreshRequest[] = []
+  const catalog = new DirectCatalogPort(options.ctx as never, (sessionId) => {
+    const live = options.state !== undefined ? options.state.agent : options.agent
+    return live?.session.id === sessionId ? live : undefined
+  })
+  if (options.presetsPort !== undefined) Object.assign(catalog, { presets: options.presetsPort })
   const runner: TuiCommandRunner = {
     ctx: options.ctx,
     app: options.app,
@@ -256,10 +272,7 @@ function stubRunner(options: {
       sessionStatus: () => undefined,
        ...options.sessionReader,
     },
-    catalog: new DirectCatalogPort(options.ctx as never, (sessionId) => {
-      const live = options.state !== undefined ? options.state.agent : options.agent
-      return live?.session.id === sessionId ? live : undefined
-    }),
+    catalog,
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
     commandRegistry: options.ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
@@ -396,6 +409,8 @@ function setup(options: {
   commandsPresetOverride?: { name: string; definitionId?: string; description?: string }
   /** Omit the `agentPresets` service (a rosterless deployment). */
   noPresets?: boolean
+  /** Replace the preset catalog sub-domain with a scripted port. */
+  presetsPort?: PresetCatalog
   width?: number
   /** Viewport height; a taller screen keeps the whole `/help` list on one page. */
   height?: number
@@ -441,6 +456,7 @@ function setup(options: {
       }),
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
+    presetsPort: options.presetsPort,
   })
   const surface = registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'preset')
@@ -452,11 +468,18 @@ function setup(options: {
     assert.ok(found?.handler !== undefined, `${name} handler missing`)
     return (found!.handler as (inv: CommandInvocation) => unknown)(invoke(rawInput))
   }
+  /** Invoke one registered handler as the outer command plane would: the
+   *  execution's command id is the disposition correlation key. */
+  const invokeCommand = async (name: string, commandId: string, rawInput: string): Promise<unknown> => {
+    const found = commands.defs.find(entry => entry.name === name)
+    assert.ok(found?.handler !== undefined, `${name} handler missing`)
+    return (found!.handler as (inv: CommandInvocation) => unknown)({ ...invoke(rawInput), commandId: CommandId(commandId) })
+  }
   const view = async (): Promise<string> => {
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, runCommand, view, pending, presets, ensureCalls, refreshes, surface }
+  return { vt, app, run, runCommand, invokeCommand, view, pending, presets, ensureCalls, refreshes, surface }
 }
 
 test('/preset is in the sessionless dispatch gate', () => {
@@ -1317,6 +1340,150 @@ test('/preset <id> surfaces an indeterminate switch without retrying', async () 
   assert.match(result.text, /do not retry/)
   assert.deepEqual(t.presets.selected, [], 'an ambiguous switch is never retried')
   t.app.stop()
+})
+
+/* ── PR5 Slice B: /preset <id> through the OUTER command-settlement owner ──
+ * The two cases below are ONE semantic family. The handler's draft disposition
+ * is what the outer owner reads; a future "always suppress preset failures"
+ * regression must break the known-rejection case, and a future "always
+ * restore" regression must break the indeterminate case. */
+
+/** Drive the REAL `/preset` handler through the REAL outer command-settlement
+ *  owner (`executeHostCommandSubmission`) with a scripted preset port. */
+async function settlePresetThroughOuterOwner(
+  outcome: Awaited<ReturnType<PresetCatalog['selectSessionPreset']>>['outcome'],
+): Promise<{
+  readonly restored: readonly string[]
+  readonly fallbacks: number
+  readonly draft: string
+  readonly handlerText: string
+  readonly selects: number
+  readonly view: string
+}> {
+  const commandId = 'cmd-preset-exec'
+  const selects: unknown[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    width: 200,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'alternate' }], defaultId: 'standard' }),
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      defaultId: () => 'standard',
+      selectSessionPreset: async (sessionId, presetId) => {
+        selects.push({ sessionId, presetId })
+        return { ownership: 'current', outcome }
+      },
+    },
+  })
+  const restored: string[] = []
+  const acks: string[] = []
+  let fallbacks = 0
+  let handlerText = ''
+  let settled!: () => void
+  const done = new Promise<void>(resolve => { settled = resolve })
+  const deps = {
+    isDisposed: () => false,
+    notify: () => {},
+    loggerError: () => {},
+    readDraft: () => t.app.getDraft(),
+    mergeDraftIntoEditor: (value: string) => {
+      const merged = mergeDraft(t.app.getDraft(), value)
+      t.app.setEditorText(merged)
+      return merged === value
+    },
+    restoreSubmissionDraft: (value: string) => {
+      restored.push(value)
+      t.app.setEditorText(mergeDraft(t.app.getDraft(), value))
+    },
+    consumeDraftAttachments: () => {},
+    draftHasAttachments: () => false,
+    pinDraftAttachments: () => () => {},
+    settleLocalSubmission: () => {},
+    settleSubmitAck: (reason: string) => { acks.push(reason); settled() },
+    notifySubmissionFailure: () => {},
+    isScopeCurrent: () => true,
+    refuseByTransitionFence: () => {},
+    lateAttachmentRefusal: () => undefined,
+    commandSubmitAttachments: () => [],
+    isTuiOwnedCommand: () => false,
+    commandPlaneOwnsLine: () => false,
+    submittedHostClaim: () => undefined,
+    commandSignal: () => new AbortController().signal,
+    invokeCommandPlane: async () => {
+      const handlerResult = await t.invokeCommand('preset', commandId, 'alternate') as { kind: string; text?: string }
+      handlerText = handlerResult.text ?? ''
+      return {
+        kind: 'committed' as const,
+        matched: true,
+        execution: { commandId, result: { kind: handlerResult.kind, text: handlerResult.text } },
+      }
+    },
+    beginCommandSettlement: () => {},
+    abortCommandSettlement: () => {},
+    settleCommandSettlement: () => {},
+    trackSettlementWork: () => {},
+    captureCommandHealthRef: () => undefined,
+    clearCommandHealthError: () => {},
+    recordCommandHealthError: () => {},
+    readCommandDraftDisposition: (id?: string) => t.surface.takeCommandDraftDisposition(id),
+    shouldConsumeAdvertisedMiss: () => false,
+    isIndeterminateSkillWrite: () => false,
+    startArtifactSave: () => {},
+    submitPrompt: async () => { fallbacks += 1 },
+    commandSessionId: () => 's1',
+    markTurnTransferred: () => {},
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }
+  // The submit gesture cleared the editor before the command was dispatched.
+  t.app.setEditorText('')
+  executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+    text: '/preset alternate',
+    toggled: '/preset alternate',
+    scope: { sessionId: 's1' } as never,
+    submitRequestId: 'req-preset',
+    submitAckToken: 3,
+    generation: 0,
+    localEchoInstalled: true,
+    wasAdvertisedAtSubmit: false,
+    parsedName: 'preset',
+    submitTurn: { wait: Promise.resolve(), release: () => {} },
+  })
+  await done
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(acks.length, 1, 'the gesture settled exactly once')
+  return {
+    restored,
+    fallbacks,
+    draft: t.app.getDraft(),
+    handlerText,
+    selects: selects.length,
+    view: await t.view(),
+  }
+}
+
+test('PR5: a TRUE indeterminate /preset <id> does not restore the typed command at the outer settlement owner', async () => {
+  const result = await settlePresetThroughOuterOwner({
+    kind: 'indeterminate',
+    error: { code: 'agent-preset/select-indeterminate', message: 'recompose ran but the durable append failed' },
+  })
+  assert.deepEqual(result.restored, [], 'an indeterminate switch must never restore a retry-ready command')
+  assert.equal(result.draft, '', 'the editor does not regain /preset <id>')
+  assert.equal(result.fallbacks, 0, 'no agent-facing fallback prompt is launched')
+  assert.equal(result.selects, 1, 'the switch dispatched exactly once (no implicit retry)')
+  assert.match(result.view, /do not retry/)
+})
+
+test('PR5: a KNOWN writer-held /preset <id> rejection restores the typed command at the outer settlement owner', async () => {
+  const result = await settlePresetThroughOuterOwner({
+    kind: 'rejected',
+    error: { code: 'session/writer-held', message: SESSION_WRITER_HELD_GUIDANCE, details: { sessionId: 's1' } },
+  })
+  assert.deepEqual(result.restored, ['/preset alternate'], 'a known rejection restores the complete typed command')
+  assert.equal(result.draft, '/preset alternate', 'the editor regains the command for manual recovery')
+  assert.equal(result.fallbacks, 0, 'a restored command is never additionally submitted as a prompt')
+  assert.equal(result.selects, 1, 'the refused switch is not retried')
+  assert.match(result.view, /already in use/, 'the centralized writer-held guidance is rendered')
 })
 
 test('/preset commits a Host-blank selection even when the transcript has a turn', async () => {
