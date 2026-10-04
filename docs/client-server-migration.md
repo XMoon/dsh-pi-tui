@@ -4243,7 +4243,7 @@ remain).
 | Reconnect invalidation | L6 | L6-E: a hand-edited profile truth (no event) stays cached; the official `connection.reconnect()` establishes a new generation → invalidation → authoritative reread, with no mutation replay |
 | Forwarded install events over the real wire | L5 | the `L5:` scenario in the same suite (real Host install events forwarded to the Remote adapter). The controller's exact-request-id filtering, close/reopen-without-redispatch and `waitForInstall` recovery remain covered by `test/plugin-manager-install.test.ts` and `test/plugin-manager-port.test.ts` |
 | Controller disposal lifecycle | L1 (transport-neutral controller unit) / L3 (Remote adapter unit) | `test/plugin-manager-port.test.ts`: a synchronously throwing invalidation subscription releases the install subscription and rethrows; `dispose()` releases BOTH subscriptions exactly once and is idempotent; a held inventory read settled (success AND failure) after dispose never commits nor repaints; a held inspect result never advances the phase nor repaints; a late install settlement never mutates nor repaints; no `cancelInstall`. `test/remote-plugin-manager.test.ts` proves each Remote adapter disposer runs exactly once (off-call counters, repeated dispose included) |
-| Direct behaviour preserved | L3/L6 | `test/plugin-manager-direct.test.ts`, `test/plugin-manager-runner-integration.test.ts` and the controller suite remain green |
+| Direct behaviour preserved | L2 / L6 | `test/plugin-manager-direct.test.ts`, `test/plugin-manager-runner-integration.test.ts` and the controller suite remain green |
 
 **Honest gap:** the network/pnpm real package *installation* L6-F scenario is
 NOT claimed at L6. It is retained at the L5 Remote-event level above; no test

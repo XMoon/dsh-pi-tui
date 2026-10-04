@@ -181,6 +181,22 @@ async function selectListRow(vt: VirtualTerminal, name: string): Promise<void> {
   throw new Error(`no selectable row for ${name}: ${plain(vt.getViewport())}`)
 }
 
+/**
+ * The real user mutation path over the ALREADY-OPEN list: select the fixture
+ * bundle, open its detail and activate the official Enable action, then wait
+ * for the authoritative reread to repaint the enabled truth. Returns with the
+ * panel in DETAIL mode.
+ */
+async function enableFixtureBundleThroughPanel(fixture: Fixture, bundle: string): Promise<void> {
+  await selectListRow(fixture.vt, bundle)
+  fixture.vt.sendInput('\r')
+  await waitFor('the fixture bundle detail offers the official Enable action', () =>
+    /\bEnable\b/.test(plain(fixture.vt.getViewport())), 20_000)
+  fixture.vt.sendInput('\r')
+  await waitFor('the panel repaints the enabled truth from the authoritative reread', () =>
+    /\bDisable\b/.test(plain(fixture.vt.getViewport())), 20_000)
+}
+
 test('L6-A: the real Remote /plugins reads the real Host PluginManager through the generated Remote', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
@@ -259,23 +275,16 @@ test('L6-C: one real Remote mutation reaches Host authority and the authoritativ
   assert.equal(readFileSync(join(profile.profileDir, 'package.json'), 'utf8'), manifestBefore,
     'the self-protected target never mutates the Host truth')
 
-  // Positive mutation: select the fixture bundle in the list, open its detail,
-  // and activate the official Enable action.
+  // Positive mutation: the real user path (select → detail → official Enable).
   fixture.vt.sendInput('\x1b') // back to the list
   await fixture.vt.waitForRender()
-  await selectListRow(fixture.vt, bundle)
-  fixture.vt.sendInput('\r')
-  await waitFor('the fixture bundle detail offers the official Enable action', () =>
-    /\bEnable\b/.test(plain(fixture.vt.getViewport())), 20_000)
-  fixture.vt.sendInput('\r')
+  await enableFixtureBundleThroughPanel(fixture, bundle)
 
   // Host authority: the durable profile manifest now selects the fixture
   // bundle (the ONLY truth), and the panel repainted from the authoritative
   // reread — not from the operation reply.
   await waitFor('the Host profile truth is written', () =>
     profile.selectedBundles().includes(bundle), 20_000)
-  await waitFor('the panel repaints from the authoritative reread', () =>
-    /\bDisable\b/.test(plain(fixture.vt.getViewport())), 20_000)
   const detail = plain(fixture.vt.getViewport())
   assert.match(detail, /enabled · DSH plugin/, 'the reread renders the enabled status')
   assert.doesNotMatch(detail, /disabled · DSH plugin/, 'the stale disabled truth is gone')
@@ -309,7 +318,7 @@ test('L6-D: an external Host change invalidates an open Remote panel with no man
     (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('active'), 20_000)
 })
 
-test('L6-E: a new Connection generation invalidates and rereads without replaying a mutation', async (t) => {
+test('L6-E: a new Connection generation rereads authoritative truth without replaying the prior mutation', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountPluginManagerRunner(life)
   const profile = fixture.host.pluginManager!
@@ -319,12 +328,20 @@ test('L6-E: a new Connection generation invalidates and rereads without replayin
   await waitFor('the fixture bundle is listed disabled', () =>
     (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('disabled'), 20_000)
 
-  // A hand edit of the profile manifest changes authoritative Host truth and
-  // announces NOTHING (the official manager only announces its own operations).
-  writeProfileBundles(profile.profileDir, [bundle])
+  // A REAL prior mutation through the panel (this is the operation a buggy
+  // reconnect could wrongly replay), then back to the list.
+  await enableFixtureBundleThroughPanel(fixture, bundle)
+  fixture.vt.sendInput('\x1b')
+  await waitFor('the prior Enable reached both Host truth and the list render', () =>
+    profile.selectedBundles().includes(bundle)
+    && (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('active'), 20_000)
+
+  // External hand edit: authoritative truth becomes DISABLED and NOTHING is
+  // announced (the official manager only announces its own operations).
+  writeProfileBundles(profile.profileDir, [])
   await settle(250)
-  const stillCached = bundleLine(fixture.vt.getViewport(), bundle) ?? ''
-  assert.match(stillCached, /disabled/, 'without an invalidation the open panel keeps its cached truth')
+  assert.match(bundleLine(fixture.vt.getViewport(), bundle) ?? '', /active/,
+    'without an invalidation the open panel keeps its cached truth')
 
   const connection = fixture.aggregate.wire.client.connection as unknown as {
     generation: { getSnapshot(): { readonly id: number } | undefined }
@@ -338,11 +355,13 @@ test('L6-E: a new Connection generation invalidates and rereads without replayin
   }, 20_000)
 
   await waitFor('the generation invalidation rereads the authoritative inventory', () =>
-    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('active'), 20_000)
+    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('disabled'), 20_000)
 
-  // Reconnect is never permission to replay a mutation: the durable profile
-  // truth is exactly the hand edit, and the reread wrote nothing.
-  assert.deepEqual([...profile.selectedBundles()], [bundle], 'the reconnect reread replays no mutation')
+  // The REPLAY-NEGATIVE: the earlier Enable really happened, so a reconnect
+  // that replayed it would flip the durable Host truth back to selected (and
+  // the reread would repaint `active`). It must stay exactly the hand edit.
+  assert.deepEqual([...profile.selectedBundles()], [],
+    'reconnect rereads only; it never replays the earlier Enable mutation')
 })
 
 test('L5: the real forwarded install events reach the Remote adapter by exact request id', async (t) => {
