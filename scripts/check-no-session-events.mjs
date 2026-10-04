@@ -67,8 +67,11 @@ export const DEPRECATED_READER_PATTERNS = [
 // `src/app/bootstrap.ts`; the debt moved WITH them, never doubled and never
 // absorbed by the surface.
 export const DEPRECATED_READER_ALLOWLIST = [
-  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly Event[] = initialChild?.snapshotEvents() ?? []', why: 'child-viewer observed history seed (A5b-1 viewer owner)' },
-  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'child-viewer durable history merge (A5b-1 viewer owner)' },
+  // M3-5 PR2 moved the Direct child-viewer read OUT of the A5b-1 viewer owner
+  // into the Direct child-view source (`src/app/direct/child-view.ts`): the debt
+  // moved WITH the call sites, never doubled and never absorbed by the surface.
+  { file: 'src/app/direct/child-view.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly Event[] = initial?.snapshotEvents() ?? []', why: 'child-viewer observed history seed (M3-5 PR2 Direct child-view source)' },
+  { file: 'src/app/direct/child-view.ts', call: 'snapshotEvents', site: 'const durableEvents = current?.snapshotEvents() ?? observedEvents', why: 'child-viewer durable history merge (M3-5 PR2 Direct child-view source)' },
   { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'live-session resume history branch (A5b-1 presentation owner)' },
   { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: ': mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)', why: 'live-session resume history merge branch (A5b-1 presentation owner)' },
   // M3-4 PR4 relocated the rewind picker authority OUT of the application

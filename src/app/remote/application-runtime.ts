@@ -143,6 +143,10 @@ export async function createRemoteApplicationRuntime(
   }
 
   let transportDisposed = false
+  // The M3-5 PR2 presentation/task source bundle. Its Task read owns a retained
+  // root Job-roster watch that must be released through THIS owner before the
+  // Client Context is disposed (adapter -> Client -> Host order).
+  const presentation = createRemotePresentationSource(wire, backendRuntime)
   return {
     selected: {
       kind: 'remote',
@@ -152,12 +156,14 @@ export async function createRemoteApplicationRuntime(
       disposeTransport: async (): Promise<void> => {
         if (transportDisposed) return
         transportDisposed = true
-        // backendRuntime.dispose() drops the adapter caches/subscriptions
-        // BEFORE the Client Context disposal; wire.dispose() then disposes
-        // Client first, Host additive fibers last. Both steps run even when
-        // the first throws; the first error surfaces with the second on its
-        // cause chain.
+        // presentation.task.dispose() drops the retained roster watch and
+        // invalidates every in-flight Task read; backendRuntime.dispose() then
+        // drops the adapter caches/subscriptions BEFORE the Client Context
+        // disposal; wire.dispose() disposes Client first, Host additive fibers
+        // last. Every step runs even when an earlier one throws; the first
+        // error surfaces with the rest on its cause chain.
         const errors = [
+          ...await collectDisposeErrors(() => presentation.task.dispose()),
           ...await collectDisposeErrors(() => backendRuntime.dispose()),
           ...await collectDisposeErrors(() => wire.dispose()),
         ]
@@ -166,6 +172,6 @@ export async function createRemoteApplicationRuntime(
     },
     wire,
     backendRuntime,
-    presentation: createRemotePresentationSource(wire, backendRuntime),
+    presentation,
   }
 }

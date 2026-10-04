@@ -56,9 +56,13 @@ const subagentActivity = (rows: readonly TaskBrowserRow[], childId: string): str
 
 const rowValue = (rows: readonly TaskBrowserRow[]): string[] => rows.map(row => row.value)
 
-/** A harness with a DEFERRED listDescendants (each catalog request gets
+/** The status word of the first Job row (the roster projection's observable). */
+const jobStatus = (rows: readonly TaskBrowserRow[]): string | undefined =>
+  rows.find((row): row is Extract<TaskBrowserRow, { kind: 'job' }> => row.kind === 'job')?.status
+
+/** A harness with a DEFERRED Task read (each catalog request gets
  * its own deferred; the test settles or rejects them in any order), a
- * mutable registry-status map, and commit/badge journals. */
+ * mutable activity map, and commit/badge journals. */
 function makeHarness(): {
   runtime: TaskBrowserRuntime
   listings(): number
@@ -70,9 +74,9 @@ function makeHarness(): {
   setKey(key: string | undefined): void
   setStatus(id: string, status: string | undefined): void
   setJobs(jobs: readonly TaskBrowserJobInput[]): void
-  /** Resolve the listing of the i-th refreshCatalog call (0-based). */
+  /** Resolve the Task read of the i-th refreshCatalog call (0-based). */
   settleListing(index: number, entries: readonly SubagentDescendantListEntry[]): void
-  /** Reject the listing of the i-th refreshCatalog call (0-based). */
+  /** Reject the Task read of the i-th refreshCatalog call (0-based). */
   rejectListing(index: number, error: Error): void
 } {
   let key: string | undefined = 'g1:sess-main'
@@ -88,15 +92,20 @@ function makeHarness(): {
   const summaries: TaskBrowserSummary[] = []
   const runtime = new TaskBrowserRuntime({
     currentKey: () => key,
-    listDescendants: () => {
+    readTask: () => {
       listingCount += 1
       return new Promise((resolve, reject) => {
-        pendingSettles.push(resolve)
+        pendingSettles.push(entries => resolve({
+          parentSessionId: 'sess-main',
+          parentAvailable: true,
+          descendants: entries,
+          jobs,
+        }))
         pendingRejects.push(reject)
       })
     },
     readJobs: () => jobs,
-    agentStatusOf: (id) => statuses.get(id),
+    activityOf: (id) => statuses.get(id),
     commitRows: (rows, preferred) => {
       commits.push([...rows])
       preferreds.push(preferred)
@@ -571,11 +580,13 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
     'the browser must capture a surface token for delayed action results')
   assert.ok(!handler.includes('actionGeneration'),
     'the dispatch must not re-capture the generation at dispatch time')
-  // A subagent stop re-reads the LIVE driver before firing the interrupt.
-  assert.ok(handler.includes("source.agents?.agentStatusOf(row.childId) !== 'running'"),
+  // A subagent stop re-reads the LIVE driver before firing the interrupt
+  // through the SELECTED Task read source (Direct: the Agent registry; Remote:
+  // the official Session list).
+  assert.ok(handler.includes("source.taskRead?.activityOf(row.childId) !== 'running'"),
     'the dispatch must re-check the live registry driver at confirm time')
   // A job stop re-reads the current record through the public registry API.
-  assert.ok(handler.includes('jobs.get(row.jobId, browserSessionId)'),
+  assert.ok(handler.includes('jobs!.get?.(row.jobId, browserSessionId)'),
     'the dispatch must re-read the live job record before killing through the surface session id')
   assert.ok(handler.includes('!isActiveJobStatus(current.status)'),
     'a settled job must not be killable at confirm time')
@@ -606,7 +617,7 @@ test('the Task Center surface never calls the consuming jobs read API (review ro
   const open = surfaceSource.slice(surfaceSource.indexOf(marker), surfaceSource.indexOf('const handleWorkflowAction'))
   assert.ok(!open.includes('jobs.read('),
     'the browser must never consume the model-owned job output cursor')
-  assert.ok(open.includes('jobs.get('),
+  assert.ok(open.includes('jobs!.get?.(row.jobId, browserSessionId)'),
     'metadata reads through the public get API are the only job access the surface needs')
 })
 
@@ -891,4 +902,32 @@ test('the surface coalesces every production catalog refresh through one gate', 
   )
   assert.ok(!agentStatus.includes('refreshAgents()'),
     'agent/status must never trigger a catalog refresh through the coalescing gate')
+})
+
+test('F3 regression: acknowledge/setScope commit the CURRENT roster, never a stale catalog snapshot', async () => {
+  const h = makeHarness()
+  h.setJobs([{ id: 'j1', kind: 'bash', label: 'job j1', status: 'running', startedAt: 1 }])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [child({ activity: 'inactive' })])
+  await listing
+  assert.equal(jobStatus(h.commits().at(-1)!), 'running')
+  assert.equal(h.summaries().at(-1)!.runningJobs, 1)
+  // The Job settles on the Host AFTER the catalog read landed. A runtime-only
+  // refresh commits the failure...
+  h.setJobs([{ id: 'j1', kind: 'bash', label: 'job j1', status: 'failed', startedAt: 1, finishedAt: 2 }])
+  h.runtime.refreshRuntime()
+  assert.equal(jobStatus(h.commits().at(-1)!), 'failed')
+  // ...and the ACKNOWLEDGE commit must keep committing the CURRENT roster: a
+  // catalog-snapshot fallback would resurrect the pre-settlement `running`
+  // row, zero the failure ledger and repaint a wrong active-job count.
+  h.runtime.acknowledge(['job:j1'])
+  assert.equal(jobStatus(h.commits().at(-1)!), 'failed',
+    'acknowledge must not resurrect the catalog-time roster')
+  assert.equal(h.summaries().at(-1)!.failedAttention, 0, 'the visible failure is acknowledged')
+  assert.equal(h.summaries().at(-1)!.failedTotal, 1, 'the failure is still counted')
+  assert.equal(h.summaries().at(-1)!.runningJobs, 0, 'a settled job is not running')
+  // setScope re-commits through the SAME rule.
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-a'] })
+  assert.equal(h.summaries().at(-1)!.runningJobs, 0,
+    'setScope must not resurrect the catalog-time roster either')
 })

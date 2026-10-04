@@ -46,7 +46,7 @@ import {
   PARKED_STEERING_NOTICE,
   steerAll,
   steerHasPayload,
-  type SteerAgentLike,
+  type SteerSubjectLike,
 } from '../../steer.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 
@@ -662,7 +662,7 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
 // ── Ctrl+S steer / busy-Enter draft steer ──────────────────────────────────
 
 /** The live steer agent identity (structural: session + activity). */
-export interface SteerSubmissionAgent extends SteerAgentLike {
+export interface SteerSubmissionAgent extends SteerSubjectLike {
   readonly status: string
 }
 
@@ -921,7 +921,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
           // T1 BEFORE the dispatch.
           deps.markDispatch(agentForSteer.session.id)
           const outcome = await steerAll({
-            currentAgent: () => deps.isDisposed() ? undefined : agentForSteer,
+            currentSubject: () => deps.isDisposed() ? undefined : agentForSteer,
             currentGeneration: () => generationForSteer,
             notify: (message, kind) => {
               if (deps.isDisposed()) return

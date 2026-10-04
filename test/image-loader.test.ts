@@ -250,3 +250,27 @@ test('clear() invalidates even attachments that were locally invalidated before 
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(loader.get(ref).state, 'ready')
 })
+
+test('F7 regression: the requesting subject is captured at load(), not when the deferred read runs', async () => {
+  const contexts: unknown[] = []
+  let subject: unknown = 'child-view'
+  const loader = new ImageLoader(
+    async (_ref, context) => {
+      contexts.push(context)
+      return { ref: {}, data: new Uint8Array([1]) }
+    },
+    undefined,
+    () => subject,
+  )
+  const childRef = refOf('child-only')
+  // The component asks for the child's bytes...
+  loader.load(childRef)
+  // ...and the display subject switches in the SAME tick, before the deferred
+  // read callback runs. The read must still address the ASKING subject: a late
+  // resolution would send the child-only attachment to the parent Session.
+  subject = 'parent-main'
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(contexts, ['child-view'],
+    'the deferred read carries the subject captured at the ask, never the later one')
+  assert.equal(loader.get(childRef).state, 'ready')
+})

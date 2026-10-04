@@ -131,7 +131,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
   // session id from the ownership core; the A5b-6 retention policy (the
   // retained snapshot + the same-session fence) is Task-Center-owned and reads
   // both at CALL time (locked in test/a5b-bootstrap-closure.test.ts).
-  const jobFence = spanOf(indexSource, 'currentKey: () => {', 'listDescendants:')
+  const jobFence = spanOf(indexSource, 'const taskReadKey = (): string | undefined => {', 'surface.attachTasks({')
   assert.ok(jobFence.includes('const sessionId = ownership.currentSessionId()'),
     'the Job snapshot key takes its session id from the core')
   assert.ok(jobFence.includes('`${ownership.generation()}:${sessionId}`'),

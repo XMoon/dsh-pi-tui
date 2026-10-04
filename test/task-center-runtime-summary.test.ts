@@ -10,9 +10,9 @@ test('runtime commits independent totals and clears acknowledged failure attenti
   const summaries: TaskBrowserSummary[] = []
   const runtime = new TaskBrowserRuntime({
     currentKey: () => 'session',
-    listDescendants: async () => [entry],
+    readTask: async () => ({ parentSessionId: 'session', parentAvailable: true, descendants: [entry], jobs }),
     readJobs: () => jobs,
-    agentStatusOf: () => 'running',
+    activityOf: () => 'running',
     commitRows: () => {},
     commitBadge: () => {},
     commitSummary: summary => summaries.push(summary),

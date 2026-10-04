@@ -45,7 +45,7 @@ import type { PendingInputReader } from '../../runtime/pending-input-reader-port
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import type { SubagentPort } from '../../runtime/subagent-port.ts'
 import type { RewindNavigationIdentity } from '../../session-fork.ts'
-import { mergeDraft, steerAll, type SteerAgentLike } from '../../steer.ts'
+import { mergeDraft, steerAll, type SteerSubjectLike } from '../../steer.ts'
 import {
   isEmptyAcceleratedViewerSubmit,
   type TuiApp,
@@ -110,8 +110,9 @@ export interface ApplicationEventsSurface {
  * narrower owner today. Injected as ONE domain group, never a flat bag.
  */
 export interface ApplicationEventsSubagentDelivery {
-  /** The exact live queue Agent of the viewed child (the steer-all target). */
-  queueAgentFor(childId: string): SteerAgentLike | undefined
+  /** The exact writer subject of the viewed child (the steer-all target): the
+   *  Direct child Agent object, or the viewer-owned token on Remote. */
+  queueSubjectFor(childId: string): SteerSubjectLike | undefined
   /** The semantic pending-input read (the queue placement/running state). */
   readonly pendingInputReader: PendingInputReader
   /** The session WRITE delivery seams (ordinary prompt + queue mutation). */
@@ -672,7 +673,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           return false
         }
         deps.lifecycle.runOwned('subagent queue steer', () => steerAll({
-          currentAgent: () => deps.subagentDelivery.queueAgentFor(submit.childSessionId),
+          currentSubject: () => deps.subagentDelivery.queueSubjectFor(submit.childSessionId),
           currentGeneration: () => app.getViewerGeneration(),
           notify: (message, kind) => {
             if (deps.lifecycle.isCleanedUp() || app.getViewerGeneration() !== childViewerGeneration) return
@@ -690,7 +691,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           writer: deps.subagentDelivery.writer,
           writerSection: deps.subagentDelivery.writerSection,
         }, submit.text, { draftHasPayload: false }), {
-          sessionId: () => deps.subagentDelivery.queueAgentFor(submit.childSessionId)?.session.id,
+          sessionId: () => deps.subagentDelivery.queueSubjectFor(submit.childSessionId)?.session.id,
           onError: (error) => {
             restoreChildDraft(submit.text)
             if (deps.lifecycle.isCleanedUp() || app.getViewerGeneration() !== childViewerGeneration) return

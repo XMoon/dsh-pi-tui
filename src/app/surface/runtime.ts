@@ -238,8 +238,21 @@ export interface SurfaceMountDeps {
   readonly displayState: OptionCapability<'displayState'>
   /** Ctrl+R input-history source (the runner owns its filesystem IO). */
   readonly historySearchSource: OptionCapability<'historySearchSource'>
-  /** Durable-attachment read for the image loader (the runner owns Host access). */
-  readonly readImage: (ref: ImageAttachmentRefLike) => Promise<{ ref: unknown; data: Uint8Array }>
+  /** Durable-attachment read for the image loader (the runner owns Host access).
+   *  The requesting presentation's `context` is captured synchronously by the
+   *  loader at ask time, so the deferred read can never be re-routed to another
+   *  Session by a viewer exit/switch in between. */
+  readonly readImage: (
+    ref: ImageAttachmentRefLike,
+    context?: unknown,
+  ) => Promise<{ ref: unknown; data: Uint8Array }>
+  /** The context the image loader captures at ask time: the ACTIVE display
+   *  subject (the viewed child while its viewer is mounted, else the main
+   *  Session). REQUIRED by this mount contract — a mount that cannot answer it
+   *  could silently re-route a deferred child image read to another Session, so
+   *  the Remote read fails closed instead (see the runner's `readImage`); the
+   *  provider may legitimately return `undefined` when no Session is displayed. */
+  readonly activeImageSubject: () => unknown
   /** Tool-card presentation bridge (the runner resolves the live tool registry). */
   readonly present: OptionCapability<'present'>
   /** The live session cwd the history search's `current` scope resolves against. */
@@ -278,10 +291,14 @@ export interface SurfaceSeamDeps {
 /**
  * The jobs-registry capability the Task Center consumes (A4-6, plan §15).
  * Optional: a composition without the jobs service has no dock roster feed and
- * no Job viewer. The runner keeps the concrete `ctx.jobs` read and the
+ * no Job viewer. The runner keeps the concrete registry read and the
  * `JobId`/`SessionId` casts; the surface never imports the Host service. The
  * retained-snapshot fence for a transient read failure is owned here, in
  * {@link SurfaceRuntime.attachTasks}.
+ *
+ * `get`/`kill` are the SELECTED-JOB detail/stop capabilities: absent means this
+ * backend does not expose Job detail/Stop (M3-5 PR2 leaves Remote Job closure to
+ * PR3), so the Job rows must not advertise them.
  */
 export interface TaskSurfaceJobs {
   /** A FRESH registry read of the current root's roster (the public `list`
@@ -291,32 +308,34 @@ export interface TaskSurfaceJobs {
    *  filter). */
   subscribe(listener: (event: { readonly type: string }) => void): () => void
   /** Read one current registry record through the public `get` contract. */
-  get(jobId: string, sessionId: string): TaskBrowserJobInput
+  get?(jobId: string, sessionId: string): TaskBrowserJobInput
   /** Stop one active record through the public registry contract. */
-  kill(jobId: string, sessionId: string, reason: string): 'requested' | 'already-finished'
+  kill?(jobId: string, sessionId: string, reason: string): 'requested' | 'already-finished'
 }
 
 /**
- * The subagent-registry half of {@link TaskSurfaceSource}, derived from the
- * EXISTING {@link TaskBrowserRuntimeHooks} reads (plan §15.2) — never a second
- * task model. The runner provides them because they need the Direct
- * Agent/Session identity it owns. The jobs-read RETENTION policy (the retained
- * snapshot + the same-session fence) belongs to this surface owner, so the
- * runner supplies the fence FACTS (`currentKey` + `currentSessionId`) instead.
+ * The selected Task read capability the Task Center consumes (plan §15.2): the
+ * full semantic Task read plus the two live facts the coordinator needs at
+ * commit time. The runner supplies it from the SELECTED application runtime
+ * (Direct maps it to the Host Agent registry/catalog, Remote to the official
+ * Client projections/Session list), so the surface never learns which backend
+ * produced the rows.
  */
-export interface TaskSurfaceAgents {
+export interface TaskSurfaceRead {
   currentKey: TaskBrowserRuntimeHooks['currentKey']
   currentSessionId(): string | undefined
-  listDescendants: TaskBrowserRuntimeHooks['listDescendants']
-  agentStatusOf: TaskBrowserRuntimeHooks['agentStatusOf']
+  /** The selected Task semantic read (descendant tree + root Job roster). */
+  readTask: TaskBrowserRuntimeHooks['readTask']
+  /** The selected current-activity read of one child, at commit time. */
+  activityOf: TaskBrowserRuntimeHooks['activityOf']
 }
 
 /**
  * The narrow production capability the Task Browser / Job viewer need
  * (plan §15.2). Injected by the runner; no Backend port is added for
- * symmetry. The `jobs`/`agents` halves are independently optional (the
- * corresponding Host service), mirroring the runner's two original conditional
- * wiring blocks.
+ * symmetry. The `jobs`/`taskRead` halves are independently optional (the
+ * corresponding selected source), mirroring the runner's two original
+ * conditional wiring blocks.
  */
 export interface TaskSurfaceSource {
   /** The live root session id (undefined = no live agent). */
@@ -348,7 +367,7 @@ export interface TaskSurfaceSource {
   /** The selected-Job observation port (`backend.jobObservation`). */
   readonly jobObservation: JobObservationPort
   readonly jobs?: TaskSurfaceJobs
-  readonly agents?: TaskSurfaceAgents
+  readonly taskRead?: TaskSurfaceRead
 }
 
 /** The task-center lifetime inputs the surface borrows from the runner. */
@@ -553,8 +572,15 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
  * non-truncatable suffix, and the tree connector from the catalog depth.
  * `canStop` is advertised ONLY for a continuable child with a LIVE running
  * driver — an idle continuable has no driver to stop.
+ *
+ * `jobActions` is the SELECTED backend's Job capability (M3-5 PR2): the Remote
+ * branch renders its Job roster as status rows but does not yet expose Job
+ * detail or Stop (PR3 owns that closure), so its rows advertise neither.
  */
-function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
+function taskPanelItems(
+  target: readonly TaskBrowserRow[],
+  jobActions: { readonly detail: boolean; readonly stop: boolean },
+): TaskPanelItem[] {
   const labels = new Map<string, string>()
   for (const row of target) {
     if (row.kind === 'subagent') labels.set(row.childId, row.label)
@@ -575,8 +601,8 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
         source: 'job' as const,
         active: isActiveJobStatus(row.status),
         attention: row.attention ?? (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'),
-        canOpen: true,
-        canStop: isActiveJobStatus(row.status),
+        canOpen: jobActions.detail,
+        canStop: jobActions.stop && isActiveJobStatus(row.status),
         // The Tab type filter: job rows filter by their job kind.
         type: row.jobKind,
       }
@@ -1486,7 +1512,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     historySearchSessionId: () => deps.sessionId(),
     // The transcript image surface (plan M8/M9): the durable loader plus the
     // dim fallback coloring.
-    imageLoader: new ImageLoader(deps.readImage),
+    imageLoader: new ImageLoader(
+      (ref, context) => deps.readImage(ref, context),
+      undefined,
+      () => deps.activeImageSubject(),
+    ),
     imageTheme: { fallbackColor: color.textDim },
     present: deps.present,
     workspaceRoot: deps.workspaceRoot,
@@ -1665,13 +1695,20 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     mounted().setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
   }
 
+  /** The selected backend's Job capability: Remote Job rows render as status
+   *  rows only until PR3 closes Job detail/Stop. */
+  const taskJobActions = (): { readonly detail: boolean; readonly stop: boolean } => {
+    const jobs = taskSource?.jobs
+    return { detail: jobs?.get !== undefined, stop: jobs?.kill !== undefined }
+  }
+
   const taskPanelItemsWithAttention = (
     rows: readonly TaskBrowserRow[],
     mode: 'quick' | 'full',
   ): TaskPanelItem[] => {
     const attention = questionController?.attentionRows() ?? []
     const questionItems = mode === 'quick' ? quickQuestionRows(attention) : fullQuestionRows(attention)
-    return [...questionItems, ...taskPanelItems(rows)]
+    return [...questionItems, ...taskPanelItems(rows, taskJobActions())]
   }
 
   const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string): void => {
@@ -1748,9 +1785,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const refreshBody = (): string => {
       if (observed !== undefined) return formatJobObservation(observed)
       const jobs = taskCenter().jobs
-      const current = jobs === undefined ? undefined : (() => {
+      const read = jobs?.get
+      const current = read === undefined ? undefined : (() => {
         try {
-          return jobs.get(jobId, ownerSessionId)
+          return read(jobId, ownerSessionId)
         } catch {
           // The job left the registry (or the session switched): freeze.
           return undefined
@@ -1768,10 +1806,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       initial: fallbackText,
       refresh: refreshBody,
       onStop: () => {
-        const jobs = taskCenter().jobs
-        if (jobs === undefined) return
+        const kill = taskCenter().jobs?.kill
+        if (kill === undefined) return
         try {
-          jobs.kill(jobId, ownerSessionId, 'stopped from the task browser')
+          kill(jobId, ownerSessionId, 'stopped from the task browser')
         } catch {
           // Already finished: nothing to stop.
         }
@@ -1781,10 +1819,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // CURRENT registry record, so a job that settles while the viewer
       // is open stops advertising/handling Stop.
       canStop: () => {
-        const jobs = taskCenter().jobs
-        if (jobs === undefined) return false
+        const read = taskCenter().jobs?.get
+        if (read === undefined) return false
         try {
-          return isActiveJobStatus(jobs.get(jobId, ownerSessionId).status)
+          return isActiveJobStatus(read(jobId, ownerSessionId).status)
         } catch {
           // The job left the registry: nothing can be stopped.
           return false
@@ -1816,10 +1854,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const source = taskCenter()
     const ownerSessionId = source.sessionId()
     const jobs = source.jobs
-    if (jobs === undefined || ownerSessionId === undefined) return 'keep-open'
+    const read = jobs?.get
+    if (jobs === undefined || read === undefined || ownerSessionId === undefined) return 'keep-open'
     let snapshot: TaskBrowserJobInput
     try {
-      snapshot = jobs.get(jobId, ownerSessionId)
+      snapshot = read(jobId, ownerSessionId)
     } catch {
       return 'keep-open'
     }
@@ -1982,7 +2021,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         if (!isSubagentRowInterruptible(row)) return
         // Re-read the live driver at confirmation time; the panel row is
         // only a snapshot and may have become idle since it was rendered.
-        if (source.agents?.agentStatusOf(row.childId) !== 'running') return
+        if (source.taskRead?.activityOf(row.childId) !== 'running') return
         // The interrupt authority names the child's DURABLE DIRECT parent;
         // deep descendants must not be addressed through the main root.
         const interruptParent = subagentInterruptParent(row, browserSessionId)
@@ -2022,14 +2061,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         })
         return
       }
-      // Job stop is capability-gated to an actually active current record.
-      // The registry authorizes by the owning Session id (DSH 0.1.7
-      // JobRegistry); no output/read cursor is touched by the UI.
-      if (jobs === undefined || !isActiveJobStatus(row.status)) return
+      // Job stop is capability-gated to an actually active current record and
+      // to a backend that exposes Job Stop at all (M3-5 PR2 leaves Remote Job
+      // closure to PR3). The registry authorizes by the owning Session id
+      // (DSH 0.1.7 JobRegistry); no output/read cursor is touched by the UI.
+      const kill = jobs?.kill
+      if (kill === undefined || !isActiveJobStatus(row.status)) return
       try {
-        const current = jobs.get(row.jobId, browserSessionId)
-        if (current === undefined || !isActiveJobStatus(current.status)) return
-        const result = jobs.kill(row.jobId, browserSessionId, 'stopped from Task Center')
+        const current = jobs!.get?.(row.jobId, browserSessionId)
+        if (current !== undefined && !isActiveJobStatus(current.status)) return
+        const result = kill(row.jobId, browserSessionId, 'stopped from Task Center')
         mounted().notify(result === 'already-finished' ? `${row.label} already finished` : `stopping ${row.label}`, 'info')
       } catch (error) {
         mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
@@ -2860,17 +2901,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         refreshTasks()
       }
       // The subagent half: the TaskBrowserRuntime coordinator owns the
-      // catalog-vs-runtime split (see task-browser-runtime.ts).
-      const agents = source.agents
-      if (agents !== undefined) {
+      // catalog-vs-runtime split (see task-browser-runtime.ts). Its Task
+      // dataset arrives through the SELECTED semantic read source, so the
+      // Remote branch never reaches the process-local Host services.
+      const taskRead = source.taskRead
+      if (taskRead !== undefined) {
         taskRuntime = new TaskBrowserRuntime({
-          currentKey: agents.currentKey,
-          listDescendants: agents.listDescendants,
+          currentKey: taskRead.currentKey,
+          readTask: taskRead.readTask,
           // The merged rows re-read the CURRENT jobs snapshot at every commit,
           // so a job settlement repaints an open browser too.
           readJobs: () => {
-            const key = agents.currentKey()
-            const sessionId = agents.currentSessionId()
+            const key = taskRead.currentKey()
+            const sessionId = taskRead.currentSessionId()
             if (jobs === undefined || key === undefined || sessionId === undefined) return []
             try {
               const rows = jobs.list(sessionId)
@@ -2885,7 +2928,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
               return retainedJobsSnapshot?.key === key ? retainedJobsSnapshot.rows : []
             }
           },
-          agentStatusOf: agents.agentStatusOf,
+          activityOf: taskRead.activityOf,
           commitRows,
           commitBadge,
           commitSummary,

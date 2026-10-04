@@ -110,7 +110,7 @@ async function submitShellResultCore(
   // TOCTOU re-validation: the session must still be the exact one the
   // identity was captured from, or the submission is aborted for a retry
   // against the new session.
-  if (!sessionUnchanged({ agent, generation }, deps.currentAgent(), deps.currentGeneration())) {
+  if (!sessionUnchanged({ subject: agent, generation }, deps.currentAgent(), deps.currentGeneration())) {
     deps.notify(deps.staleNotice(), 'error')
     return 'stale'
   }

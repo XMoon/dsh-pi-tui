@@ -33,12 +33,15 @@ import type { PresentationReader } from '../../runtime/presentation-read-port.ts
 import type { SessionReader } from '../../runtime/session-reader-port.ts'
 import type { SubmissionPresentationSource } from '../../submission-presentation.ts'
 import { RemoteSubmissionPresentation } from '../../submission-presentation.ts'
+import { RemoteTaskReader } from '../../runtime/remote/task-read-remote.ts'
 import { CURRENT_STATUS_PROJECTION_KEYS } from '../../runtime/remote/session-reader-remote.ts'
 import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
 import { createRemoteLiveIngress, type RemoteLiveIngress } from './live-ingress.ts'
+import { createRemoteChildViewSource } from './child-view.ts'
 import { createRemoteCommandSource, type RemoteCommandSource } from './command-source.ts'
 import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from './runtime.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
+import type { SessionPresentationEvent } from '../surface/session-presentation.ts'
 
 /**
  * The neutral application presentation facts the Remote branch supplies to
@@ -127,6 +130,12 @@ export function createRemotePresentationSource(
   const generation = wire.client.connection.generation as RemoteConnectionGenerationSource
   const sessionReader = backendRuntime.semantics.sessionReader
   const planSource = sessions as RemotePlanBindingSource
+  // The ONE shared live-ingress factory, referenced by both the main-surface
+  // bundle member and the child-view source (never a second instance).
+  const liveIngress = createRemoteLiveIngress(sessions, generation, CURRENT_STATUS_PROJECTION_KEYS)
+  // The ONE semantic Task read over the SAME Client faces. It retains the root
+  // Job roster watch for the session it last read.
+  const taskReader = new RemoteTaskReader(sessions, wire.client.jobs, generation)
   return {
     presentationReader: backendRuntime.semantics.presentationReader,
     // PR4 §D1: the branch-specific command authority read, assembled from the
@@ -143,7 +152,7 @@ export function createRemotePresentationSource(
       bindings: sessions,
     }),
     submissionPresentation: new RemoteSubmissionPresentation(sessions, generation),
-    liveIngress: createRemoteLiveIngress(sessions, generation, CURRENT_STATUS_PROJECTION_KEYS),
+    liveIngress,
     sessionFacts: {
       sessionStatus: sessionId => sessionReader.sessionStatus(sessionId),
       plan(sessionId: string) {
@@ -176,6 +185,65 @@ export function createRemotePresentationSource(
         if (captured === undefined || typeof captured !== 'object') return false
         if (!Object.is(captured.generation, generation.getSnapshot())) return false
         return sessions.binding(sessionId as never) === captured.binding
+      },
+    },
+    // M3-5 PR2 Step 1/2: the ONE semantic Task read (descendant catalog + root
+    // Job roster) plus the official Client model's roster/activity reads and
+    // invalidation subscriptions. The reader owns its retained root `watchRows`
+    // lease; the two subscriptions are plain observable hints whose
+    // authoritative answer is always the next semantic read.
+    task: {
+      readDescendants: (parentSessionId, signal) => taskReader.readDescendants(parentSessionId, signal),
+      jobs: sessionId => wire.client.jobs.state.getSnapshot().rows[sessionId] ?? [],
+      // The commit-time activity read: the official Session-LIST fact, never a
+      // borrowed binding (the listing retains no descendant).
+      activityOf: childSessionId => {
+        const byId = sessions.list.getSnapshot().byId as Readonly<
+          Record<string, { readonly running: boolean } | undefined>
+        >
+        const entry = byId[childSessionId]
+        return entry === undefined ? undefined : entry.running ? 'running' : 'inactive'
+      },
+      subscribeJobs: listener => wire.client.jobs.state.subscribe(listener),
+      subscribeSessions: listener => sessions.list.subscribe(listener),
+      // The reader owns the retained root roster watch: release it through this
+      // owner before the Client Context goes away.
+      dispose: () => taskReader.dispose(),
+    },
+    // M3-5 PR2 Step 4/5: the child viewer's exact retained generation, hydrated
+    // through the SAME presentation reader and live ingress (no child-specific
+    // transport).
+    childView: createRemoteChildViewSource<SessionPresentationEvent>({
+      sessions,
+      reader: backendRuntime.semantics.presentationReader,
+      liveIngress,
+      childCwd: sessionId => {
+        const cwd = sessionReader.sessionStatus(sessionId)?.cwd
+        return typeof cwd === 'string' ? cwd : ''
+      },
+      asEvent: event => event as unknown as SessionPresentationEvent,
+    }),
+    // M3-5 PR2 Step 9: the durable image read of the ACTIVE retained Session —
+    // borrow the exact binding, capture the Connection generation + binding
+    // identity, read through that Session, then re-check BOTH before the bytes
+    // are committed. No cold retain, no Host attachment access.
+    attachments: {
+      async readDurableImage(sessionId: string, attachmentId: string): Promise<{ ref: unknown; data: Uint8Array }> {
+        const capturedGeneration = generation.getSnapshot()
+        if (capturedGeneration === undefined) {
+          throw new Error(`the Remote connection is not ready to read an attachment of ${sessionId}`)
+        }
+        const binding = sessions.binding(sessionId as never)
+        if (binding === undefined) {
+          throw new Error(`no retained Session binding for ${sessionId}`)
+        }
+        const result = await binding.session.readAttachment(attachmentId as never)
+        if (!Object.is(capturedGeneration, generation.getSnapshot())
+          || sessions.binding(sessionId as never) !== binding) {
+          throw new Error(`the Session binding for ${sessionId} changed while the attachment was read`)
+        }
+        if (!result.ok) throw result.error
+        return { ref: result.value.attachment, data: result.value.data }
       },
     },
   }
