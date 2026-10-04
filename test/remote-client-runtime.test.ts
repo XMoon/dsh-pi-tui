@@ -568,15 +568,33 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
         snapshots.at(-1)?.text.includes('l5 live output') === true)
 
       // Real adapter `stop` -> generated `job.kill` -> Host JobRegistry
-      // admission, then the official roster converges on its own. This is L5
-      // wire evidence only (the generated list/follow/kill path through the
-      // SAME Client graph); application Task Center reachability — the
-      // blocking post-PR2 L6 — is deliberately absent here.
+      // admission, then BOTH official streams converge on their own: the roster
+      // (`job.list`) reports the terminal row, and the SAME observation stream
+      // (`job.follow`) settles with the terminal projection. This is L5 wire
+      // evidence only (the generated list/follow/kill path through the SAME
+      // Client graph); application Task Center reachability — the blocking
+      // post-PR2 L6 — is deliberately absent here.
       assert.deepEqual(await port.stop(String(ownerId), String(jobId)), { kind: 'requested' })
       await waitFor('the roster to converge to the terminal status', () => {
         const rows = client.jobs.state.getSnapshot().rows[ownerId] ?? []
         return rows.some(row => String(row.id) === String(jobId) && row.status === 'killed')
       })
+      // Follow convergence: the observer opened BEFORE Stop must receive the
+      // terminal projection of the still-open generated `job.follow` stream
+      // (settled, no error, retained output + the merged kill detail) — not
+      // just the list stream.
+      await waitFor('the observed follow stream to settle after Stop', () =>
+        snapshots.at(-1)?.status === 'killed' && snapshots.at(-1)?.settled === true)
+      const settled = snapshots.at(-1)!
+      assert.equal(settled.status, 'killed')
+      assert.equal(settled.settled, true)
+      assert.equal(settled.error, undefined, 'a terminal settlement is not an observation failure')
+      assert.match(settled.text, /l5 retained output/)
+      assert.match(settled.text, /l5 live output/)
+      assert.ok(
+        typeof settled.detail === 'string' && settled.detail.length > 0,
+        'the terminal follow projection carries the merged kill detail',
+      )
       // A row that already settled is an already-finished admission; a row the
       // session can no longer see is a proven non-commit.
       assert.deepEqual(await port.stop(String(ownerId), String(jobId)), { kind: 'already-finished' })

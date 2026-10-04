@@ -316,22 +316,29 @@ test('stop maps job/not-found to not-found and does not retry', async () => {
   assert.equal(jobs.killCalls.length, 1, 'a not-found settlement is never replayed')
 })
 
-test('stop maps a proven business refusal to rejected and does not retry', async () => {
-  const jobs = jobsFixture()
-  const port = new RemoteJobObservationPort(jobs)
-  jobs.setKill(killFailure({ code: 'job/refused', message: 'the registry refused the kill' }))
-  assert.deepEqual(await port.stop('s1', 'job-1'), {
-    kind: 'rejected',
-    message: 'the registry refused the kill',
-  })
-  assert.equal(jobs.killCalls.length, 1)
+test('stop maps a proven pre-dispatch refusal to rejected and does not retry', async () => {
+  for (const error of [
+    { code: 'gateway/bad-request', message: 'the gateway rejected the request' },
+    { code: 'gateway/arguments-invalid', message: 'the arguments were invalid' },
+  ]) {
+    const jobs = jobsFixture()
+    const port = new RemoteJobObservationPort(jobs)
+    jobs.setKill(killFailure(error))
+    assert.deepEqual(await port.stop('s1', 'job-1'), { kind: 'rejected', message: error.message })
+    assert.equal(jobs.killCalls.length, 1, 'a rejected settlement is never replayed')
+  }
 })
 
-test('stop maps carrier/internal/cancellation failures to indeterminate without retry', async () => {
+test('stop keeps every UNPROVEN settlement indeterminate (unknown != proven refusal)', async () => {
   for (const error of [
     { code: 'gateway/internal', message: 'internal' },
     { code: 'gateway/result-invalid', message: 'invalid result' },
     { code: 'gateway/cancelled', message: 'cancelled' },
+    { code: 'gateway/some-future-gateway-code', message: 'an unknown gateway code' },
+    // The Job operation family's proven vocabulary is only `job/not-found`:
+    // a future/unknown Job domain code must NOT be reported as a refusal.
+    { code: 'job/some-future-code', message: 'an unknown Job domain code' },
+    { code: 'subagent/foreign-domain', message: 'a foreign domain code' },
     new Error('carrier went away'),
   ]) {
     const jobs = jobsFixture()
