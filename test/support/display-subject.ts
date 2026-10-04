@@ -37,6 +37,16 @@ export interface ChildDisplaySubject {
   readonly model?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
   readonly permission?: string
   readonly parentSessionId?: string
+  /** The LIVE session's legacy display facts merged into the live slot by the
+   *  same commit (default: leave the live slot untouched). */
+  readonly live?: {
+    readonly model?: string
+    readonly cwd?: string
+    readonly branch?: string
+    readonly turns?: number
+    readonly steps?: number
+    readonly permission?: string
+  }
 }
 
 /** Enter the viewer and commit the CHILD as the display subject in ONE atomic
@@ -91,10 +101,20 @@ export function enterChildDisplaySubject(app: TuiApp, child: ChildDisplaySubject
         steps: child.steps,
       },
     },
-    // A child commit carries NO legacy display fields: the legacy slot stays
-    // the LIVE session's (M3-5 PR1 contract decision) — the child's visible
-    // facts are the store patch above plus the presentation projection.
-    undefined,
+    // The legacy fields travel as the LIVE session's (M3-5 PR1 contract
+    // decision): a child commit merges them into the live slot without
+    // re-projecting the store, so the extension v2 live snapshot stays fresh.
+    // Only the facts the suite declares are merged — an omitted `live` leaves
+    // the suite's live facts untouched.
+    {
+      ...child.live?.model === undefined ? {} : { model: child.live.model },
+      ...child.live?.cwd === undefined ? {} : { cwd: child.live.cwd },
+      ...child.live?.branch === undefined ? {} : { branch: child.live.branch },
+      ...child.live?.turns === undefined ? {} : { turns: child.live.turns },
+      ...child.live?.steps === undefined ? {} : { steps: child.live.steps },
+      ...child.live?.permission === undefined ? {} : { permission: child.live.permission },
+      goal: undefined,
+    },
     {
       sessionId: child.id,
       workspaceRoot: child.cwd,

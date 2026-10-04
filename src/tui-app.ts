@@ -12768,7 +12768,7 @@ export class TuiApp {
    */
   commitDisplaySubject(
     patch: StatusPatch,
-    legacy: Partial<StatusData> | undefined,
+    legacy: Partial<StatusData>,
     presentation: DisplaySubjectPresentation | undefined,
   ): void {
     this.displaySubjectPresentation = presentation
@@ -12781,13 +12781,16 @@ export class TuiApp {
     if (presentation === undefined) {
       // MAIN: the legacy display fields are the live session's own — merge
       // them and let `setStatus` project + notify as before.
-      this.setStatus(legacy ?? {})
+      this.setStatus(legacy)
     } else {
-      // CHILD: the legacy `StatusData` slot stays the LIVE MAIN session's.
-      // The extension v2 `SessionSnapshot` describes the live session owner, so
-      // a viewer transition must never re-point it; the display subject's own
-      // visible facts travel in the store patch above and in the presentation
-      // projection (todos/title/goal/identity) — see `displaySubject`.
+      // CHILD: the legacy `StatusData` slot stays the LIVE session's and must
+      // stay CURRENT while the child is displayed — the extension v2
+      // `SessionSnapshot` reads it. Merge the live facts WITHOUT the legacy
+      // store projection (the child's own sections came from `patch` above:
+      // the store must never receive the live sections on a child subject).
+      // The display subject's own visible facts travel in the store patch and
+      // in the presentation projection (todos/title/goal/identity).
+      this.status = { ...this.status, ...legacy }
       this.renderDock()
       this.renderGoalLine()
       this.syncExtensionState()

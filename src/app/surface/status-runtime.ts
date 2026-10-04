@@ -87,10 +87,9 @@ export interface StatusSurface {
    *  projection describe the SAME subject. */
   commitStatus(
     patch: StatusPatch,
-    /** The legacy display fields of the committed subject; `undefined` for a
-     *  child display subject (its visible facts travel in `presentation` and
-     *  the store patch, and the legacy slot stays the LIVE session's). */
-    legacyFacts: Partial<StatusData> | undefined,
+    /** The LIVE session's legacy display fields (always the live owner's —
+     *  never the display subject's when a child is displayed). */
+    legacyFacts: Partial<StatusData>,
     presentation: import('../../tui-app.ts').DisplaySubjectPresentation | undefined,
   ): void
 }
@@ -744,47 +743,49 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           // `goalText` slot stays the LIVE session's).
           goal: childGoalText(childStatus),
         }
-    // A4-4 (plan §13.1): the semantic derivation stays here; the surface
-    // owns the commit coordination. The three parts are ONE atomic
-    // display-subject commit (M3-5 PR1 §9.7).
-    deps.surface.commitStatus(patch, viewed === undefined
-      ? {
-          model: modelLabel(),
-          // The FULL cwd lands in the structured workspace section (the
-          // footer cwd ITEM shortens for display itself); the legacy
-          // display value (tail segments) is derived from it.
-          cwd: liveCwd,
-          branch: gitBranch(liveCwd),
-          goal: goalText,
-          turns: stats.turns,
-          steps: stats.steps,
-          // PR5 (plan §3.2): the legacy line shares the availability rule with
-          // the structured usage section (the main-subject branch only — a
-          // viewer child's own fold stays numeric).
-          statsLine: formatStats(stats, deps.presentation.mainRecentPerformanceAvailable?.() ?? true),
-          // EXPLICITLY clear the permission when the service/agent is
-          // unavailable: the legacy merge keeps the old value otherwise,
-          // and syncExtensionState would publish a STALE permission to the
-          // extension snapshot (a state transition where the permission
-          // preset service or the live agent is momentarily gone).
-          permission: deriveRunnerPermission(permission, deps.liveAgent()),
-          // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
-          // TuiApp merge keeps old fields otherwise, and the session
-          // switch / cold-resume window before the deferred measurement
-          // would show the PREVIOUS session's context pressure — exactly the
-          // permission policy above (P1 finding: the previous conditional
-          // spread skipped the fields, leaving session A's measurement on
-          // session B's first frames, indefinitely when B's measurement
-          // fails).
-          contextTokens,
-          contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
-        }
-      // A CHILD subject passes NO legacy fields: the extension's v2
-      // `SessionSnapshot` (and the legacy `status` slot) describes the LIVE
-      // session owner, so a viewer transition must never re-point them. The
-      // child's own visible facts are the store patch above plus the
-      // presentation projection (todos/title/goal/identity).
-      : undefined, presentation)
+    // The LIVE session's legacy display facts (M3-5 PR1 contract decision):
+    // `StatusData` — and therefore the extension's v2 live-session snapshot —
+    // always describes the LIVE session owner. They are passed for BOTH
+    // subjects: on the main subject they also feed the legacy store projection,
+    // while on a child subject the surface merges them into the live slot
+    // WITHOUT re-projecting the store (the child's own sections came from the
+    // patch above). A viewer transition must never re-point them, and a viewer
+    // must never freeze them either.
+    const liveLegacy: Partial<StatusData> = {
+        model: modelLabel(),
+        // The FULL cwd lands in the structured workspace section (the
+        // footer cwd ITEM shortens for display itself); the legacy
+        // display value (tail segments) is derived from it.
+        cwd: liveCwd,
+        branch: gitBranch(liveCwd),
+        goal: goalText,
+        turns: stats.turns,
+        steps: stats.steps,
+        // PR5 (plan §3.2): the legacy line shares the availability rule with
+        // the structured usage section (the main-subject branch only — a
+        // viewer child's own fold stays numeric).
+        statsLine: formatStats(stats, deps.presentation.mainRecentPerformanceAvailable?.() ?? true),
+        // EXPLICITLY clear the permission when the service/agent is
+        // unavailable: the legacy merge keeps the old value otherwise,
+        // and syncExtensionState would publish a STALE permission to the
+        // extension snapshot (a state transition where the permission
+        // preset service or the live agent is momentarily gone).
+        permission: deriveRunnerPermission(permission, deps.liveAgent()),
+        // EXPLICITLY CLEAR the legacy context fields when unmeasured: the
+        // TuiApp merge keeps old fields otherwise, and the session
+        // switch / cold-resume window before the deferred measurement
+        // would show the PREVIOUS session's context pressure — exactly the
+        // permission policy above (P1 finding: the previous conditional
+        // spread skipped the fields, leaving session A's measurement on
+        // session B's first frames, indefinitely when B's measurement
+        // fails).
+        contextTokens,
+        contextWindow: contextTokens === undefined ? undefined : stats.contextWindow,
+    }
+    // A4-4 (plan §13.1): the semantic derivation stays here; the surface owns
+    // the commit coordination. The three parts are ONE atomic display-subject
+    // commit (M3-5 PR1 §9.7).
+    deps.surface.commitStatus(patch, liveLegacy, presentation)
   }
 
   /**
