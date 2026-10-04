@@ -2823,19 +2823,17 @@ export function applyRunnerWithRuntime(
       subagentJobTranscriptId,
       subagentJobViewHint,
       jobObservation: backend.jobObservation,
-      // The roster feed. Direct reads the Host registry (get/kill included:
-      // its Job detail + Stop are the current behavior). Remote reads the
-      // official Client Jobs model under the task reader's retained root watch
-      // and exposes NO detail/Stop — M3-5 PR2 leaves that closure to PR3, so the
-      // Job rows must not advertise it.
+      // The roster feed ONLY on both backends: the selected-Job detail and
+      // Stop come from `backend.jobObservation` (M3-5 PR3), so this capability
+      // never carries a registry get/kill. Direct reads the Host registry;
+      // Remote reads the official Client Jobs model under the task reader's
+      // retained root watch.
       jobs: remoteSources === undefined
         ? jobs === undefined ? undefined : {
           // Job ownership is the Session id (DSH 0.1.7 JobRegistry); the caller
           // may be omitted (the unowned-only view) when no session is live.
           list: (sessionId) => jobs.list(sessionId as SessionId | undefined),
           subscribe: (listener) => jobs.events.subscribe({ owners: 'scope' }, listener),
-          get: (jobId, sessionId) => jobs.get(jobId as JobId, sessionId as SessionId),
-          kill: (jobId, sessionId, reason) => jobs.kill(jobId as JobId, sessionId as SessionId, reason),
         }
         : {
           list: (sessionId) => sessionId === undefined ? [] : remoteSources.task.jobs(sessionId),

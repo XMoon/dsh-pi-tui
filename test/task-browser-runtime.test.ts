@@ -585,11 +585,13 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
   // the official Session list).
   assert.ok(handler.includes("source.taskRead?.activityOf(row.childId) !== 'running'"),
     'the dispatch must re-check the live registry driver at confirm time')
-  // A job stop re-reads the current record through the public registry API.
-  assert.ok(handler.includes('jobs!.get?.(row.jobId, browserSessionId)'),
-    'the dispatch must re-read the live job record before killing through the surface session id')
-  assert.ok(handler.includes('!isActiveJobStatus(current.status)'),
-    'a settled job must not be killable at confirm time')
+  // A job stop re-checks the CURRENT projection row (the Task row identity
+  // authority) and dispatches the semantic stop seam — never a
+  // backend-specific registry get/kill from the neutral surface.
+  assert.ok(handler.includes('!isActiveJobStatus(row.status)'),
+    'a settled job row must not be stoppable at confirm time')
+  assert.ok(handler.includes('jobObservation.stop(browserSessionId, row.jobId)'),
+    'the dispatch must use the semantic JobObservationPort stop seam')
   // The semantic SubagentPort seam stays in the runner (the surface calls the
   // injected operation); the surface must never reach for ctx.subagents.
   assert.ok(indexSource.includes('backend.subagent.interrupt'),
@@ -617,8 +619,8 @@ test('the Task Center surface never calls the consuming jobs read API (review ro
   const open = surfaceSource.slice(surfaceSource.indexOf(marker), surfaceSource.indexOf('const handleWorkflowAction'))
   assert.ok(!open.includes('jobs.read('),
     'the browser must never consume the model-owned job output cursor')
-  assert.ok(open.includes('jobs!.get?.(row.jobId, browserSessionId)'),
-    'metadata reads through the public get API are the only job access the surface needs')
+  assert.ok(open.includes('jobObservation.stop(browserSessionId, row.jobId)'),
+    'Job Stop must use the semantic JobObservationPort seam on the surface session id')
 })
 
 test('Case E: an old session listing rejecting never marks the NEW session browser stale (PR review P1)', async () => {

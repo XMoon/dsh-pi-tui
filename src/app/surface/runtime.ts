@@ -124,7 +124,7 @@ import type { TaskBrowserHandle, WorkflowAction } from '../../tui-app.ts'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { QuestionSurfaceController } from './question-controller.ts'
-import type { JobObservationPort, JobObservedSnapshot } from '../../runtime/job-observation-port.ts'
+import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { SubmitLatencyPhase } from '../../submit-latency.ts'
@@ -297,9 +297,10 @@ export interface SurfaceSeamDeps {
  * retained-snapshot fence for a transient read failure is owned here, in
  * {@link SurfaceRuntime.attachTasks}.
  *
- * `get`/`kill` are the SELECTED-JOB detail/stop capabilities: absent means this
- * backend does not expose Job detail/Stop (M3-5 PR2 leaves Remote Job closure to
- * PR3), so the Job rows must not advertise them.
+ * `list`/`subscribe` are ONLY the roster feed. The selected-Job detail/Stop
+ * capability is `jobObservation` (both backends), so this interface never
+ * carries a registry detail/kill read: the neutral Task/Job UI has no
+ * backend-specific Job authority (M3-5 PR3).
  */
 export interface TaskSurfaceJobs {
   /** A FRESH registry read of the current root's roster (the public `list`
@@ -308,10 +309,6 @@ export interface TaskSurfaceJobs {
   /** Subscribe to scope-owned roster/runtime events (the `owners: 'scope'`
    *  filter). */
   subscribe(listener: (event: { readonly type: string }) => void): () => void
-  /** Read one current registry record through the public `get` contract. */
-  get?(jobId: string, sessionId: string): TaskBrowserJobInput
-  /** Stop one active record through the public registry contract. */
-  kill?(jobId: string, sessionId: string, reason: string): 'requested' | 'already-finished'
 }
 
 /**
@@ -574,14 +571,11 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
  * `canStop` is advertised ONLY for a continuable child with a LIVE running
  * driver — an idle continuable has no driver to stop.
  *
- * `jobActions` is the SELECTED backend's Job capability (M3-5 PR2): the Remote
- * branch renders its Job roster as status rows but does not yet expose Job
- * detail or Stop (PR3 owns that closure), so its rows advertise neither.
+ * JOB rows are openable/stop-capable on BOTH backends: the selected-Job detail
+ * and Stop come from the semantic `jobObservation` port the selected backend
+ * always provides (M3-5 PR3), never from a backend-specific registry read.
  */
-function taskPanelItems(
-  target: readonly TaskBrowserRow[],
-  jobActions: { readonly detail: boolean; readonly stop: boolean },
-): TaskPanelItem[] {
+function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
   const labels = new Map<string, string>()
   for (const row of target) {
     if (row.kind === 'subagent') labels.set(row.childId, row.label)
@@ -602,8 +596,8 @@ function taskPanelItems(
         source: 'job' as const,
         active: isActiveJobStatus(row.status),
         attention: row.attention ?? (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'),
-        canOpen: jobActions.detail,
-        canStop: jobActions.stop && isActiveJobStatus(row.status),
+        canOpen: true,
+        canStop: isActiveJobStatus(row.status),
         // The Tab type filter: job rows filter by their job kind.
         type: row.jobKind,
       }
@@ -655,6 +649,27 @@ function formatJobObservation(observed: JobObservedSnapshot): string {
   if (observed.error !== undefined) lines.push(`follow error: ${observed.error}`)
   lines.push('', 'best-effort retained output preview (not a complete transcript):', '', observed.text)
   return lines.join('\n')
+}
+
+/**
+ * The ONE user-facing settlement of a Job Stop (plan J2). It preserves the
+ * certainty distinction: an unproven `indeterminate` settlement is never
+ * reported as "not stopped" and is never replayed — the authoritative Job
+ * streams decide.
+ */
+export function jobStopNotice(outcome: JobStopOutcome, label: string): { message: string; level: 'info' | 'error' } {
+  switch (outcome.kind) {
+    case 'requested':
+      return { message: `stopping ${label}`, level: 'info' }
+    case 'already-finished':
+      return { message: `${label} already finished`, level: 'info' }
+    case 'not-found':
+      return { message: `${label} is no longer active`, level: 'info' }
+    case 'rejected':
+      return { message: `could not stop ${label}: ${outcome.message}`, level: 'error' }
+    case 'indeterminate':
+      return { message: `could not confirm stopping ${label} — the state will decide`, level: 'error' }
+  }
 }
 
 /** The creation options: the early surface state + the Client-local sinks. */
@@ -1693,20 +1708,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     mounted().setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
   }
 
-  /** The selected backend's Job capability: Remote Job rows render as status
-   *  rows only until PR3 closes Job detail/Stop. */
-  const taskJobActions = (): { readonly detail: boolean; readonly stop: boolean } => {
-    const jobs = taskSource?.jobs
-    return { detail: jobs?.get !== undefined, stop: jobs?.kill !== undefined }
-  }
-
   const taskPanelItemsWithAttention = (
     rows: readonly TaskBrowserRow[],
     mode: 'quick' | 'full',
   ): TaskPanelItem[] => {
     const attention = questionController?.attentionRows() ?? []
     const questionItems = mode === 'quick' ? quickQuestionRows(attention) : fullQuestionRows(attention)
-    return [...questionItems, ...taskPanelItems(rows, taskJobActions())]
+    return [...questionItems, ...taskPanelItems(rows)]
   }
 
   const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string): void => {
@@ -1741,30 +1749,29 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   /**
-   * Open the Job status viewer (selected-Job detail). It opens one official
-   * non-consuming observation stream for exactly this Job and repaints the
-   * latest local snapshot on the viewer's timer (the tick never reads Host
-   * output).
+   * Open the selected-Job status viewer. Its facts are backend-neutral: the
+   * opening Task row is the fallback until the FIRST observed snapshot, and
+   * from then on the viewer repaints the LATEST local observation — its timer
+   * never reads Host/Client Job output. `jobObservation.stop` is the one Stop
+   * mutation, fenced by the viewer's captured subject + the latest active
+   * status.
    */
   const openJobStatusViewer = (
     jobId: string,
     title: string,
-    snapshot: {
-      readonly kind?: string
-      readonly id: string
-      readonly label: string
-      readonly status: string
-      readonly detail?: string
-    },
+    row: { readonly jobKind: string; readonly label: string; readonly status: string; readonly detail?: string },
   ): void => {
     const source = taskCenter()
     // One viewer at a time, and a fresh selection replaces the previous.
     activeJobViewerClose?.()
     const ownerSessionId = source.sessionId()
     if (ownerSessionId === undefined) return
-    const fallbackText = snapshot.kind === 'subagent'
-      ? source.subagentJobViewHint(snapshot.status, snapshot.detail)
-      : jobStatusHint(snapshot.status, snapshot.detail)
+    // The destructive-intent fence is captured at OPEN time (like the browser
+    // fence): a Stop confirmed later belongs to THIS viewer's subject.
+    const viewerSubject = source.captureSubject()
+    const fallbackText = row.jobKind === 'subagent'
+      ? source.subagentJobViewHint(row.status, row.detail)
+      : jobStatusHint(row.status, row.detail)
     // The selected Job is the ONLY observed Job (P1-B1). The observer is
     // event-driven at its data source: the official follow stream updates
     // this local snapshot and the viewer's existing refresh timer merely
@@ -1777,55 +1784,47 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     } catch (error) {
       // A composition without the official job-controller row (the injected
       // production row guarantees it) degrades to the status-only detail —
-      // the documented P1-B safety valve — and says so explicitly.
+      // the documented safety valve — and says so explicitly.
       observationError = safeErrorMessage(error)
     }
     const refreshBody = (): string => {
       if (observed !== undefined) return formatJobObservation(observed)
-      const jobs = taskCenter().jobs
-      const read = jobs?.get
-      const current = read === undefined ? undefined : (() => {
-        try {
-          return read(jobId, ownerSessionId)
-        } catch {
-          // The job left the registry (or the session switched): freeze.
-          return undefined
-        }
-      })()
-      const base = current === undefined
+      // Only the opening row projection before the first observed snapshot:
+      // never a registry/roster re-read on the timer.
+      return observationError === undefined
         ? fallbackText
-        : current.kind === 'subagent'
-          ? taskCenter().subagentJobViewHint(current.status, current.detail)
-          : jobStatusHint(current.status, current.detail)
-      return observationError === undefined ? base : `${base}\nlive observation unavailable: ${observationError}`
+        : `${fallbackText}\nlive observation unavailable: ${observationError}`
     }
+    // The Stop key and its hint share ONE live capability source: the latest
+    // OBSERVED status (the opening row before the first snapshot) AND the
+    // captured viewer subject still current.
+    const activeForStop = (): boolean =>
+      source.subjectMatches(viewerSubject) && isActiveJobStatus(observed?.status ?? row.status)
     activeJobViewerClose = mounted().openOutputViewer({
       title,
       initial: fallbackText,
       refresh: refreshBody,
       onStop: () => {
-        const kill = taskCenter().jobs?.kill
-        if (kill === undefined) return
-        try {
-          kill(jobId, ownerSessionId, 'stopped from the task browser')
-        } catch {
-          // Already finished: nothing to stop.
-        }
-        refreshTasks()
+        // Re-check both fences at dispatch: a stale viewer/session
+        // confirmation dispatches nothing.
+        if (!activeForStop()) return
+        runOwned('job stop', () => source.jobObservation.stop(ownerSessionId, jobId), {
+          diag: taskDiag(),
+          sessionId: () => ownerSessionId,
+          onResult: (outcome) => {
+            if (isCleanedUp() || !source.subjectMatches(viewerSubject)) return
+            const notice = jobStopNotice(outcome, row.label)
+            mounted().notify(notice.message, notice.level)
+          },
+          onError: (error) => {
+            if (isCleanedUp() || !source.subjectMatches(viewerSubject)) return
+            mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+          },
+        })
+        // No optimistic local mutation: the official roster/observation
+        // streams converge on their own.
       },
-      // Live capability: the Stop hint and the Stop key both read the
-      // CURRENT registry record, so a job that settles while the viewer
-      // is open stops advertising/handling Stop.
-      canStop: () => {
-        const read = taskCenter().jobs?.get
-        if (read === undefined) return false
-        try {
-          return isActiveJobStatus(read(jobId, ownerSessionId).status)
-        } catch {
-          // The job left the registry: nothing can be stopped.
-          return false
-        }
-      },
+      canStop: activeForStop,
       // The viewer was opened from the Task Center browser: Esc returns
       // to the parent browser, not to the editor.
       closeHint: 'back',
@@ -1840,35 +1839,33 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   /**
-   * Open one job from the task browser: an ordinary Job opens the detail
-   * viewer, which shows a NON-CONSUMING live output preview through the
-   * official JobController.follow() stream (never `jobs.read()`); a subagent
-   * job whose stable child session id is unknown shows the same Job detail
-   * with a /tasks hint. Returns the navigation disposition for the selecting
-   * browser: the transcript path REPLACES the Task Center (`'close'`); a Job
-   * detail is a child overlay of it (`'keep-open'`).
+   * Open one job from the task browser from its CURRENT row projection: an
+   * ordinary Job opens the backend-neutral selected-Job viewer, whose facts
+   * come from `jobObservation` (never `jobs.read()`); a subagent job whose
+   * stable child session id is unknown shows the same Job detail with a /tasks
+   * hint. The row projection is the row identity + opening-metadata authority
+   * — never a fresh registry read. Returns the navigation disposition for the
+   * selecting browser: the transcript path REPLACES the Task Center
+   * (`'close'`); a Job detail is a child overlay of it (`'keep-open'`).
    */
   const openJobView = (jobId: string): 'close' | 'keep-open' => {
     const source = taskCenter()
     const ownerSessionId = source.sessionId()
-    const jobs = source.jobs
-    const read = jobs?.get
-    if (jobs === undefined || read === undefined || ownerSessionId === undefined) return 'keep-open'
-    let snapshot: TaskBrowserJobInput
-    try {
-      snapshot = read(jobId, ownerSessionId)
-    } catch {
-      return 'keep-open'
-    }
-    if (snapshot.kind === 'subagent') {
-      const childSessionId = source.subagentJobTranscriptId(snapshot)
+    if (ownerSessionId === undefined) return 'keep-open'
+    const row = taskBrowserRows.find(
+      (candidate): candidate is Extract<TaskBrowserRow, { readonly kind: 'job' }> =>
+        candidate.kind === 'job' && candidate.jobId === jobId,
+    )
+    if (row === undefined) return 'keep-open'
+    if (row.jobKind === 'subagent') {
+      const childSessionId = source.subagentJobTranscriptId(row)
       if (childSessionId !== undefined) {
-        // The jobs registry's `subagent` kind IS the reliable contract
+        // The registry's `subagent` kind IS the reliable contract
         // for a background ONE-SHOT delegation (the registry never
         // records continuable children): the transcript viewer opens
         // read-only. The parent is the job owner.
         runOwned('subagent view from tasks', () => source.enterView(
-          childSessionId, snapshot.label, 'one-shot', ownerSessionId, 'inactive',
+          childSessionId, row.label, 'one-shot', ownerSessionId, 'inactive',
         ), {
           diag: taskDiag(),
           sessionId: () => ownerSessionId,
@@ -1881,14 +1878,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // overlay: it keeps its own Esc semantics (browser closed).
         return 'close'
       }
-      // Current JobSnapshot has no stable child id. Use the reliable status
+      // The rc.2 Job row carries no stable child id. Use the reliable status
       // fallback and let /tasks (which owns child identities through
       // the merged browser) perform transcript selection; never substitute
       // label/order/time matching.
-      openJobStatusViewer(jobId, `subagent ${snapshot.id} · ${snapshot.label}`, snapshot)
+      openJobStatusViewer(jobId, `subagent ${row.jobId} · ${row.label}`, row)
       return 'keep-open'
     }
-    openJobStatusViewer(jobId, `${snapshot.kind} ${snapshot.id} · ${snapshot.label}`, snapshot)
+    openJobStatusViewer(jobId, `${row.jobKind} ${row.jobId} · ${row.label}`, row)
     return 'keep-open'
   }
 
@@ -2059,20 +2056,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         })
         return
       }
-      // Job stop is capability-gated to an actually active current record and
-      // to a backend that exposes Job Stop at all (M3-5 PR2 leaves Remote Job
-      // closure to PR3). The registry authorizes by the owning Session id
-      // (DSH 0.1.7 JobRegistry); no output/read cursor is touched by the UI.
-      const kill = jobs?.kill
-      if (kill === undefined || !isActiveJobStatus(row.status)) return
-      try {
-        const current = jobs!.get?.(row.jobId, browserSessionId)
-        if (current !== undefined && !isActiveJobStatus(current.status)) return
-        const result = kill(row.jobId, browserSessionId, 'stopped from Task Center')
-        mounted().notify(result === 'already-finished' ? `${row.label} already finished` : `stopping ${row.label}`, 'info')
-      } catch (error) {
-        mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-      }
+      // Job Stop uses the SAME semantic operation as the viewer on BOTH
+      // backends: the browser/subject fence above already bound the intent,
+      // the CURRENT projection row must still be active, then the ONE
+      // `jobObservation.stop` is dispatched. No optimistic local mutation —
+      // the authoritative roster/observation streams converge the row.
+      if (!isActiveJobStatus(row.status)) return
+      runOwned('job stop from tasks', () => taskCenter().jobObservation.stop(browserSessionId, row.jobId), {
+        diag: taskDiag(),
+        sessionId: () => browserSessionId,
+        onResult: (outcome) => {
+          if (isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
+          const notice = jobStopNotice(outcome, row.label)
+          mounted().notify(notice.message, notice.level)
+        },
+        onError: (error) => {
+          if (isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
+          mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+        },
+      })
     }
     // Read Question authority BEFORE composing the first frame: the attention
     // rows Task Center shows must reflect the current projection, never only
