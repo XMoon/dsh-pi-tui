@@ -421,11 +421,16 @@ future change must not silently reverse:
     the live-session fields stay truthful. Direct/current viewer composition is
     qualified by PR1; the Remote child viewer stays PR2 (no Remote
     child-viewer L6 is claimed here).
-  The display-subject status is re-derived for EVERY durable child event that
-  can move it — the turn/step boundaries, `todo/write` / `session/title` /
-  `goal/change`, the permission knobs and the child's own `compaction/end` —
-  never only on the turn/step counters and never on streaming deltas
-  (`invalidatesDisplaySubjectStatus`, `app/surface/runtime.ts`). **Extension footer segments do not render while viewing**:
+  The display-subject status is re-derived on EVERY durable event of the viewed
+  child (never on streaming deltas, which do not reach that path): the child's
+  Session-owned facts come from the official projections, and any durable event
+  of that Session may move one of them — `model/selection` / `request/header`
+  (modelSelection), `agent-preset/selected` (agentPreset), `request/context`,
+  usage-bearing `assistant/message`/`assistant/attempt`, the `surfaceOp`
+  message/tool-result family (contextPressure/contextBreakdown), `todo/write` /
+  `session/title` / `goal/change`, the permission knobs and the turn/step
+  counters. Enumerating that family set proved fragile, so the primitive is the
+  whole durable event stream (`app/surface/runtime.ts`, the viewer branch). **Extension footer segments do not render while viewing**:
   viewer mode is host-owned chrome, the extension surface already exposes
   `viewerMode` in its session state, and the first-party builtin's
   turn/step segment would otherwise duplicate the child counters with the
