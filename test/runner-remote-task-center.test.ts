@@ -165,9 +165,12 @@ interface MountedApp {
   pendingInputForTest(): { queued: ReadonlyArray<{ text?: string }>; tail: ReadonlyArray<{ row?: { text?: string } }> }
   setFullscreen(on: boolean): void
   scrollToTop(options?: { disableFollow?: boolean }): void
+  /** The private presentation-scope provider (read through the structural escape
+   *  hatch; the same value a child thumbnail would be stamped with). */
+  readonly imageScope?: () => unknown
   statusStore: {
     snapshot(): {
-      view?: { subject?: { kind?: string; id?: string } }
+      view?: { subject?: { kind?: string; id?: string; label?: string; mode?: string; activity?: string } }
       workspace?: { cwd?: string; project?: string }
       activity?: { childAgentCount?: number; todoCount?: number }
       usage?: { turns?: number; steps?: number }
@@ -924,15 +927,88 @@ interface RetainFace {
   retain(target: unknown, options: unknown): unknown
 }
 
-/** The mounted TuiApp's production image loader (the bootstrap-wired one). */
+/** One presentation's IMMUTABLE image scope token (the bootstrap provider's
+ *  memoized `{key, sessionId}` lifetime object). */
+interface ImageScopeToken {
+  readonly key: string
+  readonly sessionId: string
+}
+
+/** The mounted TuiApp's production image loader (the bootstrap-wired one). Every
+ *  read-state access carries the caller's scope: bytes, failures and subscribers
+ *  are keyed by `(scope, attachmentId)`. */
 interface MountedImageLoader {
   readonly imageLoader: {
-    load(ref: unknown): void
-    get(ref: unknown): {
+    load(ref: unknown, scope?: unknown): void
+    get(ref: unknown, scope?: unknown): {
       readonly state: 'idle' | 'loading' | 'ready' | 'error'
       readonly error?: Error
     }
+    isReady(ref: unknown, scope?: unknown): boolean
+    subscribe(attachmentId: string, listener: () => void, scope?: unknown): () => void
+    cacheSize(scope?: unknown): number
   }
+}
+
+/** The CURRENT presentation scope token the mounted app would stamp on a
+ *  thumbnail constructed right now (the private provider field). */
+function currentImageScope(app: MountedApp): ImageScopeToken {
+  const provider = (app as unknown as { readonly imageScope?: () => unknown }).imageScope
+  assert.ok(provider !== undefined, 'the mounted app must expose the image scope provider')
+  const token = provider()
+  assert.ok(token !== null && typeof token === 'object', 'a live image scope token must exist')
+  const candidate = token as { readonly key?: unknown; readonly sessionId?: unknown }
+  assert.equal(typeof candidate.key, 'string', 'the scope token must carry its lifetime key')
+  assert.equal(typeof candidate.sessionId, 'string', 'the scope token must carry its Session id')
+  return candidate as ImageScopeToken
+}
+
+interface DurableReadSpy {
+  /** Every read in call order: which Session address was asked for which ref. */
+  readonly routed: Array<{ readonly sessionId: string; readonly attachmentId: string }>
+  /** The bytes served per `sessionId\u0000attachmentId` address. */
+  readonly served: Map<string, Uint8Array>
+  /** Each ADDRESS's settle outcome, keyed `sessionId\u0000attachmentId`
+   *  (independent of the loader's scope caches). */
+  readonly settled: Map<string, {
+    readonly sessionId: string
+    readonly outcome: 'ok' | 'failed'
+    readonly error?: unknown
+  }>
+  /** The most recent settle per attachment id (convenience for single-ask refs). */
+  readonly settledByAttachment: Map<string, {
+    readonly sessionId: string
+    readonly outcome: 'ok' | 'failed'
+    readonly error?: unknown
+  }>
+  restore(): void
+}
+
+/** Install the read-routing spy over the production durable-image source. */
+function spyDurableImageReads(fixture: { readonly aggregate: { readonly presentation: unknown } }): DurableReadSpy {
+  const source = (fixture.aggregate.presentation as { attachments: DurableImageFace }).attachments
+  const original = source.readDurableImage
+  const routed: Array<{ sessionId: string; attachmentId: string }> = []
+  const served = new Map<string, Uint8Array>()
+  const settled = new Map<string, { sessionId: string; outcome: 'ok' | 'failed'; error?: unknown }>()
+  const settledByAttachment = new Map<string, { sessionId: string; outcome: 'ok' | 'failed'; error?: unknown }>()
+  source.readDurableImage = async (sessionId, attachmentId) => {
+    routed.push({ sessionId, attachmentId })
+    try {
+      const result = await original(sessionId, attachmentId)
+      served.set(`${sessionId}\u0000${attachmentId}`, result.data)
+      const record = { sessionId, outcome: 'ok' as const }
+      settled.set(`${sessionId}\u0000${attachmentId}`, record)
+      settledByAttachment.set(attachmentId, record)
+      return result
+    } catch (error: unknown) {
+      const record = { sessionId, outcome: 'failed' as const, error }
+      settled.set(`${sessionId}\u0000${attachmentId}`, record)
+      settledByAttachment.set(attachmentId, record)
+      throw error
+    }
+  }
+  return { routed, served, settled, settledByAttachment, restore: () => { source.readDurableImage = original } }
 }
 
 /** The Remote durable-image source the mounted surface's loader reads through. */
@@ -1002,19 +1078,16 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   const image = (await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'child-a-shot.png' }]))[0]!
   seedImageTurn(appenderOf(host.ctx, CHILD_A_ID), 31, 'childa image prompt', image)
 
-  // The routing spy over the production object the bootstrap loader closure
+  // The read-routing spy over the production object the bootstrap loader closure
   // reads: which Session address the mounted surface asks for bytes.
-  const served = new Map<string, Uint8Array>()
-  const routed: Array<{ sessionId: string; attachmentId: string }> = []
+  const readerSpy = spyDurableImageReads(fixture)
+  life.defer(readerSpy.restore)
+  const { routed, served, settledByAttachment } = readerSpy
+  // The MAIN presentation's scope token, captured BEFORE the viewer opens (the
+  // provider memoizes it by lifetime key, so the same object survives the viewer
+  // round trip — asserted below).
+  const mainScope = currentImageScope(app)
   const presentation = fixture.aggregate.presentation as unknown as { attachments: DurableImageFace }
-  const originalRead = presentation.attachments.readDurableImage
-  presentation.attachments.readDurableImage = async (sessionId, attachmentId) => {
-    routed.push({ sessionId, attachmentId })
-    const result = await originalRead(sessionId, attachmentId)
-    served.set(`${sessionId}\u0000${attachmentId}`, result.data)
-    return result
-  }
-  life.defer(() => { presentation.attachments.readDurableImage = originalRead })
 
   const parentBinding = sessions.binding(SessionId(PARENT_ID)) as unknown as ReadAttachmentFace
   const parentReads: string[] = []
@@ -1047,9 +1120,13 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   await waitFor('the child Session served the durable image bytes', () =>
     served.has(imageKey), 20_000)
 
-  assert.deepEqual(routed.filter(entry => entry.attachmentId === image.attachmentId),
-    [{ sessionId: CHILD_A_ID, attachmentId: image.attachmentId }],
-    'the rendered child image must be read from the CHILD Session address, exactly once')
+  // The loader caches per captured CONTEXT (the `src/image/loader.ts` scope
+  // model), so one ref may legitimately be read once per scope; what must hold
+  // is the ROUTING — every read of the child's image addresses the CHILD.
+  const imageReads = routed.filter(entry => entry.attachmentId === image.attachmentId)
+  assert.ok(imageReads.length >= 1, 'the rendered child image must be read at least once')
+  assert.equal(imageReads.every(entry => entry.sessionId === CHILD_A_ID), true,
+    `every rendered child image read must address the CHILD Session (got ${JSON.stringify(imageReads)})`)
   assert.equal(childReads.includes(image.attachmentId), true,
     "the bytes must traverse the CHILD binding's official readAttachment")
   assert.deepEqual(served.get(imageKey), png,
@@ -1059,35 +1136,83 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   assert.equal(retainFacts(clientSessions, CHILD_A_ID).retainedBy['tuiChildView'], 1,
     'the mounted child viewer owns exactly one child generation')
 
-  // ── F7 negative: a `load()` of a ref that is NOT in the transcript, followed
-  // by a viewer exit in the SAME turn. The deferred read must still address the
-  // subject captured at the ask; a late resolution would have asked the PARENT.
+  // ── F7 negative: a `load()` of a ref that is NOT in the transcript, stamped
+  // with the CHILD presentation's IMMUTABLE scope token (the exact object a child
+  // thumbnail constructed right now would be stamped with), followed by a viewer
+  // exit in the SAME turn. The scope travels with the ref, so the deferred read
+  // can never be re-routed to whichever presentation is current by then.
   const png2 = await realPng('#ff00ff', 3)
   const orphan = (await attachments.saveImages([{ data: png2, mediaType: 'image/png', name: 'child-only.png' }]))[0]!
   assert.notEqual(orphan.attachmentId, image.attachmentId,
     'the two images must be distinct durable objects (the store is content-addressed)')
+  const childScope = currentImageScope(app)
+  assert.match(childScope.key, /^child:/u, 'a mounted child viewer must own the child lifetime scope')
+  assert.equal(childScope.sessionId, CHILD_A_ID)
+  assert.notEqual(childScope, mainScope, 'the child and main presentations own distinct scopes')
   routed.length = 0
   const loader = (app as unknown as MountedImageLoader).imageLoader
+  const parentReadsBeforeF7 = parentReads.length
+  // Give the parent presentation's scope a KNOWN state before the child's ask, so
+  // the "untouched" assertion below is not vacuous.
+  const parentProbe = (await attachments.saveImages([{
+    data: await realPng('#00ffff', 5), mediaType: 'image/png', name: 'parent-probe.png',
+  }]))[0]!
+  loader.load(parentProbe, mainScope)
+  await waitFor('the parent-scope probe settled', () => settledByAttachment.has(parentProbe.attachmentId), 20_000)
+  const parentProbeStateBefore = loader.get(parentProbe, mainScope)
+  assert.equal(parentProbeStateBefore.state, 'error',
+    'the parent scope refuses an image its own Session does not reference')
+  const parentCacheBeforeF7 = loader.cacheSize(mainScope)
   const generationAtLoad = app.getViewerGeneration()
-  loader.load(orphan)
+  loader.load(orphan, childScope)
   fixture.vt.sendInput('\x1b')
   assert.ok(app.getViewerGeneration() > generationAtLoad,
     'the viewer must have exited BEFORE the deferred read runs — otherwise this proof is vacuous')
-  await waitFor('the deferred image read settled', () =>
-    loader.get(orphan).state !== 'idle' && loader.get(orphan).state !== 'loading', 20_000)
-  assert.deepEqual(routed, [{ sessionId: CHILD_A_ID, attachmentId: orphan.attachmentId }],
-    'the deferred read must address the subject captured at load() — the CHILD, never the parent')
-  assert.equal(parentReads.includes(orphan.attachmentId), false,
-    'the parent Session must never be asked for the child-only image after the viewer is gone')
-  const settled = loader.get(orphan)
-  if (settled.state === 'ready') {
+  // The settle is observed through the READ SPY, not `loader.get`: the child's
+  // scope is no longer the CURRENT one after the exit (`get` answers for the live
+  // presentation), but the read's own outcome is scope-independent.
+  await waitFor('the deferred child read settled', () => settledByAttachment.has(orphan.attachmentId), 20_000)
+  const orphanReads = routed.filter(entry => entry.attachmentId === orphan.attachmentId)
+  assert.ok(orphanReads.length >= 1, 'the scoped ask must have produced a real read')
+  assert.equal(orphanReads.every(entry => entry.sessionId === CHILD_A_ID), true,
+    `EVERY read of the child-stamped ref must address the CHILD (got ${JSON.stringify(orphanReads)})`)
+  assert.equal(routed.some(entry => entry.sessionId === PARENT_ID && entry.attachmentId === orphan.attachmentId), false,
+    `ZERO parent-addressed reads may exist for the child-stamped ref (got ${JSON.stringify(routed)})`)
+  assert.equal(parentReads.slice(parentReadsBeforeF7).includes(orphan.attachmentId), false,
+    'the parent Session binding must never be asked for the child-only image')
+  const orphanSettle = settledByAttachment.get(orphan.attachmentId)!
+  assert.equal(orphanSettle.sessionId, CHILD_A_ID, 'the settle itself is attributed to the CHILD scope')
+  if (orphanSettle.outcome === 'ok') {
     assert.equal(childReads.includes(orphan.attachmentId), true,
-      'a ready outcome must have been served by the CHILD binding')
+      'a served outcome must have come from the CHILD binding')
+    assert.deepEqual(served.get(`${CHILD_A_ID}\u0000${orphan.attachmentId}`), png2,
+      'the served bytes must be the child-only image bytes')
   } else {
-    assert.equal(settled.state, 'error', `unexpected image state: ${settled.state}`)
-    assert.match(settled.error?.message ?? '', new RegExp(CHILD_A_ID),
+    assert.match(String(orphanSettle.error), new RegExp(CHILD_A_ID),
       'a fail-closed outcome must name the CHILD subject, never the parent')
   }
+  // The parent presentation's own loader state is untouched by the child's ask.
+  assert.equal(loader.get(orphan, mainScope).state, 'idle',
+    "the child's scoped ask must not create parent-scope state for that ref")
+  assert.equal(loader.isReady(orphan, mainScope), false)
+  assert.equal(loader.get(parentProbe, mainScope).state, 'error',
+    "the child's scoped ask must not disturb the parent scope's own recorded state")
+  assert.equal(loader.get(parentProbe, mainScope).error, parentProbeStateBefore.error,
+    "the parent scope's recorded failure must be the very same object")
+  assert.equal(loader.cacheSize(mainScope), parentCacheBeforeF7,
+    "the child's scoped ask must not change the parent scope's cache")
+  // The provider carries the SAME main lifetime key after the viewer exits AND
+  // must hand back the VERY SAME token object for it: the loader keys object
+  // scopes by identity, so re-minting the main token after a child visit would
+  // silently drop the main presentation's cached bytes/failures/subscribers (and
+  // re-read every main image) on each viewer round trip.
+  const mainScopeAfterExit = currentImageScope(app)
+  assert.equal(mainScopeAfterExit.key, mainScope.key,
+    'the main lifetime key must be stable across a child viewer visit')
+  assert.equal(mainScopeAfterExit, mainScope,
+    'the same lifetime MUST yield the same scope object after a child visit')
+  assert.equal(loader.get(parentProbe, mainScopeAfterExit).error, parentProbeStateBefore.error,
+    "the post-visit main scope is the SAME scope: its recorded failure survives")
   // Mutation witness: the wrong subject is NOT a silent no-op. Asking the parent
   // Session for this child-only attachment is refused by the Host, so the pre-fix
   // late resolution would have failed the child image with a wrong-subject error
@@ -1104,11 +1229,14 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
     data: await realPng('#00ff00', 4), mediaType: 'image/png', name: 'parent-only.png',
   }]))[0]!
   routed.length = 0
-  loader.load(parentImage)
-  await waitFor('the main-surface image read settled', () =>
-    loader.get(parentImage).state !== 'idle' && loader.get(parentImage).state !== 'loading', 20_000)
+  const mainScopeAtControl = currentImageScope(app)
+  assert.match(mainScopeAtControl.key, /^main:/u, 'no mounted viewer means the main lifetime scope')
+  assert.equal(mainScopeAtControl.sessionId, PARENT_ID)
+  loader.load(parentImage, mainScopeAtControl)
+  await waitFor('the main-surface image read settled', () => settledByAttachment.has(parentImage.attachmentId), 20_000)
   assert.deepEqual(routed, [{ sessionId: PARENT_ID, attachmentId: parentImage.attachmentId }],
     'with no viewer mounted the same seam asks the PARENT Session — the routing spy is not vacuous')
+  assert.equal(settledByAttachment.get(parentImage.attachmentId)?.sessionId, PARENT_ID)
 })
 
 test('L6 F1: ending the viewer aborts a STILL-PENDING child open and releases its retained child generation without committing', async (t) => {
@@ -1382,4 +1510,199 @@ test('L6 negative control: child A → child B leaves no cross-child residue (tr
   assert.equal(backView.includes(LABEL_B), false, 'child B identity must not survive')
   assert.equal(retainFacts(clientSessions, CHILD_B_ID).referenceCount, 0)
   assert.deepEqual(retainFacts(clientSessions, CHILD_A_ID).retainedBy, { tuiChildView: 1 })
+})
+test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subject and footer on the official Client Session running flip alone', async (t) => {
+  const life = testLifecycle(t)
+  const adapter = new HoldingAdapter()
+  const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life, { adapter })
+  const childAgent = (host.ctx.agents as unknown as {
+    get(id: unknown): { followup(message: unknown): void } | undefined
+  }).get(SessionId(CHILD_A_ID))
+  assert.ok(childAgent !== undefined, 'the real Host child agent must exist')
+
+  // ── CHANNEL ISOLATION (declared substitution). The viewed child's durable
+  // events normally re-derive the display subject too (`routeSessionEvent` calls
+  // `beginTurn`/`endTurn` + `refreshFooter`), which would mask the snapshot
+  // channel. Suppressing ONLY the child's durable-event sink leaves exactly the
+  // official Session-snapshot sink (`onSessionSnapshotChanged`) as the one path
+  // that can update the viewer's internal activity, so the convergence below is
+  // attributable to it. `suppressedDurableEvents` is the witness that the
+  // suppression really ran (a no-op wrapper would make the proof vacuous).
+  // The isolation is complete on this branch: the Direct Host firehose that also
+  // feeds `routeSessionEvent` is registered ONLY when `remoteSources` is absent
+  // (bootstrap.ts), and Remote durable events arrive through this ingress alone.
+  // Hence with the durable sink suppressed, `viewing.activity` has exactly two
+  // writers — the open commit (already done) and `onSessionSnapshotChanged` — so
+  // the committed subject can follow this flip ONLY because that sink re-derives
+  // it via `deps.refreshStatus()`; without the fix the subject and the rendered
+  // footer would keep the stale activity.
+  let suppressedDurableEvents = 0
+  const ingress = fixture.aggregate.presentation.liveIngress as unknown as {
+    subscribe(
+      sessionId: string,
+      sinks: Record<string, unknown>,
+      hydrateRevision?: number,
+    ): { dispose(): void } | undefined
+  }
+  const realSubscribe = ingress.subscribe
+  ingress.subscribe = function (sessionId, sinks, hydrateRevision) {
+    if (sessionId !== CHILD_A_ID) return realSubscribe.call(ingress, sessionId, sinks, hydrateRevision)
+    return realSubscribe.call(ingress, sessionId, {
+      ...sinks,
+      onDurableEvent: () => { suppressedDurableEvents += 1 },
+    }, hydrateRevision)
+  }
+  life.defer(() => { ingress.subscribe = realSubscribe })
+
+  // The footer's display-subject identity block renders the committed activity
+  // (`● running` / `inactive`) — the exact line P2 left stale.
+  const subjectLine = (): string => viewport().split('\n')
+    .find(line => line.includes('[subagent · continuable]')) ?? ''
+  const subjectActivity = (): string | undefined => app.statusStore.snapshot().view?.subject?.activity
+  const clientRunning = (): boolean | undefined => sessions.list.getSnapshot().byId[CHILD_A_ID]?.running
+
+  // ── (1) The child is RUNNING through the official Client fact before the
+  // viewer opens, so the initial committed state is not vacuous.
+  const releaseHeld = adapter.hold()
+  life.defer(() => releaseHeld())
+  childAgent.followup({
+    id: MessageId('m3-5-pr2-p2-running'), role: 'user',
+    content: [{ type: 'text', text: 'hold the child turn open' }], source: { kind: 'user' },
+  })
+  await waitFor('the official Client list reports the child running', () => clientRunning() === true, 15_000)
+
+  // ── (2) Mount the viewer on that running child and assert the initial commit.
+  await openTaskRow(fixture, app, viewport, LABEL_A)
+  await waitFor('the child viewer hydrated on the running child', () => subjectActivity() === 'running', 20_000)
+  assert.deepEqual(app.statusStore.snapshot().view?.subject, {
+    kind: 'subagent', id: CHILD_A_ID, label: LABEL_A, mode: 'continuable', activity: 'running',
+  }, 'the mounted viewer must commit the CHILD subject as running')
+  await waitFor('the footer identity block renders the running activity', () =>
+    subjectLine().includes('● running'), 10_000)
+
+  // ── (3) The official Session-snapshot flip to `running: false` (the held turn
+  // completing), with NO durable event delivered to the viewed child, no
+  // projection poke and no reopen — the test only observes.
+  releaseHeld()
+  await waitFor('the official Client list reports the child idle', () => clientRunning() === false, 15_000)
+  await waitFor('the committed subject converges to inactive on the snapshot channel alone', () =>
+    subjectActivity() === 'inactive', 15_000)
+  assert.ok(suppressedDurableEvents > 0,
+    'the isolation witness must have suppressed real durable events, or this proof is vacuous')
+  assert.equal(subjectActivity(), 'inactive',
+    'the committed display subject must follow the official running flip')
+  await waitFor('the footer converges to the inactive activity', () =>
+    subjectLine().includes('inactive') && !subjectLine().includes('● running'), 15_000)
+  assert.equal(subjectLine().includes('inactive'), true,
+    `the rendered footer must show the converged activity:\n${viewport()}`)
+  assert.equal(subjectLine().includes('● running'), false,
+    `the stale running line must leave the footer:\n${viewport()}`)
+
+  // ── (4) The reverse flip through the same isolated channel.
+  const suppressedBefore = suppressedDurableEvents
+  const releaseSecond = adapter.hold()
+  life.defer(() => releaseSecond())
+  childAgent.followup({
+    id: MessageId('m3-5-pr2-p2-running-again'), role: 'user',
+    content: [{ type: 'text', text: 'hold the child turn open again' }], source: { kind: 'user' },
+  })
+  await waitFor('the official Client list reports the child running again', () => clientRunning() === true, 15_000)
+  await waitFor('the committed subject converges back to running', () => subjectActivity() === 'running', 15_000)
+  await waitFor('the footer converges back to the running activity', () =>
+    subjectLine().includes('● running'), 15_000)
+  assert.ok(suppressedDurableEvents > suppressedBefore,
+    'the reverse flip must also be observed with the durable sink suppressed')
+  assert.equal(subjectActivity(), 'running', 'the reverse flip must converge as well')
+  assert.equal(subjectLine().includes('● running'), true,
+    `the rendered footer must show running again:\n${viewport()}`)
+  releaseSecond()
+})
+
+test('L6 P1 dual-subject: the SAME attachment id loaded under the parent and child scopes keeps independent state and subscribers', async (t) => {
+  const life = testLifecycle(t)
+  const piTui = await import('@xmoon76/pi-tui') as unknown as {
+    resetCapabilitiesCache(): void
+    setCapabilities(caps: { images: 'kitty' | 'iterm2' | null; trueColor: boolean; hyperlinks: boolean }): void
+  }
+  piTui.resetCapabilitiesCache()
+  piTui.setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  life.defer(() => { piTui.resetCapabilitiesCache() })
+
+  const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
+  const readerSpy = spyDurableImageReads(fixture)
+  life.defer(readerSpy.restore)
+  const { routed, served, settled } = readerSpy
+  const loader = (app as unknown as MountedImageLoader).imageLoader
+  const attachments = host.ctx.get('attachments') as unknown as FixtureAttachments
+
+  // X is a REAL durable image that the parent asks for BEFORE any viewer exists
+  // (so the parent lifetime scope owns its failure) and that the CHILD then asks
+  // for under its own scope. It is referenced only by the child Session.
+  const pngX = await realPng('#c0ffee', 2)
+  const X = (await attachments.saveImages([{ data: pngX, mediaType: 'image/png', name: 'dual-subject.png' }]))[0]!
+  const parentScope = currentImageScope(app)
+  assert.match(parentScope.key, /^main:/u, 'the parent lifetime scope is captured before any viewer')
+  const parentWakes: string[] = []
+  const childWakes: string[] = []
+  const stopParent = loader.subscribe(X.attachmentId, () => { parentWakes.push('wake') }, parentScope)
+  life.defer(stopParent)
+  const parentAddress = `${PARENT_ID}\u0000${X.attachmentId}`
+
+  // ── Mount the child viewer FIRST so BOTH scopes and BOTH subscribers exist
+  // before either settle: a cross-scope wake would then be observable, never a
+  // vacuous zero.
+  submit(app, '/tasks')
+  await waitFor('the Task Center rendered the child row', () => viewport().includes(LABEL_A), 20_000)
+  fixture.vt.sendInput('\r')
+  await waitFor('the child viewer hydrated', () => viewport().includes('childa answer 30'), 20_000)
+  const childScope = currentImageScope(app)
+  assert.match(childScope.key, /^child:/u, 'the mounted viewer owns the child lifetime scope')
+  assert.equal(childScope.sessionId, CHILD_A_ID)
+  assert.notEqual(childScope, parentScope)
+  const childAddress = `${CHILD_A_ID}\u0000${X.attachmentId}`
+  const stopChild = loader.subscribe(X.attachmentId, () => { childWakes.push('wake') }, childScope)
+  life.defer(stopChild)
+
+  // ── The PARENT scope's own ask: the Host refuses an image the parent Session
+  // does not reference, and that failure belongs to the parent scope alone.
+  loader.load(X, parentScope)
+  await waitFor('the parent-scoped ask settled', () => settled.has(parentAddress), 20_000)
+  assert.deepEqual(routed.filter(entry => entry.attachmentId === X.attachmentId),
+    [{ sessionId: PARENT_ID, attachmentId: X.attachmentId }],
+    'the first ask of X is addressed to the PARENT Session')
+  assert.equal(settled.get(parentAddress)?.outcome, 'failed',
+    'the parent Session does not reference X, so its read fails closed')
+  assert.equal(parentWakes.length, 1, "the parent scope's own settle wakes its subscriber")
+  assert.equal(childWakes.length, 0,
+    "the parent scope's settle must NOT wake the child scope's subscriber")
+  assert.equal(loader.get(X, childScope).state, 'idle',
+    "the parent scope's failure must not create child-scope state for the same id")
+
+  // ── The CHILD scope's ask of the SAME id is authorized only after X is
+  // referenced by the child Session; the production render may also load it, so
+  // the claim is the isolation, never a trigger count.
+  seedImageTurn(appenderOf(host.ctx, CHILD_A_ID), 31, 'childa dual image', X)
+  loader.load(X, childScope)
+  await waitFor('the child-scoped ask served X', () => served.has(childAddress), 20_000)
+  assert.deepEqual(routed.filter(entry => entry.attachmentId === X.attachmentId), [
+    { sessionId: PARENT_ID, attachmentId: X.attachmentId },
+    { sessionId: CHILD_A_ID, attachmentId: X.attachmentId },
+  ], 'the same id was asked once per presentation scope')
+  assert.equal(settled.get(childAddress)?.outcome, 'ok',
+    'the child Session references X, so its read is served')
+  assert.deepEqual(served.get(childAddress), pngX, 'the child scope owns the real bytes')
+  assert.ok(childWakes.length >= 1, "the child scope's own settle wakes its subscriber")
+
+  // ── Isolation, both directions: neither scope's settle woke the other's
+  // subscriber, and neither scope's state changed the other's.
+  assert.equal(parentWakes.length, 1,
+    "the child scope's settle must NOT wake the parent scope's subscriber")
+  assert.equal(loader.get(X, childScope).state, 'ready',
+    'the child scope keeps its own ready state')
+  assert.equal(loader.get(X, parentScope).state, 'error',
+    'the parent scope keeps its own failure state')
+  assert.equal(settled.get(parentAddress)?.outcome, 'failed',
+    "the parent scope's recorded outcome is unchanged by the child settle")
+  assert.equal(loader.isReady(X, parentScope), false,
+    "the parent scope's cache must not gain the child-authorized bytes")
 })

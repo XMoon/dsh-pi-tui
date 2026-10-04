@@ -529,10 +529,16 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
           const target = viewing
           const handle = viewHandle
           if (target === undefined || target.id !== childId || handle === undefined) return
-          // The official snapshot channel carries the child's `running` flip: the
-          // viewer's own activity must follow the CURRENT fact (the composer's
-          // queue-vs-steer decision reads it), and the pending pane re-joins.
+          // The official snapshot channel carries the child's `running` flip. The
+          // viewer's own activity AND the committed display subject must both
+          // follow the CURRENT fact: `read().activity` drives the composer's
+          // queue-vs-steer decision, while the footer/status renders
+          // `view.subject.activity` from the PR1 display-subject projection — so a
+          // flip with no projection/durable event in between must still re-derive
+          // the subject status, or the visible `running`/`inactive` line keeps the
+          // stale value. The pending pane re-joins in the same step.
           target.activity = handle.currentActivity()
+          deps.refreshStatus()
           deps.surface.refreshPendingInput()
         },
         onProjectionsChanged: () => {

@@ -94,15 +94,17 @@ test('F2: the runner surface disposal tears the viewer down before the surface/a
 
 test('F7: the Remote image read fails closed without a captured display subject, never late-selecting one', () => {
   const readImage = span('readImage: (ref, context) => {', '\n      present,', bootstrapSource)
-  assert.ok(readImage.includes("typeof context !== 'string'"),
-    'the Remote branch must require the captured subject')
+  assert.ok(readImage.includes('typeof subject'),
+    'the Remote branch must require the captured display-subject token')
+  assert.ok(readImage.includes("typeof subject.sessionId !== 'string'"),
+    'the token must carry the asking Session id')
   assert.ok(/throw new ImageLoadError/u.test(readImage),
     'a mount without the capture seam must fail closed (a visible load failure)')
   assert.ok(!readImage.includes('viewer.read()'),
     'the read must never late-resolve the viewer subject after the ask')
   assert.ok(!readImage.includes('ownership.currentSessionId()'),
     'the read must never late-resolve the current main session after the ask')
-  assert.ok(readImage.includes('attachments.readDurableImage(context, ref.attachmentId)'),
+  assert.ok(readImage.includes('readDurableImage(subject.sessionId, ref.attachmentId)'),
     'the captured subject is the ONLY Session the Remote read may address')
   // The capture seam is part of the MOUNT CONTRACT (not an optional extra): the
   // surface deps must declare it required, so a future mount cannot silently omit
@@ -111,8 +113,51 @@ test('F7: the Remote image read fails closed without a captured display subject,
     new URL('../src/app/surface/runtime.ts', import.meta.url),
     'utf8',
   )
-  assert.ok(surfaceDeps.includes('readonly activeImageSubject: () => unknown'),
-    'the display-subject capture must be a REQUIRED mount input')
-  assert.ok(!surfaceDeps.includes('activeImageSubject?:'),
-    'the capture seam must never be optional again')
+  assert.ok(surfaceDeps.includes('readonly imageScope: () => unknown'),
+    'the presentation scopes must be a REQUIRED mount input')
+  assert.ok(!surfaceDeps.includes('imageScope?:'),
+    'the presentation-scope seam must never be optional again')
+})
+
+test('P1: the image scope identity is the presentation LIFETIME, and the renderer stamps it at construction', () => {
+  const scopeProvider = span('imageScope: () => {', 'readImage: (ref, context) => {', bootstrapSource)
+  assert.ok(scopeProvider.includes('viewer.read()'),
+    'the token follows the viewed child while its viewer is mounted')
+  assert.ok(scopeProvider.includes('app.getViewerGeneration()'),
+    'a SAME-ID reopen is a NEW viewer generation, so it is a new scope lifetime')
+  assert.ok(scopeProvider.includes('ownership.generation()'),
+    'the main subject scope follows the owner generation, not the bare session id')
+  assert.ok(scopeProvider.includes('imageScopeMain.key === key'),
+    'the MAIN lifetime token is memoized in its own slot (a plain re-render reuses the SAME scope object)')
+  assert.ok(scopeProvider.includes('imageScopeChild.key === key'),
+    'the CHILD lifetime token is memoized in its own slot, so a child visit never re-mints the main token')
+  // The loader itself must key bytes/in-flight/errors by the captured scope.
+  const loader = readFileSync(new URL('../src/image/loader.ts', import.meta.url), 'utf8')
+  assert.ok(loader.includes('private scopeOf(scope: unknown): LoaderScope'),
+    'the loader resolves one state scope per CALLER-PASSED scope')
+  assert.ok(!loader.includes('captureContext'),
+    'the loader must never resolve an ambient subject itself')
+  assert.ok(loader.includes('get(ref: ImageAttachmentRefLike, scope?: unknown)'),
+    'every state read takes the owning presentation\'s scope explicitly')
+  assert.ok(loader.includes('subscribe(attachmentId: string, listener: () => void, scope?: unknown)'),
+    'the SUBSCRIBER identity is scoped too, so a sibling scope\'s settle never wakes it')
+  assert.ok(!/private readonly cache: ImageCache\b/u.test(loader),
+    'a single global bytes cache would let one subject satisfy another subject\'s authorization')
+  // The renderer samples the presentation scope ONCE per component construction
+  // and the component keeps it: no ambient re-resolution on any read path.
+  const app = readFileSync(new URL('../src/tui-app.ts', import.meta.url), 'utf8')
+  assert.ok(app.includes('imageScope?: () => unknown'),
+    'the renderer receives the presentation-scope provider')
+  assert.ok(app.includes('this.imageScope?.(),'),
+    'the scope is sampled where the thumbnail is CONSTRUCTED')
+  const thumbnail = readFileSync(
+    new URL('../src/components/media/image-thumbnail.ts', import.meta.url),
+    'utf8',
+  )
+  assert.ok(thumbnail.includes('this.loader.get(this.ref, this.scope)'),
+    'the component reads through its IMMUTABLE scope')
+  assert.ok(thumbnail.includes('this.loader.load(this.ref, this.scope)'),
+    'the component loads through its IMMUTABLE scope')
+  assert.ok(thumbnail.includes('}, scope)'),
+    'the component subscribes through its IMMUTABLE scope')
 })

@@ -43,6 +43,15 @@ export class ImageThumbnail implements Component {
   private readonly ref: ImageAttachmentRefLike
   private readonly collapsedRef: (() => boolean) | undefined
   private readonly requestRender: () => void
+  /**
+   * The IMMUTABLE presentation scope this ref belongs to (M3-5 PR2 review, P1):
+   * the renderer stamps it from the presentation being constructed, and every
+   * `get`/`load`/`subscribe` uses THIS value — never a freshly resolved "current"
+   * subject. A stale component of a replaced presentation therefore keeps asking
+   * through its OWN (possibly released) authorization and fails closed, instead of
+   * sending its ref to whoever is displayed by then.
+   */
+  private readonly scope: unknown
   private unsubscribe: (() => void) | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
@@ -54,6 +63,7 @@ export class ImageThumbnail implements Component {
     theme: ImageThumbnailTheme,
     requestRender: () => void,
     collapsedRef?: () => boolean,
+    scope?: unknown,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
@@ -61,16 +71,18 @@ export class ImageThumbnail implements Component {
     this.theme = theme
     this.requestRender = requestRender
     this.collapsedRef = collapsedRef
-    // Subscribe to THIS attachment's settles only: N thumbnails loading in
-    // parallel never invalidate each other (review finding 8 — no O(N²)
-    // repaint churn, no kitty image-id churn). A settle clears the render
+    this.scope = scope
+    // Subscribe to THIS (scope, attachment)'s settles only: N thumbnails loading
+    // in parallel never invalidate each other, and another presentation's settle
+    // for the same content id never wakes this component (review finding 8 — no
+    // O(N²) repaint churn, no kitty image-id churn). A settle clears the render
     // cache AND schedules the next frame: an async load that resolves
     // between frames must repaint with the resolved bytes (the loader
     // itself never schedules a frame).
     this.unsubscribe = loader.subscribe(ref.attachmentId, () => {
       this.invalidate()
       this.requestRender()
-    })
+    }, scope)
   }
 
   /** Whether this thumbnail participates in the fullscreen collapse
@@ -147,10 +159,10 @@ export class ImageThumbnail implements Component {
     if (getCapabilities().images === null) {
       return [this.theme.fallbackColor(this.infoLine())]
     }
-    const state = this.loader.get(this.ref)
+    const state = this.loader.get(this.ref, this.scope)
     if (state.state === 'idle') {
       // Fire the read; the settle notification invalidates this component.
-      this.loader.load(this.ref)
+      this.loader.load(this.ref, this.scope)
       return [this.theme.fallbackColor(this.infoLine())]
     }
     if (state.state === 'loading') {

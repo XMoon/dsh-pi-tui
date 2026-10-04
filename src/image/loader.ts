@@ -1,16 +1,34 @@
 /**
  * Durable image loading for the transcript (plan M8, §16).
  *
- * History images come ONLY from `ctx.attachments.readImage(ref)` — never
- * from the draft store (§16). The loader is the async bridge a render
- * component consults synchronously:
+ * History images come ONLY from the official attachment read — never from the
+ * draft store (§16). The loader is the async bridge a render component consults
+ * synchronously:
  *
- * - `get(ref)` returns the CURRENT state (idle/loading/ready/error) without
- *   awaiting — render methods cannot await (plan §16.1);
- * - `load(ref)` fires the underlying read ONCE per attachment id, deduping
- *   concurrent loads from multiple components (§16.2);
+ * - `get(ref, scope)` returns the CURRENT state (idle/loading/ready/error)
+ *   without awaiting — render methods cannot await (plan §16.1);
+ * - `load(ref, scope)` fires the underlying read ONCE per (scope, attachment id),
+ *   deduping concurrent loads from multiple components (§16.2);
  * - subscribers are notified after every settle so components can
  *   invalidate and repaint with the resolved bytes.
+ *
+ * SCOPE OWNERSHIP (M3-5 PR2 review, P1): the read AUTHORITY belongs to the
+ * attachment ref's OWNING PRESENTATION, not to whichever Session happens to be on
+ * screen when the read runs. The caller therefore passes an explicit, IMMUTABLE
+ * scope (`ImageThumbnail` captures it at construction from the presentation being
+ * rendered; the renderer never re-resolves it), and EVERY piece of read state —
+ * the resolved bytes, the in-flight read, the recorded failure AND the subscribers
+ * — is keyed by that scope plus the attachment id. The loader never resolves or
+ * guesses the subject itself.
+ *
+ * Why the scope is not the attachment id alone: the official Client authorizes
+ * `session/attachment` per Session (`referencedImage(source.events, attachmentId)`)
+ * and the official Web client scopes its own history-image cache by
+ * `SessionBinding`. Identical content-addressed bytes therefore never mean the
+ * authorization may be shared: a child transcript's image must be read through
+ * the CHILD Session's bound face, and a stale component of a replaced presentation
+ * must fail closed against ITS OWN (possibly released) binding instead of asking
+ * whoever is displayed now.
  * @module @xmoon76/dsh-pi-tui/image/loader
  */
 
@@ -29,9 +47,8 @@ export type ImageLoadState =
   | { readonly state: 'ready'; readonly bytes: Uint8Array; readonly base64: string }
   | { readonly state: 'error'; readonly error: Error }
 
-/** The read seam: the requesting presentation's captured context travels with
- *  the ref, so a subject switch between the ask and the deferred read can never
- *  re-route the bytes to another Session. */
+/** The read seam. `context` is the caller's immutable presentation scope; the
+ *  composition owner interprets it (it decides which Session face may read). */
 export type ReadImage = (
   ref: ImageAttachmentRefLike,
   context?: unknown,
@@ -42,20 +59,34 @@ export interface ReadImageLike {
   readImage(ref: ImageAttachmentRefLike, signal?: AbortSignal): Promise<{ ref: unknown; data: Uint8Array }>
 }
 
-/** The async image loader with concurrent-load dedupe + subscriber notify. */
+/**
+ * One presentation lifetime's read state. Never shared across scopes: the bytes,
+ * the in-flight read, the recorded failure and the subscribers all belong to the
+ * presentation whose authorization produced them.
+ */
+interface LoaderScope {
+  readonly cache: ImageCache
+  readonly inflight: Map<string, Promise<{ data: Uint8Array }>>
+  readonly errors: Map<string, Error>
+  /** Per-attachment listeners OF THIS SCOPE: another scope's settle never wakes
+   *  this presentation's components. */
+  readonly listeners: Map<string, Set<() => void>>
+}
+
+function emptyScope(cache: ImageCache = new ImageCache()): LoaderScope {
+  return { cache, inflight: new Map(), errors: new Map(), listeners: new Map() }
+}
+
+/** The async image loader with per-scope dedupe + subscriber notify. */
 export class ImageLoader {
-  private readonly cache: ImageCache
-  private readonly inflight = new Map<string, Promise<{ data: Uint8Array }>>()
-  private readonly errors = new Map<string, Error>()
-  /** Per-attachment listeners: a settle notifies ONLY the attachments that
-   * care, so N thumbnails loading in parallel never invalidate each other
-   * (review finding 8 — no O(N²) repaint churn). */
-  private readonly listeners = new Map<string, Set<() => void>>()
   private readonly read: ReadImage
-  /** Captures the REQUESTING presentation's context synchronously at `load()`
-   *  time (the active display subject), so the deferred read cannot be
-   *  re-routed by a viewer exit/switch in the meantime. */
-  private readonly captureContext: () => unknown
+  /** Object scopes are held weakly: the renderer keeps only the presentation it
+   *  is currently building, so a retired presentation's state (bytes, failures and
+   *  subscribers) is collectable instead of accumulating. */
+  private readonly objectScopes = new WeakMap<object, LoaderScope>()
+  /** Primitive/absent scopes share one state per value. */
+  private readonly valueScopes = new Map<unknown, LoaderScope>()
+  private readonly defaultScope: LoaderScope
   /**
    * Invalidation generations (review finding 3): `invalidate(id)` bumps
    * ONLY that attachment's local generation, so a settle of an unrelated
@@ -68,6 +99,39 @@ export class ImageLoader {
    */
   private globalEpoch = 0
   private readonly perIdEpoch = new Map<string, number>()
+
+  constructor(
+    read: ReadImage,
+    cache: ImageCache = new ImageCache(),
+  ) {
+    // Explicit fields (Node strip-only mode rejects parameter properties).
+    this.read = read
+    this.defaultScope = emptyScope(cache)
+  }
+
+  /** Resolve (or create) the read-state scope of one caller-supplied identity. */
+  private scopeOf(scope: unknown): LoaderScope {
+    if (scope === undefined) return this.defaultScope
+    if (typeof scope === 'object' && scope !== null) {
+      let resolved = this.objectScopes.get(scope)
+      if (resolved === undefined) {
+        resolved = emptyScope()
+        this.objectScopes.set(scope, resolved)
+      }
+      return resolved
+    }
+    let resolved = this.valueScopes.get(scope)
+    if (resolved === undefined) {
+      resolved = emptyScope()
+      this.valueScopes.set(scope, resolved)
+    }
+    return resolved
+  }
+
+  /** The scopes a global operation (clear/invalidate) can reach synchronously. */
+  private reachableScopes(): LoaderScope[] {
+    return [this.defaultScope, ...this.valueScopes.values()]
+  }
 
   /** The epoch one read must match at settle time (a binary snapshot). */
   private epochOf(id: string): { global: number; local: number } {
@@ -83,150 +147,156 @@ export class ImageLoader {
       && (this.perIdEpoch.get(id) ?? 0) === captured.local
   }
 
-  constructor(
-    read: ReadImage,
-    cache: ImageCache = new ImageCache(),
-    captureContext: () => unknown = () => undefined,
-  ) {
-    // Explicit fields (Node strip-only mode rejects parameter properties).
-    this.read = read
-    this.cache = cache
-    this.captureContext = captureContext
-  }
-
-  /** The synchronous state view for one ref (never awaits). */
-  get(ref: ImageAttachmentRefLike): ImageLoadState {
+  /** The synchronous state view for one ref in one presentation scope. */
+  get(ref: ImageAttachmentRefLike, scope?: unknown): ImageLoadState {
+    const resolved = this.scopeOf(scope)
     const id = ref.attachmentId
-    const cached = this.cache.get(id)
+    const cached = resolved.cache.get(id)
     if (cached !== undefined) {
       if (cached.state === 'ready') {
         return { state: 'ready', bytes: cached.bytes, base64: cached.base64 }
       }
       return { state: 'error', error: cached.error }
     }
-    const failed = this.errors.get(id)
+    const failed = resolved.errors.get(id)
     if (failed !== undefined) return { state: 'error', error: failed }
-    if (this.inflight.has(id)) return { state: 'loading' }
+    if (resolved.inflight.has(id)) return { state: 'loading' }
     return { state: 'idle' }
   }
 
-  /** Whether a ref is fully resolved (cache hit). */
-  isReady(ref: ImageAttachmentRefLike): boolean {
-    return this.cache.has(ref.attachmentId)
+  /** Whether a ref is fully resolved for one presentation scope (cache hit). */
+  isReady(ref: ImageAttachmentRefLike, scope?: unknown): boolean {
+    return this.scopeOf(scope).cache.has(ref.attachmentId)
   }
 
   /**
    * Fire the async load for a ref (no-op when already loading/ready). One
-   * underlying `readImage` per attachment id: concurrent callers share the
-   * in-flight promise. On settle, the cache/error maps update and every
-   * subscriber is notified.
+   * underlying `readImage` per (scope, attachment id): concurrent callers of the
+   * SAME presentation share the in-flight promise; a different presentation starts
+   * its own read under its own authorization. On settle, that scope's cache/error
+   * state updates and its subscribers for the attachment are notified.
    */
-  load(ref: ImageAttachmentRefLike): void {
+  load(ref: ImageAttachmentRefLike, scope?: unknown): void {
+    const resolved = this.scopeOf(scope)
     const id = ref.attachmentId
-    if (this.cache.has(id) || this.inflight.has(id)) return
+    if (resolved.cache.has(id) || resolved.inflight.has(id)) return
     const epoch = this.epochOf(id)
-    // The requesting presentation is captured HERE, synchronously: the read is
-    // deferred, so resolving the subject later could send a child-only
-    // attachment to whichever Session is displayed by then.
-    const context = this.captureContext()
     // `Promise.resolve().then(...)` defers the read call: a SYNCHRONOUS
     // throw from `read` becomes a rejection instead of escaping into a
-    // render() call stack (round-2 finding 1).
-    const pending = Promise.resolve().then(() => this.read(ref, context)).then((stored) => {
+    // render() call stack (round-2 finding 1). The caller's IMMUTABLE scope
+    // travels with the ref, so the deferred read can never be re-routed to
+    // whichever presentation is current by then.
+    const pending = Promise.resolve().then(() => this.read(ref, scope)).then((stored) => {
       // A stale settlement (the attachment was invalidated, or the whole
       // cache cleared) is dropped — it must not repopulate the cache
-      // (round-4 finding 4; per-id generations, review finding 3).
+      // (round-4 finding 4; per-id generations, review finding 3). The bytes are
+      // authorized for THIS scope only, so they land in this scope's cache.
       if (!this.epochCurrent(id, epoch)) return stored
       const data = stored.data
-      this.cache.set(id, {
+      resolved.cache.set(id, {
         state: 'ready',
         bytes: data,
         base64: bytesToBase64(data),
         byteLength: data.byteLength,
       })
-      this.errors.delete(id)
+      resolved.errors.delete(id)
       return stored
     }).catch((error: unknown) => {
       if (!this.epochCurrent(id, epoch)) return { data: new Uint8Array(0) }
-      this.recordError(id, error instanceof Error ? error : new ImageLoadError(String(error)))
+      // The failure belongs to the ASKING scope: a read replaced by a newer
+      // request of the same scope must not publish its failure for it.
+      if (resolved.inflight.get(id) !== pending) return { data: new Uint8Array(0) }
+      this.recordError(resolved, id, error instanceof Error ? error : new ImageLoadError(String(error)))
       return { data: new Uint8Array(0) }
     }).finally(() => {
-      this.inflight.delete(id)
-      // Settle fan-out is per-attachment: only the components watching
-      // THIS id repaint (review finding 8).
-      this.notify(id)
+      // Only the CURRENT entry is cleared (a newer request of the same scope may
+      // already have replaced this read).
+      if (resolved.inflight.get(id) === pending) resolved.inflight.delete(id)
+      // Settle fan-out is per-(scope, attachment): only the components of THIS
+      // presentation watching THIS id repaint (review finding 8).
+      this.notify(resolved, id)
     })
-    this.inflight.set(id, pending)
+    resolved.inflight.set(id, pending)
   }
 
   /** Record one load failure, bounding the error map (round-2 finding 3). */
-  private recordError(id: string, error: Error): void {
-    this.errors.set(id, error)
-    if (this.errors.size > MAX_ERROR_ENTRIES) {
-      const oldest = this.errors.keys().next().value as string | undefined
-      if (oldest !== undefined) this.errors.delete(oldest)
+  private recordError(scope: LoaderScope, id: string, error: Error): void {
+    scope.errors.set(id, error)
+    if (scope.errors.size > MAX_ERROR_ENTRIES) {
+      const oldest = scope.errors.keys().next().value as string | undefined
+      if (oldest !== undefined) scope.errors.delete(oldest)
     }
   }
 
   /**
-   * Subscribe to one attachment's settles; returns the unsubscribe
-   * function. A settle notifies ONLY its attachment's listeners — N
-   * thumbnails loading in parallel never invalidate each other (review
-   * finding 8). `clear()` still broadcasts to every subscriber.
+   * Subscribe to one attachment's settles WITHIN one presentation scope; returns
+   * the unsubscribe function. A settle notifies only its own scope's listeners, so
+   * another Session's settle for the same content id never wakes this
+   * presentation's components. `clear()` broadcasts to every reachable subscriber.
    */
-  subscribe(attachmentId: string, listener: () => void): () => void {
-    let set = this.listeners.get(attachmentId)
+  subscribe(attachmentId: string, listener: () => void, scope?: unknown): () => void {
+    const resolved = this.scopeOf(scope)
+    let set = resolved.listeners.get(attachmentId)
     if (set === undefined) {
       set = new Set()
-      this.listeners.set(attachmentId, set)
+      resolved.listeners.set(attachmentId, set)
     }
     set.add(listener)
     return () => {
-      const owned = this.listeners.get(attachmentId)
+      const owned = resolved.listeners.get(attachmentId)
       if (owned === undefined) return
       owned.delete(listener)
-      if (owned.size === 0) this.listeners.delete(attachmentId)
+      if (owned.size === 0) resolved.listeners.delete(attachmentId)
     }
   }
 
   /** Drop one attachment's cached state (transcript trim). In-flight reads
    * for THIS attachment settle into the void (its per-id generation bumps);
    * unrelated in-flight reads keep their generations and settle normally
-   * (review finding 3). */
+   * (review finding 3). A retired presentation scope is unreachable and
+   * collects with its own state. */
   invalidate(attachmentId: string): void {
     this.perIdEpoch.set(attachmentId, this.epochOf(attachmentId).local + 1)
-    this.cache.delete(attachmentId)
-    this.errors.delete(attachmentId)
+    for (const scope of this.reachableScopes()) {
+      scope.cache.delete(attachmentId)
+      scope.errors.delete(attachmentId)
+    }
   }
 
   /** Drop everything (session switch / dispose): the GLOBAL generation
    * bumps AND the per-id map resets — a pre-clear local invalidation can
    * never mask the global invalidation for a later settle (review
-   * finding), and the map cannot grow unboundedly. Every subscriber hears
-   * the global invalidation and repaints once. */
+   * finding), and the map cannot grow unboundedly. Every reachable
+   * subscriber hears the global invalidation and repaints once. Retired
+   * object scopes are dropped by the renderer building a new presentation,
+   * not enumerated here. */
   clear(): void {
     this.globalEpoch += 1
     this.perIdEpoch.clear()
-    this.cache.clear()
-    this.errors.clear()
+    for (const scope of this.reachableScopes()) {
+      scope.cache.clear()
+      scope.errors.clear()
+    }
     this.notifyAll()
   }
 
-  /** Current cache size (observability/tests). */
-  cacheSize(): number {
-    return this.cache.size()
+  /** Current cache size of one scope (observability/tests). */
+  cacheSize(scope?: unknown): number {
+    return this.scopeOf(scope).cache.size()
   }
 
-  /** Current subscriber count (observability/tests). */
+  /** Current subscriber count across the reachable scopes (observability/tests). */
   listenerCount(): number {
     let total = 0
-    for (const set of this.listeners.values()) total += set.size
+    for (const scope of this.reachableScopes()) {
+      for (const set of scope.listeners.values()) total += set.size
+    }
     return total
   }
 
-  /** Notify the listeners of ONE attachment (settle fan-out). */
-  private notify(attachmentId: string): void {
-    const set = this.listeners.get(attachmentId)
+  /** Notify ONE scope's listeners of one attachment (settle fan-out). */
+  private notify(scope: LoaderScope, attachmentId: string): void {
+    const set = scope.listeners.get(attachmentId)
     if (set === undefined) return
     for (const listener of set) {
       try {
@@ -237,14 +307,16 @@ export class ImageLoader {
     }
   }
 
-  /** Notify every subscriber (global invalidation). */
+  /** Notify every reachable subscriber (global invalidation). */
   private notifyAll(): void {
-    for (const set of this.listeners.values()) {
-      for (const listener of set) {
-        try {
-          listener()
-        } catch {
-          // A throwing subscriber must not break the fan-out.
+    for (const scope of this.reachableScopes()) {
+      for (const set of scope.listeners.values()) {
+        for (const listener of set) {
+          try {
+            listener()
+          } catch {
+            // A throwing subscriber must not break the fan-out.
+          }
         }
       }
     }

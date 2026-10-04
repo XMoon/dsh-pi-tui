@@ -246,13 +246,13 @@ export interface SurfaceMountDeps {
     ref: ImageAttachmentRefLike,
     context?: unknown,
   ) => Promise<{ ref: unknown; data: Uint8Array }>
-  /** The context the image loader captures at ask time: the ACTIVE display
-   *  subject (the viewed child while its viewer is mounted, else the main
-   *  Session). REQUIRED by this mount contract — a mount that cannot answer it
-   *  could silently re-route a deferred child image read to another Session, so
-   *  the Remote read fails closed instead (see the runner's `readImage`); the
-   *  provider may legitimately return `undefined` when no Session is displayed. */
-  readonly activeImageSubject: () => unknown
+  /** The presentation scope the image loader must key reads by. The renderer
+   *  samples it ONCE when it constructs an `ImageThumbnail` (from the presentation
+   *  being built) and the component keeps it immutably; the loader never resolves a
+   *  subject itself. REQUIRED by this mount contract — a mount that cannot answer it
+   *  could send a child ref to the parent Session. It may legitimately return
+   *  `undefined` when no presentation owns the transcript yet. */
+  readonly imageScope: () => unknown
   /** Tool-card presentation bridge (the runner resolves the live tool registry). */
   readonly present: OptionCapability<'present'>
   /** The live session cwd the history search's `current` scope resolves against. */
@@ -1512,11 +1512,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     historySearchSessionId: () => deps.sessionId(),
     // The transcript image surface (plan M8/M9): the durable loader plus the
     // dim fallback coloring.
-    imageLoader: new ImageLoader(
-      (ref, context) => deps.readImage(ref, context),
-      undefined,
-      () => deps.activeImageSubject(),
-    ),
+    imageLoader: new ImageLoader((ref, context) => deps.readImage(ref, context)),
+    imageScope: deps.imageScope,
     imageTheme: { fallbackColor: color.textDim },
     present: deps.present,
     workspaceRoot: deps.workspaceRoot,

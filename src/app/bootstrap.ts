@@ -1782,6 +1782,16 @@ export function applyRunnerWithRuntime(
     let cleanedUp = false
 
     let app: TuiApp
+    /**
+     * The stable display-subject lifetime tokens for image reads (M3-5 PR2): one
+     * slot for the MAIN presentation (keyed by owner generation + session id) and
+     * one for the VIEWED CHILD (keyed by viewer generation + child id). Each slot
+     * returns the SAME object while its lifetime is unchanged, so the loader's
+     * identity-keyed scope survives a child visit and is replaced only when that
+     * exact lifetime ends.
+     */
+    let imageScopeMain: { readonly key: string; readonly sessionId: string } | undefined
+    let imageScopeChild: { readonly key: string; readonly sessionId: string } | undefined
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -2379,24 +2389,52 @@ export function applyRunnerWithRuntime(
       // callback is a late-bound service access (AGENTS.md: never a bare
       // property read of a non-injected service).
       //
-      // M3-5 PR2 Step 9: the ACTIVE DISPLAY SUBJECT is captured when the
-      // component ASKS for bytes (`activeImageSubject`, resolved synchronously by
-      // the image loader) and travels with the ref. On Remote the read then
-      // borrows the exact retained binding of the DISPLAYED Session — the viewed
-      // child while its viewer is mounted, else the main Session. A mount WITHOUT
-      // that capture seam cannot prove which subject asked, so the Remote read
-      // FAILS CLOSED instead of late-selecting whichever subject happens to be
-      // displayed by then (a late resolution could send a child-only attachment
-      // to the parent). Direct keeps its in-process `ctx.attachments.readImage`.
-      activeImageSubject: () => viewer.read()?.id ?? ownership.currentSessionId(),
+      // M3-5 PR2 Step 9: the read AUTHORITY belongs to the attachment ref's OWNING
+      // presentation, not to whichever Session is on screen when the read runs. The
+      // renderer samples this scope ONCE per thumbnail construction, the component
+      // keeps it immutably, and the image loader keys the bytes/in-flight/error
+      // state AND its subscribers by it. On Remote the read then borrows the exact
+      // retained binding of THAT Session. A mount without the seam fails closed
+      // instead of late-selecting a subject. Direct keeps its in-process
+      // `ctx.attachments.readImage`.
+      //
+      // The token is a display-subject LIFETIME, not the bare session id: the
+      // official Client authorizes `session/attachment` per Session and a same-id
+      // binding rollover is a NEW generation, so reusing one session id would let a
+      // child's image ride the parent's authorization or inherit a retired
+      // generation's entry. A plain re-render of the SAME lifetime reuses the same
+      // token object.
+      imageScope: () => {
+        const child = viewer.read()
+        const sessionId = child?.id ?? ownership.currentSessionId()
+        if (sessionId === undefined) return undefined
+        // ONE stable token per LIFETIME slot (main / viewed child). Comparing
+        // against a single "previous" token would RE-MINT the main token after
+        // every child visit (same key, new object), and because the loader keys
+        // object scopes by identity that would silently drop the main
+        // presentation's cached bytes/failures/subscribers on each viewer round
+        // trip. The two slots are naturally bounded — a lifetime is identified by
+        // its owner/viewer generation, and a replaced generation mints a new one.
+        if (child === undefined) {
+          const key = `main:${ownership.generation()}:${sessionId}`
+          if (imageScopeMain !== undefined && imageScopeMain.key === key) return imageScopeMain
+          imageScopeMain = { key, sessionId }
+          return imageScopeMain
+        }
+        const key = `child:${app.getViewerGeneration()}:${sessionId}`
+        if (imageScopeChild !== undefined && imageScopeChild.key === key) return imageScopeChild
+        imageScopeChild = { key, sessionId }
+        return imageScopeChild
+      },
       readImage: (ref, context) => {
         if (remoteSources !== undefined) {
-          if (typeof context !== 'string') {
+          const subject = context as { readonly sessionId?: unknown } | undefined
+          if (subject === undefined || typeof subject !== 'object' || typeof subject.sessionId !== 'string') {
             throw new ImageLoadError(
-              'The image request carries no captured display subject — the Remote image read requires the asking presentation\'s subject.',
+              'The image request carries no presentation scope — the Remote image read requires the owning presentation\'s subject.',
             )
           }
-          return remoteSources.attachments.readDurableImage(context, ref.attachmentId)
+          return remoteSources.attachments.readDurableImage(subject.sessionId, ref.attachmentId)
         }
         const attachments = ctx.get('attachments')
         if (attachments === undefined) {
@@ -2789,14 +2827,16 @@ export function applyRunnerWithRuntime(
       // observable-driven — the official Session list (catalog membership and
       // the per-session running fact) and the official Jobs state (roster
       // changes) feed the EXISTING coalesced refresh gate. No timer, no poll.
+      //
+      // The Jobs half is subscribed EXACTLY ONCE, through the surface's own
+      // `TaskSurfaceJobs.subscribe` (which the runner maps onto the official Jobs
+      // state and which routes a roster/status change to `refreshTasks()` +
+      // `refreshAgents()`). A second direct subscription here would deliver the
+      // SAME change twice: the second entry would mark the in-flight catalog
+      // refresh dirty and force a trailing traversal for one state change.
       const disposeTaskSessions = remoteSources.task.subscribeSessions(() => surface.refreshAgents())
-      const disposeTaskJobs = remoteSources.task.subscribeJobs(() => {
-        surface.refreshTasks()
-        surface.refreshAgents()
-      })
       lifecycleController.signal.addEventListener('abort', () => {
         disposeTaskSessions()
-        disposeTaskJobs()
       }, { once: true })
     }
     surface.refreshPendingInput()
