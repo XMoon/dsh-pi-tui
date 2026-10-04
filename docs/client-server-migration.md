@@ -4598,7 +4598,13 @@ Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
   — it never resolves an ambient subject itself. The scope is a presentation
   LIFETIME token (main owner generation | child viewer generation, carrying the
   Session id), mirroring the official Web client's `WeakMap<SessionBinding, …>`
-  history-image cache. Consequences: a cached main image can never satisfy a child
+  history-image cache. The scope also carries the transport lifetime captured at the
+  same moment (Connection generation + the EXACT `SessionBinding`), and the durable
+  read REQUIRES it: a different or missing binding, or a malformed/missing lifetime,
+  fails closed BEFORE any Session is touched, so a retired presentation can never
+  borrow a successor binding for the same Session id — while a same-binding
+  Connection generation rollover is the official ADOPTION (the retained binding
+  survives), so a live presentation keeps reading across a reconnect. Consequences: a cached main image can never satisfy a child
   component; a same-id binding rollover is a new scope; and a stale component of a
   replaced presentation reads through its OWN (possibly released) binding and fails
   closed instead of asking the parent. A mount that supplies no scope FAILS CLOSED

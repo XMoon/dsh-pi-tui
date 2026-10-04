@@ -71,6 +71,7 @@ import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { MessageId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { RemoteTransportLifetime } from '../src/app/application-runtime.ts'
 import { mountRemotePresentationHost, mountRemoteRunner } from './runner-remote-presentation.test.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -934,7 +935,7 @@ interface ImageScopeToken {
   readonly sessionId: string
   /** The captured transport lifetime (Connection generation + exact binding);
    *  absent only when the Remote facts are not composed. */
-  readonly transportToken?: TransportToken
+  readonly transportToken?: RemoteTransportLifetime
 }
 
 /** The mounted TuiApp's production image loader (the bootstrap-wired one). Every
@@ -1048,16 +1049,12 @@ interface DurableImageFace {
   readDurableImage(
     sessionId: string,
     attachmentId: string,
-    expectedLifetime?: unknown,
+    expectedLifetime: RemoteTransportLifetime,
   ): Promise<{ ref: unknown; data: Uint8Array }>
 }
 
-/** One captured presentation transport token: Connection generation + the EXACT
- *  binding object (`sessionFacts.captureTransportToken`). */
-interface TransportToken {
-  readonly generation: unknown
-  readonly binding: unknown
-}
+/* The captured presentation lifetime is the PRODUCTION type
+ * (`RemoteTransportLifetime`, Connection generation + the EXACT binding). */
 
 /** A retained Client binding face with the official Session attachment read. */
 interface ReadAttachmentFace {
@@ -1260,8 +1257,10 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   // Session for this child-only attachment is refused by the Host, so the pre-fix
   // late resolution would have failed the child image with a wrong-subject error
   // instead of serving it.
+  const parentLifetime = currentImageScope(app).transportToken
+  assert.ok(parentLifetime !== undefined, 'the parent presentation must carry a transport lifetime')
   await assert.rejects(
-    () => presentation.attachments.readDurableImage(PARENT_ID, orphan.attachmentId),
+    () => presentation.attachments.readDurableImage(PARENT_ID, orphan.attachmentId, parentLifetime),
     (error: unknown) => /not referenced by this session/u.test(String(error)),
     'the parent route is refused by the Host — the defect would have surfaced here')
 
@@ -1817,11 +1816,14 @@ test('L6 P1 reincarnation: a read stamped with the OLD child lifetime fails clos
   assert.equal(staleCall.sessionId, CHILD_A_ID, 'the stale read was addressed to the CHILD Session')
   assert.equal(staleCall.expectedLifetime, scope1.transportToken,
     'the stale read carried the captured lifetime 1 transport token')
-  assert.equal((staleCall.expectedLifetime as TransportToken).binding, binding1,
+  assert.equal((staleCall.expectedLifetime as RemoteTransportLifetime).binding, binding1,
     'that token pins the RETIRED binding object')
   assert.equal(staleCall.outcome, 'failed', 'a retired child lifetime must fail closed')
   assert.match(String(staleCall.error), new RegExp(CHILD_A_ID), 'the failure must name the CHILD Session')
-  assert.match(String(staleCall.error), /retired/u, 'the failure is the retired-lifetime refusal')
+  // The fence reaches the missing-binding branch first once Esc has released the
+  // lifetime's binding; it is still a PRE-dispatch refusal (no Session was called).
+  assert.match(String(staleCall.error), /no retained Session binding/u,
+    'the stale ask is refused by the pre-dispatch lifetime fence')
   assert.equal(loader.get(orphan, scope1).state, 'error', 'the OLD scope records its own failure')
   assert.equal(readerSpy.served.has(address), false, 'nothing may be served for the stale ask')
 
@@ -1844,11 +1846,11 @@ test('L6 P1 reincarnation: a read stamped with the OLD child lifetime fails clos
   assert.notEqual(scope2, scope1, 'the reincarnated scope token is a distinct object')
   assert.equal(scope2.sessionId, CHILD_A_ID, 'both lifetimes address the same child Session id')
   assert.notEqual(scope2.transportToken, scope1.transportToken)
-  assert.equal((scope2.transportToken as TransportToken).binding, binding2,
+  assert.equal((scope2.transportToken as RemoteTransportLifetime).binding, binding2,
     'lifetime 2 pins the SUCCESSOR binding object')
 
-  // The successor binding is watched from here on: the stale read must never
-  // reach it, and only the new scope's own ask may.
+  // (c) ARM the successor binding spy BEFORE any further ask: everything the
+  // loader does from here on is observed by THIS spy instance.
   const successorReads: string[] = []
   const originalSuccessor = binding2.session.readAttachment
   binding2.session.readAttachment = async (id: unknown) => {
@@ -1856,26 +1858,49 @@ test('L6 P1 reincarnation: a read stamped with the OLD child lifetime fails clos
     return originalSuccessor.call(binding2.session, id)
   }
   life.defer(() => { binding2.session.readAttachment = originalSuccessor })
-  assert.equal(successorReads.includes(orphan.attachmentId), false,
-    'the stale read must never reach the reopened binding')
 
-  // ── POSITIVE CONTROL: the NEW scope's own ask of the SAME ref is not blocked
-  // by the old scope's failure (this is not "everything fails").
-  loader.load(orphan, scope2)
-  const calls = (): Array<{ expectedLifetime: unknown; outcome?: string; error?: unknown }> =>
+  const calls = (): DurableReadCall[] =>
     readerSpy.routed.filter(call => call.attachmentId === orphan.attachmentId)
-  await waitFor('the new lifetime read settled', () => calls().length === 2, 20_000)
-  const [first, second] = calls()
-  assert.equal(first!.expectedLifetime, scope1.transportToken)
-  assert.equal(second!.expectedLifetime, scope2.transportToken,
+  // Await that call's REAL settle (not merely its presence), so every assertion
+  // below is about an outcome rather than a dispatched count.
+  const settledCall = async (index: number): Promise<DurableReadCall> => {
+    await waitFor(`read #${index + 1} of the ref settled`, () => calls()[index]?.outcome !== undefined, 20_000)
+    return calls()[index]!
+  }
+
+  // (d) The OLD scope legitimately RETRIES after its error (the loader only
+  // blocks on a cached/in-flight entry, never on a recorded failure). The retry
+  // is still stamped with the retired lifetime, so it must be refused by the
+  // binding-identity fence BEFORE any Session call — the successor binding must
+  // never see it.
+  loader.load(orphan, scope1)
+  const retiredRetry = await settledCall(1)
+  assert.equal(retiredRetry.expectedLifetime, scope1.transportToken,
+    'the retry still carries the RETIRED lifetime token')
+  assert.equal(retiredRetry.outcome, 'failed', 'the retired lifetime must keep failing closed')
+  assert.match(String(retiredRetry.error), new RegExp(CHILD_A_ID), 'the refusal names the CHILD Session')
+  assert.match(String(retiredRetry.error), /retired/u, 'the refusal is the retired-binding fence')
+  assert.equal(successorReads.length, 0,
+    'ZERO successor-binding calls for the retired lifetime (the spy is armed and proven below)')
+
+  // (e) The NEW scope's own ask is NOT blocked by the old scope's failure. The
+  // ref is referenced by no Session, so the Host's bounded refusal is the honest
+  // positive control — asserted as an outcome plus loader state, never a faked
+  // served success.
+  loader.load(orphan, scope2)
+  const successorAsk = await settledCall(2)
+  assert.equal(successorAsk.expectedLifetime, scope2.transportToken,
     'the new ask carries the SUCCESSOR lifetime token')
-  assert.notEqual(second!.expectedLifetime, first!.expectedLifetime)
-  assert.equal(second!.outcome, 'failed', 'the ref is not referenced by any Session, so the Host refuses it')
-  assert.doesNotMatch(String(second!.error), /retired/u,
-    'the successor lifetime must NOT be refused by the retirement guard — it reached the Session')
-  assert.equal(successorReads.filter(id => id === orphan.attachmentId).length, 1,
-    'exactly the new scope\'s own ask reached the reopened binding')
+  assert.notEqual(successorAsk.expectedLifetime, retiredRetry.expectedLifetime)
+  assert.equal(successorAsk.outcome, 'failed',
+    'an unreferenced ref is refused by the Host, never served')
+  assert.match(String(successorAsk.error), /not referenced by this session/u,
+    'the successor ask reached the Session and got the Host reference refusal')
+  assert.doesNotMatch(String(successorAsk.error), /retired|no retained Session binding/u,
+    'the successor lifetime must NOT hit the lifetime fence')
   assert.equal(loader.get(orphan, scope2).state, 'error', 'lifetime 2 records its own refusal')
   assert.equal(loader.get(orphan, scope1).state, 'error', 'lifetime 1 keeps its own retired failure')
+  assert.equal(successorReads.filter(id => id === orphan.attachmentId).length, 1,
+    'ARMING PROOF: this very spy observed the new scope\'s call, so the zero-call assertion in (d) is not vacuous')
   assert.equal(readerSpy.served.has(address), false, 'the refused ref is never served in either scope')
 })

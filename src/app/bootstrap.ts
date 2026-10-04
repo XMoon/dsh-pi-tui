@@ -99,6 +99,7 @@ import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '.
 import type {
   ApplicationRuntimeSelection,
   RemoteApplicationOverride,
+  RemoteTransportLifetime,
 } from '../app/application-runtime.ts'
 import { loadRemoteApplicationRuntime } from '../runtime/backend-loader.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
@@ -1790,8 +1791,8 @@ export function applyRunnerWithRuntime(
      * identity-keyed scope survives a child visit and is replaced only when that
      * exact lifetime ends.
      */
-    let imageScopeMain: { readonly key: string; readonly sessionId: string; readonly transportToken: unknown } | undefined
-    let imageScopeChild: { readonly key: string; readonly sessionId: string; readonly transportToken: unknown } | undefined
+    let imageScopeMain: { readonly key: string; readonly sessionId: string; readonly transportToken: RemoteTransportLifetime | undefined } | undefined
+    let imageScopeChild: { readonly key: string; readonly sessionId: string; readonly transportToken: RemoteTransportLifetime | undefined } | undefined
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -2425,7 +2426,8 @@ export function applyRunnerWithRuntime(
           imageScopeMain = {
             key,
             sessionId,
-            transportToken: remoteSources?.sessionFacts.captureTransportToken(sessionId),
+            transportToken: remoteSources?.sessionFacts.captureTransportToken(sessionId) as
+              RemoteTransportLifetime | undefined,
           }
           return imageScopeMain
         }
@@ -2434,22 +2436,31 @@ export function applyRunnerWithRuntime(
         imageScopeChild = {
           key,
           sessionId,
-          transportToken: remoteSources?.sessionFacts.captureTransportToken(sessionId),
+          // The capture is the composition root's structural read of the official
+          // transport identity (Connection generation + exact binding object).
+          transportToken: remoteSources?.sessionFacts.captureTransportToken(sessionId) as
+            RemoteTransportLifetime | undefined,
         }
         return imageScopeChild
       },
       readImage: (ref, context) => {
         if (remoteSources !== undefined) {
-          const subject = context as { readonly sessionId?: unknown; readonly transportToken?: unknown } | undefined
+          const subject = context as
+            { readonly sessionId?: unknown; readonly transportToken?: unknown } | undefined
           if (subject === undefined || typeof subject !== 'object' || typeof subject.sessionId !== 'string') {
             throw new ImageLoadError(
               'The image request carries no presentation scope — the Remote image read requires the owning presentation\'s subject.',
             )
           }
+          if (subject.transportToken === undefined || typeof subject.transportToken !== 'object') {
+            throw new ImageLoadError(
+              'The image request carries no presentation lifetime — the Remote image read requires the exact binding the owning presentation was authorized under.',
+            )
+          }
           return remoteSources.attachments.readDurableImage(
             subject.sessionId,
             ref.attachmentId,
-            subject.transportToken,
+            subject.transportToken as RemoteTransportLifetime,
           )
         }
         const attachments = ctx.get('attachments')
