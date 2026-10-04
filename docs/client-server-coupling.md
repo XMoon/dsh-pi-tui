@@ -274,13 +274,16 @@ narrow injected capability or a semantic port. The Task Center consumes
 `Backend` port and not a second task model. M3-5 PR2 replaced the old
 `TaskSurfaceAgents` group with the SELECTED `TaskSurfaceRead` bundle
 (`currentKey` + `currentSessionId` + the semantic `readTask` + the commit-time
-`activityOf`), renamed the jobs half's `get`/`kill` to OPTIONAL selected-Job
-capabilities (Remote advertises neither until PR3), and made
-`TaskSurfaceSource.sessionId()` the transport-neutral ownership read: the runner
-keeps the `SessionId`/`JobId` casts, the retained-snapshot session fence, the
-`ownership` subject fences, the `SessionRuntime.withWriter` interruption
-admission and the `cleanedUp` latch. On the Remote branch the Task rows/activity
-come exclusively from `RemoteApplicationSources.task`
+`activityOf`); M3-5 PR2 briefly renamed the jobs half's `get`/`kill` to OPTIONAL
+selected-Job capabilities, and M3-5 PR3 removed them entirely: the jobs half is
+now the roster feed ONLY (`list`/`subscribe`), because the selected-Job detail
+and Stop are the ONE semantic `backend.jobObservation` port on BOTH backends.
+M3-5 PR2 also made `TaskSurfaceSource.sessionId()` the transport-neutral
+ownership read. The runner keeps the `SessionId`/`JobId` casts, the
+retained-snapshot session fence, the `ownership` subject fences, the
+`SessionRuntime.withWriter` interruption admission and the `cleanedUp` latch.
+On the Remote branch the Task rows/activity come exclusively from
+`RemoteApplicationSources.task`
 (`readDescendants`/`jobs`/`subscribeJobs`/`subscribeSessions`) and the child
 viewer from `RemoteApplicationSources.childView`; the Host `subagent/start|end`
 and `agent/status` channels are registered on the Direct branch only, so no Host
