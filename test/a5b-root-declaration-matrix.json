@@ -1,6 +1,6 @@
 {
   "generatedFrom": "src/app/bootstrap.ts",
-  "sourceHash": "sha256:da7c036c975cfe1b",
+  "sourceHash": "sha256:bb9960bc66b44c29",
   "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
   "total": 99,
   "rows": [
@@ -149,7 +149,7 @@
         "status",
         "localShell",
         "submission",
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
@@ -174,7 +174,7 @@
         "sessionRuntime",
         "command",
         "submission",
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
@@ -716,7 +716,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "scope-checked projection read for the echo install fence; no Host service lookup.",
       "callers": [
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
@@ -840,7 +840,7 @@
         "root-statement@2027",
         "root-statement@2280",
         "root-statement@2797",
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
@@ -848,7 +848,7 @@
       "kind": "const",
       "mutable": false,
       "lines": "798-798",
-      "refs": 65,
+      "refs": 66,
       "hostDependency": false,
       "head": "const backend = selectedRuntime.backend",
       "tests": [
@@ -1046,7 +1046,7 @@
         "sessionRuntime",
         "root-statement@932",
         "root-statement@1115",
-        "root-statement@2997"
+        "root-statement@2995"
       ]
     },
     {
@@ -1137,7 +1137,7 @@
       "callers": [
         "presentation",
         "root-statement@1115",
-        "root-statement@2974"
+        "root-statement@2972"
       ]
     },
     {
@@ -1160,7 +1160,7 @@
       "callers": [
         "presentation",
         "root-statement@1115",
-        "root-statement@2974"
+        "root-statement@2972"
       ]
     },
     {
@@ -1180,7 +1180,7 @@
       "sweepNote": "deferred startup notice shown once post-mount then cleared; startup prerequisite.",
       "callers": [
         "root-statement@1115",
-        "root-statement@2993"
+        "root-statement@2991"
       ]
     },
     {
@@ -1414,7 +1414,7 @@
       "sweepNote": "Remote cold-hydrate + ingress subscribe connector invoked by the session runtime seam; branch connector.",
       "callers": [
         "sessionRuntime",
-        "root-statement@2954"
+        "root-statement@2952"
       ]
     },
     {
@@ -1598,7 +1598,7 @@
         "root-statement@932",
         "root-statement@2371",
         "root-statement@2534",
-        "root-statement@2872"
+        "root-statement@2870"
       ]
     },
     {
@@ -1884,7 +1884,7 @@
         "prepareRemotePrompt",
         "root-statement@2280",
         "root-statement@2371",
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
@@ -1909,7 +1909,7 @@
         "submission",
         "prepareRemotePrompt",
         "root-statement@2280",
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
@@ -2066,7 +2066,7 @@
         "directPresentationReader",
         "presentation",
         "childView",
-        "root-statement@3106"
+        "root-statement@3104"
       ]
     },
     {
@@ -2153,7 +2153,7 @@
         "root-statement@2280",
         "root-statement@2574",
         "root-statement@2797",
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
@@ -2209,7 +2209,7 @@
       "kind": "const",
       "mutable": false,
       "lines": "2746-2746",
-      "refs": 19,
+      "refs": 17,
       "hostDependency": true,
       "head": "const jobs = remoteSources === undefined ? ctx.get('jobs') : undefined",
       "tests": [
@@ -2320,7 +2320,7 @@
       "name": "prepareRemotePrompt",
       "kind": "const",
       "mutable": false,
-      "lines": "2880-2890",
+      "lines": "2878-2888",
       "refs": 4,
       "hostDependency": false,
       "head": "const prepareRemotePrompt = async (text: string, requestId: string): Promise<unknown> => {",
@@ -2334,14 +2334,14 @@
       "callers": [
         "command",
         "submission",
-        "root-statement@2897"
+        "root-statement@2895"
       ]
     },
     {
       "name": "startupAgent",
       "kind": "const",
       "mutable": false,
-      "lines": "2953-2953",
+      "lines": "2951-2951",
       "refs": 3,
       "hostDependency": false,
       "head": "const startupAgent = agentNow()",
@@ -2353,14 +2353,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "agentNow() snapshot deciding the resume vs deferred startup surface; startup orchestration.",
       "callers": [
-        "root-statement@2954"
+        "root-statement@2952"
       ]
     },
     {
       "name": "currentWorkingFromLog",
       "kind": "const",
       "mutable": false,
-      "lines": "3009-3063",
+      "lines": "3007-3061",
       "refs": 4,
       "hostDependency": false,
       "head": "const currentWorkingFromLog = (): boolean => {",
@@ -2379,7 +2379,7 @@
       "name": "flushTurn",
       "kind": "const",
       "mutable": false,
-      "lines": "3068-3082",
+      "lines": "3066-3080",
       "refs": 3,
       "hostDependency": false,
       "head": "const flushTurn = (): void => {",
@@ -2398,7 +2398,7 @@
       "name": "directAssistantRuntime",
       "kind": "const",
       "mutable": false,
-      "lines": "3105-3105",
+      "lines": "3103-3103",
       "refs": 3,
       "hostDependency": true,
       "head": "const directAssistantRuntime = directRuntime()",
@@ -2412,14 +2412,14 @@
       "sweep": "verified@a5b6",
       "sweepNote": "transitional local for the Direct assistant-stream install; no state.",
       "callers": [
-        "root-statement@3106"
+        "root-statement@3104"
       ]
     },
     {
       "name": "disposeCredentialSubscription",
       "kind": "const",
       "mutable": false,
-      "lines": "3157-3157",
+      "lines": "3155-3155",
       "refs": 2,
       "hostDependency": false,
       "head": "const disposeCredentialSubscription = backend.config.credentials.onChanged(() => surface.routeProviderRefresh())",
@@ -2433,7 +2433,7 @@
       "sweep": "verified@a5b6",
       "sweepNote": "credentials.onChanged subscription handle disposed on abort; Host event wiring (thin delegation).",
       "callers": [
-        "root-statement@3158"
+        "root-statement@3156"
       ]
     }
   ]

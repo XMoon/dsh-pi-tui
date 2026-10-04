@@ -800,14 +800,19 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   assert.ok(view().includes('completed'),
     `the restored parent must show the live-refreshed job status:\n${view()}`)
 
-  // A vanished job must leave the parent usable: the registry lookup throws,
-  // so openJobView opens nothing and reports keep-open.
+  // A row that left the CURRENT Task projection must leave the parent usable:
+  // the selection resolves against the current rows (the Task row identity
+  // authority, not a registry lookup), so a vanished row opens nothing and
+  // reports keep-open.
   jobs.setEntries([])
+  jobs.emit()
+  await settle()
+  await vt.waitForRender()
   input('\r')
   await settle()
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1,
-    'a vanished job must not dismiss the parent browser')
+    'a row that left the current projection must not dismiss the parent browser')
 })
 
 test('the runner-level Job event subscription is exactly-once and disposed with the surface (C1)', async (t) => {
