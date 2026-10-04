@@ -430,7 +430,12 @@ future change must not silently reverse:
   message/tool-result family (contextPressure/contextBreakdown), `todo/write` /
   `session/title` / `goal/change`, the permission knobs and the turn/step
   counters. Enumerating that family set proved fragile, so the primitive is the
-  whole durable event stream (`app/surface/runtime.ts`, the viewer branch). **Extension footer segments do not render while viewing**:
+  whole durable event stream (`app/surface/runtime.ts`, the viewer branch).
+  While a child viewer is mounted, every durable event of the LIVE session also
+  refreshes the status: the extension's v2 live-session snapshot is derived from
+  the same refresh (one that does not re-project the live sections into the
+  child store), so a cheap live event such as `step/end` can no longer leave the
+  published live counters behind the live fold. **Extension footer segments do not render while viewing**:
   viewer mode is host-owned chrome, the extension surface already exposes
   `viewerMode` in its session state, and the first-party builtin's
   turn/step segment would otherwise duplicate the child counters with the
