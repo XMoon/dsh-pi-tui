@@ -239,9 +239,10 @@ export interface SurfaceMountDeps {
   /** Ctrl+R input-history source (the runner owns its filesystem IO). */
   readonly historySearchSource: OptionCapability<'historySearchSource'>
   /** Durable-attachment read for the image loader (the runner owns Host access).
-   *  The requesting presentation's `context` is captured synchronously by the
-   *  loader at ask time, so the deferred read can never be re-routed to another
-   *  Session by a viewer exit/switch in between. */
+   *  The `context` is the OWNING presentation's scope, captured by the renderer
+   *  ONCE when it constructs the thumbnail and kept immutably by that component —
+   *  the loader merely forwards it — so the deferred read can never be re-routed to
+   *  another Session by a viewer exit/switch (or a same-id reopen) in between. */
   readonly readImage: (
     ref: ImageAttachmentRefLike,
     context?: unknown,

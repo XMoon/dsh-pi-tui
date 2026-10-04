@@ -171,14 +171,24 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
     new URL('../src/app/remote/presentation-source.ts', import.meta.url),
     'utf8',
   )
-  assert.ok(presentation.includes('expectedLifetime?: unknown'),
-    'the durable read accepts the owning presentation’s expected lifetime')
+  assert.ok(presentation.includes('expectedLifetime: RemoteTransportLifetime'),
+    'the durable read REQUIRES the owning presentation’s exact lifetime (no ambient fallback)')
+  const portType = readFileSync(
+    new URL('../src/app/application-runtime.ts', import.meta.url),
+    'utf8',
+  )
+  assert.ok(portType.includes('export interface RemoteTransportLifetime'),
+    'the lifetime is a structural type, not an opaque unknown')
+  assert.ok(!/expectedLifetime\?:/u.test(portType),
+    'the lifetime argument must never be optional again — the seam itself expresses the invariant')
+  assert.ok(!presentation.includes('expectedLifetime?'),
+    'the implementation must never accept a missing lifetime')
   assert.ok(presentation.includes("the presentation's Session binding for ${sessionId} is retired"),
     'a retired binding must fail closed BEFORE any Session is touched')
   const applicationRuntime = readFileSync(
     new URL('../src/app/application-runtime.ts', import.meta.url),
     'utf8',
   )
-  assert.ok(applicationRuntime.includes('expectedLifetime?: unknown'),
-    'the port contract carries the expected lifetime')
+  assert.ok(applicationRuntime.includes('expectedLifetime: RemoteTransportLifetime'),
+    'the port contract REQUIRES the expected lifetime')
 })

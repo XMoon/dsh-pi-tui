@@ -121,19 +121,31 @@ export interface RemoteApplicationSources {
 }
 
 /**
+ * The exact display-subject lifetime a durable attachment read is authorized
+ * under: the Connection generation at capture time plus the EXACT SessionBinding
+ * object the owning presentation was created with. A same-binding Connection
+ * generation rollover is the official ADOPTION (the retained binding survives),
+ * while a DIFFERENT binding retires the presentation.
+ */
+export interface RemoteTransportLifetime {
+  readonly generation: unknown
+  readonly binding: unknown
+}
+
+/**
  * The neutral Remote durable-image read face (M3-5 PR2 Step 9): resolve one
  * attachment through the EXACT retained binding the OWNING presentation was
  * authorized under. There is no Host attachment shortcut and no cold retain on
- * this path. `expectedLifetime` is the presentation's captured transport token
- * (Connection generation + exact binding identity): when supplied, the read MUST
- * fail closed BEFORE touching the Session if that lifetime is no longer the live
- * one, so a retired presentation can never borrow a successor binding.
+ * this path. `expectedLifetime` is REQUIRED — the seam itself expresses the
+ * owning-presentation invariant, so there is no "read through whatever binding
+ * the Session has now" path: a missing/malformed lifetime, a different binding,
+ * or a missing binding fails closed BEFORE the Session is touched.
  */
 export interface RemoteAttachmentSource {
   readDurableImage(
     sessionId: string,
     attachmentId: string,
-    expectedLifetime?: unknown,
+    expectedLifetime: RemoteTransportLifetime,
   ): Promise<{ ref: unknown; data: Uint8Array }>
 }
 

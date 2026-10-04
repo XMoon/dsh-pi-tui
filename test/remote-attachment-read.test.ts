@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { RemoteAttachmentSource } from '../src/app/application-runtime.ts'
+import type { RemoteAttachmentSource, RemoteTransportLifetime } from '../src/app/application-runtime.ts'
 import type { RemoteAttachmentReadResult } from '../src/app/remote/child-view.ts'
 import { createRemotePresentationSource } from '../src/app/remote/presentation-source.ts'
 import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from '../src/app/remote/runtime.ts'
@@ -27,6 +27,8 @@ interface AttachmentBinding {
 
 interface AttachmentHarness {
   readonly attachments: RemoteAttachmentSource
+  /** The capture of the CURRENT transport lifetime (generation + exact binding). */
+  lifetime(): RemoteTransportLifetime
   /** The attachment ids the CURRENT binding's `readAttachment` was asked for. */
   readonly reads: string[]
   /** Every `sessions.retain` call; a durable image read must never make one. */
@@ -95,8 +97,10 @@ function attachmentHarness(options: AttachmentHarnessOptions = {}): AttachmentHa
     },
   } as unknown as RemoteBackendRuntime
 
+  const source = createRemotePresentationSource(wire, backendRuntime)
   return {
-    attachments: createRemotePresentationSource(wire, backendRuntime).attachments,
+    attachments: source.attachments,
+    lifetime: () => source.sessionFacts.captureTransportToken('session-1') as RemoteTransportLifetime,
     reads,
     retains,
     setBinding(next) { binding = next },
@@ -107,7 +111,8 @@ function attachmentHarness(options: AttachmentHarnessOptions = {}): AttachmentHa
 
 test('reads through the EXACT retained binding readAttachment with no cold retain', async () => {
   const harness = attachmentHarness()
-  const result = await harness.attachments.readDurableImage('session-1', 'attach-7')
+  const result = await harness.attachments.readDurableImage(
+    'session-1', 'attach-7', harness.lifetime())
 
   assert.deepEqual(harness.reads, ['attach-7'], 'the exact attachment id reaches the retained Session')
   assert.deepEqual(harness.retains, [], 'a durable image read never calls sessions.retain')
@@ -120,7 +125,7 @@ test('an unwrapped RemoteResult failure rejects (a visible load failure, never e
   const harness = attachmentHarness({ readAttachment: async () => ({ ok: false, error: denied }) })
 
   await assert.rejects(
-    harness.attachments.readDurableImage('session-1', 'attach-7'),
+    harness.attachments.readDurableImage('session-1', 'attach-7', harness.lifetime()),
     error => error === denied,
     'the official failure error is surfaced by identity',
   )
@@ -137,7 +142,8 @@ test('a binding replaced while the read is in flight is refused, not committed a
     },
   })
 
-  const pending = harness.attachments.readDurableImage('session-1', 'attach-7')
+  const pending = harness.attachments.readDurableImage(
+    'session-1', 'attach-7', harness.lifetime())
   await Promise.resolve()
   assert.deepEqual(harness.reads, ['attach-7'], 'the read is in flight against the original binding')
   harness.setBinding(harness.newBinding())
@@ -152,7 +158,8 @@ test('a Connection generation replacement while the read is in flight is refused
   const gate = new Promise<void>(resolve => { releaseRead = resolve })
   const harness = attachmentHarness({ readAttachment: async () => { await gate; return { ok: true, value: { attachment: {}, data: new Uint8Array([1]) } } } })
 
-  const pending = harness.attachments.readDurableImage('session-1', 'attach-7')
+  const pending = harness.attachments.readDurableImage(
+    'session-1', 'attach-7', harness.lifetime())
   await Promise.resolve()
   harness.setGeneration({ id: 'generation-2' })
   releaseRead()
@@ -165,7 +172,7 @@ test('an unretained session rejects and never cold-retains one', async () => {
   harness.setBinding(undefined)
 
   await assert.rejects(
-    harness.attachments.readDurableImage('session-1', 'attach-7'),
+    harness.attachments.readDurableImage('session-1', 'attach-7', harness.lifetime()),
     /no retained Session binding for session-1/,
   )
   assert.deepEqual(harness.reads, [], 'no binding means no read at all')
@@ -177,9 +184,51 @@ test('a missing Connection generation rejects as a not-ready transport, not an e
   harness.setGeneration(undefined)
 
   await assert.rejects(
-    harness.attachments.readDurableImage('session-1', 'attach-7'),
+    harness.attachments.readDurableImage('session-1', 'attach-7', harness.lifetime()),
     /the Remote connection is not ready to read an attachment of session-1/,
   )
   assert.deepEqual(harness.reads, [], 'a disconnected transport reads nothing')
   assert.deepEqual(harness.retains, [], 'and cold-retains nothing')
+})
+
+test('R7-1: a same-binding Connection generation rollover is ADOPTED (a fresh read still succeeds)', async () => {
+  // The official RemoteLiveIngress guarantees that a Connection generation
+  // rollover does NOT retire the handle: the retained binding is unchanged and the
+  // handle adopts the new generation. A presentation captured before the reconnect
+  // must therefore still be able to read its images.
+  const harness = attachmentHarness()
+  const lifetime = harness.lifetime()
+  harness.setGeneration({ id: 'generation-2' })
+
+  const result = await harness.attachments.readDurableImage('session-1', 'attach-7', lifetime)
+
+  assert.deepEqual(harness.reads, ['attach-7'], 'the adopted generation still reads through the same binding')
+  assert.deepEqual(result.data, new Uint8Array([8]), 'the bytes come back through the adopted binding')
+})
+
+test('a DIFFERENT binding retires the captured lifetime and is refused before any Session call', async () => {
+  const harness = attachmentHarness()
+  const lifetime = harness.lifetime()
+  // The presentation's binding is gone (viewer exit / same-id reopen): the
+  // successor binding must never be borrowed for it.
+  harness.setBinding(harness.newBinding())
+
+  await assert.rejects(
+    harness.attachments.readDurableImage('session-1', 'attach-7', lifetime),
+    /the presentation's Session binding for session-1 is retired/,
+  )
+  assert.deepEqual(harness.reads, [], 'a retired presentation never touches the successor binding')
+  assert.deepEqual(harness.retains, [], 'and never cold-retains one')
+})
+
+test('a missing or malformed lifetime is refused before any Session call', async () => {
+  const harness = attachmentHarness()
+  for (const malformed of [undefined, {}]) {
+    await assert.rejects(
+      harness.attachments.readDurableImage('session-1', 'attach-7', malformed as never),
+      /is retired|carries no presentation lifetime/,
+      'a read with no usable owning-presentation lifetime must fail closed',
+    )
+  }
+  assert.deepEqual(harness.reads, [], 'no malformed lifetime ever reaches the Session face')
 })

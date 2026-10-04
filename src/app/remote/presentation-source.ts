@@ -40,7 +40,9 @@ import { createRemoteLiveIngress, type RemoteLiveIngress } from './live-ingress.
 import { createRemoteChildViewSource } from './child-view.ts'
 import { createRemoteCommandSource, type RemoteCommandSource } from './command-source.ts'
 import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from './runtime.ts'
-import type { RemoteApplicationSources } from '../application-runtime.ts'
+import type { RemoteApplicationSources,
+  RemoteTransportLifetime,
+} from '../application-runtime.ts'
 import type { SessionPresentationEvent } from '../surface/session-presentation.ts'
 
 /**
@@ -181,7 +183,7 @@ export function createRemotePresentationSource(
         return binding.session.projections.faceOf('sessionStats').getSnapshot()
       },
       isTransportTokenCurrent(sessionId: string, token: unknown): boolean {
-        const captured = token as { generation?: unknown; binding?: unknown } | undefined
+        const captured = token as RemoteTransportLifetime | undefined
         if (captured === undefined || typeof captured !== 'object') return false
         if (!Object.is(captured.generation, generation.getSnapshot())) return false
         return sessions.binding(sessionId as never) === captured.binding
@@ -224,36 +226,34 @@ export function createRemotePresentationSource(
       asEvent: event => event as unknown as SessionPresentationEvent,
     }),
     // M3-5 PR2 Step 9: the durable image read of the OWNING presentation's
-    // retained Session. When the caller supplies the presentation's captured
-    // lifetime token (Connection generation + exact binding identity), that token
-    // is re-checked BEFORE the Session is touched: a retired presentation must fail
-    // closed rather than borrow a successor binding for the same Session id. The
-    // exact binding is then borrowed, the Connection generation + binding identity
-    // are captured, and BOTH are re-checked before the bytes are committed. No cold
-    // retain, no Host attachment access.
+    // retained Session. `expectedLifetime` is REQUIRED and carries the EXACT binding
+    // the presentation was created with. The PRE-dispatch fence compares the BINDING
+    // IDENTITY only: a same-binding Connection generation rollover is the official
+    // ADOPTION (the retained binding survives a rollover — see `RemoteLiveIngress`),
+    // while a DIFFERENT binding, a MISSING binding or a malformed/missing lifetime
+    // retires the presentation and fails closed BEFORE any Session is touched. The
+    // read's own Connection generation + binding identity are then re-checked before
+    // the bytes are committed, so bytes obtained across a rollover are still dropped.
+    // No cold retain, no Host attachment access.
     attachments: {
       async readDurableImage(
         sessionId: string,
         attachmentId: string,
-        expectedLifetime?: unknown,
+        expectedLifetime: RemoteTransportLifetime,
       ): Promise<{ ref: unknown; data: Uint8Array }> {
         const capturedGeneration = generation.getSnapshot()
         if (capturedGeneration === undefined) {
           throw new Error(`the Remote connection is not ready to read an attachment of ${sessionId}`)
         }
-        const expected = expectedLifetime as { generation?: unknown; binding?: unknown } | undefined
-        if (expected !== undefined) {
-          if (!Object.is(expected.generation, capturedGeneration)) {
-            throw new Error(`the presentation's Connection generation for ${sessionId} is retired`)
-          }
-          const live = sessions.binding(sessionId as never)
-          if (live !== expected.binding) {
-            throw new Error(`the presentation's Session binding for ${sessionId} is retired`)
-          }
+        if (expectedLifetime === undefined || typeof expectedLifetime !== 'object') {
+          throw new Error(`the attachment read of ${sessionId} carries no presentation lifetime`)
         }
         const binding = sessions.binding(sessionId as never)
         if (binding === undefined) {
           throw new Error(`no retained Session binding for ${sessionId}`)
+        }
+        if (binding !== expectedLifetime.binding) {
+          throw new Error(`the presentation's Session binding for ${sessionId} is retired`)
         }
         const result = await binding.session.readAttachment(attachmentId as never)
         if (!Object.is(capturedGeneration, generation.getSnapshot())
