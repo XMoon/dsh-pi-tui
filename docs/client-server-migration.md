@@ -29,7 +29,7 @@ M3-4 PR5 DONE/MERGED (final main-application closure MERGED as PR #211 into `nex
 M3-4 DONE          (PR1–PR5 landed and PR5 merged; the main TUI application + command runtime run on the experimental Remote backend — see the M3-4 status section)
 M3-5 PR1 DONE      (child display-subject status foundation: Direct SessionStatus is Session-subject-neutral, ONE shared `SessionStatus(sessionId)` read, the viewed child's Session-owned facts (model/preset/permission/context/usage/todos/cwd/title/goal) come from its own projection, the released extension v2 live-session snapshot preserved with the additive `session.displaySubject`, atomic main↔child↔child transitions — see the M3-5 PR1 status section. Remote child SessionStatus authority is qualified; the Remote Task/child surface stays PR2)
 M3-5 PR4 DONE      (Remote Plugin Manager closure: lifecycle/qualification over an ALREADY backend-neutral surface — one invalidation hint on `PluginManagerPort`, Direct/Remote mappings, demand-aware controller rereads, latest-started read currentness, dispose hardening, real Remote `/plugins` + Settings dual-entry L6, external-change and reconnect invalidation L6 — see the M3-5 PR4 section)
-M3-5 PR2 LANDED    (Remote Task Center + real child viewer: the Task read contract is the full descendant tree + root job roster on both backends, `TaskBrowserRuntime` consumes the SELECTED semantic Task read, Remote invalidation is observable-driven, the Remote Job rows expose no detail/Stop yet (PR3), `tuiChildView` owns one child SessionReference per viewer acquired from the exact SubagentAddress, the ONE viewer hydrates through the shared PresentationReader + RemoteLiveIngress, PageUp targets the active display subject, the child steer subject is transport-neutral, and durable images read through the active retained Session — see the M3-5 PR2 section. **PR open; mark DONE only after merge**)
+M3-5 PR2 LANDED    (Remote Task Center + real child viewer: the Task read contract is the full descendant tree + root job roster on both backends, `TaskBrowserRuntime` consumes the SELECTED semantic Task read, Remote invalidation is observable-driven, the Remote Job rows expose no detail/Stop yet (PR3), `tuiChildView` owns one child SessionReference per viewer acquired from the exact SubagentAddress, the ONE viewer hydrates through the shared PresentationReader + RemoteLiveIngress, PageUp targets the active display subject, the child steer subject is transport-neutral, and durable images read through the owning presentation's exact scoped retained Session — see the M3-5 PR2 section. **PR open; mark DONE only after merge**)
 M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR4 merged, PR2 implementation landed and PR open, PR3/PR5/PR6 remain — see the migration stage pointer)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -4479,12 +4479,17 @@ Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
   `ready` baseline, a `session/projections-unavailable` projection failure (Direct's
   `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE`) and any foreign wire failure —
   degrades to a branch-scoped `corrupt`/`unavailable` diagnostic whose siblings stay
-  visible; only a genuine CALLER cancellation propagates. The CURRENT Host
-  `listDescendants()` re-throws the `SubagentError` and aborts the whole traversal,
-  but that propagation is a Host-implementation/contract tension, not the shared
-  semantic: the released Client/Web catalog contract keeps an unreadable/absent
-  child catalog expandable and retryable and only treats `ready + empty` as a known
-  leaf. **Carrier/provenance limitation (explicitly user-visible, not
+  visible; only a genuine CALLER cancellation propagates. This is the plan OWNER's
+  chosen product contract for the Remote surface, NOT a claim of implementation
+  parity with anything upstream, and the tension is recorded on BOTH sides: the
+  current Host `listDescendants()` re-throws the `SubagentError`
+  (`SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE`) and aborts the whole traversal, while
+  the Web mapper keeps `state: 'ready'` but falls back to
+  `entries = (values.subagentCatalog ?? [])`, so on this ready/key-absent shape it
+  renders a KNOWN LEAF (`isKnownLeaf` = `ready && entries.length === 0`) instead of an
+  expandable/retryable branch — the expandable/retryable rule holds only for the
+  error/loading shapes. No complete Web or Host behaviour parity is claimed.
+  **Carrier/provenance limitation (explicitly user-visible, not
   `NO_USER_VISIBLE_CHANGE`):** the rc.2 Client collapses the Host `null` (missing
   Session) and a non-null baseline that omits `subagentCatalog` into the SAME
   `ready` + key-absent state, so **exact failure-scope parity is not representable**
@@ -4689,8 +4694,9 @@ Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
   catalog snapshot; `test/task-browser-runtime.test.ts`), `ready`-without-catalog
   and the bounded official projection retry (`test/remote-task-read.test.ts`),
   the official `openState: 'error'` child open (`test/remote-child-view.test.ts`),
-  and the ask-time display-subject capture for image reads
-  (`test/image-loader.test.ts`).
+  and the construction-time immutable presentation scope for image reads, keyed
+  together with the exact binding lifetime (`test/image-loader.test.ts` +
+  `test/runner-remote-task-center.test.ts`).
 
 **Released-wire taxonomy limit (recorded, not papered over).** The official
 `session.projections` Host handler collapses a corrupt / source-conflicting

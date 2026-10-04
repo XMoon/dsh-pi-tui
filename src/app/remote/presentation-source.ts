@@ -223,15 +223,33 @@ export function createRemotePresentationSource(
       },
       asEvent: event => event as unknown as SessionPresentationEvent,
     }),
-    // M3-5 PR2 Step 9: the durable image read of the ACTIVE retained Session —
-    // borrow the exact binding, capture the Connection generation + binding
-    // identity, read through that Session, then re-check BOTH before the bytes
-    // are committed. No cold retain, no Host attachment access.
+    // M3-5 PR2 Step 9: the durable image read of the OWNING presentation's
+    // retained Session. When the caller supplies the presentation's captured
+    // lifetime token (Connection generation + exact binding identity), that token
+    // is re-checked BEFORE the Session is touched: a retired presentation must fail
+    // closed rather than borrow a successor binding for the same Session id. The
+    // exact binding is then borrowed, the Connection generation + binding identity
+    // are captured, and BOTH are re-checked before the bytes are committed. No cold
+    // retain, no Host attachment access.
     attachments: {
-      async readDurableImage(sessionId: string, attachmentId: string): Promise<{ ref: unknown; data: Uint8Array }> {
+      async readDurableImage(
+        sessionId: string,
+        attachmentId: string,
+        expectedLifetime?: unknown,
+      ): Promise<{ ref: unknown; data: Uint8Array }> {
         const capturedGeneration = generation.getSnapshot()
         if (capturedGeneration === undefined) {
           throw new Error(`the Remote connection is not ready to read an attachment of ${sessionId}`)
+        }
+        const expected = expectedLifetime as { generation?: unknown; binding?: unknown } | undefined
+        if (expected !== undefined) {
+          if (!Object.is(expected.generation, capturedGeneration)) {
+            throw new Error(`the presentation's Connection generation for ${sessionId} is retired`)
+          }
+          const live = sessions.binding(sessionId as never)
+          if (live !== expected.binding) {
+            throw new Error(`the presentation's Session binding for ${sessionId} is retired`)
+          }
         }
         const binding = sessions.binding(sessionId as never)
         if (binding === undefined) {

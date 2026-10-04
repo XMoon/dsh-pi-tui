@@ -334,9 +334,12 @@ future change must not silently reverse:
   `subagent/unauthorized`, `subagent/delivery-unavailable`,
   `gateway/cancelled`, …).
 - **Child queue occurrence access is separately fenced.** Reader and queue
-  mutation calls may use only the exact live Agent mounted by the current
-  interactive direct-child continuable viewer, with the pinned direct parent
-  and registry identity still matching. This queue-only resolver never grants
+  mutation calls may use only the SEMANTIC writer subject of the child mounted
+  by the current interactive continuable viewer — the backend-neutral authority
+  the writes are addressed to, never a merely name-matched identity. Backend
+  mapping: Direct supplies the exact live Agent (with the pinned direct parent
+  and registry identity still matching); Remote supplies the writer subject of
+  the exact retained child Session. This queue-only resolver never grants
   ordinary child prompt authority; non-empty prompts remain parent-authorized
   through `SubagentPort`. The current TUI viewer exposes the child queue rows
   and Ctrl+S steer-all subset; selectable edit/remove controls remain a later
@@ -447,11 +450,15 @@ future change must not silently reverse:
 The `/tasks` browser (and the ↓ empty-editor trigger, and the footer badge)
 read the DURABLE descendant catalog, not the live-child list:
 
-- **The lineage source is `subagents.listDescendants`**, never a
-  re-implemented traversal over session headers, and never `listChildren`
-  for the browser (the badge may scope to running descendants of the same
-  listing). `parentId` + `depth` ride every row from the catalog facts —
-  never guessed from labels or order.
+- **The semantic lineage source is the DURABLE descendant catalog** — one root
+  Session plus its complete descendant tree in the official stable pre-order —
+  never a re-implemented traversal over session headers. `parentId` + `depth`
+  ride every row from the catalog facts, never guessed from labels or order.
+  Backend mapping (M3-5 PR2): Direct composes the official
+  `subagents.listDescendants`; Remote walks the recursive official
+  `subagentCatalog` projection (the released Client carrier cannot expose
+  `listDescendants`). Both feed the SAME semantic Task contract — a row's shape
+  must not encode which backend produced it.
 - **Subagent rows keep the DSH stable pre-order VERBATIM.** Activity never
   re-sorts a row above its parent (a running grandchild stays under its
   inactive parent). The "first running subagent" rule is a CURSOR policy
@@ -459,29 +466,32 @@ read the DURABLE descendant catalog, not the live-child list:
 - **A finished one-shot child stays reachable.** `inactive` is never an
   outcome; Enter opens its persisted transcript read-only. No activity
   filter exists in `buildTaskRows`.
-- **Runtime activity is projected, never read from the catalog.**
-  `listDescendants().activity` is live-STORE presence, not driver
-  activity: an idle continuable child stays live in the session store and
-  would otherwise read as `running` forever. Every child row's
-  `running` / `inactive` is re-projected from the Agent registry
-  (`ctx.agents.get(id)?.status === 'running'`) AT COMMIT TIME by the
-  `TaskBrowserRuntime` coordinator (`projectSubagentActivity`), so a slow
-  catalog response can never overwrite a newer runtime state. The
-  coordinator splits CATALOG refreshes (subagent lifecycle events, the
-  subagent tool call, jobs changes — the only paths that re-list) from
-  RUNTIME-only refreshes (`agent/status` — the cached catalog is reused,
-  membership/tree/mode never move). The runner's `agent/status` handler
-  is membership-gated: only flips of children in the cached catalog
-  refresh the surface, so the MAIN agent's own per-turn flips never
-  repaint. A session switch closes the open browser, clears the badge
+- **Runtime activity is a commit-time RUNTIME fact, never read from the
+  catalog.** A catalog's own activity field is live-STORE presence, not driver
+  activity: an idle continuable child stays live in the session store and would
+  otherwise read as `running` forever. Every child row's `running` / `inactive`
+  is therefore taken AT COMMIT TIME by the `TaskBrowserRuntime` coordinator
+  (`projectSubagentActivity`) from the backend's live-run authority, so a slow
+  catalog response can never overwrite a newer runtime state. Backend mapping:
+  Direct reads the Agent registry (`ctx.agents.get(id)?.status === 'running'`);
+  Remote reads the official Session-list `running` bit. The coordinator splits
+  CATALOG refreshes (the only paths that re-list) from RUNTIME-only refreshes
+  (the cached catalog is reused; membership/tree/mode never move). Backend
+  mapping of the triggers: Direct takes subagent lifecycle + `agent/status`
+  events and is membership-gated (only flips of children in the cached catalog
+  refresh the surface, so the MAIN agent's own per-turn flips never repaint);
+  Remote subscribes the official Session list and the Jobs state through the
+  surface owner. A session switch closes the open browser, clears the badge
   SYNCHRONOUSLY and drops the cached catalog — the old session's running
   badge never hangs on the footer until the new session's first listing
   lands (the fence key = session generation + id; a failed listing never
   leaves a stale badge).
 - **Catalog invalidation is coalesced by the SURFACE owner, never the
-  coordinator.** Every production trigger (the mount seed, `subagent/start`
-  / `subagent/end`, the subagent tool-call fallback, Job membership events,
-  opening the browser, the Full Task Center `R`) funnels through one
+  coordinator.** Every production trigger (the mount seed, the backend's
+  lifecycle/membership invalidations — Direct's `subagent/start` /
+  `subagent/end` and the subagent tool-call fallback, Remote's official Session
+  list and Jobs state — Job membership events, opening the browser, the Full
+  Task Center `R`) funnels through one
   surface-owned single-flight gate: at most ONE `refreshCatalog()` traversal
   is in flight per session generation, an invalidation arriving mid-flight
   only marks the gate `dirty`, and the traversal's settle starts at most ONE

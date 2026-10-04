@@ -281,9 +281,9 @@ export class RemoteTaskReader implements TaskReader {
       if (visited.has(entry.id)) continue
       visited.add(entry.id)
       // The child's OWN catalog settles `hasChildren` and drives recursion. Its
-      // failure stops only this branch for the foreign-failure shapes; a
-      // SubagentError-class failure (see the catch below) aborts the traversal,
-      // exactly like upstream `listDescendants`.
+      // failure stops ONLY this branch and becomes a diagnostic (see the catch
+      // below): the branch-isolation policy is the owner-ruled Remote contract, and
+      // only a real caller cancellation propagates.
       let children: readonly RemoteSubagentCatalogEntry[] | undefined
       try {
         children = await this.readCatalog(entry.id, capturedGeneration, epoch, signal)
@@ -296,21 +296,26 @@ export class RemoteTaskReader implements TaskReader {
         // child's catalog cannot be read" — the missing-Session `ready` baseline
         // (see `readCatalog`), a `session/projections-unavailable` projection
         // failure, and any foreign wire failure — degrades to a branch-scoped
-        // diagnostic whose siblings stay visible. The released Client/Web catalog
-        // contract keeps an unreadable/absent child catalog EXPANDABLE and
-        // retryable and only treats `ready + empty` as a known leaf, so the TUI
-        // follows the branch-isolation product semantic instead of reproducing the
-        // current Host `listDescendants()` propagation of
-        // `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` (a whole-traversal abort) —
-        // that rethrow is a Host-implementation/contract tension, not the shared
-        // semantic. Caller cancellation is the ONE exception (handled above).
+        // diagnostic whose siblings stay visible. This is the OWNER-CHOSEN product
+        // contract for the Remote surface (one unreadable child catalog must not
+        // erase the whole descendant tree); it is NOT a claim of behaviour parity
+        // with the current upstream implementation, and the tension is recorded on
+        // BOTH sides: the current Host `listDescendants()` re-throws
+        // `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` (a whole-traversal abort), while
+        // the Web mapper keeps `ready` but falls back to
+        // `entries = (values.subagentCatalog ?? [])` and therefore renders the
+        // ready/key-absent shape as a KNOWN LEAF (`isKnownLeaf` = `ready &&
+        // entries.length === 0`). Only the error/loading shapes are expandable and
+        // retryable there. Caller cancellation is the ONE exception (handled above).
         //
         // CARRIER LIMIT (recorded, not papered over): the rc.2 Client collapses the
         // Host `null` (missing Session) and a non-null baseline that omits
         // `subagentCatalog` into the SAME `ready + key absent` state, so exact
         // failure-scope parity with the Host rethrow is NOT representable, and its
         // provenance MUST NOT be inferred from Session-list membership, catalog
-        // presence, messages, logs or any other authority. Corrupt /
+        // presence, messages, logs or any other authority. This failure SCOPE is
+        // user-visible: on the Direct special case the whole Task read fails, while
+        // the Remote surface degrades one branch and keeps its siblings. Corrupt /
         // source-conflicting SessionQuery failures likewise collapse to
         // `gateway/internal`, so `corrupt` is never inferred from shape: the
         // representable answer is `unavailable`.

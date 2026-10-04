@@ -88,6 +88,14 @@ export class ImageLoader {
   private readonly valueScopes = new Map<unknown, LoaderScope>()
   private readonly defaultScope: LoaderScope
   /**
+   * Weakly-held registry of every live scope, so the GLOBAL operations
+   * (`clear`, `invalidate`, `listenerCount`) reach the ACTIVE presentation scopes
+   * too — the per-object map cannot be enumerated, and enumerating it with strong
+   * references would keep every retired presentation (and its bytes) alive. Dead
+   * references are compacted away on each sweep.
+   */
+  private readonly liveScopes: WeakRef<LoaderScope>[] = []
+  /**
    * Invalidation generations (review finding 3): `invalidate(id)` bumps
    * ONLY that attachment's local generation, so a settle of an unrelated
    * in-flight read is never discarded. `clear()` bumps the GLOBAL
@@ -106,7 +114,28 @@ export class ImageLoader {
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.read = read
-    this.defaultScope = emptyScope(cache)
+    this.defaultScope = this.registerScope(emptyScope(cache))
+  }
+
+  /** Track one scope for the global operations without owning it. */
+  private registerScope(scope: LoaderScope): LoaderScope {
+    this.liveScopes.push(new WeakRef(scope))
+    return scope
+  }
+
+  /** Every scope that is still alive, compacting dead registry entries. */
+  private liveScopesNow(): LoaderScope[] {
+    const live: LoaderScope[] = []
+    let write = 0
+    for (const reference of this.liveScopes) {
+      const scope = reference.deref()
+      if (scope === undefined) continue
+      live.push(scope)
+      this.liveScopes[write] = reference
+      write += 1
+    }
+    this.liveScopes.length = write
+    return live
   }
 
   /** Resolve (or create) the read-state scope of one caller-supplied identity. */
@@ -115,22 +144,17 @@ export class ImageLoader {
     if (typeof scope === 'object' && scope !== null) {
       let resolved = this.objectScopes.get(scope)
       if (resolved === undefined) {
-        resolved = emptyScope()
+        resolved = this.registerScope(emptyScope())
         this.objectScopes.set(scope, resolved)
       }
       return resolved
     }
     let resolved = this.valueScopes.get(scope)
     if (resolved === undefined) {
-      resolved = emptyScope()
+      resolved = this.registerScope(emptyScope())
       this.valueScopes.set(scope, resolved)
     }
     return resolved
-  }
-
-  /** The scopes a global operation (clear/invalidate) can reach synchronously. */
-  private reachableScopes(): LoaderScope[] {
-    return [this.defaultScope, ...this.valueScopes.values()]
   }
 
   /** The epoch one read must match at settle time (a binary snapshot). */
@@ -257,7 +281,7 @@ export class ImageLoader {
    * collects with its own state. */
   invalidate(attachmentId: string): void {
     this.perIdEpoch.set(attachmentId, this.epochOf(attachmentId).local + 1)
-    for (const scope of this.reachableScopes()) {
+    for (const scope of this.liveScopesNow()) {
       scope.cache.delete(attachmentId)
       scope.errors.delete(attachmentId)
     }
@@ -273,7 +297,7 @@ export class ImageLoader {
   clear(): void {
     this.globalEpoch += 1
     this.perIdEpoch.clear()
-    for (const scope of this.reachableScopes()) {
+    for (const scope of this.liveScopesNow()) {
       scope.cache.clear()
       scope.errors.clear()
     }
@@ -285,10 +309,11 @@ export class ImageLoader {
     return this.scopeOf(scope).cache.size()
   }
 
-  /** Current subscriber count across the reachable scopes (observability/tests). */
+  /** Current subscriber count across every LIVE scope, including the active
+   *  presentation scopes (observability/tests). */
   listenerCount(): number {
     let total = 0
-    for (const scope of this.reachableScopes()) {
+    for (const scope of this.liveScopesNow()) {
       for (const set of scope.listeners.values()) total += set.size
     }
     return total
@@ -309,7 +334,7 @@ export class ImageLoader {
 
   /** Notify every reachable subscriber (global invalidation). */
   private notifyAll(): void {
-    for (const scope of this.reachableScopes()) {
+    for (const scope of this.liveScopesNow()) {
       for (const set of scope.listeners.values()) {
         for (const listener of set) {
           try {

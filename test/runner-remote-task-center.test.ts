@@ -932,6 +932,9 @@ interface RetainFace {
 interface ImageScopeToken {
   readonly key: string
   readonly sessionId: string
+  /** The captured transport lifetime (Connection generation + exact binding);
+   *  absent only when the Remote facts are not composed. */
+  readonly transportToken?: TransportToken
 }
 
 /** The mounted TuiApp's production image loader (the bootstrap-wired one). Every
@@ -963,9 +966,23 @@ function currentImageScope(app: MountedApp): ImageScopeToken {
   return candidate as ImageScopeToken
 }
 
+/** One durable-image read attempt, resolved once it settles. */
+interface DurableReadCall {
+  readonly sessionId: string
+  readonly attachmentId: string
+  readonly expectedLifetime: unknown
+  outcome?: 'ok' | 'failed'
+  error?: unknown
+}
+
 interface DurableReadSpy {
-  /** Every read in call order: which Session address was asked for which ref. */
-  readonly routed: Array<{ readonly sessionId: string; readonly attachmentId: string }>
+  /** Every read in call order: the Session address, the ref, the captured
+   *  presentation lifetime the caller supplied (undefined for an unscoped ask),
+   *  and that read's own outcome once it settles. */
+  readonly routed: DurableReadCall[]
+  /** The `(sessionId, attachmentId)` addresses in call order, optionally filtered
+   *  to one ref; the lifetime is asserted separately where it matters. */
+  addresses(attachmentId?: string): Array<{ readonly sessionId: string; readonly attachmentId: string }>
   /** The bytes served per `sessionId\u0000attachmentId` address. */
   readonly served: Map<string, Uint8Array>
   /** Each ADDRESS's settle outcome, keyed `sessionId\u0000attachmentId`
@@ -988,32 +1005,58 @@ interface DurableReadSpy {
 function spyDurableImageReads(fixture: { readonly aggregate: { readonly presentation: unknown } }): DurableReadSpy {
   const source = (fixture.aggregate.presentation as { attachments: DurableImageFace }).attachments
   const original = source.readDurableImage
-  const routed: Array<{ sessionId: string; attachmentId: string }> = []
+  const routed: DurableReadCall[] = []
   const served = new Map<string, Uint8Array>()
   const settled = new Map<string, { sessionId: string; outcome: 'ok' | 'failed'; error?: unknown }>()
   const settledByAttachment = new Map<string, { sessionId: string; outcome: 'ok' | 'failed'; error?: unknown }>()
-  source.readDurableImage = async (sessionId, attachmentId) => {
-    routed.push({ sessionId, attachmentId })
+  source.readDurableImage = async (sessionId, attachmentId, expectedLifetime) => {
+    // The new lifetime argument MUST be forwarded: dropping it would let a stale
+    // presentation borrow a successor binding for the same Session id.
+    const call: DurableReadCall = { sessionId, attachmentId, expectedLifetime }
+    routed.push(call)
     try {
-      const result = await original(sessionId, attachmentId)
+      const result = await original(sessionId, attachmentId, expectedLifetime)
       served.set(`${sessionId}\u0000${attachmentId}`, result.data)
+      call.outcome = 'ok'
       const record = { sessionId, outcome: 'ok' as const }
       settled.set(`${sessionId}\u0000${attachmentId}`, record)
       settledByAttachment.set(attachmentId, record)
       return result
     } catch (error: unknown) {
+      call.outcome = 'failed'
+      call.error = error
       const record = { sessionId, outcome: 'failed' as const, error }
       settled.set(`${sessionId}\u0000${attachmentId}`, record)
       settledByAttachment.set(attachmentId, record)
       throw error
     }
   }
-  return { routed, served, settled, settledByAttachment, restore: () => { source.readDurableImage = original } }
+  return {
+    routed,
+    served,
+    settled,
+    settledByAttachment,
+    addresses: (attachmentId?: string) => routed
+      .filter(entry => attachmentId === undefined || entry.attachmentId === attachmentId)
+      .map(entry => ({ sessionId: entry.sessionId, attachmentId: entry.attachmentId })),
+    restore: () => { source.readDurableImage = original },
+  }
 }
 
 /** The Remote durable-image source the mounted surface's loader reads through. */
 interface DurableImageFace {
-  readDurableImage(sessionId: string, attachmentId: string): Promise<{ ref: unknown; data: Uint8Array }>
+  readDurableImage(
+    sessionId: string,
+    attachmentId: string,
+    expectedLifetime?: unknown,
+  ): Promise<{ ref: unknown; data: Uint8Array }>
+}
+
+/** One captured presentation transport token: Connection generation + the EXACT
+ *  binding object (`sessionFacts.captureTransportToken`). */
+interface TransportToken {
+  readonly generation: unknown
+  readonly binding: unknown
 }
 
 /** A retained Client binding face with the official Session attachment read. */
@@ -1126,7 +1169,7 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   const imageReads = routed.filter(entry => entry.attachmentId === image.attachmentId)
   assert.ok(imageReads.length >= 1, 'the rendered child image must be read at least once')
   assert.equal(imageReads.every(entry => entry.sessionId === CHILD_A_ID), true,
-    `every rendered child image read must address the CHILD Session (got ${JSON.stringify(imageReads)})`)
+    `every rendered child image read must address the CHILD Session (got ${JSON.stringify(readerSpy.addresses(image.attachmentId))})`)
   assert.equal(childReads.includes(image.attachmentId), true,
     "the bytes must traverse the CHILD binding's official readAttachment")
   assert.deepEqual(served.get(imageKey), png,
@@ -1175,9 +1218,9 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   const orphanReads = routed.filter(entry => entry.attachmentId === orphan.attachmentId)
   assert.ok(orphanReads.length >= 1, 'the scoped ask must have produced a real read')
   assert.equal(orphanReads.every(entry => entry.sessionId === CHILD_A_ID), true,
-    `EVERY read of the child-stamped ref must address the CHILD (got ${JSON.stringify(orphanReads)})`)
+    `EVERY read of the child-stamped ref must address the CHILD (got ${JSON.stringify(readerSpy.addresses(orphan.attachmentId))})`)
   assert.equal(routed.some(entry => entry.sessionId === PARENT_ID && entry.attachmentId === orphan.attachmentId), false,
-    `ZERO parent-addressed reads may exist for the child-stamped ref (got ${JSON.stringify(routed)})`)
+    `ZERO parent-addressed reads may exist for the child-stamped ref (got ${JSON.stringify(readerSpy.addresses())})`)
   assert.equal(parentReads.slice(parentReadsBeforeF7).includes(orphan.attachmentId), false,
     'the parent Session binding must never be asked for the child-only image')
   const orphanSettle = settledByAttachment.get(orphan.attachmentId)!
@@ -1234,7 +1277,7 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   assert.equal(mainScopeAtControl.sessionId, PARENT_ID)
   loader.load(parentImage, mainScopeAtControl)
   await waitFor('the main-surface image read settled', () => settledByAttachment.has(parentImage.attachmentId), 20_000)
-  assert.deepEqual(routed, [{ sessionId: PARENT_ID, attachmentId: parentImage.attachmentId }],
+  assert.deepEqual(readerSpy.addresses(), [{ sessionId: PARENT_ID, attachmentId: parentImage.attachmentId }],
     'with no viewer mounted the same seam asks the PARENT Session — the routing spy is not vacuous')
   assert.equal(settledByAttachment.get(parentImage.attachmentId)?.sessionId, PARENT_ID)
 })
@@ -1528,15 +1571,26 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   // that can update the viewer's internal activity, so the convergence below is
   // attributable to it. `suppressedDurableEvents` is the witness that the
   // suppression really ran (a no-op wrapper would make the proof vacuous).
-  // The isolation is complete on this branch: the Direct Host firehose that also
-  // feeds `routeSessionEvent` is registered ONLY when `remoteSources` is absent
-  // (bootstrap.ts), and Remote durable events arrive through this ingress alone.
-  // Hence with the durable sink suppressed, `viewing.activity` has exactly two
-  // writers — the open commit (already done) and `onSessionSnapshotChanged` — so
-  // the committed subject can follow this flip ONLY because that sink re-derives
-  // it via `deps.refreshStatus()`; without the fix the subject and the rendered
+  // Every OTHER status-commit path for this child is suppressed with a witness:
+  // durable events (`routeSessionEvent` → `beginTurn`/`endTurn` + `refreshFooter`),
+  // coalesced projection events (`onProjectionsChanged` → `refreshStatus`), and
+  // the window sinks (`rehydrateViewedChild` → `target.activity` + `refreshStatus`).
+  // The Direct Host firehose that also feeds `routeSessionEvent` is registered ONLY
+  // when `remoteSources` is absent (bootstrap.ts), and Remote events arrive through
+  // this ingress alone. Hence `viewing.activity` has exactly two writers — the open
+  // commit (already done) and `onSessionSnapshotChanged` — so the committed subject
+  // can follow this flip ONLY because that sink re-derives it via
+  // `deps.refreshStatus()`; with that one line removed the subject and the rendered
   // footer would keep the stale activity.
   let suppressedDurableEvents = 0
+  let suppressedProjectionEvents = 0
+  // The window sinks drive `rehydrateViewedChild`, which ALSO re-derives the
+  // subject status (`deps.refreshStatus()` + `target.activity` from the binding).
+  // They are suppressed and counted too: if they ever fired inside the measured
+  // window the causality claim below would be false, so a non-zero count fails
+  // loudly instead of silently weakening the proof.
+  let suppressedWindowReplaced = 0
+  let suppressedWindowPrepended = 0
   const ingress = fixture.aggregate.presentation.liveIngress as unknown as {
     subscribe(
       sessionId: string,
@@ -1550,6 +1604,9 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     return realSubscribe.call(ingress, sessionId, {
       ...sinks,
       onDurableEvent: () => { suppressedDurableEvents += 1 },
+      onProjectionsChanged: () => { suppressedProjectionEvents += 1 },
+      onWindowReplaced: () => { suppressedWindowReplaced += 1 },
+      onWindowPrepended: () => { suppressedWindowPrepended += 1 },
     }, hydrateRevision)
   }
   life.defer(() => { ingress.subscribe = realSubscribe })
@@ -1589,6 +1646,12 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     subjectActivity() === 'inactive', 15_000)
   assert.ok(suppressedDurableEvents > 0,
     'the isolation witness must have suppressed real durable events, or this proof is vacuous')
+  assert.ok(suppressedProjectionEvents > 0,
+    'the projection witness must have suppressed real projection events for the child')
+  assert.equal(suppressedWindowReplaced, 0,
+    'a window replacement would independently re-derive the subject status in this window')
+  assert.equal(suppressedWindowPrepended, 0,
+    'a window prepend would independently re-derive the subject status in this window')
   assert.equal(subjectActivity(), 'inactive',
     'the committed display subject must follow the official running flip')
   await waitFor('the footer converges to the inactive activity', () =>
@@ -1600,6 +1663,7 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
 
   // ── (4) The reverse flip through the same isolated channel.
   const suppressedBefore = suppressedDurableEvents
+  const suppressedProjectionsBefore = suppressedProjectionEvents
   const releaseSecond = adapter.hold()
   life.defer(() => releaseSecond())
   childAgent.followup({
@@ -1612,6 +1676,10 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     subjectLine().includes('● running'), 15_000)
   assert.ok(suppressedDurableEvents > suppressedBefore,
     'the reverse flip must also be observed with the durable sink suppressed')
+  assert.ok(suppressedProjectionEvents > suppressedProjectionsBefore,
+    'the reverse flip must also be observed with the projection sink suppressed')
+  assert.equal(suppressedWindowReplaced, 0, 'no window replacement may fire on the reverse flip either')
+  assert.equal(suppressedWindowPrepended, 0, 'no window prepend may fire on the reverse flip either')
   assert.equal(subjectActivity(), 'running', 'the reverse flip must converge as well')
   assert.equal(subjectLine().includes('● running'), true,
     `the rendered footer must show running again:\n${viewport()}`)
@@ -1667,7 +1735,7 @@ test('L6 P1 dual-subject: the SAME attachment id loaded under the parent and chi
   // does not reference, and that failure belongs to the parent scope alone.
   loader.load(X, parentScope)
   await waitFor('the parent-scoped ask settled', () => settled.has(parentAddress), 20_000)
-  assert.deepEqual(routed.filter(entry => entry.attachmentId === X.attachmentId),
+  assert.deepEqual(readerSpy.addresses(X.attachmentId),
     [{ sessionId: PARENT_ID, attachmentId: X.attachmentId }],
     'the first ask of X is addressed to the PARENT Session')
   assert.equal(settled.get(parentAddress)?.outcome, 'failed',
@@ -1684,7 +1752,7 @@ test('L6 P1 dual-subject: the SAME attachment id loaded under the parent and chi
   seedImageTurn(appenderOf(host.ctx, CHILD_A_ID), 31, 'childa dual image', X)
   loader.load(X, childScope)
   await waitFor('the child-scoped ask served X', () => served.has(childAddress), 20_000)
-  assert.deepEqual(routed.filter(entry => entry.attachmentId === X.attachmentId), [
+  assert.deepEqual(readerSpy.addresses(X.attachmentId), [
     { sessionId: PARENT_ID, attachmentId: X.attachmentId },
     { sessionId: CHILD_A_ID, attachmentId: X.attachmentId },
   ], 'the same id was asked once per presentation scope')
@@ -1705,4 +1773,109 @@ test('L6 P1 dual-subject: the SAME attachment id loaded under the parent and chi
     "the parent scope's recorded outcome is unchanged by the child settle")
   assert.equal(loader.isReady(X, parentScope), false,
     "the parent scope's cache must not gain the child-authorized bytes")
+})
+
+test('L6 P1 reincarnation: a read stamped with the OLD child lifetime fails closed and never reaches the reopened binding', async (t) => {
+  const life = testLifecycle(t)
+  const piTui = await import('@xmoon76/pi-tui') as unknown as {
+    resetCapabilitiesCache(): void
+    setCapabilities(caps: { images: 'kitty' | 'iterm2' | null; trueColor: boolean; hyperlinks: boolean }): void
+  }
+  piTui.resetCapabilitiesCache()
+  piTui.setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  life.defer(() => { piTui.resetCapabilitiesCache() })
+
+  const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
+  const readerSpy = spyDurableImageReads(fixture)
+  life.defer(readerSpy.restore)
+  const loader = (app as unknown as MountedImageLoader).imageLoader
+  const attachments = host.ctx.get('attachments') as unknown as FixtureAttachments
+  const orphan = (await attachments.saveImages([{
+    data: await realPng('#ff00ff', 3), mediaType: 'image/png', name: 'reincarnation.png',
+  }]))[0]!
+  const address = `${CHILD_A_ID}\u0000${orphan.attachmentId}`
+
+  // ── OPEN child A (lifetime 1) and capture its scope token + exact binding.
+  submit(app, '/tasks')
+  await waitFor('the Task Center rendered the child row', () => viewport().includes(LABEL_A), 20_000)
+  fixture.vt.sendInput('\r')
+  await waitFor('the child viewer A hydrated', () => viewport().includes('childa answer 30'), 20_000)
+  const generation1 = app.getViewerGeneration()
+  const scope1 = currentImageScope(app)
+  assert.match(scope1.key, /^child:1:/u, 'the first child viewer owns the child:1 lifetime key')
+  assert.equal(scope1.sessionId, CHILD_A_ID)
+  const binding1 = sessions.binding(SessionId(CHILD_A_ID))
+  assert.ok(binding1 !== undefined, 'lifetime 1 owns its exact binding')
+
+  // ── The STALE ask: stamped with lifetime 1, then the viewer exits in the SAME
+  // turn (binding 1 released) before the deferred read can touch any Session.
+  readerSpy.routed.length = 0
+  loader.load(orphan, scope1)
+  fixture.vt.sendInput('\x1b')
+  await waitFor('the stale lifetime read settled', () => readerSpy.settledByAttachment.has(orphan.attachmentId), 20_000)
+  const staleCall = readerSpy.routed.find(call => call.attachmentId === orphan.attachmentId)!
+  assert.equal(staleCall.sessionId, CHILD_A_ID, 'the stale read was addressed to the CHILD Session')
+  assert.equal(staleCall.expectedLifetime, scope1.transportToken,
+    'the stale read carried the captured lifetime 1 transport token')
+  assert.equal((staleCall.expectedLifetime as TransportToken).binding, binding1,
+    'that token pins the RETIRED binding object')
+  assert.equal(staleCall.outcome, 'failed', 'a retired child lifetime must fail closed')
+  assert.match(String(staleCall.error), new RegExp(CHILD_A_ID), 'the failure must name the CHILD Session')
+  assert.match(String(staleCall.error), /retired/u, 'the failure is the retired-lifetime refusal')
+  assert.equal(loader.get(orphan, scope1).state, 'error', 'the OLD scope records its own failure')
+  assert.equal(readerSpy.served.has(address), false, 'nothing may be served for the stale ask')
+
+  // ── REOPEN the SAME child A: a NEW viewer generation, a NEW scope token and a
+  // NEW binding object for the same Session id.
+  submit(app, '/tasks')
+  await waitFor('the Task Center rendered the child row again', () => viewport().includes(LABEL_A), 20_000)
+  fixture.vt.sendInput('\r')
+  await waitFor('the child viewer A re-hydrated', () => viewport().includes('childa answer 30'), 20_000)
+  const scope2 = currentImageScope(app)
+  const binding2 = sessions.binding(SessionId(CHILD_A_ID)) as unknown as ReadAttachmentFace | undefined
+  assert.ok(binding2 !== undefined, 'the reincarnated viewer retains its own binding')
+  assert.notEqual(binding2, binding1, 'the reopened viewer must own a NEW binding object')
+  assert.notEqual(app.getViewerGeneration(), generation1, 'the reopened viewer is a new generation')
+  assert.match(scope2.key, /^child:\d+:/u, 'the reopened viewer keys a child lifetime')
+  assert.notEqual(scope2.key, scope1.key, 'the reincarnated scope key differs from the retired one')
+  const lifetimeOf = (key: string): number => Number(/^child:(\d+):/u.exec(key)?.[1])
+  assert.ok(lifetimeOf(scope2.key) > lifetimeOf(scope1.key),
+    `the reopened viewer must be a LATER lifetime (${scope1.key} -> ${scope2.key})`)
+  assert.notEqual(scope2, scope1, 'the reincarnated scope token is a distinct object')
+  assert.equal(scope2.sessionId, CHILD_A_ID, 'both lifetimes address the same child Session id')
+  assert.notEqual(scope2.transportToken, scope1.transportToken)
+  assert.equal((scope2.transportToken as TransportToken).binding, binding2,
+    'lifetime 2 pins the SUCCESSOR binding object')
+
+  // The successor binding is watched from here on: the stale read must never
+  // reach it, and only the new scope's own ask may.
+  const successorReads: string[] = []
+  const originalSuccessor = binding2.session.readAttachment
+  binding2.session.readAttachment = async (id: unknown) => {
+    successorReads.push(String(id))
+    return originalSuccessor.call(binding2.session, id)
+  }
+  life.defer(() => { binding2.session.readAttachment = originalSuccessor })
+  assert.equal(successorReads.includes(orphan.attachmentId), false,
+    'the stale read must never reach the reopened binding')
+
+  // ── POSITIVE CONTROL: the NEW scope's own ask of the SAME ref is not blocked
+  // by the old scope's failure (this is not "everything fails").
+  loader.load(orphan, scope2)
+  const calls = (): Array<{ expectedLifetime: unknown; outcome?: string; error?: unknown }> =>
+    readerSpy.routed.filter(call => call.attachmentId === orphan.attachmentId)
+  await waitFor('the new lifetime read settled', () => calls().length === 2, 20_000)
+  const [first, second] = calls()
+  assert.equal(first!.expectedLifetime, scope1.transportToken)
+  assert.equal(second!.expectedLifetime, scope2.transportToken,
+    'the new ask carries the SUCCESSOR lifetime token')
+  assert.notEqual(second!.expectedLifetime, first!.expectedLifetime)
+  assert.equal(second!.outcome, 'failed', 'the ref is not referenced by any Session, so the Host refuses it')
+  assert.doesNotMatch(String(second!.error), /retired/u,
+    'the successor lifetime must NOT be refused by the retirement guard — it reached the Session')
+  assert.equal(successorReads.filter(id => id === orphan.attachmentId).length, 1,
+    'exactly the new scope\'s own ask reached the reopened binding')
+  assert.equal(loader.get(orphan, scope2).state, 'error', 'lifetime 2 records its own refusal')
+  assert.equal(loader.get(orphan, scope1).state, 'error', 'lifetime 1 keeps its own retired failure')
+  assert.equal(readerSpy.served.has(address), false, 'the refused ref is never served in either scope')
 })

@@ -1790,8 +1790,8 @@ export function applyRunnerWithRuntime(
      * identity-keyed scope survives a child visit and is replaced only when that
      * exact lifetime ends.
      */
-    let imageScopeMain: { readonly key: string; readonly sessionId: string } | undefined
-    let imageScopeChild: { readonly key: string; readonly sessionId: string } | undefined
+    let imageScopeMain: { readonly key: string; readonly sessionId: string; readonly transportToken: unknown } | undefined
+    let imageScopeChild: { readonly key: string; readonly sessionId: string; readonly transportToken: unknown } | undefined
     // The extension service + surface host (M3 wiring); declared here so
     // the cleanup closure can detach them.
     let extensionService: (PiTuiExtensionService & {
@@ -2418,23 +2418,39 @@ export function applyRunnerWithRuntime(
         if (child === undefined) {
           const key = `main:${ownership.generation()}:${sessionId}`
           if (imageScopeMain !== undefined && imageScopeMain.key === key) return imageScopeMain
-          imageScopeMain = { key, sessionId }
+          // The transport token (Connection generation + EXACT binding identity) is
+          // captured HERE, once per lifetime, and travels with the scope: the read
+          // re-checks it before touching any Session, so a retired presentation can
+          // never borrow a successor binding for the same Session id.
+          imageScopeMain = {
+            key,
+            sessionId,
+            transportToken: remoteSources?.sessionFacts.captureTransportToken(sessionId),
+          }
           return imageScopeMain
         }
         const key = `child:${app.getViewerGeneration()}:${sessionId}`
         if (imageScopeChild !== undefined && imageScopeChild.key === key) return imageScopeChild
-        imageScopeChild = { key, sessionId }
+        imageScopeChild = {
+          key,
+          sessionId,
+          transportToken: remoteSources?.sessionFacts.captureTransportToken(sessionId),
+        }
         return imageScopeChild
       },
       readImage: (ref, context) => {
         if (remoteSources !== undefined) {
-          const subject = context as { readonly sessionId?: unknown } | undefined
+          const subject = context as { readonly sessionId?: unknown; readonly transportToken?: unknown } | undefined
           if (subject === undefined || typeof subject !== 'object' || typeof subject.sessionId !== 'string') {
             throw new ImageLoadError(
               'The image request carries no presentation scope — the Remote image read requires the owning presentation\'s subject.',
             )
           }
-          return remoteSources.attachments.readDurableImage(subject.sessionId, ref.attachmentId)
+          return remoteSources.attachments.readDurableImage(
+            subject.sessionId,
+            ref.attachmentId,
+            subject.transportToken,
+          )
         }
         const attachments = ctx.get('attachments')
         if (attachments === undefined) {
