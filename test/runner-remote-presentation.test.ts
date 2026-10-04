@@ -1591,6 +1591,11 @@ test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title a
    *  and the picker's "← current" mark consume). */
   const displayedPreset = (sessionId: string): string | undefined =>
     fixture.aggregate.presentation.sessionFacts.sessionStatus(sessionId)?.preset
+  /** The RENDERED welcome-card preset row — the real user-visible sink fed by
+   *  `updateWelcomeCard()`/`app.setWelcomeCard(...)`. The box layout pads the
+   *  label, so a restored `/preset <id>` editor line (one space) never matches. */
+  const renderedPresetRow = (): string | undefined =>
+    fixture.vt.getViewport().find(row => /\bpreset\s{2,}\S/u.test(row))
 
   // ---- E2: ordinary prompt source -> decision -> sink --------------------
   editor.setDraft(promptText)
@@ -1622,10 +1627,14 @@ test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title a
   // intentionally ABSENT value is a real baseline here: the externally created
   // Session carries no preset row, so the guard is "it never becomes the
   // requested alternate"; the durable-log assertion below is the authoritative
-  // proof that the switch never committed).
+  // proof that the switch never committed). BOTH the render-visible welcome
+  // row and the projection read are compared before/after.
   const heldDisplayBefore = displayedPreset(heldId)
+  const heldRenderedBefore = renderedPresetRow()
   assert.notEqual(heldDisplayBefore, altPreset,
     'the held Session must not already display the requested alternate preset')
+  assert.ok(!(heldRenderedBefore ?? '').includes(altPreset),
+    'the rendered welcome card must not already show the requested alternate preset')
   editor.setDraft(`/preset ${altPreset}`)
   editor.submitDraft()
   await waitFor('the held /preset restores the command with the guidance', () =>
@@ -1636,6 +1645,8 @@ test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title a
     'the refused preset switch appended no agent-preset/selected')
   assert.equal(displayedPreset(heldId), heldDisplayBefore,
     'the refused switch did not repaint the displayed Session preset')
+  assert.equal(renderedPresetRow(), heldRenderedBefore,
+    'the refused switch did not repaint the rendered welcome-card preset row')
 
   // ---- D4: explicit recovery positive control ----------------------------
   await holder.kill()
@@ -1691,15 +1702,26 @@ test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer 
    *  picker's "← current" mark). */
   const displayedPreset = (): string | undefined =>
     fixture.aggregate.presentation.sessionFacts.sessionStatus(mainId)?.preset
+  /** The RENDERED welcome-card preset row — the real user-visible sink fed by
+   *  `updateWelcomeCard()`/`app.setWelcomeCard(...)`, independently of the
+   *  projection read above. */
+  const renderedPresetRow = (): string | undefined =>
+    fixture.vt.getViewport().find(row => /\bpreset\s{2,}\S/u.test(row))
+  const viewport = (): string => fixture.vt.getViewport().join('')
 
   // A REAL, committed switch first: it gives the displayed/current preset a
-  // DEFINED authoritative baseline (the guard below is then non-trivial).
+  // DEFINED authoritative baseline (the guard below is then non-trivial) AND
+  // makes the rendered welcome-card preset row observable.
   editor.setDraft(`/preset ${committedPreset}`)
   editor.submitDraft()
   await waitFor('the real preset switch commits', () => displayedPreset() === committedPreset, 40_000)
+  await waitFor('the rendered welcome card shows the committed preset', () =>
+    (renderedPresetRow() ?? '').includes(committedPreset), 30_000)
   const baselinePreset = displayedPreset()
   assert.equal(baselinePreset, committedPreset,
     'the live Session displays its authoritative committed preset before the indeterminate switch')
+  assert.ok((renderedPresetRow() ?? '').includes(committedPreset),
+    'the rendered welcome card is the authoritative baseline before the indeterminate switch')
   const commitsBefore = sessionEvents().filter(event => event.type === 'agent-preset/selected').length
   assert.equal(commitsBefore, 1, 'the real baseline switch committed exactly one durable selection')
 
@@ -1738,8 +1760,10 @@ test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer 
     'no optimistic preset selection is presented')
   assert.equal(displayedPreset(), baselinePreset,
     'an indeterminate switch leaves the displayed/current Session preset at its authoritative value')
-  assert.notEqual(displayedPreset(), altPreset,
-    'the requested alternate preset must never become the displayed Session preset')
+  assert.ok((renderedPresetRow() ?? '').includes(committedPreset),
+    'the rendered welcome-card preset row still shows the authoritative preset')
+  assert.ok(!viewport().includes(altPreset),
+    'the requested alternate preset never reaches the rendered surface (the suppressed draft is empty)')
   assert.equal(sessionEvents().filter(event => event.type === 'agent-preset/selected').length, commitsBefore,
     'an indeterminate switch commits no durable preset selection')
 })

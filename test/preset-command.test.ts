@@ -1364,9 +1364,8 @@ async function settlePresetThroughOuterOwner(
   readonly draft: string
   readonly handlerText: string
   readonly selects: number
+  readonly statusText: string
   readonly view: string
-  /** The runner's displayed/current Session preset AFTER the settlement. */
-  readonly displayedPreset: string | undefined
   /** The runner's run-local pending preset AFTER the settlement. */
   readonly pendingPreset: string | undefined
 }> {
@@ -1467,14 +1466,20 @@ async function settlePresetThroughOuterOwner(
   await done
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(acks.length, 1, 'the gesture settled exactly once')
+  // Read the displayed/current preset through the REAL `/preset status`
+  // handler (the production consumer of `runner.currentPreset()`), NOT by
+  // echoing the fixture's own baseline back: an optimistic local preset write
+  // would show up in this result text.
+  const status = await t.runCommand('preset', 'status') as { readonly kind: string; readonly text?: string }
+  assert.equal(status.kind, 'success', 'the /preset status read must succeed')
   return {
     restored,
     fallbacks,
     draft: t.app.getDraft(),
     handlerText,
     selects: selects.length,
+    statusText: status.text ?? '',
     view: await t.view(),
-    displayedPreset: displayed.preset,
     pendingPreset: t.pending.value,
   }
 }
@@ -1489,10 +1494,14 @@ test('PR5: a TRUE indeterminate /preset <id> does not restore the typed command 
   assert.equal(result.fallbacks, 0, 'no agent-facing fallback prompt is launched')
   assert.equal(result.selects, 1, 'the switch dispatched exactly once (no implicit retry)')
   assert.match(result.view, /do not retry/)
-  // AC4: the displayed/current preset stays the authoritative Session value and
-  // no run-local retry-ready preset intent is staged.
-  assert.equal(result.displayedPreset, 'standard',
-    'an indeterminate switch must not repaint the displayed preset as the requested alternate')
+  // AC4: the displayed/current preset the REAL `/preset status` handler reports
+  // (the production consumer of the runner's current-preset read) is still the
+  // authoritative Session value, and no run-local retry-ready preset intent is
+  // staged.
+  assert.match(result.statusText, /preset: standard/u,
+    'an indeterminate switch must leave the handler-reported current preset unchanged')
+  assert.ok(!result.statusText.includes('alternate'),
+    'the requested alternate preset must never become the reported current preset')
   assert.equal(result.pendingPreset, undefined,
     'an indeterminate switch must not stage a run-local pending preset')
 })
@@ -1508,9 +1517,11 @@ test('PR5: a KNOWN writer-held /preset <id> rejection restores the typed command
   assert.equal(result.selects, 1, 'the refused switch is not retried')
   assert.match(result.view, /already in use/, 'the centralized writer-held guidance is rendered')
   // AC4 negative control: the same family also proves a KNOWN rejection leaves
-  // the authoritative/displayed preset exactly where it was.
-  assert.equal(result.displayedPreset, 'standard',
-    'a refused switch must not repaint the displayed preset as the requested alternate')
+  // the handler-reported current preset exactly where it was.
+  assert.match(result.statusText, /preset: standard/u,
+    'a refused switch must leave the handler-reported current preset unchanged')
+  assert.ok(!result.statusText.includes('alternate'),
+    'the requested alternate preset must never become the reported current preset')
   assert.equal(result.pendingPreset, undefined,
     'a refused switch must not stage a run-local pending preset')
 })
