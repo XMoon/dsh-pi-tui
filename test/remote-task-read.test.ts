@@ -429,8 +429,8 @@ test('rc.2 CARRIER shape: a REAL wire branch failure (RemoteError code=gateway/i
   // failure maps to `unavailable`, and `corrupt` must never be inferred from
   // messages, causes, child state or log shape. (This is one of several wire
   // shapes, not the only one: `session/projections-unavailable` and
-  // `gateway/cancelled` are the SubagentError-class shapes that abort the whole
-  // traversal — see the F4c regressions above.)
+  // `gateway/cancelled` reach the SAME branch-local degradation — see the F4d
+  // owner-ruled cases above; no wire shape aborts the whole traversal.)
   const wireFailure = Object.assign(new Error('internal failure'), { code: 'gateway/internal' })
   const client = sessionsFixture({
     byId: { parent: { running: false } },

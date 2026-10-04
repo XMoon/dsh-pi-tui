@@ -401,3 +401,128 @@ test('P1 regression: a settle is delivered only to its OWN scope\'s subscribers,
   offChild()
   offParent()
 })
+
+test('P2 object-scope: invalidate(id) reaches an OBJECT scope (ready -> idle + fresh read) and leaves its subscriber alone', async () => {
+  const reads: string[] = []
+  const loader = new ImageLoader(async ref => {
+    reads.push(String(ref.attachmentId))
+    return { ref: {}, data: new Uint8Array([1]) }
+  })
+  const scope = { key: 'child:1:A' }
+  const ref = refOf('obj-invalidate')
+  let wakes = 0
+  const off = loader.subscribe(ref.attachmentId, () => { wakes += 1 }, scope)
+  loader.load(ref, scope)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(loader.get(ref, scope).state, 'ready')
+  assert.deepEqual(reads, ['obj-invalidate'], 'the first load performed exactly one read')
+  const wakesAfterSettle = wakes
+  assert.ok(wakesAfterSettle >= 1, "the object scope's subscriber heard its own settle")
+
+  loader.invalidate(ref.attachmentId)
+  assert.equal(loader.get(ref, scope).state, 'idle',
+    "invalidate(id) must drop an OBJECT scope's ready entry, not only unscoped ones")
+  assert.equal(wakes, wakesAfterSettle,
+    'invalidate(id) is not a broadcast: the object scope subscriber is untouched by it')
+
+  loader.load(ref, scope)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(reads, ['obj-invalidate', 'obj-invalidate'],
+    'the invalidated object scope performs a FRESH read')
+  assert.equal(loader.get(ref, scope).state, 'ready')
+  off()
+})
+
+test('P2 object-scope: clear() drops OBJECT-scope state, broadcasts to its subscriber, and listenerCount() counts it', async () => {
+  const loader = new ImageLoader(async ref => {
+    if (ref.attachmentId === 'obj-clear-error') throw new Error('child scope failure')
+    return { ref: {}, data: new Uint8Array([2]) }
+  })
+  const scope = { key: 'child:1:A' }
+  const readyRef = refOf('obj-clear-ready')
+  const errorRef = refOf('obj-clear-error')
+  let wakes = 0
+  const off = loader.subscribe(readyRef.attachmentId, () => { wakes += 1 }, scope)
+  assert.equal(loader.listenerCount(), 1,
+    "listenerCount() must count an OBJECT scope's subscriber (previously 0)")
+  loader.load(readyRef, scope)
+  loader.load(errorRef, scope)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(loader.get(readyRef, scope).state, 'ready')
+  assert.equal(loader.get(errorRef, scope).state, 'error')
+  const wakesAfterSettles = wakes
+  assert.equal(wakesAfterSettles, 1, 'only the subscribed attachment wakes its listener')
+
+  loader.clear()
+  assert.equal(loader.get(readyRef, scope).state, 'idle',
+    "clear() must drop an OBJECT scope's ready entry")
+  assert.equal(loader.get(errorRef, scope).state, 'idle',
+    "clear() must drop an OBJECT scope's recorded error")
+  assert.equal(wakes, wakesAfterSettles + 1,
+    "clear() broadcasts exactly one wake to the OBJECT scope's subscriber")
+  assert.equal(loader.listenerCount(), 1, 'the object scope subscriber survives clear()')
+  off()
+  assert.equal(loader.listenerCount(), 0, 'unsubscribing removes the object scope listener')
+})
+
+test('P2 object-scope: clear() discards an in-flight settle in one scope without disturbing another scope', async () => {
+  const gates: Array<() => void> = []
+  const loader = new ImageLoader(async () => {
+    await new Promise<void>(resolve => { gates.push(resolve) })
+    return { ref: {}, data: new Uint8Array([5]) }
+  })
+  const s1 = { key: 'child:1:A' }
+  const s2 = { key: 'child:2:A' }
+  const ref = refOf('obj-inflight')
+  loader.load(ref, s1)
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(loader.get(ref, s1).state, 'loading')
+  loader.clear() // global bump while s1's read is in flight
+  gates.shift()!() // s1's read settles AFTER the clear
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(loader.get(ref, s1).state, 'idle',
+    "a clear() must prevent the OBJECT scope's in-flight settle from repopulating it")
+
+  // The OTHER scope is unaffected: a read started after the clear still resolves
+  // its own bytes, and s1 stays empty (no shared state).
+  loader.load(ref, s2)
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(loader.get(ref, s2).state, 'loading')
+  gates.shift()!()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(loader.get(ref, s2).state, 'ready', 'the other scope resolves independently')
+  assert.equal(loader.get(ref, s1).state, 'idle', 'the other scope never borrows s2 bytes')
+})
+
+test('P2 object-scope: two scopes never share bytes, failures or subscribers (both directions)', async () => {
+  const loader = new ImageLoader(async (_ref, scope) => {
+    if ((scope as { key: string }).key === 'child:1:A') throw new Error('A failed')
+    return { ref: {}, data: new Uint8Array([9]) }
+  })
+  const sA = { key: 'child:1:A' }
+  const sB = { key: 'child:1:B' }
+  const ref = refOf('obj-shared')
+  let wakesA = 0
+  let wakesB = 0
+  const offA = loader.subscribe(ref.attachmentId, () => { wakesA += 1 }, sA)
+  const offB = loader.subscribe(ref.attachmentId, () => { wakesB += 1 }, sB)
+
+  loader.load(ref, sA)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(loader.get(ref, sA).state, 'error')
+  assert.equal(loader.get(ref, sB).state, 'idle', "A's failure must not appear in B")
+  assert.equal(wakesA, 1, "A's own settle wakes A")
+  assert.equal(wakesB, 0, "A's settle must NOT wake B's subscriber")
+
+  loader.load(ref, sB)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  const stateB = loader.get(ref, sB)
+  assert.equal(stateB.state, 'ready')
+  assert.deepEqual(stateB.state === 'ready' ? stateB.bytes : undefined, new Uint8Array([9]),
+    'B owns its own bytes')
+  assert.equal(loader.get(ref, sA).state, 'error', "B's success must not overwrite A's own state")
+  assert.equal(wakesA, 1, "B's settle must NOT wake A's subscriber again")
+  assert.equal(wakesB, 1, "B's own settle wakes B")
+  offA()
+  offB()
+})

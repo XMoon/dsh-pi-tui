@@ -114,19 +114,26 @@ export interface RemoteApplicationSources {
   readonly task: RemoteTaskApplicationSource
   /** The M3-5 PR2 child-view source (retained child reference + read/ingress). */
   readonly childView: import('./surface/viewer-runtime.ts').ViewerChildSource<import('./surface/session-presentation.ts').SessionPresentationEvent>
-  /** The M3-5 PR2 durable image read of the ACTIVE retained Session. */
+  /** The M3-5 PR2 durable image read of the OWNING presentation's retained
+   *  Session (exact scoped lifetime, never an ambient "currently displayed"
+   *  subject). */
   readonly attachments: RemoteAttachmentSource
 }
 
 /**
  * The neutral Remote durable-image read face (M3-5 PR2 Step 9): resolve one
- * attachment through the EXACT retained binding of the addressed Session.
- * There is no Host attachment shortcut and no cold retain on this path.
+ * attachment through the EXACT retained binding the OWNING presentation was
+ * authorized under. There is no Host attachment shortcut and no cold retain on
+ * this path. `expectedLifetime` is the presentation's captured transport token
+ * (Connection generation + exact binding identity): when supplied, the read MUST
+ * fail closed BEFORE touching the Session if that lifetime is no longer the live
+ * one, so a retired presentation can never borrow a successor binding.
  */
 export interface RemoteAttachmentSource {
   readDurableImage(
     sessionId: string,
     attachmentId: string,
+    expectedLifetime?: unknown,
   ): Promise<{ ref: unknown; data: Uint8Array }>
 }
 

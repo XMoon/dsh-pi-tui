@@ -104,8 +104,9 @@ test('F7: the Remote image read fails closed without a captured display subject,
     'the read must never late-resolve the viewer subject after the ask')
   assert.ok(!readImage.includes('ownership.currentSessionId()'),
     'the read must never late-resolve the current main session after the ask')
-  assert.ok(readImage.includes('readDurableImage(subject.sessionId, ref.attachmentId)'),
-    'the captured subject is the ONLY Session the Remote read may address')
+  assert.ok(readImage.includes('readDurableImage(') && readImage.includes('subject.sessionId')
+    && readImage.includes('subject.transportToken'),
+  'the captured subject — INCLUDING its exact binding lifetime — is the only thing the Remote read may address')
   // The capture seam is part of the MOUNT CONTRACT (not an optional extra): the
   // surface deps must declare it required, so a future mount cannot silently omit
   // the ask-time subject and fall back to a late selection.
@@ -160,4 +161,24 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
     'the component loads through its IMMUTABLE scope')
   assert.ok(thumbnail.includes('}, scope)'),
     'the component subscribes through its IMMUTABLE scope')
+  // P1 (reviewer ROUND6): the scope must carry the EXACT binding lifetime into the
+  // read — a surviving generation label is not enough, because the Remote source
+  // would otherwise re-borrow `sessions.binding(id)` and let a retired presentation
+  // read through a successor binding.
+  assert.ok(scopeProvider.includes('captureTransportToken(sessionId)'),
+    'the lifetime token is captured with the scope, once per lifetime')
+  const presentation = readFileSync(
+    new URL('../src/app/remote/presentation-source.ts', import.meta.url),
+    'utf8',
+  )
+  assert.ok(presentation.includes('expectedLifetime?: unknown'),
+    'the durable read accepts the owning presentation’s expected lifetime')
+  assert.ok(presentation.includes("the presentation's Session binding for ${sessionId} is retired"),
+    'a retired binding must fail closed BEFORE any Session is touched')
+  const applicationRuntime = readFileSync(
+    new URL('../src/app/application-runtime.ts', import.meta.url),
+    'utf8',
+  )
+  assert.ok(applicationRuntime.includes('expectedLifetime?: unknown'),
+    'the port contract carries the expected lifetime')
 })
