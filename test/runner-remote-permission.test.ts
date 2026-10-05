@@ -634,15 +634,18 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
   }
   const hostService = (hostServiceProxy[symbols.original] ?? hostServiceProxy) as typeof hostServiceProxy
   let answerDispatches = 0
+  let hostAccepted: boolean | undefined
   let releaseSettlement: (() => void) | undefined
   const settlementGate = new Promise<void>(resolve => { releaseSettlement = resolve })
   const originalAnswer = hostService.answer.bind(hostService)
   hostService.answer = async (agent: unknown, callId: unknown, answer: unknown): Promise<boolean> => {
     answerDispatches += 1
-    const accepted = originalAnswer(agent, callId, answer)
-    // The Host-side admission is already real (synchronously accepted); the
-    // gate holds only the wire settlement the Client — and the adapter —
-    // await. Awaiting INSIDE the exported method holds the typert call.
+    // The Host-side admission runs to completion (the real service is
+    // synchronous) and its OWN verdict is the settlement authority under
+    // test — never the notice text. The gate holds only the WIRE settlement
+    // the Client (and the adapter) await.
+    const accepted = await originalAnswer(agent, callId, answer)
+    hostAccepted = accepted
     await settlementGate
     return accepted
   }
@@ -692,6 +695,12 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
     throw new Error('the mounted app never exposed the notice probe')
   })()
   const view = (): string => vt.getViewport().join('\n')
+  const noticeHistory: string[] = []
+  const realNotify = (app as unknown as { notify(text: string, kind?: 'error' | 'info'): void }).notify.bind(app)
+  ;(app as unknown as { notify(text: string, kind?: 'error' | 'info'): void }).notify = (text, kind) => {
+    noticeHistory.push(text)
+    realNotify(text, kind)
+  }
   const notices = (): string => (app as unknown as { notifyTextForTest(): string }).notifyTextForTest()
 
   // ── Open the continued question: the empty-editor ↓ affordance (active
@@ -741,19 +750,37 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
     return current !== undefined && current !== generationBefore
   }, 20_000)
 
-  // ── Release the proven settlement: it must be reported TRUTHFULLY (the
-  // queued notice), never reinterpreted as a supersession.
+  // ── Release the proven settlement. The witnesses below are ordered by
+  // authority: the HOST settlement first (the truth under test), then the
+  // authoritative projection convergence, and only then the presentation
+  // outcome (which is allowed to be shown because this surface still owns
+  // the interaction — the retained session across a normal reconnect). The
+  // notice text is deliberately NOT the settlement witness.
   releaseSettlement?.()
-  await waitFor('the proven settlement was reported truthfully', () =>
-    notices().includes('Answer queued'), 20_000)
-  // Exactly ONE Host answer admission across the whole reconnect; no replay.
+
+  // WITNESS 1 — Host settlement authority: the reply was accepted exactly
+  // once and never replayed. `hostAccepted` is the REAL Host service's own
+  // verdict, captured before the wire settlement is released.
   await new Promise(resolve => setTimeout(resolve, 800))
   assert.equal(answerDispatches, 1,
     'exactly one answer admission — the settlement was never retried or replayed across the reconnect')
-  // The entry retires through the settlement (the form is spent): the FORM
-  // (its option rows) disappears. The question TEXT itself legitimately
-  // stays on screen — the durable transcript card carries the call — so the
-  // witness is the interactive form, not the text.
+  assert.equal(hostAccepted, true,
+    'the Host itself accepted the reply: the proven settlement is real, never reinterpreted from the generation change')
+
+  // WITNESS 2 — authoritative convergence: the entry retires through the
+  // settlement / projection (the form is spent). The FORM (its option rows)
+  // disappears; the question TEXT legitimately stays on screen as the
+  // durable transcript card, so the witness is the interactive form.
   await waitFor('the question form retired after the truthful settlement', () =>
     view().includes('yes') === false, 10_000)
+
+  // WITNESS 3 — presentation-positive (NOT the settlement witness): while
+  // the surface still owns the interaction, the outcome reaches the user
+  // truthfully — either the settlement notice or the authoritative
+  // projection's own queued-reply withdrawal. A surface that had been
+  // retired instead is covered by the different-subject negative in
+  // question-remote-lifecycle.test.ts.
+  await waitFor('the still-owning surface reports the outcome truthfully', () =>
+    noticeHistory.some(text =>
+      text.includes('Answer queued') || text.includes('reply for this question is already queued')), 10_000)
 })
