@@ -126,18 +126,20 @@ function instrumentAggregate(aggregate: RemoteAggregate, observed: string[]): { 
 interface TeardownCounts {
   clientUi: number
   taskWatch: number
+  adapters: number
   client: number
   host: number
 }
 
 /**
  * Wrap the aggregate's REAL sub-owner disposers (Client UI subtree, Remote
- * task watch, official Client runtime, Host additive runtime) with
- * call-through observers, so the L6 teardown proves each production owner was
- * actually released — not merely that the transport entry was called.
+ * task watch, semantic/config adapters, official Client runtime, Host additive
+ * runtime) with call-through observers, so the L6 teardown proves each
+ * production owner was actually released — not merely that the transport entry
+ * was called.
  */
 function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
-  const counts: TeardownCounts = { clientUi: 0, taskWatch: 0, client: 0, host: 0 }
+  const counts: TeardownCounts = { clientUi: 0, taskWatch: 0, adapters: 0, client: 0, host: 0 }
   const wrap = (owner: object, key: string, onDispose: () => void): void => {
     const record = owner as unknown as Record<string, unknown>
     const original = record[key] as (...args: unknown[]) => Promise<void> | void
@@ -148,6 +150,7 @@ function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
   }
   wrap(aggregate.clientUi, 'dispose', () => { counts.clientUi += 1 })
   wrap(aggregate.presentation.task, 'dispose', () => { counts.taskWatch += 1 })
+  wrap(aggregate.backendRuntime, 'dispose', () => { counts.adapters += 1 })
   wrap(aggregate.wire.client, 'dispose', () => { counts.client += 1 })
   wrap(aggregate.wire.host, 'dispose', () => { counts.host += 1 })
   return counts
@@ -274,8 +277,8 @@ test('L6-A: a mounted Remote runner unloads totally and a fresh runner mounts in
 
   await fixtureA.runnerFiberDispose()
   assert.equal(transportA?.disposals, 1, 'the selected Remote transport disposes exactly once')
-  assert.deepEqual(teardownA, { clientUi: 1, taskWatch: 1, client: 1, host: 1 },
-    'every Remote owner released exactly once: Client UI subtree, task watch, official Client, Host additive runtime')
+  assert.deepEqual(teardownA, { clientUi: 1, taskWatch: 1, adapters: 1, client: 1, host: 1 },
+    'every Remote owner released exactly once: Client UI subtree, task watch, adapters, official Client, Host additive runtime')
   assert.ok(observed.includes('surface-stop'), 'the mounted surface terminal stop was observed')
   assert.ok(observed.includes('retirement-settled'), 'the Session retirement settled')
   assert.ok(observed.includes('transport-dispose'), 'the transport disposal was observed')
@@ -469,20 +472,40 @@ test('L6-D: a throwing TuiApp-owned aggregate cleanup does not strand the later 
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
 
   let transport: { disposals: number } | undefined
+  // Call-through observers on the THREE intermediate/terminal surface-owned
+  // releases (plugin-keybinding sync lease, theme-unload hook lease, extension
+  // bridge detach), wrapping each REAL returned release before the mount
+  // acquires it. The final detach alone cannot prove the earlier two ran.
+  let keybindingSyncReleases = 0
+  let themeHookReleases = 0
+  let detachCalls = 0
   const fixture = await mountShutdownRunner(life, apps, {
     host,
     presetId,
     resumeSessionId: mainId,
-    beforeMount: (aggregate) => { transport = instrumentAggregate(aggregate, observed).transport },
+    beforeMount: (aggregate) => {
+      transport = instrumentAggregate(aggregate, observed).transport
+      const service = aggregate.clientUi.extensionService as unknown as {
+        keybindings: { subscribe(listener: () => void): () => void }
+        setThemeUnloadedHook(hook: (unloaded: { selectableValue: string; name: string }) => void): () => void
+        detachSurface(surfaceId?: string): void
+      }
+      const registry = service.keybindings
+      const originalSubscribe = registry.subscribe.bind(registry)
+      registry.subscribe = (listener: () => void): (() => void) => {
+        const release = originalSubscribe(listener)
+        return () => { keybindingSyncReleases += 1; release() }
+      }
+      const originalSetHook = service.setThemeUnloadedHook.bind(service)
+      service.setThemeUnloadedHook = (hook): (() => void) => {
+        const release = originalSetHook(hook)
+        return () => { themeHookReleases += 1; release() }
+      }
+      const originalDetach = service.detachSurface.bind(service)
+      service.detachSurface = (surfaceId?: string): void => { detachCalls += 1; originalDetach(surfaceId) }
+    },
   })
   await waitFor('runner paint', () => vt.getViewport().join('').length > 0, 20_000)
-
-  // Observer on the REAL extension service's bridge detach — the LAST step of
-  // the SurfaceRuntime aggregate batch.
-  const service = fixture.aggregate.clientUi.extensionService as unknown as { detachSurface(surfaceId?: string): void }
-  let detachCalls = 0
-  const originalDetach = service.detachSurface.bind(service)
-  service.detachSurface = (surfaceId?: string): void => { detachCalls += 1; originalDetach(surfaceId) }
 
   // A REAL TuiApp-owned cleanup step in the aggregate batch. Patched AFTER the
   // mount (the mount itself calls it through attachInteraction), so only the
@@ -492,9 +515,18 @@ test('L6-D: a throwing TuiApp-owned aggregate cleanup does not strand the later 
 
   await fixture.runnerFiberDispose()
 
+  assert.equal(keybindingSyncReleases, 1,
+    'the plugin-keybinding sync lease was still released after the app-owned cleanup threw')
+  assert.equal(themeHookReleases, 1,
+    'the theme-unload hook lease was still released after the app-owned cleanup threw')
   assert.equal(detachCalls, 1, 'the extension bridge detach still ran after the app-owned cleanup threw')
   assert.equal(transport?.disposals, 1, 'the selected transport still disposed exactly once')
   assert.ok(observed.includes('surface-stop'), 'the mounted TuiApp still completed its final disposal')
   assert.equal(liveTuiCountForTest(), 0,
     'the process TUI slot was released because TuiApp.dispose itself completed')
+
+  // A second runner disposal is inert: none of the three surface leases re-run.
+  await fixture.runnerFiberDispose()
+  assert.deepEqual({ keybindingSyncReleases, themeHookReleases, detachCalls },
+    { keybindingSyncReleases: 1, themeHookReleases: 1, detachCalls: 1 })
 })
