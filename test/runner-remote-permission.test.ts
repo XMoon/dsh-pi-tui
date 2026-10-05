@@ -567,3 +567,193 @@ test('L6 M3-6 PR2 §14.9: a real pending Remote Question survives reconnect — 
   assert.equal((app as unknown as { overlayGraphState(): { handles: number } }).overlayGraphState().handles, 0,
     'the question surface fully retired after the single answer')
 })
+
+test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement stays real across reconnect — classified from the Host result, never replayed', async (t) => {
+  // The §16.3 write-settlement window the live-waterfall case cannot reach:
+  // the answer is dispatched through `answerContinued()` on generation A,
+  // the Connection reconnects while the settlement is in flight, and the
+  // PROVEN Host settlement (`ok: true` — the reply was accepted and queued)
+  // must be reported truthfully (never reinterpreted as a transport
+  // supersession), with exactly one Host answer admission and no replay.
+  const life = testLifecycle(t)
+  const mainId = 'm3-6-pr2-q2'
+  const presetId = 'm3-4-pr4-preset'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  // ── Seed a DURABLE continued question: request/header declares the timed
+  // ask_user_question tool, the tool call carries the questions, and the
+  // tool result is PENDING — the exact fold the official projection uses to
+  // mark a call `continued`.
+  const seed = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seed.append('request/header', {
+    header: {
+      config: { provider: 'smoke', model: 'smoke' },
+      tools: [{ name: 'ask_user_question', description: 'ask', parameters: { type: 'object', properties: { timeout: { type: 'number' }, questions: { type: 'array' } } } }],
+    },
+  })
+  seed.append('turn/start', { turn: 1 })
+  seed.append('step/start', { turn: 1, step: 1 })
+  seed.append('tool/call', {
+    turn: 1, step: 1, callId: 'call-q2',
+    name: 'ask_user_question',
+    arguments: JSON.stringify({ questions: [{ id: 'q1', question: 'Ship the recovery?', options: [{ label: 'yes' }, { label: 'no' }] }], timeout: 30000 }),
+  })
+  seed.append('tool/result', {
+    turn: 1, step: 1,
+    message: {
+      id: 'msg-q2-result', role: 'tool', toolCallId: 'call-q2',
+      content: [{ type: 'text', text: JSON.stringify({ pending: true }) }],
+      source: { kind: 'tool', callId: 'call-q2' },
+    },
+  }, { surfaceOp: 'append' })
+
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  // HOLD the wire-level answer settlement: the Host-side service has
+  // accepted the reply by the time the promise resolves, but the Client
+  // sees it only on release (the in-flight window the reconnect lands in).
+  // The wrap lands on the UNWRAPPED Host service implementation (the Cordis
+  // traceable proxy refuses `set`; the unwrap discipline is the one the
+  // extension-service identity probes use). Holding the Host-side answer
+  // holds the typert settlement the Client awaits — the write is dispatched
+  // and the Host has accepted the reply before the gate opens.
+  const { symbols } = await import('@deepseek-ai/cordis')
+  const hostServiceProxy = host.ctx.get('userQuestions') as unknown as Record<symbol, unknown> & {
+    answer(agent: unknown, callId: unknown, answer: unknown): boolean | Promise<boolean>
+  }
+  const hostService = (hostServiceProxy[symbols.original] ?? hostServiceProxy) as typeof hostServiceProxy
+  let answerDispatches = 0
+  let releaseSettlement: (() => void) | undefined
+  const settlementGate = new Promise<void>(resolve => { releaseSettlement = resolve })
+  const originalAnswer = hostService.answer.bind(hostService)
+  hostService.answer = async (agent: unknown, callId: unknown, answer: unknown): Promise<boolean> => {
+    answerDispatches += 1
+    const accepted = originalAnswer(agent, callId, answer)
+    // The Host-side admission is already real (synchronously accepted); the
+    // gate holds only the wire settlement the Client — and the adapter —
+    // await. Awaiting INSIDE the exported method holds the typert call.
+    await settlementGate
+    return accepted
+  }
+  life.defer(() => releaseSettlement?.())
+
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+  life.defer(restoreTerminal)
+
+  const runnerCtx = host.ctx
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  runnerCtx.provide('appExit', (code: number) => { void code })
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
+  }
+  const apps: unknown[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: unknown) {
+    apps.push(this)
+    return originalStart.call(this)
+  }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => { runnerFiber.dispose() })
+  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+
+  const app = await (async () => {
+    for (let i = 0; i < 600; i += 1) {
+      const candidate = apps.at(-1) as unknown as {
+        notifyTextForTest(): string
+      } | undefined
+      if (candidate !== undefined && candidate.notifyTextForTest !== undefined) return candidate as never
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed the notice probe')
+  })()
+  const view = (): string => vt.getViewport().join('\n')
+  const notices = (): string => (app as unknown as { notifyTextForTest(): string }).notifyTextForTest()
+
+  // ── Open the continued question: the empty-editor ↓ affordance (active
+  // question attention makes tasks active) → the attention row → Enter
+  // reopens the SAME controller entry as a visible form.
+  // The FULL Task Center (/tasks) is the proven Enter-opens-row surface the
+  // job-viewer suite drives; the question attention row renders under
+  // "Needs attention" with Enter wired to the controller's reopen.
+  const submitLine = (line: string): void => {
+    (app as unknown as { setDraft(text: string): void; submitDraft(): void }).setDraft(line)
+    ;(app as unknown as { submitDraft(): void }).submitDraft()
+  }
+  submitLine('/tasks')
+  await waitFor('the task browser listed the question row', () =>
+    view().includes('Ship the recovery?'), 20_000)
+  for (let step = 0; step <= 8; step += 1) {
+    if (view().split('\n').some(line => line.includes('→') && line.includes('Ship the recovery?'))) break
+    vt.sendInput('\x1b[B')
+    await new Promise(resolve => setTimeout(resolve, 80))
+  }
+  vt.sendInput('\r')
+  try {
+    await waitFor('the continued question form mounted', () =>
+      view().includes('Ship the recovery?') && view().includes('yes'), 20_000)
+  } catch (error) {
+    console.error('[q2-dump] enter-press viewport:\n' + view())
+    throw error
+  }
+
+  // ── Submit the answer on generation A: the write dispatches and its
+  // settlement is HELD in flight.
+  vt.sendInput('1')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await waitFor('the review page rendered', () => view().includes('Submit'), 10_000)
+  vt.sendInput('\r')
+  await waitFor('the answer write dispatched on generation A', () => answerDispatches === 1, 15_000)
+
+  // ── reconnect A -> B while the settlement is in flight.
+  const connection = aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== generationBefore
+  }, 20_000)
+
+  // ── Release the proven settlement: it must be reported TRUTHFULLY (the
+  // queued notice), never reinterpreted as a supersession.
+  releaseSettlement?.()
+  await waitFor('the proven settlement was reported truthfully', () =>
+    notices().includes('Answer queued'), 20_000)
+  // Exactly ONE Host answer admission across the whole reconnect; no replay.
+  await new Promise(resolve => setTimeout(resolve, 800))
+  assert.equal(answerDispatches, 1,
+    'exactly one answer admission — the settlement was never retried or replayed across the reconnect')
+  // The entry retires through the settlement (the form is spent): the FORM
+  // (its option rows) disappears. The question TEXT itself legitimately
+  // stays on screen — the durable transcript card carries the call — so the
+  // witness is the interactive form, not the text.
+  await waitFor('the question form retired after the truthful settlement', () =>
+    view().includes('yes') === false, 10_000)
+})

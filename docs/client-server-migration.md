@@ -5405,7 +5405,18 @@ repopulate the same surfaces, and Host write settlements stay real.
 - **Read supersession vs write settlement**: old-generation reads settle as
   superseded/unavailable and never commit (the existing adapter fences,
   requalified); a proven Host write settlement is never reclassified or
-  replayed because the transport generation changed. Reconnect does not
+  replayed because the transport generation changed. The external review
+  found one M3-3B-era violation of exactly this rule — the Remote
+  continued-question answer adapter reinterpreted a DISPATCHED, proven
+  settlement (`ok: true`, the reply accepted) as `SupersededReadError` when
+  the Connection generation rolled over mid-settlement; PR2's review
+  follow-up fixed it to the dispatch-then-classify shape every other Remote
+  write adapter uses (pre-dispatch generation fence only; the settlement is
+  classified from the Host result alone), with an L3 pair (truthful
+  `queued` across a replacement; the Host refusal taxonomy survives it) and
+  a mounted L6 that holds the wire settlement across a real reconnect
+  (`test/runner-remote-permission.test.ts` — the truthful notice lands,
+  exactly one Host admission, no replay). Reconnect does not
   bump the TUI Session ownership generation, the viewer generation, or
   materialize another Client Session reference — the retained binding
   objects survive by identity (normal reconnect is adoption, not
