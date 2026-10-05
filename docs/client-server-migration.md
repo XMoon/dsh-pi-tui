@@ -5419,8 +5419,12 @@ repopulate the same surfaces, and Host write settlements stay real.
   no replay), plus the presentation-ownership fence in the consumer
   (question-controller): a settlement whose entry/session no longer belongs
   to the current surface is not announced there (a session-switch negative
-  is locked in `test/question-remote-lifecycle.test.ts`), while a normal
-  same-session reconnect still shows the truthful notice.
+  is locked in `test/question-remote-lifecycle.test.ts`). The notice is a
+  PRESENTATION outcome, not part of the settlement: the Host settlement is
+  always real, and the truthful notice may still appear while the same
+  entry/session retains presentation ownership (a normal same-session
+  reconnect), while an authoritative projection that already retired the
+  entry is allowed to suppress it.
 - **Credential write sibling — FIXED in this PR** (same root cause, found by
   the same review): `RemoteCredentialConfig.setReference()/.unsetReference()`
   used to fence AFTER the dispatched credential write and reclassify its
