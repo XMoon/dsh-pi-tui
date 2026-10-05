@@ -13,8 +13,10 @@
  */
 
 import assert from 'node:assert/strict'
-import { afterEach, test } from 'node:test'
+import { afterEach, test, type TestContext } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
+import { createDiag } from '../src/diag.ts'
+import { runOwned } from '../src/detached.ts'
 import { liveTuiCountForTest } from '../src/process-tui-slot.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -33,9 +35,21 @@ function startApp(sink?: (label: string, error: unknown) => void): { app: TuiApp
     onSubmit: () => {},
     onExit: () => {},
     ...sink === undefined ? {} : {
-      runOwned: <T>(label: string, task: () => T | Promise<T>): void => {
+      runOwned: <T>(
+        label: string,
+        task: () => T | Promise<T>,
+        options: Omit<import('../src/detached.ts').OwnedTaskOptions<T>, 'diag' | 'sessionId'>,
+      ): void => {
+        // Mirror `runOwned`'s option handling: a task-phase throw and an
+        // `onResult` failure both reach the sink (the route uses `onResult`).
         void Promise.resolve().then(task).then(
-          () => {},
+          (result) => {
+            try {
+              options.onResult?.(result)
+            } catch (error) {
+              sink(label, error)
+            }
+          },
           (error: unknown) => { sink(label, error) },
         )
       },
@@ -62,29 +76,70 @@ async function settleOutcome<T>(
   ])
 }
 
-test('M3-6 PR3 F6: an abort-listener settlement cleanup failure is routed to the owned sink', async (t) => {
-  const observed: Array<{ label: string; error: unknown }> = []
-  const { app } = startApp((label, error) => observed.push({ label, error }))
-  const failure = new Error('abort settlement cleanup failed')
+/**
+ * Start a TuiApp whose `events.runOwned` is the REAL production primitive with
+ * a capturing diagnostics sink — the classification口径 under test is the
+ * production one, not a stub.
+ */
+function startAppWithRealRunOwned(lines: string[]): { app: TuiApp; vt: VirtualTerminal } {
+  const diag = createDiag({
+    filePath: undefined,
+    stderrLevel: 'off',
+    sinks: [{ write: line => { lines.push(line) } }],
+  })
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<import('../src/detached.ts').OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void =>
+      runOwned(label, task, { ...options, diag }),
+  })
+  app.start()
+  startedApps.add(app)
+  return { app, vt }
+}
+
+/** One abort-routed settlement failure with a real owned sink; returns its log line. */
+async function runAbortRoutedFailure(
+  t: TestContext,
+  failure: Error,
+): Promise<string | undefined> {
+  const lines: string[] = []
+  const { app } = startAppWithRealRunOwned(lines)
   let armed = false
   t.mock.method(app as unknown as { clearFullscreenPointerGestures(): void }, 'clearFullscreenPointerGestures', () => {
     if (!armed) return
     armed = false
     throw failure
   })
-
   const controller = new AbortController()
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
   armed = true
-  // The EventTarget dispatcher must not leak the failure to the process root.
   controller.abort()
-
   assert.deepEqual(await settleOutcome(decision), { kind: 'resolved', value: 'cancelled' },
     'the approval promise still settles through the abort route')
-  assert.equal(observed.length, 1, 'the owned sink observed exactly one settlement failure')
-  assert.equal(observed[0]!.label, 'approval abort settlement')
-  assert.equal(observed[0]!.error, failure, 'the exact cleanup failure reached the sink')
+  // Flush the owned-runner microtask chain that records the diagnostic.
+  await new Promise(resolve => setImmediate(resolve))
   t.mock.restoreAll()
+  // Release the process slot so the next subcase can start its own app.
+  app.dispose()
+  startedApps.delete(app)
+  return lines.find(entry => entry.includes('approval abort settlement'))
+}
+
+test('M3-6 PR3 F6: a cleanup failure is recorded as an ERROR through the real owned sink (never as a cancellation)', async (t) => {
+  for (const failure of [
+    new Error('plain cleanup failed'),
+    Object.assign(new Error('abort-shaped cleanup failed'), { name: 'AbortError' }),
+    Object.assign(new Error('code-shaped cleanup failed'), { code: 'ABORT_ERR' }),
+  ]) {
+    const line = await runAbortRoutedFailure(t, failure)
+    assert.ok(line, `the owned sink recorded the settlement failure for ${failure.message}`)
+    assert.match(line, / ERROR /, `recorded at error level: ${line}`)
+    assert.match(line, new RegExp(failure.message), 'the exact failure message reached the sink')
+    assert.doesNotMatch(line, /DEBUG|cancelled=true/,
+      'a cleanup failure is never misclassified as a user cancellation')
+  }
 })
 
 test('M3-6 PR3 F4: multiple settlement cleanup failures aggregate in execution order', async (t) => {

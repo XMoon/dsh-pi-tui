@@ -20124,14 +20124,18 @@ export class TuiApp {
    * there becomes a next-tick `uncaughtException` that the caller's synchronous
    * batch cannot collect. Route it to the OWNED diagnostic sink the runner
    * attaches (never a silent drop); a bare headless TuiApp with no sink
-   * re-raises it asynchronously instead of swallowing it. A cleanup failure is
-   * never a user cancellation — `isCancellation` is pinned false so the sink
-   * cannot misclassify an AbortError-shaped value.
+   * re-raises it asynchronously instead of swallowing it.
+   *
+   * The route uses `runOwned`'s `onResult` PRIMARY-failure path deliberately: a
+   * result-consumer failure is classified with cancellation DISABLED, so an
+   * AbortError/`ABORT_ERR`-shaped cleanup failure is still recorded as an error
+   * — the task-local `isCancellation` predicate cannot override the built-in
+   * error-shape classifier (a cleanup failure is never a user cancellation).
    */
   private routeTerminalSettlementFailure(label: string, error: unknown): void {
     const runOwned = this.events.runOwned
     if (runOwned !== undefined) {
-      runOwned(label, async () => { throw error }, { isCancellation: () => false })
+      runOwned(label, (): void => {}, { onResult: () => { throw error } })
       return
     }
     queueMicrotask(() => { throw error })
