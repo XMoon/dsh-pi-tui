@@ -4968,7 +4968,9 @@ public Remote selector, unrelated UI/plugins, reconnect/HMR).
 
 ### Known limitations / debt (not PR5's)
 
-The `/title` result branches are enumerated EXPLICITLY so PR6 cannot miss one:
+The `/title` WRITE-SETTLEMENT branches (`/title <name>` and its shared
+`/rename` alias) are enumerated EXPLICITLY so PR6 cannot misread this as a
+claim about every `/title` handler branch:
 
 ```text
 rejected (incl. session/writer-held) -> command restored + guidance notice      (PR5, delivered)
@@ -4977,6 +4979,11 @@ committed                            -> NO success confirmation on Remote       
 stale capture                        -> NO notice on Remote                      (still silent)
 transition in progress               -> NO notice on Remote                      (still silent)
 ```
+
+NOT part of this inventory (pre-existing, unchanged by PR5, and NOT claimed as
+closed here): the bare `/title` regeneration's `unsupported` result, a
+non-cancellation exception result, and the `cancelled` carrier (which throws
+instead of settling). They keep their previous Remote behavior.
 
 - A COMMITTED Client-owned TUI command renders no result text on Remote (no
   `title set: <name>` confirmation), and the `/title` `stale`/`transitioning`
