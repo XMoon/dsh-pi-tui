@@ -52,7 +52,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
+import { symbols } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { loadRemoteApplicationRuntime } from '../src/runtime/backend-loader.ts'
 import {
   createRemoteApplicationHostFixture,
@@ -60,6 +62,12 @@ import {
   testPromptSerializer,
   waitFor,
 } from './support/remote-application-fixture.ts'
+
+/** Unwrap a Cordis traceable service proxy to its implementation. */
+function unwrapService(value: unknown): unknown {
+  const original = (value as Record<symbol, unknown>)[symbols.original]
+  return original ?? value
+}
 
 const PRESET = 'm3-4-pr1-preset'
 const SEED_SESSION_ID = 'm3-4-pr1-seed'
@@ -82,7 +90,7 @@ test('A. the aggregate composes ONE Host runtime, ONE Client runtime, ONE Backen
   const runtime = await (await loadApplicationRuntimeModule()).createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => { prerequisites += 1 },
-    promptSerializer: testPromptSerializer,
+    clientUiStartup: {},
   })
   t.after(() => runtime.selected.disposeTransport().catch(() => host.dispose()))
 
@@ -103,6 +111,23 @@ test('A. the aggregate composes ONE Host runtime, ONE Client runtime, ONE Backen
   // No second semantic assembly exists to observe: the aggregate's parts are
   // exactly the constructors it called once (structural source lock below).
 
+  // M3-6 PR1: the aggregate's Client UI subtree owns the extension service
+  // on the EXACT official Client Context (identity, never a second graph),
+  // and the first-party builtins registered on that same Client service.
+  // `ctx.get()` returns a fresh Cordis traceable proxy per call, so the
+  // identity proof unwraps `symbols.original` before comparing.
+  assert.equal(unwrapService(runtime.clientUi.extensionService),
+    unwrapService(runtime.wire.client.context.get(PI_TUI_EXTENSIONS_SERVICE)),
+    'aggregate.clientUi.extensionService unwraps to the wire Client Context service implementation')
+  const clientLedger = (runtime.clientUi.extensionService as unknown as {
+    _ledger(): { snapshot(slot: string): { records: Array<{ id: string }> } }
+  })._ledger()
+  assert.ok(
+    clientLedger.snapshot('chrome.header.badge').records.some(record => record.id === 'builtin-version')
+      && clientLedger.snapshot('input.dock.item').records.some(record => record.id === 'builtin-todo-summary'),
+    'the first-party builtins registered on the Client Context service',
+  )
+
   // The Client is genuinely ready over the official wire (not a stub).
   await waitFor('the Client Session list to become ready', () =>
     runtime.wire.client.sessions.list.getSnapshot().phase === 'ready')
@@ -122,7 +147,7 @@ test('B. a retained Remote Session handle maps to the exact owner and retirement
   const runtime = await (await loadApplicationRuntimeModule()).createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
-    promptSerializer: testPromptSerializer,
+    clientUiStartup: {},
   })
   t.after(() => runtime.selected.disposeTransport().catch(() => host.dispose()))
   const client = runtime.wire.client
@@ -155,7 +180,7 @@ test('C. disposeTransport disposes adapters before the Client and the Client bef
   const runtime = await (await loadApplicationRuntimeModule()).createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
-    promptSerializer: testPromptSerializer,
+    clientUiStartup: {},
   })
 
   // The disposal-ORDER proof observes each step's ACTUAL lifetime event:
@@ -204,7 +229,7 @@ test('C2. disposeTransport preserves errors from every step and never truncates 
   const runtime = await (await loadApplicationRuntimeModule()).createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
-    promptSerializer: testPromptSerializer,
+    clientUiStartup: {},
   })
   t.after(() => host.dispose())
 
@@ -242,6 +267,55 @@ test('C2. disposeTransport preserves errors from every step and never truncates 
   await assert.doesNotReject(() => runtime.selected.disposeTransport())
 })
 
+test('C3. the Client UI subtree disposes independently before the official Client core, with a separate Host-negative service (M3-6 PR1)', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
+
+  // HOST-NEGATIVE setup: a SEPARATE extension service on the ordinary Host
+  // Context (the negative-control authority — present, distinct, and never
+  // the Remote runner's selected extension authority).
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  host.ctx.provide(TUI_STARTUP_SERVICE, {})
+  const extensionHostModule = await import('../src/extensions.ts')
+  await host.ctx.plugin(extensionHostModule)
+  const hostService = host.ctx.get(PI_TUI_EXTENSIONS_SERVICE)
+
+  const runtime = await (await loadApplicationRuntimeModule()).createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: {},
+  })
+  t.after(() => runtime.selected.disposeTransport().catch(() => host.dispose()))
+
+  // Identity separation: the aggregate's Client UI service is the Client
+  // Context service and is a DIFFERENT implementation from the
+  // simultaneously mounted Host-context service.
+  assert.equal(unwrapService(runtime.clientUi.extensionService),
+    unwrapService(runtime.wire.client.context.get(PI_TUI_EXTENSIONS_SERVICE)),
+    'the aggregate carries the Client Context extension service')
+  assert.notEqual(hostService, undefined, 'the negative-control Host service is mounted')
+  assert.notEqual(unwrapService(runtime.clientUi.extensionService), unwrapService(hostService),
+    'the Host-context extension service is a distinct implementation from the Client service')
+
+  // Independent subtree disposal: the Client UI fibers go away while the
+  // official Client Context (and its readiness) is still alive.
+  await runtime.clientUi.dispose()
+  assert.equal(runtime.wire.client.context.get(PI_TUI_EXTENSIONS_SERVICE), undefined,
+    'the Client UI subtree disposal removed the Client extension service')
+  assert.equal(runtime.wire.client.sessions.list.getSnapshot().phase, 'ready',
+    'the official Client Context is still alive after the subtree disposal')
+  assert.notEqual(host.ctx.get(PI_TUI_EXTENSIONS_SERVICE), undefined,
+    'the negative-control Host service survives independently (separate Context)')
+
+  // The aggregate's transport disposal stays idempotent with the subtree
+  // already disposed (its clientUi step is a contained no-op).
+  await runtime.selected.disposeTransport()
+  assert.equal(host.ctx.reflect.get('connection'), undefined,
+    'the full transport disposal still unwinds the wire after the subtree was disposed separately')
+  await host.dispose()
+})
+
 test('D1. a Host-side wire construction failure unwinds the mounted M3 fibers and leaves the ordinary Host intact', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
@@ -256,6 +330,7 @@ test('D1. a Host-side wire construction failure unwinds the mounted M3 fibers an
       hostContext: host.ctx,
       waitForHostPrerequisites: async () => {},
       promptSerializer: testPromptSerializer,
+      clientUiStartup: {},
     }),
     /fileUploads/,
     'the wire construction failure must surface through the aggregate',
@@ -280,6 +355,7 @@ test('D2. a post-wire application composition failure (Client exists) unwinds th
   const options = {
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
+    clientUiStartup: {},
     get promptSerializer(): never {
       clientRowsMountedAtInjection = host.ctx.reflect.get('connection') !== undefined
       throw induced

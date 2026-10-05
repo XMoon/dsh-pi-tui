@@ -96,10 +96,12 @@ test('L6 §7.4-9: Remote /rewind lists an out-of-window turn from turnOutline, t
     seedTurn(turn, turn === 2 ? longPrompt : `pr4 prompt ${turn}`)
   }
 
-  // The production Remote aggregate (NO serializer stub).
+  // The production Remote aggregate (NO serializer stub). The runner
+  // receives the same startup facts (M3-6 PR1).
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -124,6 +126,7 @@ test('L6 §7.4-9: Remote /rewind lists an out-of-window turn from turnOutline, t
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -236,6 +239,7 @@ test('L6 §7.4-15 stale rewind: select A\'s old turn → switch away mid-loadThr
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: sessionA },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -275,6 +279,7 @@ test('L6 §7.4-15 stale rewind: select A\'s old turn → switch away mid-loadThr
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -366,7 +371,11 @@ test('PR5 R7-4: a rewind pre-admission LOAD failure follows the PICKER identity 
   seed(mainId, 'load')
   seed(targetId, 'target')
 
-  const aggregate = await createRemoteApplicationRuntime({ hostContext: host.ctx, waitForHostPrerequisites: async () => {} })
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
   const vt = new VirtualTerminal(110, 32)
   const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
@@ -380,7 +389,7 @@ test('PR5 R7-4: a rewind pre-admission LOAD failure follows the PICKER identity 
   host.ctx.provide('appExit', (code: number) => { void code })
   const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
   host.ctx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
-  const override: RemoteApplicationOverride = { selected: aggregate.selected, presentation: aggregate.presentation }
+  const override: RemoteApplicationOverride = { selected: aggregate.selected, presentation: aggregate.presentation, extensionService: aggregate.clientUi.extensionService }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
   TuiApp.prototype.start = function patchedStart(this: unknown) { apps.push(this); return originalStart.call(this) }

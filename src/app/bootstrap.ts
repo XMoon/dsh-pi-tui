@@ -213,6 +213,7 @@ export async function selectApplicationRuntime(
       waitForHostPrerequisites: selection.remote.waitForHostPrerequisites,
       signal: selection.remote.signal,
       promptSerializer: selection.remote.promptSerializer as Parameters<typeof createRemoteApplicationRuntime>[0]['promptSerializer'],
+      clientUiStartup: selection.remote.clientUiStartup,
     })
     return runtime.selected
   }
@@ -2256,7 +2257,15 @@ export function applyRunnerWithRuntime(
     // the host and its generation-leased theme-unload hook are surface-owned;
     // the runner only resolves the service (it never becomes a service
     // locator inside `app/surface`).
-    extensionService = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
+    // M3-6 PR1: the branch discriminator is `override === undefined` — the
+    // SAME internal Remote composition discriminator the presentation
+    // sources use. Direct resolves the existing Host/profile service; Remote
+    // consumes the aggregate's SELECTED Client-local service through the
+    // override and NEVER evaluates the Host lookup as its extension
+    // authority (no `??` fallback in either direction).
+    extensionService = override === undefined
+      ? ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
+      : override.extensionService as typeof extensionService
     if (extensionService !== undefined) surface.attachExtensionHost(extensionService)
     // The TUI is about to mount: the pre-mount status line must be gone
     // before the first frame (no stale scrollback line after mount).

@@ -34,7 +34,10 @@ M3-5 PR3 DONE/MERGED (Remote selected-Job viewer closure: the selected-Job detai
 M3-5 PR5 DONE/MERGED (writer-held caller recovery + remaining secondary presentation: the ordinary prompt consumes `WriteOutcome.rejected` INSIDE the held Session writer (restore once + terminal code-bearing ack + the actionable guidance, never a generic failure), the Remote preset adapter now classifies the exact `session/writer-held` as a proven refusal with preserved details and centralized guidance, a TRUE indeterminate typed `/preset <id>` records `suppressed` so no retry-ready command is restored, `/title` surfaces its own refusal notice on the Client-owned command path, and the real two-process kernel write lease is proven at L5 (lifecycle parity Flow F) and L6 (real runner prompt + `/title` + `/preset`, plus an explicit retry that commits only after the holder is killed) — MERGED as PR #217 into `next @ bc3e95fe`; see the M3-5 PR5 section)
 M3-5 PR6 DONE      (hardening / stage closure: the Remote Task composition no longer resolves Host `ctx.jobs`/`ctx.subagents` (Direct-only gate + source lock), plus the stale/currentness matrix, duplicate/shadow-authority audit, UI/UX disposition, live-doc reconciliation and the deferred-with-owner table — see the M3-5 PR6 section)
 M3-5 DONE          (secondary surfaces + writer-held recovery closed; PR1–PR6 landed)
-M3-6 NEXT          (locality / extensions / reconnect / closure; not started)
+M3-6 PR1 DONE      (Client UI / Extension locality: the Remote application's UI extension
+                    authority moved from the ordinary Host runner Context to the existing
+                    official Client Context — see the M3-6 PR1 section)
+M3-6 IN PROGRESS   (PR1 landed on this branch; PR2 full-surface reconnect recovery NEXT)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -69,7 +72,8 @@ M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
 M3-5 = DONE                 (PR1–PR6 landed; PR6 stage closure/hardening closed
                              the Remote Task locality gap and reconciled the
                              live closure record)
-M3-6 = NEXT                 (locality / extensions / reconnect / closure; not started)
+M3-6 = IN PROGRESS          (PR1 Client UI / Extension locality complete;
+                             PR2 full-surface reconnect recovery NEXT)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
@@ -5283,4 +5287,80 @@ metadata changed; the `A5b-0 matrix CURRENT (deep check)` gate is green.
 - Deferred items promoted with owner: the deferred-with-owner table above.
 
 M3-5 = DONE
-M3-6 = NEXT
+M3-6 = IN PROGRESS (PR1 Client UI / Extension locality landed; PR2 NEXT)
+
+## M3-6 status
+
+### M3-6 PR1 — Client UI / Extension locality (DONE)
+
+Baseline: `next @ c41a36c21123aac18774f56217c33a5ce0d4e389` (M3-5 PR6 merged).
+PR1 closed the one frozen §8 ownership violation
+(`docs/m3-entry-contract.md` §8 assigns `PiTuiExtensionService`, the
+contribution ledger, the command/theme/autocomplete/settings/keybinding/
+renderer/editor registries, SurfaceHost integration and the Advanced/Unstable
+captures to the **Client Context** under wire mode):
+
+- **Previous violation**: `app/bootstrap.ts` resolved the Remote runner's
+  extension service with an unconditional
+  `ctx.get(PI_TUI_EXTENSIONS_SERVICE)` on the ordinary Host runner Context —
+  the experimental Remote application therefore used Host-context extension
+  state even though its semantic/backend/presentation came from the Client
+  graph.
+- **Final owner graph** (experimental Remote; Direct unchanged):
+  `wire.client.context` (the ONE existing official Client Context from
+  `app/remote/client-runtime.ts`) now hosts `RemoteClientUiRuntime`
+  (`src/app/remote/client-ui-runtime.ts`), which mounts exactly three fibers
+  in order — the Client-local `tuiStartup` facts provider (a frozen detached
+  `sessionId`/`presetId` copy; the Host-only `markSurfaceMounted` callback is
+  structurally excluded), the `@xmoon76/dsh-pi-tui/extensions` plugin module
+  (extension host), and the `@xmoon76/dsh-pi-tui/builtins` plugin module
+  (first-party contributions through the same public extension API). The
+  resolved `PiTuiExtensionService` crosses to `app/bootstrap.ts` only as the
+  narrow `RemoteApplicationOverride.extensionService` object (never the
+  Client Context, never a Cordis face), and the bootstrap selects the
+  extension authority by the branch discriminator `override === undefined`:
+  Direct reads the existing Host/profile service exactly as before; Remote
+  consumes `override.extensionService` and never evaluates the Host lookup
+  (source-locked in `test/application-runtime-selection.test.ts`, including
+  the no-`??`-fallback rule).
+- **Client UI subtree disposal owner/order**: `RemoteClientUiRuntime.dispose()`
+  is explicit, idempotent and reverse (builtins fiber → extension-host fiber
+  → startup facts fiber), never disposing the Client Context itself. The
+  aggregate's transport disposal runs `clientUi.dispose()` FIRST
+  (`clientUi → presentation.task → backendRuntime → wire`), so
+  extension/plugin cleanup happens while every official Client service still
+  exists and after the TUI surface has detached its extension seams.
+- **Stale M3-4 command L6 evidence corrected**
+  (`test/runner-remote-command-plane.test.ts`): the old §7.4-2 fixture
+  mounted the extension host on `host.ctx` and claimed "the Client callback
+  runs in the Client Context" without proving it. PR1 rewrote the fixture:
+  the positive extension command and the collision registration are
+  registered by a REAL Client plugin fiber on
+  `aggregate.wire.client.context` through its own plugin context
+  (caller-fiber ownership preserved), and a simultaneously mounted
+  Host-context extension service with the same test identity acts as the
+  negative control.
+- **New L6 source→decision→sink proof**: `/pr4ext` executes with
+  `clientCalls == 1`, `hostExtensionCalls == 0` and Host DSH `command/run`
+  rows `== 0` — source = Client Context contribution, decision =
+  `override.extensionService`, sink = real Remote runner command dispatch,
+  negative = the Host-context twin present and ignored. The Host DSH command
+  collision scenario still wins over a Client-context registration
+  (relocation did not weaken Host command authority), and Plugin Manager
+  TUI-extension observations read the selected Client service
+  (`test/runner-remote-plugin-manager.test.ts`) while package
+  enable/disable/read stays `PluginManagerPort`/Host-owned.
+- **Direct / no-public-selector UI/UX disposition**: Direct is
+  `NO_USER_VISIBLE_CHANGE` (same service, same builtins, same extension API,
+  same profile rows; `cordis.patch.yml` unchanged). The experimental Remote
+  renders the same builtin contributions from the correct owner; no notice,
+  badge, label or setting was added, and there is still no public
+  Remote selector, external attach or IPC/TCP.
+- **Deferrals**: full-surface reconnect recovery and the last-good
+  Host-command claim after generation replacement → M3-6 PR2; runner-wide
+  HMR/fatal/partial-disposer qualification → M3-6 PR3; the M3 closure matrix
+  and `M3 DONE` promotion → M3-6 PR4. PR1 implements §8; it does not rewrite
+  the frozen contract.
+
+M3-6 PR1 = DONE (Client UI / Extension locality)
+M3-6 PR2 = NEXT (full-surface reconnect recovery)

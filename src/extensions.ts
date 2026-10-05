@@ -2,10 +2,13 @@
  * The public extension SDK entry: `@xmoon76/dsh-pi-tui/extensions`.
  *
  * Exports the public contracts (types, capabilities, slot names) and the
- * Cordis plugin that PROVIDES the `piTuiExtensions` service (`pi-tui-extension-host`
- * Loader row). Third-party plugins import ONLY this entry — never
- * `@xmoon76/pi-tui`, `TuiApp`, or repository internals (the packed `.d.mts`
- * leak gate enforces that).
+ * Cordis plugin that PROVIDES the `piTuiExtensions` service (Direct: the
+ * `pi-tui-extension-host` Loader row in `cordis.patch.yml`; Remote: the
+ * Client UI subtree mounts this module as a Client plugin fiber on the
+ * official Client Context — same module, no backend branching inside).
+ * Third-party plugins import ONLY this entry — never `@xmoon76/pi-tui`,
+ * `TuiApp`, or repository internals (the packed `.d.mts` leak gate
+ * enforces that).
  *
  * M1 scope: registry primitives only. The service is available before any
  * TUI surface exists (`tuiStartup` gate), so a plugin can register during

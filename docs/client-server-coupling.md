@@ -123,8 +123,29 @@ lands.
 | M3 Host API/session helper rows | Host-owned | `M3_ADDITIVE_HOST` | `RemoteHostRuntime` (§2.4.1) | the M3 adapters | official Host plugins + generated Remotes | additive; mount only the frozen §2.4.1 closure | `test/remote-client-runtime.test.ts` |
 | TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority; the Remote Task composition resolves no Host `ctx.jobs`/`ctx.subagents` (Direct-only gate, M3-5 PR6) | `test/runner-viewer-task-integration.test.ts` + `test/runner-remote-task-center.test.ts` + the Remote Task locality source lock in `test/application-runtime-selection.test.ts` |
 | Application runtime selection (`SelectedApplicationRuntime`) | Client-local composition | composition spine (M3-4 PR1) | `src/app/remote/application-runtime.ts` (Remote aggregate) + `selectApplicationRuntime` in `src/app/bootstrap.ts` (the seam) | `bindSessionRuntime` common inputs (`owners`/`retirement`/`lifecycle`) and the runner's `backend` | Remote aggregate reuses the M3-1 wire + M3-3B backend + M3-2 owner services; reached ONLY through `runtime/backend-loader.ts` (the ONE frozen dynamic edge into `app/remote/runtime.ts`, which statically re-exports the aggregate) | exactly ONE Remote Host/Client graph, ONE semantic assembly, ONE owner registry per selected runtime; no second construction site; no public/config/env selector — normal `apply()` stays Direct | `test/remote-application-runtime.test.ts` + `test/application-runtime-selection.test.ts` + the dynamic-boundary rules in `test/pre-m3-architecture-gate.test.mjs` |
+| PiTui Client UI subtree (`RemoteClientUiRuntime`) | CLIENT_LOCAL | `CLIENT_LOCAL` | `src/app/remote/client-ui-runtime.ts`, composed by the Remote application runtime (M3-6 PR1) on the EXISTING official Client Context (`wire.client.context` — `client-runtime.ts` stays the official transport/data core and creates that Context exactly once) | SurfaceRuntime / extension-facing TUI owners (through `RemoteApplicationOverride.extensionService` — the narrow service object, never the Client Context or a Cordis face) | none for extension callbacks (TUI-local `src/extensions.ts`/`src/builtins.ts` plugin fibers); plugins may separately consume public Client/Remote facts | one subtree per Remote application aggregate: exactly three fibers (Client-local tuiStartup facts provider → extension host → builtins), no second Client Context, no generic Loader/profile/bundle discovery | `test/remote-client-ui-runtime.test.ts` (component) + `test/remote-application-runtime.test.ts` (aggregate) + `test/runner-remote-command-plane.test.ts` (L6 locality) |
 
 The exact package/row names may evolve; the ownership rule must remain explicit.
+
+### TUI extension/builtins module ownership (M3-6 PR1)
+
+`src/extensions.ts` and `src/builtins.ts` are the SAME TUI-local modules on
+both compositions — they carry no Host business coupling and no backend
+branching:
+
+```text
+Direct  -> mounted by the ordinary profile Context (cordis.patch.yml rows
+           pi-tui-extension-host / pi-tui-builtins)
+Remote  -> mounted as Client plugin fibers by RemoteClientUiRuntime on the
+           official Client application Context
+```
+
+The Remote branch's disposal is explicit and reverse (builtins → extension
+host → startup facts) and runs before the official Client core
+(`clientUi.dispose()` is the FIRST step of the aggregate's transport
+disposal). The Remote bootstrap never resolves the Host-context
+`piTuiExtensions` as its UI authority (branch-exclusive selection locked in
+`test/application-runtime-selection.test.ts`).
 
 ### Duplicate-mount prohibition
 
