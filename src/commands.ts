@@ -5141,10 +5141,14 @@ export function registerTuiCommands(
           if (outcome.kind === 'cancelled') throw cancellationError('session title write cancelled')
           if (outcome.kind === 'indeterminate') {
             recordCommandDraftDisposition(invocation.commandId, 'suppressed')
-            return {
-              kind: 'error',
-              text: 'session title result is indeterminate — do not retry automatically',
-            }
+            const message = 'session title result is indeterminate — do not retry automatically'
+            // PR5 (external review F5): the suppressed draft must NOT be the
+            // only outcome — on the Remote Client-owned command path there is
+            // no official command card either, so the indeterminate no-retry
+            // notice is emitted with the same inline pattern as the rejected
+            // branch below and the `/preset`/`/model` handlers.
+            app.notify(message, 'error')
+            return { kind: 'error', text: message }
           }
           const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
           // PR5 (Slice C1): the Remote Client-owned command path renders no

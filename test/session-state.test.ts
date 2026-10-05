@@ -1146,6 +1146,47 @@ test('/title foo reports a superseded capture as the stale notice', async () => 
   app.stop()
 })
 
+test('/title foo renders an indeterminate write as a no-retry notice, never a silent suppression', async () => {
+  // External review F5: the indeterminate branch suppresses the draft
+  // disposition (no retry-ready intent), but a suppressed command with no
+  // notice is invisible on the Remote Client-owned command path. The handler
+  // must RENDER its own no-retry notice.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  const writer = (runner as unknown as { sessionWriter: Record<string, unknown> }).sessionWriter
+  let renames = 0
+  Object.assign(runner, {
+    sessionWriter: {
+      ...writer,
+      rename: async () => {
+        renames += 1
+        return {
+          kind: 'indeterminate' as const,
+          error: { code: 'gateway/internal', message: 'the rename may have committed' },
+        }
+      },
+    },
+  })
+  registerTuiCommands(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /do not retry/, 'the no-retry error result is preserved')
+  assert.equal(renames, 1, 'an indeterminate title write is never retried')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /do not retry/,
+    'the indeterminate no-retry notice must be RENDERED, not only returned')
+  app.stop()
+})
+
 test('/title (regenerate) reports a frozen transition as the transition notice, never the stale capture', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
