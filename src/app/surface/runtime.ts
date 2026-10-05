@@ -290,21 +290,23 @@ export interface SurfaceSeamDeps {
 }
 
 /**
- * The jobs-registry capability the Task Center consumes (A4-6, plan §15).
- * Optional: a composition without the jobs service has no dock roster feed and
- * no Job viewer. The runner keeps the concrete registry read and the
- * `JobId`/`SessionId` casts; the surface never imports the Host service. The
- * retained-snapshot fence for a transient read failure is owned here, in
- * {@link SurfaceRuntime.attachTasks}.
+ * The roster-feed capability the Task Center consumes (A4-6, plan §15; M3-5
+ * PR2/PR3). Optional: a composition without a roster source has no dock roster
+ * feed and no Job viewer. The runner keeps the selected backend-specific read
+ * (Direct maps it to the Host JobRegistry `ctx.jobs`; Remote to the official
+ * Client Jobs via `remoteSources.task.jobs()`) plus the `JobId`/`SessionId`
+ * casts; the surface never imports the Host service or learns which backend
+ * produced the rows. The retained-snapshot fence for a transient read failure
+ * is owned here, in {@link SurfaceRuntime.attachTasks}.
  *
  * `list`/`subscribe` are ONLY the roster feed. The selected-Job detail/Stop
  * capability is `jobObservation` (both backends), so this interface never
- * carries a registry detail/kill read: the neutral Task/Job UI has no
+ * carries a backend-specific detail/kill read: the neutral Task/Job UI has no
  * backend-specific Job authority (M3-5 PR3).
  */
 export interface TaskSurfaceJobs {
-  /** A FRESH registry read of the current root's roster (the public `list`
-   *  contract; throws like the registry on a failed read). */
+  /** A FRESH roster read of the current root's roster (the selected source's
+   *  `list` contract; throws on a failed read). */
   list(sessionId: string | undefined): readonly TaskBrowserJobInput[]
   /** Subscribe to scope-owned roster/runtime events (the `owners: 'scope'`
    *  filter). */

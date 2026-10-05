@@ -30,9 +30,11 @@ M3-4 DONE          (PR1–PR5 landed and PR5 merged; the main TUI application + 
 M3-5 PR1 DONE      (child display-subject status foundation: Direct SessionStatus is Session-subject-neutral, ONE shared `SessionStatus(sessionId)` read, the viewed child's Session-owned facts (model/preset/permission/context/usage/todos/cwd/title/goal) come from its own projection, the released extension v2 live-session snapshot preserved with the additive `session.displaySubject`, atomic main↔child↔child transitions — see the M3-5 PR1 status section. Remote child SessionStatus authority is qualified; the Remote Task/child surface stays PR2)
 M3-5 PR4 DONE      (Remote Plugin Manager closure: lifecycle/qualification over an ALREADY backend-neutral surface — one invalidation hint on `PluginManagerPort`, Direct/Remote mappings, demand-aware controller rereads, latest-started read currentness, dispose hardening, real Remote `/plugins` + Settings dual-entry L6, external-change and reconnect invalidation L6 — see the M3-5 PR4 section)
 M3-5 PR2 DONE/MERGED (Remote Task Center + real child viewer: the Task read contract is the full descendant tree + root job roster on both backends, `TaskBrowserRuntime` consumes the SELECTED semantic Task read, Remote invalidation is observable-driven, `tuiChildView` owns one child SessionReference per viewer acquired from the exact SubagentAddress, the ONE viewer hydrates through the shared PresentationReader + RemoteLiveIngress, PageUp targets the active display subject, the child steer subject is transport-neutral, and durable images read through the owning presentation's exact scoped retained Session — MERGED as PR #216 into `next @ cd498a2f`; see the M3-5 PR2 section)
-M3-5 PR3 LANDED    (Remote selected-Job viewer closure: the selected-Job detail/Stop is the ONE semantic `jobObservation` port on BOTH backends, `TaskSurfaceJobs` is the roster feed only (`list`/`subscribe`), the viewer's facts come from the official Client `IJobs.observe` NON-CONSUMING stream and its Stop from the official `IJobs.kill`, the neutral surface carries no Direct registry `get`/`kill`, and the real post-PR2 Remote application L6 drives `/tasks` → Job row → OutputViewer → Stop → official roster/follow convergence. Direct records the same human-kill reason. rc.2 `JobView` still carries no stable child id, so a `kind:'subagent'` Job stays a detail view — see the M3-5 PR3 section. **PR open; mark DONE only after merge**)
-M3-5 PR5 LANDED    (writer-held caller recovery + remaining secondary presentation: the ordinary prompt consumes `WriteOutcome.rejected` INSIDE the held Session writer (restore once + terminal code-bearing ack + the actionable guidance, never a generic failure), the Remote preset adapter now classifies the exact `session/writer-held` as a proven refusal with preserved details and centralized guidance, a TRUE indeterminate typed `/preset <id>` records `suppressed` so no retry-ready command is restored, `/title` surfaces its own refusal notice on the Client-owned command path, and the real two-process kernel write lease is proven at L5 (lifecycle parity Flow F) and L6 (real runner prompt + `/title` + `/preset`, plus an explicit retry that commits only after the holder is killed) — see the M3-5 PR5 section. **PR open; mark DONE only after merge**)
-M3-5 IN PROGRESS   (secondary surfaces + writer-held recovery; PR1/PR2/PR4 merged, PR3 and PR5 landed and PR open, PR6 remains — see the migration stage pointer)
+M3-5 PR3 DONE/MERGED (Remote selected-Job viewer closure: the selected-Job detail/Stop is the ONE semantic `jobObservation` port on BOTH backends, `TaskSurfaceJobs` is the roster feed only (`list`/`subscribe`), the viewer's facts come from the official Client `IJobs.observe` NON-CONSUMING stream and its Stop from the official `IJobs.kill`, the neutral surface carries no Direct registry `get`/`kill`, and the real post-PR2 Remote application L6 drives `/tasks` → Job row → OutputViewer → Stop → official roster/follow convergence. Direct records the same human-kill reason. rc.2 `JobView` still carries no stable child id, so a `kind:'subagent'` Job stays a detail view — MERGED as PR #215 into `next @ 8e851981`; see the M3-5 PR3 section)
+M3-5 PR5 DONE/MERGED (writer-held caller recovery + remaining secondary presentation: the ordinary prompt consumes `WriteOutcome.rejected` INSIDE the held Session writer (restore once + terminal code-bearing ack + the actionable guidance, never a generic failure), the Remote preset adapter now classifies the exact `session/writer-held` as a proven refusal with preserved details and centralized guidance, a TRUE indeterminate typed `/preset <id>` records `suppressed` so no retry-ready command is restored, `/title` surfaces its own refusal notice on the Client-owned command path, and the real two-process kernel write lease is proven at L5 (lifecycle parity Flow F) and L6 (real runner prompt + `/title` + `/preset`, plus an explicit retry that commits only after the holder is killed) — MERGED as PR #217 into `next @ bc3e95fe`; see the M3-5 PR5 section)
+M3-5 PR6 DONE      (hardening / stage closure: the Remote Task composition no longer resolves Host `ctx.jobs`/`ctx.subagents` (Direct-only gate + source lock), plus the stale/currentness matrix, duplicate/shadow-authority audit, UI/UX disposition, live-doc reconciliation and the deferred-with-owner table — see the M3-5 PR6 section)
+M3-5 DONE          (secondary surfaces + writer-held recovery closed; PR1–PR6 landed)
+M3-6 NEXT          (locality / extensions / reconnect / closure; not started)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -51,8 +53,8 @@ Experimental Remote:        the M3-4 main-TUI application is closed on the wire
                            (Session reads/writes, interaction, status, command runtime,
                            rewind, images, tool cards); the M3-5 secondary surfaces
                            (child/Task Center, Job viewer, Plugin Manager) and the
-                           writer-held caller recovery (PR5) are landed, and PR6 stage
-                           closure remains; normal startup never selects it
+                           writer-held caller recovery (PR5) are closed, and PR6
+                           stage closure is complete; normal startup never selects it
 Remote writes:              available only through the experimental in-process wire
                            application path; no normal/default production Remote
                            selection
@@ -64,19 +66,17 @@ Direct rollback:           available
 
 ```text
 M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
-M3-5 = IN PROGRESS          (PR1 child display-subject status foundation,
-                             PR2 Remote Task Center + real child viewer and
-                             PR4 Remote Plugin Manager closure merged; PR3
-                             Remote selected-Job viewer closure and PR5
-                             writer-held caller recovery landed, PR open;
-                             PR6 stage closure remains)
+M3-5 = DONE                 (PR1–PR6 landed; PR6 stage closure/hardening closed
+                             the Remote Task locality gap and reconciled the
+                             live closure record)
+M3-6 = NEXT                 (locality / extensions / reconnect / closure; not started)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
 (reads, submission, status and the command runtime with their currentness
 fences). It does NOT flip the production backend: Direct remains the default,
-no public/config/env Remote selector exists, and M3 is not complete while M3-5
-and M3-6 remain.
+no public/config/env Remote selector exists, and M3 is not complete while M3-6
+remains.
 
 ## Current state
 
@@ -3600,11 +3600,15 @@ longer resolves the Host tools registry outside the Direct branch.
 
 ### Evidence
 
-- L1/L2/L3 owners and adapters: `client-command-registry`,
-  `tool-presentation-client`, `rewind-outline-authority`,
-  `permission-cycle`, `status-ownership`, `remote-command-source`,
-  `remote-session-facts-compose`, and the
-  `remote-session-reader` projection-list parity lock.
+- L2 Direct adapter: `rewind-outline-authority` (the Direct adapter half).
+- L3 Remote adapter: `remote-session-reader` and
+  `remote-surface-authority-reader` (the real Remote surface-authority reader).
+- Supporting owner/component/helper unit evidence (no L1–L6 level):
+  `tool-presentation-client`, `remote-command-source`, `permission-cycle`,
+  `remote-session-facts-compose`, `client-command-registry` and
+  `status-ownership`.
+- Architecture/source guard: `rewind-outline-authority`'s Remote no-snapshot
+  lock (the Remote side has no `snapshotEvents` / compatibility-fold path).
 - L6 Remote composition (the REAL runner over the real rc.2 Host + the
   official Client/Gateway path): `runner-remote-command-plane` (TUI built-in
   and extension callbacks with ZERO Host `command/run` rows, a Host command
@@ -4197,8 +4201,9 @@ recorded, no required row remains PARTIAL; the v2 additions
 (origin-aware authority, `/yolo`, `/status` unknown-vs-zero, rewind final
 currentness, Ctrl+R identity) are recorded above with their evidence. This
 closure state is authoritative at the MERGED HEAD (`next @ e520c016`, PR #211,
-v4 §19) — not only on the pre-merge branch. The next migration stage is M3-5
-(secondary surfaces + writer-held recovery), which is IN PROGRESS; see the
+v4 §19) — not only on the pre-merge branch. The next migration stage was M3-5
+(secondary surfaces + writer-held recovery), which was IN PROGRESS at the time
+and is now DONE (see the M3-5 PR6 section at the end of this file); see the
 M3-5 PR1/PR4 sections below. No automatic "PR6" is created for historical unchecked
 checklist items.
 
@@ -4304,7 +4309,8 @@ Closure evidence:
   — a retained Session with no live Agent answers its own model/context/usage/
   todos/cwd; retained child A / child B isolation; an unattached Session and a
   missing projection service read unavailable.
-- L1/L2 (display-subject derivation): `test/status-display-subject.test.ts` —
+- Display-subject derivation (supporting unit; no L1–L6 level):
+  `test/status-display-subject.test.ts` —
   the main subject keeps the main view/sections; every child Session-owned
   section comes from `SessionStatus(childId)`; an unavailable child status
   leaves those fields absent (never the parent's); child A → child B keeps no
@@ -4363,11 +4369,11 @@ Explicitly NOT claimed by PR1:
   merged M3-5 PR2 section, which records its own coverage limits.
 - **Delivered since PR1 (NOT remaining):** the Remote Task Center + real child
   viewer (PR2, MERGED), the child durable-image read (proven in the M3-5 PR2
-  section) and the Remote selected-Job viewer closure (PR3, LANDED / PR OPEN —
-  see the M3-5 PR3 section). **Still remaining for M3-5:** writer-held caller
-  recovery (PR5) and stage closure (PR6). The Remote Plugin Manager is outside
-  PR1's scope and is CLOSED by the M3-5 PR4 section below — no longer a
-  remaining obligation.
+  section, requalified by PR6) and the Remote selected-Job viewer closure (PR3,
+  MERGED as PR #215 — see the M3-5 PR3 section). writer-held caller recovery
+  (PR5, MERGED as PR #217) and stage closure (PR6) are closed; M3-5 is DONE.
+  The Remote Plugin Manager is outside PR1's scope and is CLOSED by the M3-5 PR4
+  section below — no longer a remaining obligation.
 
 Remote child SessionStatus authority: qualified. PR1 claimed no Remote
 child-viewer L6 (that was owned by M3-5 PR2, now merged) — see the M3-5 PR2
@@ -4375,9 +4381,8 @@ section for the delivered L6 and its coverage limits.
 
 ## M3-5 PR4 — Remote Plugin Manager closure (DONE)
 
-Scope note: this section records **M3-5 PR4 only**. M3-5 as a stage is
-**IN PROGRESS** and must not be marked DONE from this PR (PR5/PR6 remain; PR2
-merged, PR3 landed and PR open).
+Scope note: this section records **M3-5 PR4 only**. M3-5 as a stage was
+**IN PROGRESS** at PR4 time.
 
 ### Implemented authority
 
@@ -4431,23 +4436,25 @@ merged, PR3 landed and PR open).
 | External Host change invalidates an open panel | L6 | L6-D: a second Host actor's manager operation → forwarded `plugin-manager/changed` → invalidation → reread; no `R` key |
 | Reconnect invalidation | L6 | L6-E: a REAL panel Enable first, then a hand-edited profile truth (no event) which stays cached; the official `connection.reconnect()` establishes a new generation → invalidation → authoritative reread repaints the hand-edited truth, and the durable manifest stays at the hand edit (a replayed Enable would flip it back — mutation-probed) |
 | Forwarded install events over the real wire | L5 | the `L5:` scenario in the same suite (real Host install events forwarded to the Remote adapter). The controller's exact-request-id filtering, close/reopen-without-redispatch and `waitForInstall` recovery remain covered by `test/plugin-manager-install.test.ts` and `test/plugin-manager-port.test.ts` |
-| Controller disposal lifecycle | L1 (transport-neutral controller unit) / L3 (Remote adapter unit) | `test/plugin-manager-port.test.ts`: a synchronously throwing invalidation subscription releases the install subscription and rethrows; `dispose()` releases BOTH subscriptions exactly once and is idempotent; a held inventory read settled (success AND failure) after dispose never commits nor repaints; a held inspect result never advances the phase nor repaints; a late install settlement never mutates nor repaints; no `cancelInstall`. `test/remote-plugin-manager.test.ts` proves each Remote adapter disposer runs exactly once (off-call counters, repeated dispose included) |
+| Controller disposal lifecycle | controller unit (supporting; no L1–L6 level) / L3 (Remote adapter unit) | `test/plugin-manager-port.test.ts`: a synchronously throwing invalidation subscription releases the install subscription and rethrows; `dispose()` releases BOTH subscriptions exactly once and is idempotent; a held inventory read settled (success AND failure) after dispose never commits nor repaints; a held inspect result never advances the phase nor repaints; a late install settlement never mutates nor repaints; no `cancelInstall`. `test/remote-plugin-manager.test.ts` proves each Remote adapter disposer runs exactly once (off-call counters, repeated dispose included) |
 | Direct behaviour preserved | L2 / L6 | `test/plugin-manager-direct.test.ts`, `test/plugin-manager-runner-integration.test.ts` and the controller suite remain green |
 
 **Honest gap:** the network/pnpm real package *installation* L6-F scenario is
 NOT claimed at L6. It is retained at the L5 Remote-event level above; no test
 in this PR is labelled L6 for installation.
 
-### Remaining M3-5 obligations
+### Remaining M3-5 obligations (at PR4 time)
 
-PR5 (writer-held recovery) and PR6 (stage closure) remain. `M3-5 DONE` is not
-claimed anywhere in this PR.
+PR5 (writer-held recovery) and PR6 (stage closure) remained at PR4 time.
+`M3-5 DONE` was not claimed by PR4; both are closed since — PR5 merged as
+PR #217 and PR6 closed the stage (see the M3-5 PR6 section at the end of this
+file).
 
 ## M3-5 PR2 — Remote Task Center + real child viewer
 
-Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage is
-**IN PROGRESS** and must not be marked DONE from this PR (PR5/PR6 remain; PR3
-landed and PR open — see the M3-5 PR3 section at the end of this file).
+Scope note: this section records **M3-5 PR2 only**. M3-5 as a stage was
+**IN PROGRESS** at PR2 time (PR5/PR6 remained — see the M3-5 PR3 section at the
+end of this file).
 
 ### Implemented authority
 
@@ -4626,20 +4633,21 @@ landed and PR open — see the M3-5 PR3 section at the end of this file).
 
 ### Qualification
 
-- L1/L2/L3: `test/remote-task-read.test.ts` (recursive traversal, pre-order,
+- L2/L3: `test/remote-task-read.test.ts` (recursive traversal, pre-order,
   `parentId`/`depth`, `hasChildren`, unknown-mode diagnostics with children
   still traversed, branch diagnostics with sibling survival, root rejection,
   activity from the Session list, no-retain/no-log, roster watch lifecycle,
-  supersession/generation/dispose fences, Direct mapping); the Direct↔Remote
-  parity cases in `test/remote-task-read-shadow.test.ts`; the child-reference
-  contract in `test/remote-child-view.test.ts`; the durable-image read in
-  `test/remote-attachment-read.test.ts`; the transport-neutral writer subject in
-  `test/steer-subject-neutral.test.ts`; the coordinator contract in
-  `test/task-browser-runtime.test.ts`.
-- L2 Direct-preserved: `test/runner-viewer-task-integration.test.ts`,
-  `test/subagent-viewer-submit.test.ts` and the Direct Task Center suites remain
-  green; the Direct child viewer read moved into the Direct child-view source
-  with the frozen deprecated-reader allowance relocated, not doubled.
+  supersession/generation/dispose fences, Direct mapping AND the Remote adapter).
+- L3: the child-reference contract in `test/remote-child-view.test.ts`; the
+  durable-image read in `test/remote-attachment-read.test.ts`.
+- L4: the Direct↔Remote parity cases in `test/remote-task-read-shadow.test.ts`.
+- Supporting unit evidence (no L1–L6 level): the transport-neutral
+  writer-subject / steer orchestration in `test/steer-subject-neutral.test.ts`;
+  the coordinator contract in `test/task-browser-runtime.test.ts`.
+- L6 Direct application preserved: `test/runner-viewer-task-integration.test.ts`
+  and the Direct Task Center suites remain green. `test/subagent-viewer-submit.test.ts`
+  (the Direct submit unit) and the Direct child viewer source read are Direct-local
+  units; the frozen deprecated-reader allowance was relocated, not doubled.
 - L5: `pnpm smoke:remote-task-read-parity` compares the REAL Direct Host
   descendant tree against the official-Client-derived Remote tree through the
   parity shadow (`comparable: true`, zero mismatches, `skipped: []` — the former
@@ -4771,13 +4779,13 @@ follow-up), so that path is covered by the F2 teardown lock instead.
 ### Remaining M3-5 obligations
 
 PR5 (writer-held caller recovery + remaining secondary presentation) and PR6
-(stage closure) remain. PR3 is landed and PR open (see the M3-5 PR3 section
-below). `M3-5 DONE` is not claimed anywhere in this PR.
+(stage closure) remained at PR2 time. PR3 was landed (see the M3-5 PR3 section
+below). M3-5 was not claimed DONE from this PR.
 
-## M3-5 PR3 — Remote selected-Job viewer closure (LANDED; PR OPEN)
+## M3-5 PR3 — Remote selected-Job viewer closure (DONE / MERGED — PR #215 at `next @ 8e851981`)
 
-Scope note: this section records **M3-5 PR3 only**. M3-5 as a stage stays
-**IN PROGRESS** and must not be marked DONE from this PR (PR5/PR6 remain).
+Scope note: this section records **M3-5 PR3 only**. M3-5 as a stage was
+**IN PROGRESS** at PR3 time (PR5/PR6 remained).
 
 ### Baseline
 
@@ -4836,11 +4844,12 @@ mutation; an observer stream error is never treated as a Job settlement.
 
 ### Qualification evidence
 
-- **L1-L4**: `test/remote-job-observation.test.ts` (taxonomy + no-retry),
-  `test/job-observation-direct.test.ts` (Direct mapping + the unified reason),
-  `test/job-observation-parity.test.ts` (Direct↔Remote parity across the live
-  and terminal stages), `test/job-stop-notice.test.ts` (the user-facing
-  settlement text).
+- **L2–L4 adapters/parity**: `test/remote-job-observation.test.ts` (L3 taxonomy +
+  no-retry), `test/job-observation-direct.test.ts` (L2 Direct mapping + the
+  unified reason), `test/job-observation-parity.test.ts` (L4 Direct↔Remote parity
+  across the live and terminal stages).
+- **Supporting presentation unit (no L1–L6 level)**:
+  `test/job-stop-notice.test.ts` (the user-facing settlement text).
 - **L5**: the real generated-wire `observe`+`kill` case in
   `test/remote-client-runtime.test.ts` (roster AND follow convergence in one
   Client graph).
@@ -4863,15 +4872,18 @@ rc.2 `JobView` has no stable child Session identity, so a subagent Job cannot
 be linked to its child transcript; the Job-detail fallback is the truthful
 behavior and no local correlation bridge exists.
 
-### Remaining M3-5 obligations
+### Remaining M3-5 obligations (at PR3 time)
 
 PR5 (writer-held caller recovery + remaining secondary presentation) and PR6
-(stage closure) remain. `M3-5 DONE` is not claimed here.
+(stage closure) remained at PR3 time. `M3-5 DONE` was not claimed by PR3; both
+are closed since — PR5 merged as PR#217 and PR6 closed the stage (see the M3-5
+PR6 section at the end of this file).
 
-## M3-5 PR5 — writer-held caller recovery + remaining secondary presentation (LANDED; PR OPEN)
+## M3-5 PR5 — writer-held caller recovery + remaining secondary presentation (DONE / MERGED — PR #217 at `next @ bc3e95fe`)
 
-Scope note: this section records **M3-5 PR5 only**. M3-5 as a stage stays
-**IN PROGRESS**; PR6 (stage closure) remains. `M3-5 DONE` is not claimed.
+Scope note: this section records **M3-5 PR5 only**. M3-5 as a stage was
+**IN PROGRESS** at PR5 time; PR6 (stage closure) remained. `M3-5 DONE` was not
+claimed by PR5.
 
 Authority contract: the semantic `session/writer-held` contract was already
 frozen (`docs/m3-entry-contract.md`, `docs/concurrency.md`). PR5 closes the
@@ -4948,7 +4960,7 @@ Direct; that duplication already exists for `/preset` and `/model`.
 
 ### Real reachability / qualification
 
-| Requirement | L1/L2 | L3 | L5 | L6 |
+| Requirement | Port / owner-unit evidence | L3 | L5 | L6 |
 |---|---|---|---|---|
 | ordinary prompt structured rejection settlement | `test/a3-writer-admission.test.ts`: exact restore-once + code-bearing ack + guidance + no consume/no generic failure; indeterminate and unsupported negative controls; the writer-barrier-order test proves EVERY settlement step ran while the writer still held the barrier (`activeWriters === 1`, transition not yet run) | Remote `RemoteSessionWriter.prompt` mapping (existing) | real generated-Client rejected result (`Flow F`) | real Remote runner: draft restored exactly once, optimistic row settled, guidance visible, no durable `user/message`, no Host Agent activated |
 | Remote preset writer-held | existing preset port | `test/remote-preset-port.test.ts`: exact code + `details.sessionId` + guidance, empty details dropped, `session/post-commit-failed`/`gateway/internal` stay indeterminate | `Flow F` preset adapter rejected | real runner `/preset <alt>`: command restored, guidance visible, no durable `agent-preset/selected`, and the RENDERED welcome-card preset row never becomes the requested alternate |
@@ -4997,9 +5009,278 @@ instead of settling). They keep their previous Remote behavior.
 
 ### Remaining M3-5 obligations
 
-PR6 (M3-5 hardening / stage closure) remains: reconcile every M3-5
-entry-contract bullet with implementation, finish the child durable image read
-through the child `session/attachment`, refresh the stale-generation matrix,
+PR6 (M3-5 hardening / stage closure) remained at PR5 time: reconcile every M3-5
+entry-contract bullet with implementation, refresh the stale-generation matrix,
 audit remaining Remote `ctx.jobs`/`ctx.subagents` reachability and shadow state,
-and promote intentional leftovers with an explicit owner. `M3-5 DONE` is not
-claimed here.
+and promote intentional leftovers with an explicit owner. The child durable-image
+read was already delivered by PR2 and is requalified by PR6; PR6 performs no
+image production rewrite. `M3-5 DONE` was not claimed at PR5 time — it is claimed
+by the M3-5 PR6 section below.
+
+## M3-5 PR6 — hardening / stage closure (DONE)
+
+Scope note: this section closes **M3-5**. It records the one remaining M3-5
+production cleanup (Remote Task locality), the stage-wide stale/currentness
+matrix, the duplicate/shadow-authority audit, the UI/UX disposition, the
+deferred-with-owner table and the closure evidence. **M3-6 remains a separate
+stage** (locality / extensions / reconnect / closure) and is not started here.
+
+### Baseline and selected contract
+
+```text
+Repository baseline:  next @ bc3e95fe75a13a46e97eb458cf35753c6de6f9e0 (PR5 merge)
+Package:              @xmoon76/dsh-pi-tui@0.5.1
+Selected DSH:         0.2.0-rc.2 (source authority 639ed015397290b3745d163aafe02ffee4aa3f84)
+```
+
+PR6 does not retarget DSH (upstream `0.2.1-alpha.1` exists, but the selected
+build/test contract stays `0.2.0-rc.2`), adds no semantic port / DTO / Remote RPC
+/ error taxonomy, and reopens no M3-4/M3-5 architecture.
+
+### Production fix — Task Host services are Direct-only
+
+`src/app/bootstrap.ts` composes the Task Center with:
+
+```ts
+const jobs = remoteSources === undefined ? ctx.get('jobs') : undefined
+const subagents = remoteSources === undefined ? ctx.get('subagents') : undefined
+```
+
+Before PR6 the `subagents` lookup was unconditional: the Remote branch never
+consumed the value (`directTaskReader` is disabled when `remoteSources !==
+undefined`) but still resolved the Host service. PR6 gates BOTH lookups on the
+Direct branch, so a Remote-selected application resolves neither `ctx.jobs` nor
+`ctx.subagents`.
+
+```text
+Direct Task composition:  ctx.jobs / ctx.subagents -> DirectTaskReader + Direct
+                          child source + Direct Job observation adapter
+Remote Task composition:  RemoteApplicationSources.task / childView +
+                          backend.jobObservation; neither Host service resolved
+```
+
+The rest of the Task composition is unchanged; no Task semantic, Session
+identity, Job authority or layout moved. UI disposition:
+`NO_USER_VISIBLE_CHANGE`. `scripts/client-boundary-baseline.json` is
+intentionally unchanged — `src/app/bootstrap.ts` is the composition root and
+still lexically contains both lookups; the closure fact is branch reachability,
+not lexical absence. Source lock:
+`test/application-runtime-selection.test.ts` (Remote-selected Task composition
+resolves no Host `ctx.jobs` / `ctx.subagents`); real surface proof:
+`test/runner-remote-task-center.test.ts`.
+
+### Stale / currentness closure matrix
+
+| Surface / operation | Authoritative subject/currentness | Required stale behavior | Evidence |
+|---|---|---|---|
+| main ↔ child display subject | explicit display-subject Session id; viewer identity | child facts never fall back to main; exit restores newest main facts | `test/status-display-subject.test.ts`, `test/footer-view-subject.test.ts`, `test/surface-host-app.test.ts` |
+| Task catalog read | `taskReadKey = ownership generation + root Session id`; runtime newest read | old traversal cannot commit rows/badge to replacement subject | `test/task-browser-runtime.test.ts`, `test/runner-remote-task-center.test.ts` |
+| child viewer open | exact durable SubagentAddress + one `tuiChildView` SessionReference | replaced/closed pending child cannot publish; retained generation released | `test/remote-child-view.test.ts`, `test/runner-remote-task-center.test.ts` |
+| child live ingress | exact child binding + viewer instance/generation | child A late frames cannot contaminate B/main | `test/runner-remote-task-center.test.ts` |
+| child durable image | immutable asking presentation scope + exact binding + Connection generation | replacement/exit cannot reroute child read to parent or repaint replacement | `test/remote-attachment-read.test.ts`, `test/runner-remote-task-center.test.ts` |
+| selected Job viewer | viewer instance + selected Job id + ownership subject | old Job observation/Stop settlement cannot paint or notify replacement | `test/runner-remote-job-viewer.test.ts` |
+| selected Job Stop | same viewer/row ownership + official observation convergence | stale success/error is silent on replacement; no optimistic local kill state | `test/remote-job-observation.test.ts`, `test/runner-remote-job-viewer.test.ts` |
+| Plugin Manager read | controller lifetime + latest-started read token | older read cannot overwrite newer; disposed controller ignores late settle | `test/plugin-manager-port.test.ts`, `test/remote-plugin-manager.test.ts`, `test/runner-remote-plugin-manager.test.ts` |
+| Plugin Manager reconnect invalidation | official Connection generation is invalidation hint only | authoritative reread; no mutation replay | `test/runner-remote-plugin-manager.test.ts` L6-E |
+| ordinary prompt writer-held | admitted `SessionRuntime.withWriter` section | transition waits through settlement; no post-prompt duplicate fence | `test/a3-writer-admission.test.ts`, `test/runner-remote-presentation.test.ts` |
+| `/preset` write | captured Session scope + preset operation token | superseded result cannot repaint; true indeterminate does not restore retry intent | `test/preset-command.test.ts`, `test/runner-remote-presentation.test.ts` |
+| `/title` write | captured Session scope + `withWriter` + post-await current check | stale result does not repaint; indeterminate remains non-retryable | `test/session-state.test.ts`, `test/runner-remote-presentation.test.ts` |
+
+No new production fence was added merely because a row appears in this matrix.
+The rows record the fences the inherited PR1–PR5 surfaces already carry.
+
+The historical PR2 qualification note stands: PR6 manufactures no fake
+"main-session swap at exactly the pending child-open instant" L6. The accepted
+combination remains a real L6 pending child open + cancellation/release, real
+child A/B/main replacement controls, production-class exact binding/generation
+tests and the explicit source guards. If a change removes one of those guards,
+the proof re-opens.
+
+### Duplicate / shadow-authority audit
+
+No new production state was created for this audit.
+
+- **Task Center** — lineage / parent / depth / mode / hasChildren come from the
+  official descendant catalog authority; Remote runtime activity from the
+  official Client Session-list running fact; Direct runtime activity from the
+  Direct live Agent fact at commit time; `TaskBrowserRuntime.lastRows` is a
+  presentation cache only. No row cache becomes business authority.
+- **Jobs** — `TaskSurfaceJobs` is the roster + invalidation feed only; Job
+  detail / output / canStop / Stop are `backend.jobObservation` (Remote =
+  official `IJobs.observe`/`IJobs.kill`; Direct = Host JobRegistry/JobController
+  adapter). No `TaskSurfaceJobs.get` / `.kill`, no Remote `ctx.jobs` detail
+  authority.
+- **Child viewer** — child identity/control is the durable SubagentAddress +
+  viewer target; child transcript/status the child Session
+  PresentationReader/SessionStatus; child live output the child binding live
+  ingress; child image bytes the child Session attachment read. No parent-session
+  fallback.
+- **Plugin Manager** — `snapshot()` is the authoritative inventory read; the
+  controller store is a presentation snapshot; invalidation is a reread hint
+  only. No second plugin inventory and no optimistic mutation authority.
+- **writer-held** — machine identity is the structural error code
+  `session/writer-held`; user guidance is the centralized shared guidance; holder
+  identity is unknown unless the official contract supplies it. No message
+  parsing, PID/process guessing or takeover.
+- **pending input / Queue** — the official occurrence identity is the semantic
+  authority; the local pending-submission ledger is optimistic presentation
+  only. Local queue display state is never queue mutation authority.
+
+### Child durable image (inherited + requalified)
+
+The PR5 tail's claim that PR6 still owed the child durable-image read was
+stale. The child durable-image read was already delivered by PR2 and is
+requalified here: child transcript image reference → immutable child
+presentation/image scope → captured `RemoteTransportLifetime` (exact child
+SessionBinding identity + Connection generation) →
+`RemoteApplicationSources.attachments.readDurableImage(childSessionId,
+attachmentId, lifetime)` → exact child binding `session.readAttachment` →
+post-await generation + binding-identity recheck → image loader keyed by
+presentation scope + attachment id → child repaint only if the asking
+viewer/scope still owns the surface. Evidence:
+`test/remote-attachment-read.test.ts` (exact retained binding, no cold
+retain/open, binding replacement / Connection generation replacement / missing
+unretained Session all reject; different binding fails closed before the Session
+read) and `test/runner-remote-task-center.test.ts` (real `LocalAttachmentStore`
+child image read through the child binding, parent binding never used, bytes
+match, same-tick viewer exit cannot reroute the read). PR6 makes no image
+production change.
+
+### PR1–PR5 closure summary
+
+- **PR1 (#213, `7fc56961`)** child display-subject status foundation: subject-neutral
+  Direct `SessionStatus`, ONE shared `SessionStatus(sessionId)` read, child-owned
+  facts, atomic main↔child↔child transitions.
+- **PR2 (#216, `cd498a2f`)** Remote Task Center + real child viewer: full
+  descendant tree + root job roster on both backends, observable-driven Remote
+  invalidation, one `tuiChildView` SessionReference per viewer from the exact
+  SubagentAddress, shared PresentationReader + RemoteLiveIngress hydration,
+  child durable images.
+- **PR3 (#215, `8e851981`)** Remote selected-Job viewer closure: detail/Stop is
+  the ONE semantic `jobObservation` port on both backends; `TaskSurfaceJobs` is
+  the roster feed only.
+- **PR4 (#214, `9abf0869`)** Remote Plugin Manager closure: one backend-neutral
+  surface/controller, `backend.pluginManager` owner, snapshot inventory
+  authority, latest-started read currentness, reconnect invalidation as a reread
+  hint, idempotent disposal.
+- **PR5 (#217, `bc3e95fe`)** writer-held caller recovery: ordinary prompt
+  restores intent once inside the held writer; Remote preset exact
+  `session/writer-held` is a proven rejection; true indeterminate `/preset`
+  suppresses retry-ready restoration; `/title` writer-held + indeterminate are
+  visible with no-retry; real two-process kernel lease at L5/L6.
+
+### UI/UX disposition
+
+| Area | PR6 disposition |
+|---|---|
+| Remote `/tasks` / Task Center | `NO_USER_VISIBLE_CHANGE` |
+| child viewer | `NO_USER_VISIBLE_CHANGE` |
+| child images | `ALREADY_IMPLEMENTED_AND_REQUALIFIED` |
+| Job viewer / Stop | `ALREADY_IMPLEMENTED_AND_REQUALIFIED` |
+| Plugin Manager | `ALREADY_IMPLEMENTED_AND_REQUALIFIED` |
+| writer-held recovery | `ALREADY_IMPLEMENTED_AND_REQUALIFIED` |
+| Queue per-occurrence Edit/Remove/Steer | `DEFERRED_WITH_OWNER -> Post-M3 Q1`, current product gap |
+| subagent timing/duration | `DEFERRED_WITH_OWNER -> Post-M3 Task Center follow-up`; no current authority |
+| generic Client-owned command-result presentation | `DEFERRED_WITH_OWNER -> Post-M3 Semantic/UI Reconciliation` |
+| reconnect/HMR/global fatal/last-good Host command | `DEFERRED_WITH_OWNER -> M3-6` |
+
+PR6 intentionally makes no new interactive UI. No "intentionally unsupported"
+label is used for the Queue per-occurrence UI: it is a current product gap.
+
+### Deferred-with-owner table
+
+| Item | Classification | Owner | PR6 action |
+|---|---|---|---|
+| Queue per-occurrence Edit/Remove/Steer | `CURRENT_PRODUCT_GAP` | Post-M3 Q1 | docs correction only |
+| subagent timing | `DEFERRED_WITH_OWNER` | Post-M3 Task Center follow-up | no inferred/local timing |
+| generic Client-owned command-result presentation | `CURRENT_PRESENTATION_GAP` | Post-M3 Semantic/UI Reconciliation | no generic sink in PR6 |
+| reconnect/HMR/global-fatal recovery | `DEFERRED_WITH_OWNER` | M3-6 | no implementation |
+| last-good Host-command claim after reconnect | `DEFERRED_WITH_OWNER` | M3-6 | no implementation |
+| public Remote selector / external attach | outside M3-5 | later M4/M5/M6 sequencing | no implementation |
+| real-network Plugin Manager package install at L6 | `N/A_WITH_REASON` for M3-5 closure | existing PR4 evidence contract | keep honest L5 event proof |
+| Remote bare `/title` regeneration | `INTENTIONAL_UNSUPPORTED_IN_M3` under rc.2 | upstream capability boundary | no Host shortcut |
+
+### Final qualification
+
+All lanes were run on this PR6 tree. The repository-generated
+`test/a5b-root-declaration-matrix.json` was regenerated
+(`node scripts/a5b-root-matrix.mjs --write`) because the bootstrap declaration
+metadata changed; the `A5b-0 matrix CURRENT (deep check)` gate is green.
+
+- Targeted PR1–PR6 batch (`node --test --import tsx/esm` over the sub-plan §14
+  file list): 382 pass / 0 fail; the live migration-doc contract (`node --test
+  test/client-server-migration.test.mjs`): 12 pass / 0 fail.
+- Remote parity/lifecycle smokes: `smoke:remote-task-read-parity`,
+  `smoke:remote-presentation-parity`, `smoke:remote-session-lifecycle-parity`
+  (Flow F kernel write lease) — passed.
+- rc.2 compatibility: `compat:dsh:npm` and `compat:dsh:client-family` — passed
+  (`0.2.0-rc.2` exact family + release family, with the embedded session-read /
+  read-parity / lifecycle / d2-closure lanes).
+- Gates: `typecheck:bundle`, `test:docs`, `gate:boundary` (28 files, no new Host
+  coupling or stale baseline), `gate:architecture`, `verify:prepush:nofork`,
+  `smoke:boundary`, `smoke:startup-strictness` — passed.
+- Full `pnpm test` (fork + product + tooling + docs) — passed;
+  `packages/pi-tui/**` untouched.
+- Mutation controls: restoring the unconditional `ctx.get('subagents')` fails
+  the new source lock; restoring the stale Queue "not a gap" framing, removing
+  the Post-M3 Q1 owner, or regressing the stage pointer to `M3-5 = IN PROGRESS`
+  each fails the new closure test.
+
+### Closure evidence
+
+- Contract authority: `docs/m3-entry-contract.md` M3-5 exit, unchanged by PR6;
+  released DSH `0.2.0-rc.2` Client/Remote/projection authority.
+- Composition owner: `src/app/bootstrap.ts` (composition root) +
+  `src/app/surface/**` (Task Center/Job viewer) + `src/app/remote/**` (Remote
+  presentation/task/child sources).
+- Adapter-level evidence (L1–L3): `test/session-status-projection.test.ts` (L2
+  Direct projection adapter); `test/remote-child-view.test.ts`,
+  `test/remote-attachment-read.test.ts`, `test/remote-job-observation.test.ts`
+  and `test/remote-plugin-manager.test.ts` (L3 Remote adapters). No separate L1
+  semantic-port contract suite is cited by this closure.
+- Application-owner / component unit evidence (supporting evidence; these do
+  NOT carry an L1–L6 level): `test/plugin-manager-port.test.ts` (Plugin Manager
+  controller contract over a fake semantic port),
+  `test/a3-writer-admission.test.ts` (session / submission owner behavior),
+  `test/preset-command.test.ts` (command surface behavior),
+  `test/session-state.test.ts` (command/session presentation state),
+  `test/status-display-subject.test.ts` (status derivation),
+  `test/footer-view-subject.test.ts` (footer component) and
+  `test/task-browser-runtime.test.ts` (Task coordinator unit).
+- Direct ↔ Remote parity (L4): the same-Host task read parity smoke
+  (`smoke:remote-task-read-parity`); there is no dedicated Direct↔Remote parity
+  lane for `sessionStatus`, so status parity is `N/A_WITH_REASON` (Direct L2
+  `test/session-status-projection.test.ts` + Remote adapter L3). The new locality
+  lock is an architecture/source lock, not L4/L6 — see the forbidden-fallback
+  item below.
+- Wire evidence (L5): `smoke:remote-presentation-parity`,
+  `smoke:remote-session-lifecycle-parity` (Flow F kernel write lease), the
+  Plugin Manager L5 install-event proof.
+- Application/surface evidence (L6): `test/runner-remote-task-center.test.ts`,
+  `test/runner-remote-job-viewer.test.ts`,
+  `test/runner-remote-plugin-manager.test.ts`,
+  `test/runner-remote-presentation.test.ts` (Remote, real runner + official
+  wire) and `test/runner-viewer-task-integration.test.ts` (Direct real `/tasks`
+  → viewer application integration).
+- Supported success paths: Remote `/tasks` → descendant tree → child viewer /
+  Job viewer / Stop; Remote `/plugins` + Settings dual entry; ordinary prompt +
+  `/preset` + `/title` writer-held recovery; Direct equivalents unchanged.
+- Fail-closed/error paths: exact child binding/Connection generation fences,
+  viewer/scope ownership after await, stale Job observation/Stop settlement
+  silence, disposed controller late-settle suppression, writer-held no-takeover
+  / no-auto-retry, indeterminate non-retryable.
+- Reachability/UI disposition: `NO_USER_VISIBLE_CHANGE` for all PR6 surfaces;
+  Queue per-occurrence UI documented as `CURRENT_PRODUCT_GAP`/Post-M3 Q1;
+  subagent timing and generic command-result presentation deferred with owners.
+- Forbidden fallback verified: Remote Task composition resolves no Host
+  `ctx.jobs` / `ctx.subagents` (architecture/source lock in
+  `test/application-runtime-selection.test.ts` — explicitly NOT L4/L6 — plus
+  the mutation control); no parent-session child fallback; no second
+  Job/Plugin/Task/child authority; no M3-6 reconnect implementation.
+- Original-plan closure review: M3-5 overall plan §14 acceptance and §19 stage
+  axes reconciled; PR6 sub-plan §18 acceptance items checked; PR1–PR5
+  responsibilities requalified, not redesigned.
+- Deferred items promoted with owner: the deferred-with-owner table above.
+
+M3-5 = DONE
+M3-6 = NEXT

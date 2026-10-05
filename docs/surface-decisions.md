@@ -148,16 +148,18 @@ accepted but has no authoritative representation yet:
   (`… to steer accepted`) so `sending…` rows are never implied to participate.
   The `sending…` suffix already communicates the state.
 
-Per-occurrence QueueDock controls: the TUI intentionally does NOT expose a
-per-occurrence queue action UI. `Alt+Up` is recall-all over authoritative
-occurrences and `Ctrl+S` is FIFO steer-all; there is no row selection,
-single-row edit/remove/steer, row action button/keybinding, per-row busy state,
-edit overlay, selection clamp, or edit-target-disappearance lifecycle. D2.2
-still keeps the queue-action SEMANTIC (`SessionWriter.updateQueue` `edit` /
-`remove` / `steer`) fully aligned for both Direct and Remote adapters with
-adapter tests and same-Host proof. The migration preserves DSH capabilities and
-expresses them with a TUI-native surface; it is not a React/Web affordance
-clone, so adapter-level `edit` without an edit UI is expected, not a gap.
+Per-occurrence QueueDock controls: per-occurrence QueueDock Edit / Remove /
+Steer is a CURRENT PRODUCT GAP. The semantic adapters already support exact
+occurrence operations: D2.2 keeps the queue-action SEMANTIC
+(`SessionWriter.updateQueue` `edit` / `remove` / `steer`) fully aligned for both
+Direct and Remote adapters with adapter tests and same-Host proof. `Alt+Up` is
+recall-all over authoritative occurrences and `Ctrl+S` is FIFO steer-all; both
+are useful bulk terminal-native affordances but do NOT substitute for exact
+occurrence actions. There is no row selection, single-row edit/remove/steer, row
+action button/keybinding, per-row busy state, edit overlay, selection clamp, or
+edit-target-disappearance lifecycle.
+
+Owner: Post-M3 Q1.
 
 ### Remote presentation keeps exactly one optimistic identity
 

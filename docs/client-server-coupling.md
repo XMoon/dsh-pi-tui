@@ -121,7 +121,7 @@ lands.
 | `settings` | Host-owned | `BASE_HOST_PREREQUISITE` | profile/base composition | Remote Config adapter | generated `settings` Remote | reuse; no second settings authority or namespace | `test/remote-config-port.test.ts` + same-Host smoke |
 | `jobController` | Host-owned | `BASE_HOST_PREREQUISITE` | the existing TUI row | `JobObservationPort` | `IJobs` + generated `job` Remote | reuse; no second job observation authority | `test/remote-job-observation.test.ts` + the Job roster in `test/remote-client-runtime.test.ts` |
 | M3 Host API/session helper rows | Host-owned | `M3_ADDITIVE_HOST` | `RemoteHostRuntime` (§2.4.1) | the M3 adapters | official Host plugins + generated Remotes | additive; mount only the frozen §2.4.1 closure | `test/remote-client-runtime.test.ts` |
-| TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority | `test/runner-viewer-task-integration.test.ts` |
+| TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority; the Remote Task composition resolves no Host `ctx.jobs`/`ctx.subagents` (Direct-only gate, M3-5 PR6) | `test/runner-viewer-task-integration.test.ts` + `test/runner-remote-task-center.test.ts` + the Remote Task locality source lock in `test/application-runtime-selection.test.ts` |
 | Application runtime selection (`SelectedApplicationRuntime`) | Client-local composition | composition spine (M3-4 PR1) | `src/app/remote/application-runtime.ts` (Remote aggregate) + `selectApplicationRuntime` in `src/app/bootstrap.ts` (the seam) | `bindSessionRuntime` common inputs (`owners`/`retirement`/`lifecycle`) and the runner's `backend` | Remote aggregate reuses the M3-1 wire + M3-3B backend + M3-2 owner services; reached ONLY through `runtime/backend-loader.ts` (the ONE frozen dynamic edge into `app/remote/runtime.ts`, which statically re-exports the aggregate) | exactly ONE Remote Host/Client graph, ONE semantic assembly, ONE owner registry per selected runtime; no second construction site; no public/config/env selector — normal `apply()` stays Direct | `test/remote-application-runtime.test.ts` + `test/application-runtime-selection.test.ts` + the dynamic-boundary rules in `test/pre-m3-architecture-gate.test.mjs` |
 
 The exact package/row names may evolve; the ownership rule must remain explicit.
@@ -294,6 +294,17 @@ Host-reading path (`planMode` / `sandboxPolicy` / `permissionPresets` /
 projection. The boundary gate therefore still reports the unchanged
 `scripts/client-boundary-baseline.json` (28 coupled files), and the A5b-0 root
 matrix is regenerated for the M3-5 PR2 root declarations.
+
+Composition locality (M3-5 PR6): the **Direct** Task composition is the ONLY
+branch that evaluates the Host `ctx.jobs` / `ctx.subagents` lookups — both are
+gated on `remoteSources === undefined`. The **Remote** Task composition resolves
+neither Host service; it consumes `RemoteApplicationSources.task` / `childView`
+plus `backend.jobObservation`. `src/app/bootstrap.ts` remains the composition
+root and still lexically contains both lookups (the boundary baseline keeps its
+`jobs` / `subagents` entries); the closure fact is branch reachability, not
+lexical absence. The source lock is `test/application-runtime-selection.test.ts`
+(Remote-selected Task composition resolves no Host `ctx.jobs` / `ctx.subagents`);
+the real Remote surface proof remains `test/runner-remote-task-center.test.ts`.
 
 ## Categories
 

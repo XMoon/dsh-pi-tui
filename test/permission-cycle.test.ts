@@ -1,21 +1,19 @@
 /**
- * M3-4 PR4 Step 6 permission qualification:
+ * M3-4 PR4 Step 6 permission qualification (supporting mapper/owner unit; no
+ * L1–L6 level — the REAL Remote runner composition lives in the separate
+ * `test/runner-remote-permission.test.ts`):
  *
- * L3 (this file's first block) — the projection mapper + the cycle owner:
+ * The projection mapper:
  * - the permissions projection view ({currentValue}) maps onto the status
- *   DTO's permission field (well-formed only; foreign shapes read absent);
+ *   DTO's permission field (well-formed only; foreign shapes read absent).
+ *
+ * The cycle owner (over a status-runtime double):
  * - cyclePermission over the PR4 authority: projection current → catalog
  *   next → exactly ONE semantic apply; applied does NOT install the value
  *   locally; a stale scope after the await repaints/notifies NOTHING for
  *   the replacement; unavailable surfaces truthfully; a rejected apply
  *   reports without retrying; the Remote branch NEVER calls a Host
  *   permissionPresets.set (negative lock).
- *
- * L6 (the runner block, same file) — the REAL Remote composition with the
- * official dsh-permission-presets service mounted: the current value
- * renders from the projection; Shift+Tab dispatches exactly one
- * /permission command through the wire; the pushed projection repaints
- * the new value.
  *
  * @module @xmoon76/dsh-pi-tui/permission-cycle.test
  */
@@ -27,7 +25,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { detachedSessionStatus } from '../src/runtime/session-status-projection.ts'
 import { createStatusRuntime, type StatusRuntimeDeps } from '../src/app/surface/status-runtime.ts'
 
-/* ───────────────────────── L3: the projection mapper ─────────────────── */
+/* ──────────────────────── the projection mapper ──────────────────────── */
 
 test('§6.1 the permissions projection view maps onto the status DTO', () => {
   const status = detachedSessionStatus('s', {
@@ -43,7 +41,7 @@ test('§6.1 a foreign/absent permissions view reads absent (never guessed)', () 
   assert.equal(detachedSessionStatus('s', { permissions: { currentValue: 42 } }, undefined).permission, undefined)
 })
 
-/* ───────────────────── L3: the cycle owner (§6.3) ────────────────────── */
+/* ──────────────────── the cycle owner (§6.3) ─────────────────────────── */
 
 /** A minimal surface double recording notifies. */
 function harness(options: {

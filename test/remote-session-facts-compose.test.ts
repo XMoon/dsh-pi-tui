@@ -1,10 +1,10 @@
 /**
- * L3 contract tests for the Remote session-facts composition (M3-4 PR4
- * Step 3 / plan §3.3/§3.4/§3.6): whole-log totals from the official
- * projections (never the bounded window), recent performance from the
- * bounded window via the shared fold, bounded loadOlder paging for both
- * stats and lastAssistantText, stale-transport dropping, and the
- * undefined-vs-empty-text distinction.
+ * Supporting composition-unit tests (no L1–L6 level) for the Remote
+ * session-facts composition (M3-4 PR4 Step 3 / plan §3.3/§3.4/§3.6): whole-log
+ * totals from the official projections (never the bounded window), recent
+ * performance from the bounded window via the shared fold, bounded loadOlder
+ * paging for both stats and lastAssistantText, stale-transport dropping, and
+ * the undefined-vs-empty-text distinction.
  * @module @xmoon76/dsh-pi-tui/remote-session-facts-compose.test
  */
 
