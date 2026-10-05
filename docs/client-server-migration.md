@@ -5603,15 +5603,18 @@ mounted fatal:
     error is the fatal reason, the transport disposed exactly once when
     retirement settled, `exit(1)` fired exactly once, and the later fiber
     disposal did not re-run surface cleanup.
-  - **L6-D** a throwing TuiApp-owned aggregate cleanup: `TuiApp.prototype.
-    setSettledQuestionAnswersLookup` throws inside the mounted
-    `SurfaceRuntime.dispose()` batch; the two intermediate surface leases
-    (plugin-keybinding sync unsubscribe, theme-unload hook release) AND the
-    final extension-surface bridge detach each still ran exactly once
-    (call-through observers on the REAL returned releases), the transport
-    still disposed exactly once, a second runner disposal re-ran none of
-    them, and the mounted TuiApp still completed final disposal (process slot
-    released).
+  - **L6-D** a REAL throwing mounted `TuiApp.dispose()` (terminal fail-closed):
+    `stop()` runs its real cleanup and THEN throws, so the failure lands inside
+    `TuiApp.dispose()`'s own non-truncating batch. The remaining TuiApp final
+    steps were still attempted (the generation retirement ran), the
+    `SurfaceRuntime.dispose()` aggregate still released the two intermediate
+    surface leases (plugin-keybinding sync unsubscribe, theme-unload hook
+    release) AND the final extension-surface bridge detach each exactly once
+    (call-through observers on the REAL returned releases), the surface
+    failure was logged, the Session retirement still settled before the
+    exactly-once transport disposal, a second runner disposal re-ran none of
+    the three leases, and — fail-closed — the failed final TuiApp dispose kept
+    the process TUI slot CLAIMED.
 - **Owner/component evidence**: `test/disposal.test.ts`;
   `test/viewer-lifecycle-release.test.ts` (throwing ingress still releases
   the retained child binding); `test/command-catalog-reconnect.test.ts`
@@ -5636,11 +5639,13 @@ mounted fatal:
   the new viewer behavioural case red; M5 starting transport disposal before
   the retirement settlement → L6-A ordering red; M6 removing
   `coordinator?.dispose()` → L6-B coordinator-observer red; M7 restoring the
-  truncating `SurfaceRuntime.dispose` sequence → L6-D red; M8 restoring the
-  raw tracked-editor for-loop → the new tracked-editor regression red; M9
-  removing the theme-unload hook release → L6-D theme-lease red; M10 removing
-  the plugin-keybinding sync release → L6-D keybinding-lease red; M11 removing
-  the aggregate `backendRuntime.dispose()` → L6-A adapters count red.
+  truncating `SurfaceRuntime.dispose` sequence → L6-D red (against the REAL
+  `TuiApp.dispose()` failure); M8 restoring the raw tracked-editor for-loop →
+  the new tracked-editor regression red; M9 removing the theme-unload hook
+  release → L6-D theme-lease red; M10 removing the plugin-keybinding sync
+  release → L6-D keybinding-lease red; M11 removing the aggregate
+  `backendRuntime.dispose()` → L6-A adapters count red; M12 force-releasing the
+  process slot after a final-dispose failure → L6-D fail-closed slot red.
 - **Direct**: unchanged — the Direct branch has no Remote selector, transport
   disposal stays the inert no-op, and the shared helper does not import any
   Remote code. PR2 reconnect/write semantics are untouched and their suites

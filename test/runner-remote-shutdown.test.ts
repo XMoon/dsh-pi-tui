@@ -159,7 +159,13 @@ function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
 interface ShutdownFixture {
   readonly host: HostFixture
   readonly aggregate: RemoteAggregate
-  app(): { stop(): void; setDraft(text: string): void; submitDraft(request?: string): void; getDraft(): string }
+  app(): {
+    stop(): void
+    setDraft(text: string): void
+    submitDraft(request?: string): void
+    getDraft(): string
+    getSurfaceGeneration(): number
+  }
   runnerFiberDispose(): Promise<void>
 }
 
@@ -455,20 +461,22 @@ test('L6-C: a mounted startup fatal uses the same surface cleanup authority befo
 
 /* ── L6-D ──────────────────────────────────────────────────────────────── */
 
-test('L6-D: a throwing TuiApp-owned aggregate cleanup does not strand the later plugin/theme/extension releases', async (t) => {
+/**
+ * TERMINAL fail-closed L6 (LAST test in this file): a REAL `TuiApp.dispose()`
+ * failure must not strand the later SurfaceRuntime releases, and the process
+ * TUI slot must stay CLAIMED. node:test runs each file in its own process, so
+ * leaving the slot claimed here cannot poison another test file; nothing after
+ * this test in this file may start a TUI.
+ */
+test('L6-D: a throwing mounted TuiApp.dispose() neither strands the later plugin/theme/extension releases nor releases the slot', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-6-pr3-shutdown-preset'
   const vt = virtualTerminal(life)
   const { apps } = instrumentTuiApps(life)
   const observed: string[] = []
-  const originalStop = TuiApp.prototype.stop
-  t.mock.method(TuiApp.prototype, 'stop', function (this: TuiApp) {
-    observed.push('surface-stop')
-    return originalStop.call(this)
-  })
 
   const host = await mountHost(life, presetId)
-  const mainId = 'm3-6-pr3-shutdown-d-appowned'
+  const mainId = 'm3-6-pr3-shutdown-d-dispose-failure'
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
 
   let transport: { disposals: number } | undefined
@@ -507,26 +515,50 @@ test('L6-D: a throwing TuiApp-owned aggregate cleanup does not strand the later 
   })
   await waitFor('runner paint', () => vt.getViewport().join('').length > 0, 20_000)
 
-  // A REAL TuiApp-owned cleanup step in the aggregate batch. Patched AFTER the
-  // mount (the mount itself calls it through attachInteraction), so only the
-  // teardown call throws.
-  const failure = new Error('m3-6-pr3 app-owned cleanup failed')
-  t.mock.method(TuiApp.prototype, 'setSettledQuestionAnswersLookup', () => { throw failure })
+  const app = fixture.app()
+  const generationBefore = app.getSurfaceGeneration()
+  // Inject the failure at TuiApp.dispose() ITSELF: `stop()` runs its REAL
+  // cleanup call-through and THEN throws, so the failure lands inside
+  // `TuiApp.dispose()`'s own non-truncating batch (not at a pre-dispose
+  // SurfaceRuntime step). Patched AFTER the mount so startup is unaffected.
+  const failure = new Error('m3-6-pr3 TuiApp final dispose failed')
+  const originalStop = TuiApp.prototype.stop
+  t.mock.method(TuiApp.prototype, 'stop', function (this: TuiApp) {
+    observed.push('surface-stop')
+    originalStop.call(this)
+    throw failure
+  })
 
   await fixture.runnerFiberDispose()
 
+  // Inner contract: TuiApp.dispose() attempted its remaining final steps (the
+  // generation retirement runs AFTER the throwing stop in the batch).
+  assert.ok(app.getSurfaceGeneration() > generationBefore,
+    'TuiApp remaining final steps were still attempted after the throwing stop')
+  // Outer contract: SurfaceRuntime released the two intermediate leases AND the
+  // bridge detach despite the TuiApp final-dispose failure.
   assert.equal(keybindingSyncReleases, 1,
-    'the plugin-keybinding sync lease was still released after the app-owned cleanup threw')
+    'the plugin-keybinding sync lease was still released after TuiApp.dispose threw')
   assert.equal(themeHookReleases, 1,
-    'the theme-unload hook lease was still released after the app-owned cleanup threw')
-  assert.equal(detachCalls, 1, 'the extension bridge detach still ran after the app-owned cleanup threw')
-  assert.equal(transport?.disposals, 1, 'the selected transport still disposed exactly once')
-  assert.ok(observed.includes('surface-stop'), 'the mounted TuiApp still completed its final disposal')
-  assert.equal(liveTuiCountForTest(), 0,
-    'the process TUI slot was released because TuiApp.dispose itself completed')
+    'the theme-unload hook lease was still released after TuiApp.dispose threw')
+  assert.equal(detachCalls, 1, 'the extension bridge detach still ran after TuiApp.dispose threw')
+  assert.ok(observed.includes('surface-stop'), 'the real TuiApp stop was entered')
+  // Bootstrap orchestration: the failure is logged, retirement still settles,
+  // and the transport only disposes AFTER the retirement settlement.
+  assert.match(diagLogOf(host), /surface dispose failed/, 'the surfaced TuiApp failure was observed/logged')
+  assert.ok(observed.includes('retirement-settled'), 'the Session retirement still settled')
+  assert.ok(observed.indexOf('surface-stop') < observed.indexOf('retirement-settled'))
+  assert.ok(observed.indexOf('retirement-settled') < observed.indexOf('transport-dispose'))
+  assert.equal(transport?.disposals, 1, 'the selected transport disposed exactly once, after retirement')
+  // Fail-closed process slot: the failed final TuiApp dispose keeps it claimed.
+  assert.equal(liveTuiCountForTest(), 1,
+    'a failed final TuiApp dispose keeps the process TUI slot claimed (fail-closed)')
 
-  // A second runner disposal is inert: none of the three surface leases re-run.
+  // A second runner disposal is inert: none of the three surface leases re-run
+  // and the slot stays claimed.
   await fixture.runnerFiberDispose()
   assert.deepEqual({ keybindingSyncReleases, themeHookReleases, detachCalls },
     { keybindingSyncReleases: 1, themeHookReleases: 1, detachCalls: 1 })
+  assert.equal(transport?.disposals, 1)
+  assert.equal(liveTuiCountForTest(), 1)
 })
