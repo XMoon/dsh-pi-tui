@@ -577,6 +577,13 @@ test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same 
   await waitFor('the pre-reconnect retained output rendered', () =>
     view().includes('pr3-two retained line'), 20_000)
   const acquiresBeforeReconnect = fx.observeAcquires()
+  // The CROSS-RECONNECT write-settlement baseline: both kill counters are
+  // sampled AFTER the pre-reconnect Stop settled and BEFORE the reconnect,
+  // so any replay of the settled kill during/after the reconnect must show
+  // up as growth against THESE numbers (not against a post-reconnect
+  // re-sample that would absorb it).
+  const killCallsAtReconnect = fx.killControl.calls
+  const hostKillsAtReconnect = fx.hostKillCalls()
 
   // ── The OFFICIAL reconnect, with the Job truth advancing while the old
   // generation is gone (the appended output exists only for generation B).
@@ -608,23 +615,23 @@ test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same 
   // the live Job stays running through the same Client model).
   await waitFor('the roster re-converged after B', () =>
     fx.rosterStatus(settledJob.id) === 'killed' && fx.rosterStatus(liveJob.id) === 'running', 20_000)
+  // THE write-settlement negative control: across the whole reconnect and
+  // its convergence, NEITHER kill counter grew — the reconnect never
+  // replayed the pre-reconnect settled Stop (§14.6 / §21.8).
+  assert.equal(fx.killControl.calls, killCallsAtReconnect,
+    'the reconnect replayed NO Client-side kill of the already-settled Job')
+  assert.equal(fx.hostKillCalls(), hostKillsAtReconnect,
+    'the reconnect replayed NO Host kill admission of the already-settled Job')
 
   // ── A Stop issued AFTER B reaches the official `IJobs.kill` exactly once.
-  const killCallsBeforePostB = fx.killControl.calls
-  const hostKillsBeforePostB = fx.hostKillCalls()
   fx.fixture.vt.sendInput(key)
   await waitFor('the post-B Stop converged the live Job', () =>
     fx.rosterStatus(liveJob.id) === 'killed', 20_000)
   await waitFor('the viewer rendered the terminal status', () => view().includes('killed'), 20_000)
-  assert.equal(fx.killControl.calls - killCallsBeforePostB, 1,
-    'the post-B Stop dispatched the official kill EXACTLY once')
-  assert.equal(fx.hostKillCalls() - hostKillsBeforePostB, 1,
+  assert.equal(fx.killControl.calls, killCallsAtReconnect + 1,
+    'exactly ONE Client kill dispatched after B (the post-B Stop), nothing else')
+  assert.equal(fx.hostKillCalls(), hostKillsAtReconnect + 1,
     'exactly one Host kill admission served the post-B Stop')
-  // The write-settlement negative control: the reconnect NEVER replayed the
-  // pre-reconnect Stop — the total kill count grows by exactly the one
-  // post-B dispatch above.
-  assert.equal(fx.killControl.calls, killCallsBeforePostB + 1,
-    'no pre-reconnect settlement was replayed across the reconnect')
 })
 
 test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
