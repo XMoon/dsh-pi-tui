@@ -16,7 +16,9 @@ mention semantics; the viewer send seam now routes identity-only)
 M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
 Pre-M3 DONE   (readiness closure, no behavior change — see the Pre-M3 status section: Direct semantic assembly centralized in `src/runtime/direct/backend-direct.ts`; `JobObservationPort` joined the `Backend` vocabulary; P1 `RemotePluginManagerPort` + `RemoteJobObservationPort` added but NOT production-composed; the centralized published-0.1.7-rc.2 Client/Remote structural contract gate is green; the focused same-Host lifecycle/model/preset smoke replaces the retired D2.3 lane)
 Pre-M3 TS Architecture Convergence  DONE   (M3-oriented application-layer ownership convergence, NO behavior change — A5a + A5b; see the Pre-M3 TS Architecture Convergence status section)
-M3-0 DONE          (entry contract frozen — the M3 architecture contract is docs/m3-entry-contract.md)
+M3-0 DONE          (entry contract frozen in M3-0; the M3-only stage contract was
+                    retired by M3-6 PR4 — the surviving live authorities are
+                    docs/client-server-migration.md and docs/client-server-coupling.md)
 M3-1 DONE          (experimental in-process wire composition spine: reusable `RemoteHostRuntime` + `RemoteClientRuntime` + `backend-loader.ts` dynamic boundary, zero product cutover — see the M3-1 status section)
 M3-2 DONE          (Remote Session owner spine: exact-`SessionBinding` `SessionOwnerAccess`/`SessionOwnerRetirement` provider, transport-neutral app/session runtime, Remote fork publication→open adoption — zero product cutover, see the M3-2 status section)
 M3-3A DONE         (Remote session/runtime/catalog/host-file semantic closure: official contextPressure + turnOutline + sessionStatus projection reads, subagent allowlist on the official model directory, Remote skills/list + fileReferences/list adapters, truthful Host-file unavailable states, PresentationReader.loadThrough, one-source M3-3A semantic bundle — zero product cutover, see the M3-3A status section)
@@ -45,7 +47,13 @@ M3-6 PR3 DONE      (Shutdown / HMR / mounted-fatal teardown hardening: one froze
                     disposal primitive hardening every named owner, the mounted fatal routed
                     through the SAME surface cleanup authority, and fail-closed process-slot
                     ownership preserved — see the M3-6 PR3 section)
-M3-6 IN PROGRESS   (PR1/PR2/PR3 landed; PR4 M3 closure / docs / gates NEXT)
+M3-6 PR4 DONE      (final M3 closure: truthful user-visible discovery copy, live
+                    authority reconciliation, Debt disposition and the retired
+                    M3-only stage contract — see the M3 closure section)
+M3-6 DONE          (PR1 locality + PR2 reconnect + PR3 teardown + PR4 closure)
+M3 DONE            (M3-1..M3-6 delivered; Direct remains the production backend,
+                    the in-process official wire stays experimental/non-public,
+                    and no M4 IPC/TCP or public external attach exists)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -80,16 +88,81 @@ M3-4 = DONE                 (merged PR #211: `next @ e520c016`)
 M3-5 = DONE                 (PR1–PR6 landed; PR6 stage closure/hardening closed
                              the Remote Task locality gap and reconciled the
                              live closure record)
-M3-6 = IN PROGRESS          (PR1 Client UI / Extension locality complete;
-                             PR2 full-surface reconnect recovery complete;
-                             PR3 shutdown/HMR/fatal teardown NEXT)
+M3-6 = DONE                 (PR1 Client UI / Extension locality; PR2 full-surface
+                             reconnect recovery; PR3 shutdown/HMR/fatal teardown;
+                             PR4 final closure / docs / gates)
+M4   = NOT STARTED          (experimental local Host process / IPC split)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
 (reads, submission, status and the command runtime with their currentness
-fences). It does NOT flip the production backend: Direct remains the default,
-no public/config/env Remote selector exists, and M3 is not complete while M3-6
-remains.
+fences). It did NOT flip the production backend: Direct remains the default and
+no public/config/env Remote selector exists. M3-6 closed the
+locality/reconnect/teardown axis on that same experimental wire path.
+**M3 is DONE; M4 is NOT STARTED.**
+
+## M3 closure
+
+```text
+Baseline
+  dsh-pi-tui: M3-6 PR4 branch HEAD (final PR4 commit; see the PR)
+  DSH qualification: exact 0.2.0-rc.2
+  production backend: Direct
+  experimental backend: in-process official wire
+
+Contract
+  CLOSED
+  surviving authority:
+    docs/client-server-migration.md
+    docs/client-server-coupling.md
+
+Implementation
+  CLOSED
+  M3-1..M3-6 delivered
+  no M4 IPC/TCP
+  no public external attach
+  no production backend flip
+
+Qualification
+  CLOSED
+  semantic adapter/unit coverage
+  official-wire composition coverage
+  application/surface L6 coverage
+  session lifecycle parity
+  D2 closure coverage
+  final product/tooling/boundary/architecture gates
+
+Surface / Reachability
+  CLOSED
+  supported paths reachable
+  unsupported paths explicitly fail closed
+  command/help/settings discovery reconciled
+
+Intentional leftovers (later owner; the external Debt ledger holds the detail)
+  U1, U3, U4, U5, U7, U8, U9, U10, U11a, U11b, U14
+    upstream carrier/locality parity gaps -> M6-0 upstream watch
+  U6, U15
+    intentional unsupported semantics (keep unsupported)
+  R1 -> post-M3 Remote attachment work (D4/M5); R7 -> conditional binary readBytes
+  Q1, T1, D1, D2, D3, D5, F10, A1
+    preserved later-owner obligations (Post-M3 / M8)
+
+Debt disposition at the M3 boundary
+  R6  extension Host/Client split ownership -> CLOSED (M3-6 PR1)
+  U12 Remote external editor -> CLOSED: the draft external editor is
+      Client-local and already valid under Remote composition
+  U13 full descendant Subagent tree -> CLOSED by the M3-5 Task/child surface
+  U2  @file existence/canonicalization -> RETIRED as a cross-backend
+      requirement: submitted mentions stay literal and Host resolution owns it;
+      Client-side canonicalization/existence probing is not the contract
+
+Historical M3 frozen contract
+  retired by PR4
+  Git history contains the last version
+
+Next
+  M4 NOT STARTED
+```
 
 ## Current state
 
@@ -332,7 +405,7 @@ in Stage D.
 | M2 | Experimental Remote Adapter against an existing DSH Host: Semantic Port reads first, then writes, then approval/question via the DSH Connection | Shadow parity on read paths; no physical session lock in Remote mode — DSH writer ownership stays Host-side |
 | M3 | Experimental in-process wire: separate Host/Client Cordis contexts, DSH Connection over the Semantic Port, no TCP | Wire parity on the transcript parity suite; Host composition stays experimental |
 | M4 | Local Host process / IPC split; crash semantics (TUI↔Host, Ctrl+C/D, SIGTERM, HMR, parent/child death) | IPC integration lane green; ordinary local mode: TUI owns ephemeral Host lifecycle |
-| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; the user shell (`!`/`!!`, both policies) must execute in the Host execution environment — until a qualified one-shot Host user-shell carrier is released, Remote `!`/`!!` stay fail-closed (U11a/U11b); remote external editor unsupported | Security review; fail-closed locality checks |
+| M5 | `dsh-pi-tui attach <url>`; localhost + SSH tunnel only; the user shell (`!`/`!!`, both policies) must execute in the Host execution environment — until a qualified one-shot Host user-shell carrier is released, Remote `!`/`!!` stay fail-closed (U11a/U11b); the draft external editor stays Client-local and a future Host-filesystem editor/open is a separate capability | Security review; fail-closed locality checks |
 | M6 | Production dual stack: `--backend wire-local` opt-in, direct default; extension CI matrix (direct × wire-local) | One stable observation cycle; no perceptible regression |
 | M7 | Default flip to wire-local; `--backend direct` rollback kept for ≥ 1 release | Rollback verified on the release train |
 | M8 | Direct ownership retirement (the SessionHandle `direct` escape — live Agent/AgentHandle; the physical lock stack is already removed legacy) **plus the Direct command-callback ownership retirement** (the Host `ctx.commands` compatibility mirror of TUI built-ins; see the M8 entry below) | Proof: all TUI writes Host-owned, cross-client concurrency safe (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash); Direct and wire-local share one `ClientCommandRegistry` callback ownership |
@@ -634,14 +707,14 @@ forms and the composition-ownership rules live in
 
 ### Composition ownership and UI locality clarification (2026-10-03)
 
-The 2026-10-03 frozen-contract amendment (`docs/m3-entry-contract.md`
-§Amendment register, §2.4/§8) records why these invariants were made explicit:
+The 2026-10-03 composition/locality amendment (M3-0 entry contract, retired by
+M3-6 PR4) records why these invariants were made explicit:
 the existing composition owners are the current M3 core graph, not universal
 registries, and a Host-owned feature may expose a declarative serialized surface
 without moving callbacks Client-side.
 
-M3-6 remains "locality / extensions / reconnect / closure"; its future extension
-task is clarified, not expanded:
+M3-6 delivered "locality / extensions / reconnect / closure"; the clarification
+was not an expansion:
 
 - preserve the existing PiTui extension callbacks/components as Client-owned;
 - ensure mixed Host-state + Client-UI extensions consume public Remote facts;
@@ -2419,12 +2492,12 @@ The verified rc.2 public carrier is the explicit `installConnection(ctx,
 `transport.ownsHost: true` is passed with no `location`. No global `fetch`,
 WebSocket, fake `location`, or browser `Worker` is reachable on the
 in-process path (proven by the trapped-globals L5 case). The frozen wording
-in `docs/m3-entry-contract.md` §2.4.3/§4.2 has been corrected in place; no
+in the (retired) M3-0 entry contract §2.4.3/§4.2 has been corrected in place; no
 ownership, stage boundary, or seam policy changed.
 
 ### Closure evidence
 
-- Contract authority: `docs/m3-entry-contract.md` §2.4 (Host/Client composition
+- Contract authority: the (retired) M3-0 entry contract §2.4 (Host/Client composition
   closure), §4.1–§4.3 (lifetime, scoped loader, dynamic boundary); DSH
   `0.1.7-rc.2` at stage time, requalified to `0.2.0-rc.2` in M3-3B.
 - Composition owner: `src/app/remote/host-runtime.ts` (`RemoteHostRuntime`) and
@@ -2591,7 +2664,7 @@ the composition and presentation.
 
 ### Closure evidence
 
-- Contract authority: `docs/m3-entry-contract.md` §5 (exact identity, handle
+- Contract authority: `docs/concurrency.md` (exact identity, handle
   mapping, retirement semantics, transition ordering, lifecycle reference
   table).
 - Composition owner: `src/app/remote/session-owners.ts`
@@ -2623,7 +2696,7 @@ the composition and presentation.
 
 M3-3A closed the Remote **session / runtime / catalog / host-file semantic
 foundation** against the published DSH 0.2.0-rc.1 contract
-(`docs/m3-entry-contract.md` §1.1 requalification): the semantic ports no
+(the retired M3-0 entry contract §1.1 requalification): the semantic ports no
 longer inherit historical Direct shapes, and every M3-3A adapter constructs
 from ONE M3-1 `RemoteClientRuntime`. Nothing about which backend the user
 runs changed: Direct remains the production default, `BackendKind` stays
@@ -2798,7 +2871,7 @@ build a `ChildStatusReader`, `ViewerStatusPort` or any parent-fallback.
 ### Closure evidence
 
 - Contract authority: DSH `0.2.0-rc.1` (`next @ fa71168…`, package `0.5.0`) per
-  `docs/m3-entry-contract.md` §1.1; requalified to `0.2.0-rc.2` in M3-3B.
+  the retired M3-0 entry contract §1.1; requalified to `0.2.0-rc.2` in M3-3B.
 - Composition owner: `src/app/remote/m3a-semantics.ts`
   (`createRemoteM3ASemantics`) over ONE M3-1 `RemoteClientRuntime`.
 - Adapter-level evidence (L1–L3): the adapter suites listed under Evidence
@@ -2832,7 +2905,7 @@ merge blockers; each records what is absent and the follow-up shape.
 
 None currently for **Pre-M3**: the D2.3 same-Host integration lane is closed by
 `smoke:remote-session-lifecycle-parity` (see the Pre-M3 status section). The
-M3-only L5/L6 proofs frozen in `docs/m3-entry-contract.md` (Client command
+M3-only L5/L6 proofs frozen in the (retired) M3-0 entry contract (Client command
 execution, tool presentation, image submit/read, `turnOutline` rewind and skill
 invalidation behavior) are stage acceptance tests, not missing Pre-M3 coverage.
 
@@ -2840,9 +2913,9 @@ invalidation behavior) are stage acceptance tests, not missing Pre-M3 coverage.
 
 | Blocker | Level | Mitigation |
 |---|---|---|
-| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + the in-process explicit transport carrier (`connection.createSharedFetchHandler('/api')` + `typertGateway.wireStream.open`, installed through `installConnection`) (see `docs/m3-entry-contract.md` §4.2). No product redesign required |
-| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: after the Host-local legacy-settings migration prerequisite settles, M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see `docs/m3-entry-contract.md` §2.4, §4.4, §11 M3-1) |
-| Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/m3-entry-contract.md` §8) |
+| Client Runtime still carries web assembly assumptions (`dsh.client.platform: web`) | High | M3-0 validated the packaging: every rc.2 `/client` entry is a `window.__ModuleLoader__` browser chunk with no Node-native entry, and the transport/generation/`installConnection` seams are public. M3-1 owns the scoped loader shim + the in-process explicit transport carrier (`connection.createSharedFetchHandler('/api')` + `typertGateway.wireStream.open`, installed through `installConnection`) (see the retired M3-0 entry contract §4.2). No product redesign required |
+| DSH Connection / generated-remote dependency closure differs from the pi-tui profile | High | M3-0 resolved the closure question with an explicit **dynamic composition owner**: after the Host-local legacy-settings migration prerequisite settles, M3-1 `src/app/remote/host-runtime.ts` mounts Host connection → fileUploads → `sessionStats`/`turnOutline` → session/settings controllers → forwarded events → session-log-export only while the experimental Remote runtime is alive; it reuses the already-mounted `jobController`. The Client mounts the explicit minimal `/remote`/Client set. The normal `cordis.patch.yml` is unchanged byte-for-byte — no hidden experimental rows or Loader flag (see the retired M3-0 entry contract §2.4, §4.4, §11 M3-1) |
+| Extension Cordis ownership across the split | High | M3-0 froze the direction (UI contributions in the Client Context, Host domain state behind public Remote facts, no callback across the wire); M3-6 implements it (see `docs/client-server-coupling.md` for the Client Context ownership) |
 | Cross-client concurrency safety (Web+TUI, TUI+TUI, reconnect, cold resume, Host crash) | Critical | DSH SessionWriteLease is the cross-process writer authority; the full matrix is proven at M8 |
 | Shell execution on the wrong machine | Critical | Locality hard rule (shell amendment, M3-4 PR3): `!`/`!!` — both policies — are Host-side user-shell operations. The rc.2 terminal-controller Remote is a retained interactive PTY carrier and fails the one-shot qualification, so Remote `!`/`!!` fail closed entirely (U11a/U11b); a Client-side shell under a Remote Session is a critical locality violation, and the Remote branch never borrows Host `ctx.shell` merely because M3 is in-process |
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
@@ -2899,7 +2972,7 @@ still reaches the Remote graph only through the dynamic
   (reserved `0.5.1` row `dshFrom 0.2.0-rc.2`; the published `0.5.0` row keeps
   its `0.1.7-rc.2 … 0.2.0-rc.1` history), `docs/dsh-compatibility.md`,
   `README*.md`, `CHANGELOG*.md`.
-- `docs/m3-entry-contract.md` §2.1 now carries SEPARATE Approval and Question
+- the retired M3-0 entry contract §2.1 now carries SEPARATE Approval and Question
   authority matrices (the old combined "waterfall only" row was stale for
   Question on rc.2).
 - `test/remote-official-contract.test.ts` is the rc.2 published-surface gate:
@@ -2988,7 +3061,7 @@ still reaches the Remote graph only through the dynamic
   sign-in is unavailable here. The wire cannot say whether a keyless route is
   OAuth-only or uses the conventional env-var reference, so a hard block would
   hide provider login entirely (which §9.3 also forbids).
-- Explicit unsupported (docs/m3-entry-contract.md §10): `listRecords()` /
+- Explicit unsupported (the current Remote composition's unsupported set): `listRecords()` /
   `deleteRecord()` REJECT with a truthful unavailable error (never an empty
   record list), and the whole authorization sub-domain fails closed
   (`available()===false`, no fake targets, no private auth RPC). UI
@@ -3057,7 +3130,7 @@ still reaches the Remote graph only through the dynamic
   bundle whose layer supplies the row's non-volatile fields, and app boot's own
   root `Include` fed the raw `insert`-dialect patch options — because the
   product composition must never mount `configEditor`/`settings` itself.
-- `docs/m3-entry-contract.md` §1.3/§2.1 `interaction` row is reconverged:
+- the retired M3-0 entry contract §1.3/§2.1 `interaction` row is reconverged:
   rc.2 publishes the full Question contract, no capability detection and no
   rc.1 fallback lane exists.
 
@@ -3101,7 +3174,7 @@ release commit.
 ### Closure evidence
 
 - Contract authority: DSH `0.2.0-rc.2` at
-  `639ed015397290b3745d163aafe02ffee4aa3f84`; `docs/m3-entry-contract.md` §2.1
+  `639ed015397290b3745d163aafe02ffee4aa3f84`; the retired M3-0 entry contract §2.1
   (separate Approval/Question rows), §2.3 and §2.4.
 - Composition owner: `src/app/remote/runtime.ts#createRemoteBackendRuntime`
   (`src/runtime/remote/backend-remote.ts`) over the M3-1 composition spine;
@@ -4900,7 +4973,7 @@ Scope note: this section records **M3-5 PR5 only**. M3-5 as a stage was
 claimed by PR5.
 
 Authority contract: the semantic `session/writer-held` contract was already
-frozen (`docs/m3-entry-contract.md`, `docs/concurrency.md`). PR5 closes the
+frozen (`docs/concurrency.md`). PR5 closes the
 CALLER/UI recovery and the remaining secondary presentation; it re-opens no
 architecture, adds no writer-held error taxonomy, and takes over no lease.
 
@@ -5036,8 +5109,9 @@ by the M3-5 PR6 section below.
 Scope note: this section closes **M3-5**. It records the one remaining M3-5
 production cleanup (Remote Task locality), the stage-wide stale/currentness
 matrix, the duplicate/shadow-authority audit, the UI/UX disposition, the
-deferred-with-owner table and the closure evidence. **M3-6 remains a separate
-stage** (locality / extensions / reconnect / closure) and is not started here.
+deferred-with-owner table and the closure evidence. **M3-6 is the following
+stage** (locality / extensions / reconnect / closure), closed by the M3-6
+sections below.
 
 ### Baseline and selected contract
 
@@ -5242,7 +5316,7 @@ metadata changed; the `A5b-0 matrix CURRENT (deep check)` gate is green.
 
 ### Closure evidence
 
-- Contract authority: `docs/m3-entry-contract.md` M3-5 exit, unchanged by PR6;
+- Contract authority: the (retired) M3-0 entry contract M3-5 exit, unchanged by PR6;
   released DSH `0.2.0-rc.2` Client/Remote/projection authority.
 - Composition owner: `src/app/bootstrap.ts` (composition root) +
   `src/app/surface/**` (Task Center/Job viewer) + `src/app/remote/**` (Remote
@@ -5297,7 +5371,7 @@ metadata changed; the `A5b-0 matrix CURRENT (deep check)` gate is green.
 - Deferred items promoted with owner: the deferred-with-owner table above.
 
 M3-5 = DONE
-M3-6 = IN PROGRESS (PR1 Client UI / Extension locality landed; PR2 NEXT)
+M3-6 = DONE (see the M3-6 sections below and the M3 closure record)
 
 ## M3-6 status
 
@@ -5305,7 +5379,7 @@ M3-6 = IN PROGRESS (PR1 Client UI / Extension locality landed; PR2 NEXT)
 
 Baseline: `next @ c41a36c21123aac18774f56217c33a5ce0d4e389` (M3-5 PR6 merged).
 PR1 closed the one frozen §8 ownership violation
-(`docs/m3-entry-contract.md` §8 assigns `PiTuiExtensionService`, the
+(`docs/client-server-coupling.md` assigns `PiTuiExtensionService`, the
 contribution ledger, the command/theme/autocomplete/settings/keybinding/
 renderer/editor registries, SurfaceHost integration and the Advanced/Unstable
 captures to the **Client Context** under wire mode):
@@ -5371,11 +5445,10 @@ captures to the **Client Context** under wire mode):
 - **Deferrals**: full-surface reconnect recovery and the last-good
   Host-command claim after generation replacement → M3-6 PR2; runner-wide
   HMR/fatal/partial-disposer qualification → M3-6 PR3; the M3 closure matrix
-  and `M3 DONE` promotion → M3-6 PR4. PR1 implements §8; it does not rewrite
-  the frozen contract.
+  and `M3 DONE` promotion → M3-6 PR4. PR1 implemented the Client-Context
+  ownership rule; it did not rewrite the stage contract.
 
 M3-6 PR1 = DONE (Client UI / Extension locality)
-M3-6 PR2 = NEXT (full-surface reconnect recovery)
 
 ### M3-6 PR2 — Full-surface reconnect recovery (DONE)
 
@@ -5528,7 +5601,6 @@ repopulate the same surfaces, and Host write settlements stay real.
   M3-6 PR3; the final M3 closure matrix and `M3 DONE` → M3-6 PR4.
 
 M3-6 PR2 = DONE (full-surface reconnect recovery)
-M3-6 PR3 = NEXT (shutdown / HMR / global-fatal teardown hardening)
 
 ### M3-6 PR3 — Shutdown / HMR / mounted-fatal teardown (DONE)
 
@@ -5701,4 +5773,4 @@ Reviewed implementation snapshot: `967bd7f8` (branch tip and PR body record the
 later docs-only metadata commits).
 
 M3-6 PR3 = DONE (shutdown / HMR / mounted-fatal teardown)
-M3-6 PR4 = NEXT (M3 closure / docs / gates)
+M3-6 PR4 = DONE (final closure / docs / gates — see the M3 closure record)

@@ -75,37 +75,63 @@ test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () =>
     'the retired D2.2 write harness must not remain a gate')
 })
 
-test('M3-5 PR6 stage closure: merged-PR record, child-image tail and owned queue gap', () => {
+test('M3-5 PR6 stage closure and the final M3 closure record', () => {
   const migration = readFileSync(MIGRATION_DOC, 'utf8')
   const surface = readFileSync(SURFACE_DECISIONS_DOC, 'utf8')
 
   // Stage closure. The canonical `### Migration stage pointer` block AND the
-  // top status header must both record M3-5 DONE / M3-6 IN PROGRESS (PR1
-  // landed); duplicate summary markers elsewhere in the document must not be
-  // able to satisfy this lock.
+  // top status header must both record the FINAL M3 DONE / M4 NOT STARTED
+  // state; duplicate summary markers elsewhere must not satisfy this lock.
   const pointerMatch = migration.match(/### Migration stage pointer\n+```text\n([\s\S]*?)```/u)
   assert.ok(pointerMatch !== null, 'the canonical Migration stage pointer block must exist')
   const pointer = pointerMatch[1]
   assert.match(pointer, /^M3-5 = DONE\b/mu, 'the stage pointer must record M3-5 DONE')
-  assert.match(pointer, /^M3-6 = IN PROGRESS\b/mu, 'the stage pointer must record M3-6 IN PROGRESS (PR1 landed)')
+  assert.match(pointer, /^M3-6 = DONE\b/mu, 'the stage pointer must record M3-6 DONE')
+  assert.match(pointer, /^M4\s+= NOT STARTED\b/mu, 'the stage pointer must record M4 NOT STARTED')
+  assert.doesNotMatch(pointer, /^M3-6 = IN PROGRESS\b/mu, 'the stage pointer must not keep M3-6 in progress')
   assert.doesNotMatch(pointer, /^M3-5 = IN PROGRESS\b/mu, 'the stage pointer must not regress M3-5 to IN PROGRESS')
-  assert.doesNotMatch(pointer, /^M3-6 = (?:DONE|NEXT)\b/mu, 'the stage pointer must not mark M3-6 unstarted or done')
   assert.match(migration, /^M3-5 DONE\b/mu, 'the status header must record M3-5 DONE')
-  assert.match(migration, /^M3-6 IN PROGRESS\b/mu, 'the status header must record M3-6 IN PROGRESS')
-  assert.match(migration, /^M3-6 PR1 DONE\b/mu, 'the status header must record the landed PR1')
+  assert.match(migration, /^M3-6 PR4 DONE\b/mu, 'the status header must record the landed PR4')
+  assert.match(migration, /^M3-6 DONE\b/mu, 'the status header must record M3-6 DONE')
+  assert.match(migration, /^M3 DONE\b/mu, 'the status header must record M3 DONE')
   assert.doesNotMatch(migration, /^M3-5 IN PROGRESS\b/mu, 'the status header must not regress M3-5')
-  assert.doesNotMatch(migration, /^M3-6 NEXT\b/mu, 'the stale M3-6 NEXT marker must be gone')
-  assert.doesNotMatch(migration, /^M3 DONE\b/mu, 'M3 must NOT be marked DONE before PR4')
+  assert.doesNotMatch(migration, /^M3-6 IN PROGRESS\b/mu, 'the stale M3-6 IN PROGRESS marker must be gone')
+  assert.doesNotMatch(migration, /^M3-6 PR\d = NEXT\b/mu, 'no M3-6 PR may remain NEXT once M3 is closed')
 
-  // The PR1 migration section records the Client Context extension owner,
-  // the absent Host fallback, and PR2 as the next step.
+  // The M3 closure record: the four axes, the delivered implementation, the
+  // unchanged production backend, the intentional leftovers and the Next state.
+  const closureMatch = migration.match(/## M3 closure\n+```text\n([\s\S]*?)```/u)
+  assert.ok(closureMatch !== null, 'the M3 closure record must exist')
+  const record = closureMatch[1]
+  for (const axis of ['Contract', 'Implementation', 'Qualification', 'Surface / Reachability']) {
+    assert.match(record, new RegExp(`^${axis}$`, 'mu'), `the closure record must carry the ${axis} axis`)
+  }
+  assert.match(record, /M3-1\.\.M3-6 delivered/u, 'the closure record names the delivered stages')
+  assert.match(record, /production backend: Direct/u, 'Direct stays the production backend')
+  assert.match(record, /experimental backend: in-process official wire/u, 'the wire stays experimental')
+  assert.match(record, /no M4 IPC\/TCP/u, 'no M4 IPC/TCP may exist yet')
+  assert.match(record, /no public external attach/u, 'external attach is still unsupported')
+  assert.match(record, /no production backend flip/u, 'the production backend never flipped')
+  assert.match(record, /Intentional leftovers/u, 'remaining obligations carry explicit owners')
+  for (const id of ['R6', 'U2', 'U12', 'U13']) {
+    assert.match(record, new RegExp(`${id}\\b`, 'u'), `the closure record disposes ${id}`)
+  }
+  assert.match(record, /^Next\n  M4 NOT STARTED$/mu, 'the closure record ends with M4 NOT STARTED')
+
+  // M4-M8 remain NOT STARTED in the top status header.
+  for (const stage of ['M4', 'M5', 'M6', 'M7', 'M8']) {
+    assert.match(migration, new RegExp(`^${stage}\\s+NOT STARTED`, 'mu'), `${stage} must remain NOT STARTED`)
+  }
+
+  // The PR1 migration section records the Client Context extension owner, the
+  // absent Host fallback, and the reconnect work that followed it.
   const pr1Section = migration.slice(migration.indexOf('### M3-6 PR1 — Client UI / Extension locality (DONE)'))
   assert.ok(pr1Section.length > 0 && pr1Section.length < migration.length, 'the M3-6 PR1 section must exist')
   assert.match(pr1Section, /PiTuiExtensionService/, 'the PR1 section names the extension service')
   assert.match(pr1Section, /never evaluates the Host lookup/u,
     'the PR1 section records the absent Host fallback on the Remote branch')
-  assert.match(pr1Section, /M3-6 PR2 = NEXT/u, 'the PR1 section records PR2 reconnect as NEXT')
-  assert.match(pr1Section, /full-surface reconnect recovery/u, 'the PR1 section defers reconnect to PR2')
+  assert.doesNotMatch(pr1Section, /M3-6 PR2 = NEXT/u, 'the PR1 tail must not read as an open NEXT marker')
+  assert.match(pr1Section, /full-surface reconnect recovery/u, 'the PR1 section records the reconnect work')
 
   // Merged-PR bookkeeping: the merged PR3/PR5 must never read as still open.
   for (const line of migration.split('\n')) {
