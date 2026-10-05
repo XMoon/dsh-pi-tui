@@ -260,19 +260,45 @@ test('setApprovalPolicy fails closed (no public rc.2 carrier) and approval rides
   assert.deepEqual(seen, [{ toolName: 'bash' }])
 })
 
-test('answerContinued refuses to report an outcome once the Connection generation was replaced', async () => {
-  // A late answer is a write whose completion must not repaint a NEWER
-  // Question surface (plan §7.3 stale-generation row): the adapter captures
-  // the generation before dispatch and throws a superseded read afterwards, so
-  // the controller stays silent about an outcome it cannot vouch for.
+test('answerContinued keeps a dispatched settlement real across a Connection generation replacement (M3-6 PR2 §16.3)', async () => {
+  // The write was DISPATCHED on generation A and the Host settled it
+  // (`ok: true, value: true` = the reply was accepted and queued). A
+  // Connection replacement landing while the settlement was in flight loses
+  // only the OLD surface's presentation ownership — it must NOT reclassify
+  // the proven Host settlement as `SupersededReadError` (frozen §9.1 "Host
+  // settlements stay real"; PR2 plan §7 Must-not / §16.3). This mirrors the
+  // dispatch-then-classify shape of session-writer / host-command.
+  const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  let dispatches = 0
   const remote = fakeRemote({
     answer: async () => {
-      // The replace lands while the answer is in flight.
+      dispatches += 1
+      // The replacement lands while the settlement is in flight.
       generation.set({ id: 'gen-2' })
       return { ok: true, value: true }
     },
   })
+  const port = new RemoteInteractionPort({
+    sessions: { scopeOf: () => undefined, binding: () => undefined },
+    remote: remote as never,
+    connection: { generation: generation.source },
+  })
+  assert.equal(await port.questions.answerContinued('session-a', 'call-1', { answers: [] }), 'queued',
+    'the proven Host settlement is reported truthfully (never reinterpreted from the new generation)')
+  assert.equal(dispatches, 1, 'exactly one dispatch — the settlement is never retried/replayed')
+})
+
+test('answerContinued classifies a dispatched Host REFUSAL by the Host taxonomy even across a generation replacement', async () => {
+  // Same window, rejected settlement: the Host taxonomy (REPLY_QUEUED here)
+  // stays the reported failure; the generation replacement does not mask it
+  // behind a transport supersession.
   const generation = createObservableGenerationHarness({ id: 'gen-1' })
+  const remote = fakeRemote({
+    answer: async () => {
+      generation.set({ id: 'gen-2' })
+      return { ok: false, error: { code: 'REPLY_QUEUED', message: 'a reply is already queued' } }
+    },
+  })
   const port = new RemoteInteractionPort({
     sessions: { scopeOf: () => undefined, binding: () => undefined },
     remote: remote as never,
@@ -281,7 +307,9 @@ test('answerContinued refuses to report an outcome once the Connection generatio
   await assert.rejects(
     () => port.questions.answerContinued('session-a', 'call-1', { answers: [] }),
     (error: unknown) => {
-      assert.equal((error as Error).name, 'SupersededReadError')
+      assert.ok(error instanceof QuestionAnswerError)
+      assert.equal((error as QuestionAnswerError).code, 'REPLY_QUEUED',
+        'the Host refusal taxonomy survives the generation replacement')
       return true
     },
   )

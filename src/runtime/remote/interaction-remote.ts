@@ -372,19 +372,23 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     callId: string,
     answer: AskUserQuestionAnswer,
   ): Promise<'queued' | 'not-continued'> {
-    // A late answer is a WRITE whose completion must not repaint a newer
-    // Question surface (plan §7.3 stale-generation row): capture the
-    // Connection generation before dispatch and refuse to report an outcome
-    // once it was replaced. The Host still owns the durable fact — this
-    // adapter only declines to speak for a superseded UI.
+    // Pre-dispatch fence ONLY: with no current Connection generation the
+    // write provably never left (§9.3 pre-dispatch unavailable).
     const capturedGeneration = this.generation.getSnapshot()
     if (capturedGeneration === undefined) {
       throw new SupersededReadError('the question answer was not dispatched: no current Connection generation')
     }
     const result = await this.remote.userQuestions.answer(sessionId, callId, answer)
-    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
-      throw new SupersededReadError('the question answer completed after the Connection generation changed')
-    }
+    // The write HAS BEEN dispatched: its settlement is a real Host fact and
+    // is classified from the Host result alone (frozen §9.1 "Host
+    // settlements stay real" / PR2 §16.3 "DO NOT reinterpret solely from
+    // B"). A Connection replacement after dispatch loses only the OLD
+    // surface's presentation ownership — the controller and the surface
+    // fences decide where (and whether) a notice renders, exactly like
+    // every other Remote write adapter (session-writer / host-command
+    // dispatch-then-classify). Convergence is authoritative: the queued
+    // reply lands in the inbox projection and reconcile withdraws the
+    // entry.
     if (!result.ok) {
       // Preserve the Host taxonomy (REPLY_QUEUED / BAD_ANSWER / transport) in
       // the shared port vocabulary so both backends recover identically.
