@@ -877,12 +877,17 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
   }
 
   /** Notify a teardown observer exactly once, whatever hide path removed the
-   *  overlay (the frame is the owner disposed by disposeOnHide). */
+   *  overlay (the frame is the owner disposed by disposeOnHide). M3-6 PR3: the
+   *  owned child dispose and the one-shot notification are INDEPENDENT
+   *  obligations — a throwing child dispose must not strand the notification
+   *  (which removes the frame from its owner's bookkeeping). */
   dispose(): void {
-    super.dispose()
-    if (this.disposeNotified) return
+    const notify = !this.disposeNotified
     this.disposeNotified = true
-    this.onDispose?.()
+    runSyncDisposalSteps('responsive overlay frame disposal', [
+      () => super.dispose(),
+      ...notify ? [() => this.onDispose?.()] : [],
+    ])
   }
 
   /** Re-run the geometry callback without scheduling a frame. */
@@ -19789,34 +19794,56 @@ export class TuiApp {
   private settleApproval(pending: PendingApproval, outcome: ApprovalOutcome): void {
     if (pending.settled === true) return
     pending.settled = true
-    if (this.activeApproval === pending) {
-      this.keybindings.cancelLeader()
-      this.clearFullscreenPointerGestures()
-      this.activeApproval = undefined
-      // Fallback: if nothing is restored beneath the approval, input returns
-      // to the editor.
-      this.activeScreen.setFocus(this.seatEditor().component)
-      // Closing the approval restores every overlay it hid (Quick, Settings,
-      // any capturing overlay). pi-tui focuses a restored capturing overlay
-      // on setHidden(false), overriding the editor fallback above, and the
-      // broker's tracked close re-derives the final seat from that live
-      // surface (the shared close contract — no approval-specific publish).
-      if (pending.handle !== undefined) this.overlayRemounts.delete(pending.handle)
-      pending.handle?.hide()
-      // A remountable overlay opts out of disposeOnHide: the final close owns
-      // the frame/surface lifecycle explicitly.
-      pending.responsiveFrame?.dispose()
-      pending.responsiveFrame = undefined
-      this.projectActivity()
-    } else {
-      const queued = this.approvalQueue.indexOf(pending)
-      if (queued !== -1) this.approvalQueue.splice(queued, 1)
-    }
-    if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
-      pending.request.signal.removeEventListener('abort', pending.onAbort)
+    // M3-6 PR3: the presentation cleanup is NON-TRUNCATING and the caller's
+    // promise settlement is an OBLIGATION that no cleanup throw may skip. The
+    // committed `settled` latch makes this the only settlement attempt.
+    const steps: Array<() => void> = this.activeApproval === pending
+      ? [
+        () => this.keybindings.cancelLeader(),
+        () => this.clearFullscreenPointerGestures(),
+        () => { this.activeApproval = undefined },
+        // Fallback: if nothing is restored beneath the approval, input returns
+        // to the editor.
+        () => this.activeScreen.setFocus(this.seatEditor().component),
+        // Closing the approval restores every overlay it hid (Quick, Settings,
+        // any capturing overlay). pi-tui focuses a restored capturing overlay
+        // on setHidden(false), overriding the editor fallback above, and the
+        // broker's tracked close re-derives the final seat from that live
+        // surface (the shared close contract — no approval-specific publish).
+        () => { if (pending.handle !== undefined) this.overlayRemounts.delete(pending.handle) },
+        () => pending.handle?.hide(),
+        // A remountable overlay opts out of disposeOnHide: the final close owns
+        // the frame/surface lifecycle explicitly.
+        () => pending.responsiveFrame?.dispose(),
+        () => { pending.responsiveFrame = undefined },
+        () => this.projectActivity(),
+      ]
+      : [
+        () => {
+          const queued = this.approvalQueue.indexOf(pending)
+          if (queued !== -1) this.approvalQueue.splice(queued, 1)
+        },
+      ]
+    steps.push(() => {
+      if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
+        pending.request.signal.removeEventListener('abort', pending.onAbort)
+      }
+    })
+    let failure: unknown
+    try {
+      runSyncDisposalSteps('approval settlement', steps)
+    } catch (error) {
+      failure = error
     }
     pending.resolve(outcome)
-    if (this.activeApproval === undefined) this.showNextApproval()
+    if (this.activeApproval === undefined) {
+      try {
+        this.showNextApproval()
+      } catch (error) {
+        if (failure === undefined) failure = error
+      }
+    }
+    if (failure !== undefined) throw failure
   }
 
   /**
@@ -19992,61 +20019,79 @@ export class TuiApp {
   /** Resolve the question flow with its answers, or reject on cancel/abort. */
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state || state.settled === true) return
-    this.keybindings.cancelLeader()
     state.settled = true
-    // M3-3B park/reopen: the owner receives the flow's FINAL local progress
-    // before the seat is torn down, so parking a continued Question keeps the
-    // user's answers, free text and current question exactly as they left them
-    // (a mutation-time notification alone would miss tab/page moves).
-    state.status?.onDraftChange?.(state.flow.draftSnapshot())
-    this.clearFullscreenPointerGestures()
-    if (state.onAbort !== undefined && state.signal !== undefined) {
-      state.signal.removeEventListener('abort', state.onAbort)
-    }
+    // Ownership handover is decided BEFORE any throwable cleanup, so the queue
+    // advances even when a presentation step fails.
     const next = this.questionQueue.shift()
+    // M3-6 PR3: the presentation cleanup is NON-TRUNCATING and the caller's
+    // promise settlement (below) is an OBLIGATION no cleanup throw may skip.
+    const steps: Array<() => void> = [
+      () => this.keybindings.cancelLeader(),
+      // M3-3B park/reopen: the owner receives the flow's FINAL local progress
+      // before the seat is torn down, so parking a continued Question keeps the
+      // user's answers, free text and current question exactly as they left them
+      // (a mutation-time notification alone would miss tab/page moves).
+      () => state.status?.onDraftChange?.(state.flow.draftSnapshot()),
+      () => this.clearFullscreenPointerGestures(),
+      () => {
+        if (state.onAbort !== undefined && state.signal !== undefined) {
+          state.signal.removeEventListener('abort', state.onAbort)
+        }
+      },
+    ]
     if (next !== undefined) {
       // Ownership transfer: the seat and the suspended overlays pass to the
       // next flow directly — the editor and the overlays are NEVER restored
       // between two queued flows (a restore would flash the editor row and
       // reveal overlays that must stay hidden under the question).
-      next.suspendedOverlays = state.suspendedOverlays
-      next.flow.setStatus(next.status)
-      state.suspendedOverlays = new Set()
-      const frame = new QuestionFrame(next.flow, () => this.terminal.rows)
-      next.frame = frame
-      // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS into
-      // the seat — the settled flow's frame is simply unmounted (its
-      // lifetime belongs to the settled question state, never the seat).
-      this.editorSeat.replace(frame)
-      this.activeQuestions = next
-      const screen = this.fullscreen ?? this.tui
-      screen.setFocus(frame)
-      // The next queued flow owns the seat (follow-up P1).
-      this.setFocusSeat('overlay')
-      screen.requestRender()
-      this.settle(state, answers)
-      return
+      steps.push(
+        () => { next.suspendedOverlays = state.suspendedOverlays },
+        () => { next.flow.setStatus(next.status) },
+        () => { state.suspendedOverlays = new Set() },
+        () => {
+          const frame = new QuestionFrame(next.flow, () => this.terminal.rows)
+          next.frame = frame
+          // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS into
+          // the seat — the settled flow's frame is simply unmounted (its
+          // lifetime belongs to the settled question state, never the seat).
+          this.editorSeat.replace(frame)
+        },
+        () => { this.activeQuestions = next },
+        () => { (this.fullscreen ?? this.tui).setFocus(next.frame!) },
+        // The next queued flow owns the seat (follow-up P1).
+        () => this.setFocusSeat('overlay'),
+        () => { (this.fullscreen ?? this.tui).requestRender() },
+      )
+    } else {
+      // Final restoration: the editor FIRST, then the suspended overlays — a
+      // restored capturing overlay focuses itself through setHidden(false),
+      // so the editor must not be re-focused afterwards. M9: restore the
+      // CURRENT seat occupant (host default or plugin editor). Re-vendor
+      // lifecycle follow-up P1: the flow releases the seat BEFORE the mount
+      // — mountSeatChild() fences a live question, so the release must
+      // precede it or the editor would never remount (plan §2.6).
+      steps.push(
+        () => { this.activeQuestions = undefined },
+        () => this.mountSeatChild(),
+        // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
+        // default or the plugin editor's component) as the fallback — a restored
+        // capturing overlay re-claims the keyboard through the broker restore.
+        () => { (this.fullscreen ?? this.tui).setFocus(this.seatEditor().component) },
+        // The broker restores the directly suspended roots with their OWN focus
+        // intent; the previously focused one reclaims the keyboard.
+        () => this.overlayBroker.resumeSuspendedRoots(state),
+        () => this.projectActivity(),
+        () => { (this.fullscreen ?? this.tui).requestRender() },
+      )
     }
-    // Final restoration: the editor FIRST, then the suspended overlays — a
-    // restored capturing overlay focuses itself through setHidden(false),
-    // so the editor must not be re-focused afterwards. M9: restore the
-    // CURRENT seat occupant (host default or plugin editor). Re-vendor
-    // lifecycle follow-up P1: the flow releases the seat BEFORE the mount
-    // — mountSeatChild() fences a live question, so the release must
-    // precede it or the editor would never remount (plan §2.6).
-    this.activeQuestions = undefined
-    this.mountSeatChild()
-    const screen = this.fullscreen ?? this.tui
-    // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
-    // default or the plugin editor's component) as the fallback — a restored
-    // capturing overlay re-claims the keyboard through the broker restore.
-    screen.setFocus(this.seatEditor().component)
-    // The broker restores the directly suspended roots with their OWN focus
-    // intent; the previously focused one reclaims the keyboard.
-    this.overlayBroker.resumeSuspendedRoots(state)
-    this.projectActivity()
-    screen.requestRender()
+    let failure: unknown
+    try {
+      runSyncDisposalSteps('question settlement', steps)
+    } catch (error) {
+      failure = error
+    }
     this.settle(state, answers)
+    if (failure !== undefined) throw failure
   }
 
   /** Resolve or reject the settled promise (exactly once, by construction). */
@@ -20186,21 +20231,33 @@ export class TuiApp {
   private settleSaveLocation(state: SaveLocationState, result: SaveLocationResult): void {
     if (this.activeSaveLocation !== state || state.settled === true) return
     state.settled = true
-    if (state.onAbort !== undefined && state.signal !== undefined) {
-      state.signal.removeEventListener('abort', state.onAbort)
+    // M3-6 PR3: the presentation/prompt cleanup is NON-TRUNCATING and the
+    // caller's promise settlement (below) is an OBLIGATION no cleanup throw may
+    // skip (notably `state.prompt.dispose()`).
+    let failure: unknown
+    try {
+      runSyncDisposalSteps('save location settlement', [
+        () => {
+          if (state.onAbort !== undefined && state.signal !== undefined) {
+            state.signal.removeEventListener('abort', state.onAbort)
+          }
+        },
+        () => state.prompt.dispose(),
+        // Final restoration: the editor FIRST, then the suspended overlays — a
+        // restored capturing overlay focuses itself through setHidden(false), so
+        // the editor must not be re-focused afterwards (the question-flow rule).
+        () => { this.activeSaveLocation = undefined },
+        () => this.mountSeatChild(),
+        () => { (this.fullscreen ?? this.tui).setFocus(this.seatEditor().component) },
+        () => this.overlayBroker.resumeSuspendedRoots(state),
+        () => this.projectActivity(),
+        () => { (this.fullscreen ?? this.tui).requestRender() },
+      ])
+    } catch (error) {
+      failure = error
     }
-    state.prompt.dispose()
-    // Final restoration: the editor FIRST, then the suspended overlays — a
-    // restored capturing overlay focuses itself through setHidden(false), so
-    // the editor must not be re-focused afterwards (the question-flow rule).
-    this.activeSaveLocation = undefined
-    this.mountSeatChild()
-    const screen = this.fullscreen ?? this.tui
-    screen.setFocus(this.seatEditor().component)
-    this.overlayBroker.resumeSuspendedRoots(state)
-    this.projectActivity()
-    screen.requestRender()
     state.resolve(result)
+    if (failure !== undefined) throw failure
   }
 }
 
