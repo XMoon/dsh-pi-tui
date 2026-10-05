@@ -27,6 +27,7 @@ import type { SessionReader } from '../runtime/session-reader-port.ts'
 import type { SubmissionPresentationSource } from '../submission-presentation.ts'
 import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
+import type { PiTuiExtensionService } from '../extensions.ts'
 
 /**
  * The one selected application runtime core: the common inputs the bootstrap
@@ -71,6 +72,26 @@ export interface RemoteApplicationSelection {
    * fabricated partial Remote writer.
    */
   readonly promptSerializer: object
+  /**
+   * The Client-local UI startup facts (M3-6 PR1): the detached
+   * `sessionId`/`presetId` data the Remote application's Client UI subtree
+   * (extension host + first-party builtins on the official Client Context)
+   * mounts under. Data facts ONLY — the Host-only `markSurfaceMounted`
+   * readiness callback never crosses into the Client Context.
+   */
+  readonly clientUiStartup: ClientUiStartupFacts
+}
+
+/**
+ * The detached startup facts the Remote Client-local UI subtree consumes
+ * (M3-6 PR1 D2): plain data only. It must never contain
+ * `markSurfaceMounted`, `appExit`, a Host Context, a Loader,
+ * `profileContext`, Host services or callbacks — the Client Context gets a
+ * frozen copy of exactly these two optional fields.
+ */
+export interface ClientUiStartupFacts {
+  readonly sessionId?: string
+  readonly presetId?: string
 }
 
 /**
@@ -209,12 +230,17 @@ export interface RemoteLiveIngressFactory {
 /** The pre-composed Remote application input for the internal L6
  *  composition entry (M3-4 PR2): the aggregate the caller already built
  *  through `createRemoteApplicationRuntime` (ONE Host/Client/Backend/owner
- *  graph), plus its presentation source bundle. The selection seam re-uses
- *  the aggregate's selected core instead of constructing a second Remote
- *  graph; internal/test paths only. */
+ *  graph), its presentation source bundle, and the SELECTED Client-local
+ *  extension service from that same aggregate (M3-6 PR1: the Remote branch's
+ *  UI extension authority — the Client Context's `piTuiExtensions`, never a
+ *  Host-context lookup). The selection seam re-uses the aggregate's selected
+ *  core instead of constructing a second Remote graph; internal/test paths
+ *  only. The override carries the narrow service object, NOT the Client
+ *  Context and not any Cordis/transport face. */
 export interface RemoteApplicationOverride {
   readonly selected: SelectedApplicationRuntime
   readonly presentation: RemoteApplicationSources
+  readonly extensionService: PiTuiExtensionService
 }
 
 /** The neutral Session-scoped facts face. */

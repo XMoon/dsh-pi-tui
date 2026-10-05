@@ -6,14 +6,24 @@
  * (the official executor's `command/run` lifecycle rows) rather than by
  * test-internal flags.
  *
+ * M3-6 PR1 rewrote the extension evidence (§FACT 2.8 correction): the
+ * positive extension command and the collision registration are mounted by
+ * a REAL Client plugin fiber on `aggregate.wire.client.context` through the
+ * public extension service — the selected `override.extensionService` — so
+ * the L6 below now proves genuine Client Context ownership, with a
+ * simultaneously mounted Host-context extension service as the negative
+ * control (present, distinct, and never the selected authority).
+ *
  * Scenario coverage:
  * 1. TUI built-in  — the Client handler runs; ZERO Host `command/run`.
- * 2. Extension     — the Client callback runs in the Client Context; ZERO
- *                    Host `command/run`.
+ * 2. Extension     — the CLIENT-CONTEXT callback runs (the selected Client
+ *                    service); the simultaneously present Host-context
+ *                    extension callback runs ZERO times; ZERO Host
+ *                    `command/run`.
  * 3. Host command  — executes EXACTLY ONCE through HostCommandPort (one
  *                    `command/run` + one `command/done`).
- * 4. Collision     — the Host claim wins; the same-named Client callback is
- *                    never invoked.
+ * 4. Collision     — the Host claim wins; the same-named CLIENT-CONTEXT
+ *                    extension callback is never invoked.
  * 5. Sessionless   — a sessionless TUI built-in works without creating a
  *                    Session.
  * 6. /copy         — the newest assistant message OUTSIDE the initial
@@ -30,19 +40,24 @@
  * Remote prompt serializer.
  *
  * TEST STAND-INS: the scripted streaming LLM adapter; the extension host is
- * mounted through its REAL public service (contribution registration).
+ * mounted through its REAL public service (contribution registration) — on
+ * the Client Context for the selected authority and on the Host Context
+ * only as the negative control.
  *
  * @module @xmoon76/dsh-pi-tui/runner-remote-command-plane.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import type { Fiber } from '@deepseek-ai/cordis'
+import { symbols } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../src/index.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride } from '../src/app/application-runtime.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
+import { PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -50,6 +65,13 @@ import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
+
+/** Unwrap a Cordis traceable service proxy to its implementation (service
+ * identity comparisons in this suite compare the unwrapped instances). */
+function unwrapService(value: unknown): unknown {
+  const original = (value as Record<symbol, unknown>)[symbols.original]
+  return original ?? value
+}
 
 class StubStreamingLlmAdapter extends LlmAdapter {
   override listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string }>> {
@@ -95,8 +117,20 @@ async function mountRunner(
     readonly presetId?: string
     readonly resumeSessionId?: string
     readonly host?: Fixture['host']
-    /** Register one Client extension command before the runner mounts. */
+    /** Register one CLIENT-CONTEXT extension command before the runner
+     * mounts (M3-6 PR1: the fiber mounts on
+     * `aggregate.wire.client.context` and reads the service through its OWN
+     * plugin context — the selected authority). */
     readonly extensionCommands?: ReadonlyArray<{
+      readonly id: string
+      readonly name: string
+      readonly sessionless?: boolean
+      readonly handler: () => { kind: 'success'; text?: string } | { kind: 'error'; text: string }
+    }>
+    /** Register one HOST-CONTEXT extension command of the same identity as
+     * the negative control (mounted on the ordinary Host Context; it must
+     * never be the Remote runner's authority). */
+    readonly hostExtensionCommands?: ReadonlyArray<{
       readonly id: string
       readonly name: string
       readonly sessionless?: boolean
@@ -146,32 +180,74 @@ async function mountRunner(
     host.ctx.commands.register({ name: command.name, description: `host ${command.name}`, handler: command.handler })
   }
 
-  // The REAL extension host service (the public contribution API).
+  // The REAL Host runner tuiStartup (unchanged: the runner row still reads
+  // the Host/profile Context — only the extension authority moved).
   const runnerCtx = host.ctx
   const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
   runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId, shippedPresetRoot: host.workRoot })
-  if (options.extensionCommands !== undefined) {
-    const extensionHost = await import('../src/extensions.ts')
-    await runnerCtx.plugin(extensionHost)
-    const service = runnerCtx.get(extensionHost.PI_TUI_EXTENSIONS_SERVICE ?? ('piTuiExtensions' as never)) as unknown as {
-      registerCommand(contribution: unknown): unknown
-    }
-    for (const command of options.extensionCommands) {
-      service.registerCommand({
+
+  // THE aggregate FIRST (M3-6 PR1 §14.4 ordering): the Client UI subtree
+  // mounts the extension host + builtins on the official Client Context.
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    // The runner receives the same startup facts: the exact detached
+    // sessionId copy (the runner startup carries no launch preset on this
+    // fixture — `presetId` above is the Host fixture's preset name, not a
+    // `--preset` fact).
+    clientUiStartup: {
+      ...(sessionId === undefined ? {} : { sessionId }),
+    },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  // HOST-NEGATIVE CONTROL: a Host-context extension service carrying the
+  // SAME test identity, mounted only as the ignored authority. It must be
+  // a distinct object from the aggregate's Client service.
+  let hostService: { registerCommand(contribution: unknown): unknown } | undefined
+  if (options.hostExtensionCommands !== undefined) {
+    const extensionHostModule = await import('../src/extensions.ts')
+    await runnerCtx.plugin(extensionHostModule)
+    hostService = runnerCtx.get(extensionHostModule.PI_TUI_EXTENSIONS_SERVICE) as typeof hostService
+    for (const command of options.hostExtensionCommands) {
+      hostService!.registerCommand({
         id: command.id,
         name: command.name,
-        description: `ext ${command.name}`,
+        description: `host-ext ${command.name}`,
         ...command.sessionless === true ? { sessionless: true } : {},
         handler: command.handler,
       })
     }
   }
 
-  const aggregate = await createRemoteApplicationRuntime({
-    hostContext: host.ctx,
-    waitForHostPrerequisites: async () => {},
-  })
-  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+  // The CLIENT-CONTEXT extension contributions (the SELECTED authority):
+  // a REAL Client plugin fiber reads the service through its OWN plugin
+  // context and registers exactly like a real plugin — caller-fiber
+  // ownership is preserved, and the outer test context never registers
+  // directly on the service.
+  let extensionFiber: Fiber | undefined
+  if (options.extensionCommands !== undefined) {
+    const contributions = options.extensionCommands
+    extensionFiber = aggregate.wire.client.context.plugin(clientPluginCtx => {
+      const service = clientPluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+        registerCommand(contribution: unknown): unknown
+      } | undefined
+      if (service === undefined) throw new Error('the Client plugin context did not see piTuiExtensions')
+      for (const command of contributions) {
+        service.registerCommand({
+          id: command.id,
+          name: command.name,
+          description: `ext ${command.name}`,
+          ...command.sessionless === true ? { sessionless: true } : {},
+          handler: command.handler,
+        })
+      }
+    })
+    await extensionFiber
+    // The test fiber unloads BEFORE the aggregate transport disposal (the
+    // lifecycle deferrals run in reverse registration order).
+    life.defer(() => { void extensionFiber?.dispose() })
+  }
 
   const vt = new VirtualTerminal(110, 32)
   const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
@@ -203,6 +279,7 @@ async function mountRunner(
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -274,22 +351,44 @@ test('L6 §7.4-1 TUI built-in: the Client handler runs and the Host executor is 
     'a TUI built-in must never reach the Host command executor (zero command/run rows)')
 })
 
-test('L6 §7.4-2 extension: the Client callback runs; the Host executor is NEVER entered', async (t) => {
+test('L6 §7.4-2 extension (M3-6 PR1): the CLIENT-CONTEXT callback runs through the selected Client service; the Host-context twin and the Host executor are NEVER entered', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-ext'
-  let calls = 0
+  let clientCalls = 0
+  let hostExtensionCalls = 0
   const fixture = await mountRunner(life, {
     resumeSessionId: mainId,
     extensionCommands: [{
       id: 'pr4-ext',
       name: 'pr4ext',
       sessionless: true,
-      handler: () => { calls += 1; return { kind: 'success', text: 'ext ran' } },
+      handler: () => { clientCalls += 1; return { kind: 'success', text: 'client-ext ran' } },
+    }],
+    hostExtensionCommands: [{
+      id: 'pr4-ext',
+      name: 'pr4ext',
+      sessionless: true,
+      handler: () => { hostExtensionCalls += 1; return { kind: 'success', text: 'host-ext ran' } },
     }],
   })
+  // Source → decision → sink identity precondition: the selected authority
+  // is the aggregate's CLIENT service, and the Host-context twin is a
+  // simultaneously mounted, DISTINCT service implementation.
+  assert.equal(
+    unwrapService(fixture.aggregate.clientUi.extensionService),
+    unwrapService(fixture.aggregate.wire.client.context.get(PI_TUI_EXTENSIONS_SERVICE)),
+    'the selected extension service IS the Client Context service')
+  const hostTwin = fixture.host.ctx.get(PI_TUI_EXTENSIONS_SERVICE)
+  assert.notEqual(hostTwin, undefined, 'the negative-control Host extension service is mounted')
+  assert.notEqual(
+    unwrapService(fixture.aggregate.clientUi.extensionService), unwrapService(hostTwin),
+    'the Host-context extension service is a distinct implementation')
+
   submit(fixture, '/pr4ext')
-  await waitFor('the extension callback ran', () => calls === 1, 15_000)
+  await waitFor('the CLIENT-context extension callback ran', () => clientCalls === 1, 15_000)
   await settle()
+  assert.equal(hostExtensionCalls, 0,
+    'the simultaneously present Host-context extension callback executed ZERO times (ignored authority)')
   assert.equal(fixture.hostCommandRuns(mainId), 0,
     'an extension callback must never reach the Host command executor')
 })
@@ -317,7 +416,7 @@ test('L6 §7.4-3 Host command: executes EXACTLY ONCE through HostCommandPort', a
     'exactly ONE command/run row — the Host command is never auto-retried or double-dispatched')
 })
 
-test('L6 §7.4-4 collision: the Host claim wins and the same-named Client callback is never invoked', async (t) => {
+test('L6 §7.4-4 collision (M3-6 PR1): the Host claim wins and the same-named CLIENT-CONTEXT extension callback is never invoked', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-collision'
   let hostCalls = 0
@@ -325,6 +424,8 @@ test('L6 §7.4-4 collision: the Host claim wins and the same-named Client callba
   const fixture = await mountRunner(life, {
     resumeSessionId: mainId,
     hostCommands: [{ name: 'pr4collide', handler: () => { hostCalls += 1; return { kind: 'success', text: 'host wins' } } }],
+    // A CLIENT-CONTEXT registration (M3-6 PR1): the extension side of the
+    // collision is the selected Client service's contribution.
     extensionCommands: [{
       id: 'pr4-collide',
       name: 'pr4collide',

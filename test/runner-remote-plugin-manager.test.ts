@@ -44,6 +44,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../src/app/bootstrap.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
 import type { RemoteApplicationOverride } from '../src/app/application-runtime.ts'
+import { PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { RemotePluginManagerPort } from '../src/runtime/remote/plugin-manager-remote.ts'
 import type { PluginInstallEvent } from '../src/runtime/plugin-manager-port.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
@@ -90,7 +91,20 @@ interface Fixture {
   app(): { setDraft(text: string): void; submitDraft(): void }
 }
 
-async function mountPluginManagerRunner(life: TestLifecycle): Promise<Fixture> {
+async function mountPluginManagerRunner(
+  life: TestLifecycle,
+  options: {
+    /** Register one CLIENT-CONTEXT extension contribution (M3-6 PR1): a
+     * real Client plugin fiber on `aggregate.wire.client.context` using the
+     * public extension service — the SELECTED Remote TUI extension
+     * authority. */
+    readonly clientExtensionBadge?: { readonly id: string; readonly text: string }
+    /** Register one HOST-CONTEXT extension contribution of the same shape —
+     * the negative-control authority (present on the Host Context, never
+     * reported by the selected Remote TUI extension runtime). */
+    readonly hostExtensionBadge?: { readonly id: string; readonly text: string }
+  } = {},
+): Promise<Fixture> {
   const { createRemoteApplicationHostFixture, PLUGIN_MANAGER_FIXTURE_BUNDLE } =
     await import('./support/remote-application-fixture.ts')
   const host = await createRemoteApplicationHostFixture(life, 'm3-5-pr4-plugin-preset', {
@@ -106,8 +120,41 @@ async function mountPluginManagerRunner(life: TestLifecycle): Promise<Fixture> {
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
+    // No startup subject on this fixture (M3-6 PR1): the Client UI subtree
+    // mounts under empty detached facts.
+    clientUiStartup: {},
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  // The CLIENT-CONTEXT contribution (the selected authority): a real Client
+  // plugin fiber reads the service through its OWN plugin context and
+  // registers through the same public API a third-party plugin uses.
+  if (options.clientExtensionBadge !== undefined) {
+    const badge = options.clientExtensionBadge
+    const fiber = aggregate.wire.client.context.plugin(clientPluginCtx => {
+      const service = clientPluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+        register(slot: string, spec: { id: string; order?: number }, value: { text: string; tone: string }): unknown
+      } | undefined
+      if (service === undefined) throw new Error('the Client plugin context did not see piTuiExtensions')
+      service.register('chrome.header.badge', { id: badge.id }, { text: badge.text, tone: 'info' })
+    })
+    await fiber
+    life.defer(() => { void fiber.dispose() })
+  }
+
+  // The HOST-CONTEXT twin (the negative control): a separate extension
+  // service on the ordinary Host Context, present but never the selected
+  // Remote TUI extension authority.
+  if (options.hostExtensionBadge !== undefined) {
+    const badge = options.hostExtensionBadge
+    const extensionHostModule = await import('../src/extensions.ts')
+    await runnerCtx.plugin(extensionHostModule)
+    const hostService = runnerCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+      register(slot: string, spec: { id: string; order?: number }, value: { text: string; tone: string }): unknown
+    } | undefined
+    if (hostService === undefined) throw new Error('the Host-context extension service did not mount')
+    hostService.register('chrome.header.badge', { id: badge.id }, { text: badge.text, tone: 'info' })
+  }
 
   const vt = new VirtualTerminal(110, 32)
   const restoreTerminal = installVirtualProcessTerminal(vt)
@@ -124,6 +171,7 @@ async function mountPluginManagerRunner(life: TestLifecycle): Promise<Fixture> {
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -223,6 +271,146 @@ test('L6-A: the real Remote /plugins reads the real Host PluginManager through t
   const line = bundleLine(fixture.vt.getViewport(), bundle)
   assert.ok(line !== undefined, 'the fixture bundle row is visible')
   assert.match(line, /disabled/, 'the fixture bundle starts disabled (Host truth)')
+})
+
+test('L6 (M3-6 PR1): the REAL runner controller consumes the SELECTED Client service observations; a Host-context twin is never reported', async (t) => {
+  const life = testLifecycle(t)
+  // The observation evidence is captured at the controller's OWN consumption
+  // point (R1 F2 / R2 review): the test patches the production
+  // `PluginManagerController.prototype.buildModel` ONLY to wrap the REAL
+  // instance's existing `observationSource` with a recorder (restored in
+  // `finally`), then runs the ORIGINAL unbound buildModel with the instance
+  // as receiver — the model build itself invokes the recorded source, so
+  // the evidence below is the model's genuine consumption, never an extra
+  // test-side source call. A controller wired to the wrong service (or no
+  // observations at all) cannot pass the assertions below.
+  const { PluginManagerController } = await import('../src/plugin-manager/controller.ts')
+  type Observation = { owner: string; contributionKinds: readonly string[]; contributionCount: number }
+  type BuildModel = (this: { observationSource?: () => readonly Observation[] }, snapshot: never) => unknown
+  const prototype = PluginManagerController.prototype as unknown as Record<string, BuildModel>
+  // NEVER bind: the original must keep receiving the real instance.
+  const originalBuildModel: BuildModel = prototype.buildModel
+  const consumedByBuilds: Observation[][] = []
+  const buildReceivers: unknown[] = []
+  const sourceCallsPerBuild: Array<{ modelCalls: number; sourceCalls: number }> = []
+  prototype.buildModel = function patchedBuildModel(this: unknown, snapshot: never) {
+    const instance = this as { observationSource?: () => readonly Observation[] }
+    buildReceivers.push(this)
+    const source = instance.observationSource
+    if (source === undefined) {
+      // A controller built without observations: record the empty truth and
+      // let the original build run (its own `?? []` branch).
+      consumedByBuilds.push([])
+      return originalBuildModel.call(instance, snapshot)
+    }
+    let restoreSource = false
+    const recorded: Observation[] = []
+    consumedByBuilds.push(recorded)
+    /** Transparency counters: the production build invokes the source ONCE
+     * per build (`modelCalls`), and the recorder must forward to the real
+     * underlying source EXACTLY that many times (`sourceCalls`) — a
+     * recorder that reads the source twice (record one snapshot, return
+     * another) fails the equality+one assertions below. */
+    const calls = { modelCalls: 0, sourceCalls: 0 }
+    sourceCallsPerBuild.push(calls)
+    try {
+      const countingSource = (receiver: unknown): readonly Observation[] => {
+        calls.sourceCalls += 1
+        return source.call(receiver)
+      }
+      instance.observationSource = function recordedSource(this: unknown) {
+        calls.modelCalls += 1
+        const observations = countingSource(this)
+        recorded.push(...observations)
+        return observations
+      }
+      restoreSource = true
+      return originalBuildModel.call(instance, snapshot)
+    } finally {
+      if (restoreSource) instance.observationSource = source
+    }
+  }
+  // Restore the exact original function identity (never a bound clone).
+  life.defer(() => { prototype.buildModel = originalBuildModel })
+
+  const fixture = await mountPluginManagerRunner(life, {
+    clientExtensionBadge: { id: 'client-obs-badge', text: 'client-obs' },
+    hostExtensionBadge: { id: 'host-twin-badge', text: 'host-twin' },
+  })
+  const bundle = fixture.host.pluginManager!.bundleName
+
+  // Open the REAL panel: the runner-created controller performs its real
+  // reads and buildModel calls with the observations it was wired to.
+  submit(fixture, '/plugins')
+  await waitFor('the Remote Plugin Manager panel lists the fixture bundle', () =>
+    plain(fixture.vt.getViewport()).includes(bundle), 20_000)
+  assert.match(plain(fixture.vt.getViewport()), /Current TUI/,
+    'the Host PluginManager package inventory still renders (unchanged authority)')
+
+  await waitFor('the controller built its model through the patched path', () => consumedByBuilds.length > 0, 20_000)
+  // The patched build ran on REAL controller instances (the runner's), and
+  // each build's OWN source invocation delivered non-empty observations.
+  assert.ok(buildReceivers.length > 0, 'the production buildModel ran with a real receiver')
+  for (const receiver of buildReceivers) {
+    assert.equal(receiver instanceof PluginManagerController, true,
+      'every patched build ran on a real PluginManagerController instance')
+  }
+  const allConsumed = consumedByBuilds.flat()
+  assert.ok(allConsumed.length > 0,
+    'the model builds genuinely invoked their observation source (non-empty results; a `[]` source fails here)')
+  // Transparency lock: every model build invoked its source EXACTLY ONCE —
+  // the recorder forwards one-to-one (modelCalls === sourceCalls === 1), so
+  // the recorded snapshot IS the one the model consumed and the recorder
+  // adds no second read.
+  assert.equal(sourceCallsPerBuild.length, consumedByBuilds.length,
+    'every recorded build carries its own source-call counters')
+  for (const calls of sourceCallsPerBuild) {
+    assert.equal(calls.modelCalls, 1,
+      'the production buildModel invokes its observation source exactly once per build')
+    assert.equal(calls.sourceCalls, calls.modelCalls,
+      'the recorder forwards one-to-one to the real source (no extra read, no different snapshot)')
+  }
+  const badgeObservations = allConsumed.filter(observation =>
+    observation.contributionKinds.includes('chrome.header.badge'))
+  assert.ok(badgeObservations.length > 0,
+    'the consumed observations include chrome.header.badge contributions')
+
+  // POSITIVE (discriminating): the Client fiber's UNIQUE registration is
+  // observable through the model's genuine consumption — its owner identity
+  // is keyed on the unique `client-obs-badge` registration, which the
+  // builtin badge cannot satisfy.
+  const clientService = fixture.aggregate.wire.client.context.get(PI_TUI_EXTENSIONS_SERVICE) as {
+    _ledger(): { snapshot(slot: string): { records: Array<{ id: string; owner: string }> } }
+  }
+  const clientBadgeRecords = clientService._ledger().snapshot('chrome.header.badge').records
+  const uniqueClientOwners = new Set(clientBadgeRecords.filter(record => record.id === 'client-obs-badge').map(record => record.owner))
+  assert.equal(uniqueClientOwners.size, 1,
+    'the unique Client badge has exactly one owner on the Client service ledger')
+  const uniqueClientOwner = [...uniqueClientOwners][0]!
+  await waitFor('the model consumed the UNIQUE Client contribution owner', () =>
+    badgeObservations.some(observation => observation.owner === uniqueClientOwner), 20_000)
+
+  // NEGATIVE: the Host-context twin service verifiably carries its own
+  // contribution with a DIFFERENT owner, and that owner NEVER appears in
+  // anything the model consumed.
+  const hostTwin = fixture.host.ctx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+    _ledger(): { snapshot(slot: string): { records: Array<{ id: string; owner: string }> } }
+  } | undefined
+  assert.notEqual(hostTwin, undefined, 'the negative-control Host extension service is mounted')
+  const hostTwinRecords = hostTwin!._ledger().snapshot('chrome.header.badge').records
+  assert.ok(hostTwinRecords.some(record => record.id === 'host-twin-badge'),
+    `the Host twin service verifiably carries its own contribution: ${JSON.stringify(hostTwinRecords.map(record => record.id))}`)
+  const hostTwinOwners = new Set(hostTwinRecords.map(record => record.owner))
+  for (const hostOwner of hostTwinOwners) {
+    assert.equal(allConsumed.some(observation => observation.owner === hostOwner), false,
+      `the model never consumed the Host twin service's owner (${hostOwner})`)
+  }
+
+  // Prototype restoration identity: after the test lifecycle the exact
+  // original function is back (verified here against the still-live value —
+  // the defer restores it after this test's assertions).
+  assert.equal(prototype.buildModel === originalBuildModel, false,
+    'the patch is active during the test (restoration happens through the lifecycle defer)')
 })
 
 test('L6-B: the Settings → Plugins entry hosts the SAME Remote controller/panel and Back returns', async (t) => {

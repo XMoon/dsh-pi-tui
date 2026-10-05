@@ -65,6 +65,9 @@ test('L6 §7.4-12: Remote permission cycle — projection current, one semantic 
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
+    // The runner receives the same startup facts (M3-6 PR1: the Client UI
+    // subtree mounts under the exact detached sessionId/presetId copy).
+    clientUiStartup: { sessionId: mainId },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -86,6 +89,7 @@ test('L6 §7.4-12: Remote permission cycle — projection current, one semantic 
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -217,6 +221,7 @@ test('L6 §7.4-13 stale permission: apply A → switch B before settle → NO B 
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: sessionA },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -238,6 +243,7 @@ test('L6 §7.4-13 stale permission: apply A → switch B before settle → NO B 
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -359,6 +365,7 @@ test('L6 PR5 §1D: /yolo on a Remote live session reaches the semantic permissio
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -379,6 +386,7 @@ test('L6 PR5 §1D: /yolo on a Remote live session reaches the semantic permissio
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start

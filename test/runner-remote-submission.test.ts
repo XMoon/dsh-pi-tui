@@ -145,6 +145,10 @@ async function mountPr3Runner(
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
     // NO promptSerializer: the PRODUCTION serializer composes by default.
+    // The runner receives the same startup facts (M3-6 PR1).
+    clientUiStartup: {
+      ...(options.resumeSessionId === undefined ? {} : { sessionId: options.resumeSessionId }),
+    },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -169,6 +173,7 @@ async function mountPr3Runner(
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start

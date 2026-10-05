@@ -14,11 +14,13 @@
  * M3-4 submission PR) supply a real one; the aggregate itself never invents
  * or weakens one.
  *
- * The transport disposer owns exactly `backendRuntime.dispose()` then
- * `wire.dispose()` (adapters before Client, Client before Host additive
- * fibers) and is idempotent + error-preserving. It never retires the
- * currently selected Session — that stays `app/session` ownership, and the
- * caller order is `session retirement -> disposeTransport()`.
+ * The transport disposer owns exactly `clientUi.dispose()` (the M3-6 PR1
+ * Client UI subtree: builtins -> extension host -> startup facts) then
+ * `backendRuntime.dispose()` then `wire.dispose()` (adapters before Client,
+ * Client before Host additive fibers) and is idempotent + error-preserving.
+ * It never retires the currently selected Session — that stays `app/session`
+ * ownership, and the caller order is `session retirement ->
+ * disposeTransport()`.
  *
  * The only sanctioned reachability is the internal application
  * runtime-selection seam through `runtime/backend-loader.ts`; tests about
@@ -28,7 +30,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { SelectedApplicationRuntime } from '../application-runtime.ts'
+import type { ClientUiStartupFacts, SelectedApplicationRuntime } from '../application-runtime.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
 import { mergeCause } from './host-runtime.ts'
 import {
@@ -39,6 +41,7 @@ import {
 } from './runtime.ts'
 import { createRemoteSessionOwnerServices, type RemoteSessionOwnerServices } from './session-owners.ts'
 import { createRemotePresentationSource, type RemoteApplicationSource } from './presentation-source.ts'
+import { createRemoteClientUiRuntime, type RemoteClientUiRuntime } from './client-ui-runtime.ts'
 
 /** Start input for the Remote application runtime aggregate. */
 export interface RemoteApplicationRuntimeOptions {
@@ -56,6 +59,14 @@ export interface RemoteApplicationRuntimeOptions {
    * explicit injection is a composition-test stub.
    */
   readonly promptSerializer?: RemotePromptSerializer
+  /**
+   * The Client-local UI startup facts (M3-6 PR1): detached
+   * `sessionId`/`resetId`-free plain data the Client UI subtree (extension
+   * host + first-party builtins on `wire.client.context`) mounts under.
+   * REQUIRED — every Remote aggregate construction states the Client-local
+   * startup facts explicitly (runtime-only fixtures pass `{}`).
+   */
+  readonly clientUiStartup: ClientUiStartupFacts
 }
 
 /** The Remote application runtime: the selected core plus its parts. */
@@ -71,6 +82,15 @@ export interface RemoteApplicationRuntime {
    * owns no disposal; the consuming bootstrap owns the ingress handles.
    */
   readonly presentation: RemoteApplicationSource
+  /**
+   * The M3-6 PR1 PiTui Client UI subtree on the exact official Client
+   * Context (`wire.client.context`): the Client-local tuiStartup facts
+   * fiber, the extension-host fiber, the first-party builtins fiber and the
+   * ONE Client-local `PiTuiExtensionService` the Remote branch's UI runs
+   * on. Composition/qualification input only — never part of the package
+   * API.
+   */
+  readonly clientUi: RemoteClientUiRuntime
 }
 
 /** Run one disposal step with per-step error isolation: the step's failures
@@ -147,6 +167,31 @@ export async function createRemoteApplicationRuntime(
   // root Job-roster watch that must be released through THIS owner before the
   // Client Context is disposed (adapter -> Client -> Host order).
   const presentation = createRemotePresentationSource(wire, backendRuntime)
+  // The M3-6 PR1 Client UI subtree on the EXACT official Client Context —
+  // never a second Context. A construction failure after the
+  // backend/presentation exist unwinds the partially-created subtree (its
+  // own constructor owns its partial fibers), then the presentation task,
+  // backend and wire, with the original error primary.
+  let clientUi: RemoteClientUiRuntime
+  try {
+    clientUi = await createRemoteClientUiRuntime({
+      context: wire.client.context,
+      startup: options.clientUiStartup,
+    })
+  } catch (error) {
+    const disposeErrors = [
+      ...await collectDisposeErrors(() => presentation.task.dispose()),
+      ...await collectDisposeErrors(() => backendRuntime.dispose()),
+      ...await collectDisposeErrors(() => wire.dispose()),
+    ]
+    if (disposeErrors.length > 0) {
+      const secondary = disposeErrors.length === 1
+        ? disposeErrors[0]
+        : new AggregateError(disposeErrors, 'remote application runtime: disposal failures during client-UI construction failure')
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
+    }
+    throw error
+  }
   return {
     selected: {
       kind: 'remote',
@@ -156,13 +201,17 @@ export async function createRemoteApplicationRuntime(
       disposeTransport: async (): Promise<void> => {
         if (transportDisposed) return
         transportDisposed = true
-        // presentation.task.dispose() drops the retained roster watch and
-        // invalidates every in-flight Task read; backendRuntime.dispose() then
-        // drops the adapter caches/subscriptions BEFORE the Client Context
-        // disposal; wire.dispose() disposes Client first, Host additive fibers
-        // last. Every step runs even when an earlier one throws; the first
-        // error surfaces with the rest on its cause chain.
+        // clientUi.dispose() drops the Client UI plugin fibers (builtins ->
+        // extension host -> startup facts) while every official Client
+        // service they may consume still exists; presentation.task.dispose()
+        // drops the retained roster watch and invalidates every in-flight
+        // Task read; backendRuntime.dispose() then drops the adapter
+        // caches/subscriptions BEFORE the Client Context disposal;
+        // wire.dispose() disposes Client first, Host additive fibers last.
+        // Every step runs even when an earlier one throws; the first error
+        // surfaces with the rest on its cause chain.
         const errors = [
+          ...await collectDisposeErrors(() => clientUi.dispose()),
           ...await collectDisposeErrors(() => presentation.task.dispose()),
           ...await collectDisposeErrors(() => backendRuntime.dispose()),
           ...await collectDisposeErrors(() => wire.dispose()),
@@ -173,5 +222,6 @@ export async function createRemoteApplicationRuntime(
     wire,
     backendRuntime,
     presentation,
+    clientUi,
   }
 }

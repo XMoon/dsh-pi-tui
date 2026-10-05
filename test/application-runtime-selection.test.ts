@@ -88,7 +88,7 @@ test('Direct selection: the Remote loader is never invoked and the exact Direct 
     const selected = await selectApplicationRuntime({
       kind: 'direct',
       createDirect: direct.createDirect,
-      remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: {} },
+      remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: {}, clientUiStartup: {} },
     })
     assert.equal(remoteLoads, 0, 'a Direct selection must not even load the Remote module')
     assert.equal(direct.constructionCount(), 1, 'the Direct factory ran exactly once')
@@ -116,8 +116,10 @@ test('Remote selection: the loader is invoked exactly once, the Direct factory i
   const restore = __setApplicationRuntimeLoaderForTests(async () => {
     remoteLoads += 1
     return {
-      createRemoteApplicationRuntime: (async (options: { promptSerializer: unknown }) => {
+      createRemoteApplicationRuntime: (async (options: { promptSerializer: unknown, clientUiStartup: unknown }) => {
         assert.equal(options.promptSerializer, PROMPT_STANDIN, 'the composition input crosses to the aggregate untouched')
+        assert.deepEqual(options.clientUiStartup, { sessionId: 'selection-client-ui-s' },
+          'the Client UI startup facts cross to the aggregate untouched (M3-6 PR1)')
         return { selected: remoteSelected }
       }) as never,
     }
@@ -127,7 +129,7 @@ test('Remote selection: the loader is invoked exactly once, the Direct factory i
     const selected = await selectApplicationRuntime({
       kind: 'remote',
       createDirect: direct.createDirect,
-      remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: PROMPT_STANDIN },
+      remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: PROMPT_STANDIN, clientUiStartup: { sessionId: 'selection-client-ui-s' } },
     })
     assert.equal(remoteLoads, 1, 'the Remote aggregate is constructed exactly once')
     assert.equal(direct.constructionCount(), 0,
@@ -170,7 +172,7 @@ test('the Remote selection propagates a loader/aggregate failure (no partial sel
       selectApplicationRuntime({
         kind: 'remote',
         createDirect: direct.createDirect,
-        remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: {} },
+        remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: {}, clientUiStartup: {} },
       }),
       /induced remote construction failure/,
     )
@@ -246,6 +248,45 @@ test('Remote-selected Task composition resolves no Host ctx.jobs / ctx.subagents
   )
 })
 
+test('the extension service selection is branch-exclusive with NO Host fallback on Remote (source-locked, M3-6 PR1)', async () => {
+  const bootstrapSource = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  // The exact D5 branch contract: `override === undefined` is the ONE
+  // discriminator — Direct reads the Host/profile service, Remote consumes
+  // `override.extensionService`.
+  assert.match(
+    bootstrapSource,
+    /extensionService = override === undefined\n      \? ctx\.get\(PI_TUI_EXTENSIONS_SERVICE\) as typeof extensionService\n      : override\.extensionService as typeof extensionService/,
+    'bootstrap must select the extension service by the override branch exactly',
+  )
+  // The extension selection span (from the assignment to the attach call)
+  // must not contain any `??`-fallback that would reintroduce Host
+  // extension authority on the Remote branch.
+  const assignment = bootstrapSource.indexOf('extensionService = override === undefined')
+  const attach = bootstrapSource.indexOf('surface.attachExtensionHost(extensionService)', assignment)
+  assert.ok(assignment >= 0 && attach > assignment, 'the extension selection span must exist')
+  const span = bootstrapSource.slice(assignment, attach)
+  assert.ok(!span.includes('?? ctx.get(PI_TUI_EXTENSIONS_SERVICE)'),
+    'the Remote branch must never fall back to the Host piTuiExtensions lookup')
+  assert.ok(!span.includes('ctx.get(PI_TUI_EXTENSIONS_SERVICE) ??'),
+    'the Host lookup must never fall back to the override either (one exclusive discriminator)')
+  // `ctx.get(PI_TUI_EXTENSIONS_SERVICE)` appears exactly once in the whole
+  // bootstrap: the Direct branch of this assignment.
+  const lookups = [...bootstrapSource.matchAll(/ctx\.get\(PI_TUI_EXTENSIONS_SERVICE\)/g)]
+  assert.equal(lookups.length, 1,
+    'bootstrap resolves Host piTuiExtensions exactly once (the Direct branch); no other read exists')
+})
+
+test('the canonical Remote selection forwards the clientUiStartup facts (source-locked, M3-6 PR1)', async () => {
+  const bootstrapSource = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  // The seam's Remote branch forwards the selection's REQUIRED startup
+  // facts to `createRemoteApplicationRuntime` — no default, no omission.
+  assert.match(
+    bootstrapSource,
+    /clientUiStartup: selection\.remote\.clientUiStartup,/,
+    'the Remote selection must forward the exact Client UI startup facts',
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Real chain — seam -> backend-loader -> REAL aggregate over a real Host
 // ---------------------------------------------------------------------------
@@ -267,6 +308,10 @@ test('REAL CHAIN: selectApplicationRuntime -> backend-loader -> the real Remote 
       hostContext: host.ctx,
       waitForHostPrerequisites: async () => { prerequisites += 1 },
       promptSerializer: testPromptSerializer,
+      // The exact runner startup facts (M3-6 PR1): the aggregate's Client UI
+      // subtree mounts under the same detached sessionId the Host runner
+      // tuiStartup carries on this fixture.
+      clientUiStartup: { sessionId: 'm3-4-pr1-selection-seed' },
     },
   })
   // The transport disposal is deferred through the lifecycle so an assertion

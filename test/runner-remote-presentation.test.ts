@@ -223,6 +223,12 @@ export async function mountRemoteRunner(
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
     ...(options.productionSerializer === true ? {} : { promptSerializer: testPromptSerializer }),
+    // The runner receives the same startup facts (M3-6 PR1): the exact
+    // `--session`/`--preset` copy the Host runner tuiStartup carries.
+    clientUiStartup: {
+      ...(options.resumeSessionId === undefined ? {} : { sessionId: options.resumeSessionId }),
+      ...(options.launchPresetId === undefined ? {} : { presetId: options.launchPresetId }),
+    },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
 
@@ -251,6 +257,7 @@ export async function mountRemoteRunner(
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
   }
   const aggregateRef = aggregate
   // The mounted TuiApp instance, captured exactly like the Direct runner
