@@ -5577,6 +5577,16 @@ mounted fatal:
   process live-TUI slot only after the WHOLE non-truncating batch settles; any
   collected final-dispose error keeps the slot claimed (a later fiber
   disposal cannot re-run the latched surface cleanup).
+- **Interaction settlement obligations**: the TuiApp-owned interaction
+  settlements (`settleApproval`, `settleQuestions`, `settleSaveLocation`) run
+  their presentation cleanup as a non-truncating batch and settle the
+  caller's promise as an OBLIGATION afterwards, so a throwing overlay
+  hide/frame/seat/prompt cleanup can never strand the approval / question /
+  save-location promise (the cleanup error is surfaced after the settlement,
+  never swallowed). Their shared `ResponsiveOverlayFrame.dispose()` likewise
+  attempts the owned child dispose AND the one-shot close notification as
+  independent steps, so a throwing child dispose can no longer skip the
+  frame's removal from its owner's bookkeeping.
 - **L6 evidence (decisive, `test/runner-remote-shutdown.test.ts`, real
   Remote runner over the official in-process wire)**:
   - **L6-A** clean HMR unload + same-process remount: observed order
@@ -5630,7 +5640,10 @@ mounted fatal:
   injection keeps the generation retirement; a throwing tracked
   keybinding-editor disposal still releases its siblings; SurfaceRuntime
   aggregate batch continuation); `test/process-tui-slot.test.ts` (terminal
-  fail-closed case).
+  fail-closed case); `test/interaction-settlement-failure.test.ts` (a throwing
+  approval / question / save-location presentation cleanup still settles the
+  interaction promise, and a throwing overlay child dispose still fires the
+  one-shot close notification).
 - **Mutation / counterfactual evidence** (each applied locally, verified red,
   then restored): M1 removing the fatal surface cleanup call → L6-C red; M2
   restoring a truncating pre-batch `command.disposeCatalog()` → L6-B red; M3
@@ -5645,7 +5658,12 @@ mounted fatal:
   release → L6-D theme-lease red; M10 removing the plugin-keybinding sync
   release → L6-D keybinding-lease red; M11 removing the aggregate
   `backendRuntime.dispose()` → L6-A adapters count red; M12 force-releasing the
-  process slot after a final-dispose failure → L6-D fail-closed slot red.
+  process slot after a final-dispose failure → L6-D fail-closed slot red; N1
+  restoring the fail-fast `ResponsiveOverlayFrame.dispose()` → the overlay
+  close-notification regression red; N2/N3/N4 restoring the fail-fast
+  settlement sequences (approval / question / save-location) → the
+  corresponding interaction-promise regressions red (bounded probe reports a
+  stranded promise instead of hanging).
 - **Direct**: unchanged — the Direct branch has no Remote selector, transport
   disposal stays the inert no-op, and the shared helper does not import any
   Remote code. PR2 reconnect/write semantics are untouched and their suites
