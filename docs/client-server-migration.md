@@ -5406,20 +5406,32 @@ repopulate the same surfaces, and Host write settlements stay real.
   superseded/unavailable and never commit (the existing adapter fences,
   requalified); a proven Host write settlement is never reclassified or
   replayed because the transport generation changed. The external review
-  found one M3-3B-era violation of exactly this rule — the Remote
-  continued-question answer adapter reinterpreted a DISPATCHED, proven
+  found an M3-3B-era violation of exactly this rule in the Remote
+  continued-question answer adapter — it reinterpreted a DISPATCHED, proven
   settlement (`ok: true`, the reply accepted) as `SupersededReadError` when
-  the Connection generation rolled over mid-settlement; PR2's review
-  follow-up fixed it to the dispatch-then-classify shape every other Remote
-  write adapter uses (pre-dispatch generation fence only; the settlement is
-  classified from the Host result alone), with an L3 pair (truthful
-  `queued` across a replacement; the Host refusal taxonomy survives it) and
-  a mounted L6 that holds the wire settlement across a real reconnect
-  (`test/runner-remote-permission.test.ts` — the truthful notice lands,
-  exactly one Host admission, no replay). Reconnect does not
-  bump the TUI Session ownership generation, the viewer generation, or
-  materialize another Client Session reference — the retained binding
-  objects survive by identity (normal reconnect is adoption, not
+  the Connection generation rolled over mid-settlement. PR2's review
+  follow-up fixed it to the dispatch-then-classify shape (pre-dispatch
+  generation fence only; the settlement is classified from the Host result
+  alone), with an L3 pair (truthful `queued` across a replacement; the Host
+  refusal taxonomy survives it) and a mounted L6 that holds the wire
+  settlement across a real reconnect (`test/runner-remote-permission.test.ts`
+  — the settlement reaches the user truthfully, exactly one Host admission,
+  no replay), plus the presentation-ownership fence in the consumer
+  (question-controller): a settlement whose entry/session no longer belongs
+  to the current surface is not announced there (a session-switch negative
+  is locked in `test/question-remote-lifecycle.test.ts`), while a normal
+  same-session reconnect still shows the truthful notice. KNOWN REMAINING
+  SIBLING (not fixed here, review-scoped out): `RemoteCredentialConfig`
+  `.setReference()/.unsetReference()` (config-remote.ts) still fence AFTER
+  the dispatched credential write and reclassify its proven result as
+  `SupersededReadError` — the same root cause, pre-existing, with
+  `test/remote-config-port.test.ts` locking the old semantics; fixing it
+  (adapter + tests + the /login caller's "not confirmed — retry" wording)
+  is tracked as its own change, and until then the "never reclassified"
+  claim holds for the paths qualified in this PR, not for credentials.
+  Reconnect does not bump the TUI Session ownership generation, the viewer
+  generation, or materialize another Client Session reference — the retained
+  binding objects survive by identity (normal reconnect is adoption, not
   re-materialization).
 - **All other Remote surfaces were requalified, not rewritten**: main
   presentation/status rehydrate, Plugin Manager authoritative reread without

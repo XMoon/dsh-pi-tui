@@ -345,3 +345,57 @@ const settleFrames = async (): Promise<void> => {
   await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
 }
 
+
+test('M3-6 PR2 (review F3): a proven settlement does not notify the REPLACEMENT subject\'s surface after a session switch', async () => {
+  // The adapter keeps the dispatched settlement real (no post-dispatch
+  // generation re-check); the CONSUMER must therefore own the visibility
+  // fence. When the answer was dispatched for session A's continued call and
+  // the surface switched to session B while the settlement was in flight,
+  // reconcile deletes A's entry — B's surface must NOT see A's "Answer
+  // queued" notice. The same retained-session reconnect case stays positive
+  // in the mounted L6 (runner-remote-permission).
+  let releaseSettlement: (() => void) | undefined
+  const settlementGate = new Promise<void>(resolve => { releaseSettlement = resolve })
+  const h = harness({
+    answerContinued: async (sessionId, callId) => {
+      assert.equal(sessionId, 'session-a')
+      assert.equal(callId, 'call-f3')
+      await settlementGate
+      return 'queued'
+    },
+  })
+  // The projection shows session A's continued call; the form is mounted.
+  h.setSnapshot({
+    sessionId: 'session-a',
+    active: [{ sessionId: 'session-a', callId: 'call-f3', state: 'continued', questions: QUESTIONS as never }],
+    settled: [],
+    queuedReplyCallIds: new Set<string>(),
+  })
+  h.attach()
+  h.controller.reconcile()
+  const reopened = h.controller.reopen('session-a', 'call-f3')
+  assert.equal(reopened, true, 'the continued form mounts for the current session')
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(h.asks.length, 1, 'the form is up')
+
+  // Answer submitted (the dispatch is in flight, held).
+  h.submit([{ id: 'q1', selected: ['A'] }] as never)
+
+  // The surface switches to session B: reconcile drops A's entries.
+  h.setSession('session-b')
+  h.setSnapshot({
+    sessionId: 'session-b',
+    active: [{ sessionId: 'session-b', callId: 'call-b', state: 'continued', questions: QUESTIONS as never }],
+    settled: [],
+    queuedReplyCallIds: new Set<string>(),
+  })
+  h.controller.reconcile()
+
+  // The proven settlement lands: A's entry is gone, so B's surface must not
+  // be notified about it.
+  releaseSettlement!()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(h.notices.some(text => text.includes('Answer queued')), false,
+    'the replacement subject\'s surface never sees the old subject\'s settlement notice')
+})

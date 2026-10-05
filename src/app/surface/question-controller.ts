@@ -665,7 +665,18 @@ export class QuestionSurfaceController {
         entry.callId,
         { answers: answers.map(toAnswerItem) },
       )
-      if (!this.disposed) {
+      // The settlement is REAL (the adapter classifies it from the Host
+      // result); this fence only decides WHERE it may be announced. The
+      // notice belongs to the surface that still owns the interaction: the
+      // entry must still be live AND belong to the session this surface is
+      // showing. A session switch deletes the entry (the replacement
+      // surface must not see A's notice), while a normal reconnect PARKS it
+      // on the SAME surface (the queued reply is real and displayable
+      // there). `controller.signal.aborted` cannot make this distinction
+      // (both paths abort the mounted form), so ownership is judged from
+      // the entry map + the current session, never from the abort state.
+      if (!this.disposed && this.entries.get(key) === entry
+        && this.deps.currentSessionId() === entry.sessionId) {
         this.deps.notify(
           outcome === 'queued'
             ? 'Answer queued — it will reach the Agent as a new turn.'
