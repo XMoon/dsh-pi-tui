@@ -634,27 +634,34 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // a mounted submission through the REAL Host handler exactly once.
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr4-catalog-stale-a'
-  // A post-reconnect B-side Host command: proving it dispatches through the
-  // REAL Host handler exactly once is the PR2 source→decision→sink sink
-  // (AC1). Its name ALSO carries a CLIENT-CONTEXT extension contribution —
-  // the collision is the DISCRIMINATOR: whether the mounted line routes to
-  // the Host executor depends on the INSTALLED B-side Host-origin claim, so
-  // a no-op install (the counterfactual: the automatic refresh read B but
-  // never installed it) would send the line nowhere and this test red.
   let bHostRuns = 0
   let bClientCalls = 0
+  let staleClientRuns = 0
   const fixture = await mountRunner(life, {
     resumeSessionId: sessionA,
-    // The CLIENT-CONTEXT twin of the B Host command's name: registered BEFORE
-    // the runner mounts, so both sides exist for the whole scenario. While
-    // the B Host-origin claim is installed the Host route wins and this
-    // callback never runs; without the installed claim the line cannot reach
-    // the Host executor either (see the routing analysis above).
+    // Two CLIENT-CONTEXT twins make the INSTALLED catalog the discriminator
+    // of every post-reconnect routing assertion:
+    // - `b-fresh-cmd` (claimed by the B Host catalog): with the B claim
+    //   installed the Host-origin term wins the classification and the real
+    //   Host handler runs once while this twin never executes; without the
+    //   installed claim the bare-line Client definition claims the line and
+    //   the twin runs instead — either sink goes red on a no-op install.
+    // - `stale-cmd` (retired from the B Host catalog): once B replaces the
+    //   Host truth there is NO Host-origin claim, so the bare-line Client
+    //   definition owns the line and this twin runs EXACTLY ONCE through the
+    //   Client registry; a stale-retained A claim would keep the line on the
+    //   Host route (whose registration is disposed, no command/run) and the
+    //   twin would never run — the retirement discriminator.
     extensionCommands: [{
       id: 'pr2-b-fresh-twin',
       name: 'b-fresh-cmd',
       sessionless: true,
       handler: () => { bClientCalls += 1; return { kind: 'success', text: 'client twin ran' } },
+    }, {
+      id: 'pr2-stale-twin',
+      name: 'stale-cmd',
+      sessionless: true,
+      handler: () => { staleClientRuns += 1; return { kind: 'success', text: 'retired name fell to the client twin' } },
     }],
   })
 
@@ -752,16 +759,12 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // verifiably containing the retired name) settles after B exists.
   releaseRead?.()
 
-  // The stale snapshot must NOT commit: the completion rows never offer the
-  // retired name (a committed stale install would — this is the
-  // counterfactual force: without the install fence this snapshot, whose
-  // payload verifiably contained the command, would install it).
-  await settle(800)
-  const rows = (fixture.app() as unknown as {
-    commandCompletionsForTest(): readonly { name: string }[]
-  }).commandCompletionsForTest()
-  assert.equal(rows.some(row => row.name === 'stale-cmd'), false,
-    `the stale snapshot never commits (the retired Host command must not appear): ${JSON.stringify(rows.map(row => row.name))}`)
+  // The stale-read fence (AC3): the held generation-A snapshot cannot
+  // install. The claim-layer proof comes below (the retired name must NOT
+  // behave as an installed Host claim once B's catalog installs); the
+  // Client-only completion display is not a Host-claim witness (PR4 §D3)
+  // and the twins intentionally put both names in it, so no display
+  // assertion is meaningful here — the routing assertions carry the proof.
 
   // ── M3-6 PR2 DECISIVE PATH: the automatic reconnect refresh. NO /reload
   // is submitted after the reconnect; the CommandSurface's own generation
@@ -810,15 +813,22 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   assert.equal(bClientCalls, 0,
     'the same-named Client twin never executed — the installed B Host claim owns the line')
 
-  // NEGATIVE control on the same claim layer: the retired A-only Host
-  // command no longer routes anywhere — the B claims are the authority, so
-  // a /stale-cmd line must NOT reach the Host executor (and must not become
-  // a Client callback either).
+  // NEGATIVE control on the same claim layer — the RETIREMENT discriminator.
+  // Once B replaces the Host truth there is no Host-origin claim for the
+  // retired name, so the bare-line CLIENT twin definition owns `/stale-cmd`
+  // and its handler runs exactly once through the Client registry, with no
+  // official command/run row. A stale-retained A claim would route the line
+  // to the disposed Host command instead (no command/run either — the
+  // registration is gone) and the twin would NEVER run: the twin count is
+  // what makes "the retired claim was actually removed" falsifiable.
   const runsAfterB = fixture.hostCommandRuns(sessionA)
   submit(fixture, '/stale-cmd')
-  await settle(600)
+  await waitFor('the retired name fell to its Client twin', () => staleClientRuns === 1, 15_000)
+  await settle()
+  assert.equal(staleClientRuns, 1,
+    'the retired Host command is absent from the installed B claims — the Client twin now owns the line')
   assert.equal(fixture.hostCommandRuns(sessionA), runsAfterB,
-    'the retired Host command is absent from the installed B claims (no command/run row)')
+    'no Host executor run for the retired name (the B claims are the authority)')
 })
 
 /* ── PR5 supplement: Client self-claim reachability under running + steer ── */
