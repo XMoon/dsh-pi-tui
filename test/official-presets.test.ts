@@ -150,7 +150,7 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
 })
 
 test('the preset skill composition keeps the M3 contract fact: a skill-body path on standard/ptc/cordis, none on minimal', () => {
-  // M3 composition fact (docs/m3-entry-contract.md §2.5): every preset that
+  // M3 composition fact (the preset skill-body contract): every preset that
   // exposes the TUI/Host skill-body path carries skill-filesystem AND
   // tool-skill; minimal intentionally has no skill provider at all.
   for (const id of ['standard', 'ptc', 'cordis'] as const) {

@@ -8,7 +8,7 @@
  * Client-filesystem discovery of its own (no cwd/home guess, no local file
  * source, no stat probes).
  *
- * Explicitly unsupported (docs/m3-entry-contract.md §10, requalified
+ * Explicitly unsupported (requalified
  * through 0.2.0-rc.2): the WORKSPACE/sessionless scope (every file endpoint is
  * Session-scoped) and existence probing (no public existence verb —
  * `fileReferences/list` is discovery only). Both are returned as

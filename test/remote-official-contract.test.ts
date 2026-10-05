@@ -9,7 +9,7 @@
  * The pre-existing adapter proofs were frozen against 0.1.7-rc.2 and carry
  * over unchanged; the M3-3A additions were proven against 0.2.0-rc.1 and the
  * M3-3B additions are proven against 0.2.0-rc.2 — the per-stage requalification
- * record lives in docs/m3-entry-contract.md §1.1/§2.1. The functions are never
+ * record lives in docs/client-server-migration.md. The functions are never
  * called at runtime; `assert.equal(typeof …, 'function')` keeps them referenced
  * so the compiler must keep checking them.
  *

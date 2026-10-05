@@ -19,9 +19,9 @@
  *
  * Wire mapping: `settings.*` / `credentials.*` remotes plus the Session
  * `userQuestions` / Inbox projections. Operations with no 1:1 Remote are
- * marked `INTENTIONAL_UNSUPPORTED_IN_M3` in the contract comments and in
- * `docs/m3-entry-contract.md` §10 (credential record read/delete, session
- * approval-policy override, authorization flows).
+ * marked `INTENTIONAL_UNSUPPORTED_IN_M3` in the contract comments and in the
+ * current Remote composition's unsupported set (credential record read/delete,
+ * session approval-policy override, authorization flows).
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/config-port
@@ -374,8 +374,8 @@ export interface PermissionConfig {
    *
    * This is what keeps `undefined` from `approvalOverrideOf` unambiguous: on a
    * backend where the capability is absent, "undefined" is UNAVAILABLE and
-   * must never be rendered as the consumer's own `ask` default (docs/
-   * m3-entry-contract.md §10).
+   * must never be rendered as the consumer's own `ask` default (the current
+   * Remote composition's unsupported set).
    */
   approvalOverrideAvailable(): boolean
   /** The session's own approval-policy override, resolved from the EXACT

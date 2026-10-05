@@ -630,7 +630,8 @@ test('P12: the M3 composition REUSES the existing userQuestions service (never a
   // @deepseek-ai/dsh-user-questions`, and this bundle layers on top of that
   // base without disabling it. The M3 additive closure therefore must not
   // mount a second service: the Host's stable Typert binding has to be the
-  // very same one after the composition (docs/m3-entry-contract.md §2.4.1).
+  // very same one after the composition (the additive closure mounts no
+  // second service).
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   const before = (host.ctx.get('userQuestions') as { typertRemote?: unknown } | undefined)?.typertRemote

@@ -4,7 +4,7 @@
  * SAME semantic contract as `src/runtime/direct/interaction-direct.ts`; no
  * Remote-only Question semantics and no Direct fallback exist.
  *
- * Published mapping (docs/m3-entry-contract.md §2.1 interaction rows):
+ * Published mapping (interaction rows):
  *
  * ```text
  * live request     -> remote.$on('user-questions/request')   (forwarded waterfall)
@@ -16,7 +16,7 @@
  * late answer      -> remote.userQuestions.answer(sessionId, callId, answer)
  * ```
  *
- * Explicitly unsupported on the wire (docs/m3-entry-contract.md §10):
+ * Explicitly unsupported on the wire:
  * `setApprovalPolicy` has no dedicated approval-policy Remote and no
  * synchronous exact-equivalent carrier in rc.2, so it returns `false` — the
  * Remote `/settings` approval row is shown unavailable, never guessed as
@@ -434,7 +434,7 @@ export class RemoteInteractionPort implements InteractionPort {
   }
 
   setApprovalPolicy(_sessionId: string, _policy: ApprovalPolicy): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3 (docs/m3-entry-contract.md §10): rc.2 has
+    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2 has
     // no dedicated approval-policy Remote and no synchronous exact carrier.
     // Never a silent fallback to a different semantic.
     return false

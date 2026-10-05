@@ -210,7 +210,7 @@ export async function createRemoteBackendRuntime(
     // RECORDS it (`lastRefreshFailure()`), `readiness()` stays 'stale', and the
     // next invalidation / write pre-flight / explicit read retries. The
     // consumer then shows a truthful unavailable state instead of fabricated
-    // values (docs/m3-entry-contract.md §9.1).
+    // values.
     try {
       await config.describe()
     } catch {

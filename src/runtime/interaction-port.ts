@@ -32,8 +32,8 @@
  *
  * Plan review rides the same channels; no separate method.
  *
- * Full contract: docs/client-server-migration.md + docs/m3-entry-contract.md
- * §2.1 (interaction rows) + docs/surface-decisions.md.
+ * Full contract: docs/client-server-migration.md +
+ * docs/client-server-coupling.md (interaction rows) + docs/surface-decisions.md.
  * @module @xmoon76/dsh-pi-tui/runtime/interaction-port
  */
 

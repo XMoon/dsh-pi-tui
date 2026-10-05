@@ -28,7 +28,7 @@ by the change:
 | Change area | Authority to read | Review focus |
 |---|---|---|
 | Module/composition ownership | [Architecture](architecture.md) | Actual creation sites, ownership transfers and consumers |
-| Host-owned or Direct/Remote behavior | [Migration](client-server-migration.md), [coupling](client-server-coupling.md), and [M3 entry contract](m3-entry-contract.md) for M3 changes | Locality, semantic/wire authority, allowed composition, qualification and currentness |
+| Host-owned or Direct/Remote behavior | [Migration](client-server-migration.md) and [coupling](client-server-coupling.md) | Locality, semantic/wire authority, allowed composition, qualification and currentness |
 | Session identity/generation, attachment or teardown | [Concurrency](concurrency.md) | Live identities, stale fences and lifecycle probes |
 | Detached work, cancellation or errors | [Failure model](failure-model.md) | Promise ownership, observable failures and truthful cancellation/error taxonomy |
 | Managed overlays/focus | [Overlay contract](overlay-focus-contract.md) | Logical commit before synchronous callbacks, reentrancy and physical focus |
@@ -117,10 +117,8 @@ relabel an unmet mandatory item as a non-blocking follow-up.
 Migration stage closure additionally follows the original-plan closure review
 and closure-evidence template in the migration governance linked above. An
 accepted fix round, green CI or existing adapter alone does not close a stage.
-Update live progress/evidence in the migration document, ownership in the coupling
-inventory, and amend the frozen M3 contract only under its
-[amendment rules](m3-entry-contract.md#12-contract-disposition-vs-live-implementation-status).
-Do not reopen unrelated frozen decisions for ordinary progress or docs-only
+Update live progress/evidence in the migration document and ownership in the coupling
+inventory. Do not reopen unrelated frozen decisions for ordinary progress or docs-only
 governance changes.
 
 Before accepting, make a second pass over the full delivery scope for issue

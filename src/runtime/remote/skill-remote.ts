@@ -8,7 +8,7 @@
  * value; a Host/domain error surfaces as a rejection (never an empty
  * success), and caller cancellation is honored.
  *
- * Explicitly unsupported on the wire (docs/m3-entry-contract.md §10,
+ * Explicitly unsupported on the wire (
  * requalified through 0.2.0-rc.2): the sessionless STANDING catalog (every
  * skills endpoint is Session-addressed), the Client skill-body read (no
  * `skills/read`; human gestures stay literal and the Host pre-step owns
