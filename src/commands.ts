@@ -2494,7 +2494,7 @@ export function registerTuiCommands(
           {
             id: 'local-shell-sandbox',
             label: 'User shell sandbox policy',
-            description: '! / !! execute in the Host environment outside the dsh sandbox (bypass, default) or under the sandbox policy',
+            description: 'When Host user-shell execution is available, ! / !! run outside the dsh sandbox (bypass, default) or under the sandbox policy',
             currentValue: settingsDoc?.localShellSandbox ?? 'bypass',
             values: ['bypass', 'sandbox'],
           },
@@ -4395,7 +4395,7 @@ export function registerTuiCommands(
   let modelSurfaceToken = 0
   registerOne({
     name: 'model',
-    description: 'Switch the model (and reasoning effort) for this session',
+    description: 'Switch the model (and reasoning effort) for this session; before a session exists, change the default when supported',
     handler: async () => {
       const models = runner.catalog.models
       if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
@@ -5194,7 +5194,7 @@ export function registerTuiCommands(
 
   registerTuiCommand({
     name: 'title',
-    description: 'Set the session title; without an argument, regenerate it from the conversation (overwrites the current title)',
+    description: 'Set the session title; without an argument, regenerate it from the conversation when supported (overwrites the current title)',
     input: { hint: '<title>' },
     aliases: ['rename'],
     handler: titleHandler,
@@ -5325,7 +5325,7 @@ export function registerTuiCommands(
   registerTuiCommand({
     name: 'attach',
     aliases: ['image'],
-    description: 'Attach an image or file to the draft (tab completes the path)',
+    description: 'Attach an image or file to the draft; generic-file delivery requires backend support (tab completes the path)',
     input: { hint: '<path>' },
     handler: (invocation) => stageAttachmentCommand(invocation, 'attach'),
     aliasHandlers: {
@@ -5353,7 +5353,7 @@ export function registerTuiCommands(
 
   registerOne({
     name: 'transcript',
-    description: 'Export a readable Markdown transcript of this session',
+    description: 'Export a readable Markdown transcript of this session when supported',
     handler: (invocation) => {
       // /transcript mirrors /export: no arguments, acknowledgement only; the
       // Client-local save workflow starts after successful command
@@ -5470,7 +5470,7 @@ export function registerTuiCommands(
 
   registerOne({
     name: 'login',
-    description: 'Sign in with a provider or set an API key — deepseek official or an llm-pi-ai provider route',
+    description: 'Configure provider credentials; provider-native sign-in is available when supported',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
       const credentials = runner.config.credentials
@@ -5615,7 +5615,7 @@ export function registerTuiCommands(
 
   registerOne({
     name: 'logout',
-    description: 'Clear a stored credential — deepseek official or an llm-pi-ai provider route (API key or stored record)',
+    description: 'Clear provider credentials; stored-record cleanup is available when supported',
     input: { hint: '[<route|env-var>]' },
     handler: async (invocation) => {
       const credentials = runner.config.credentials
@@ -5715,7 +5715,7 @@ export function registerTuiCommands(
 
         { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
         { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
-        { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs without recording it in the session', currentValue: '' },
+        { id: 'k-bang', label: '! cmd', description: 'Host user-shell execution is available only when the backend provides it; ! submits the completed command and its output to the Session, !! keeps the result presentation-only', currentValue: '' },
         { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
         ...runner.listScopedCommands()
           .map(command => ({

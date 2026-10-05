@@ -611,3 +611,18 @@ test('the deprecated app.input.queue action keeps its own (fixed-queue) identity
   assert.equal(both.bindings['app.input.submitAccelerated'], 'ctrl+k')
   assert.deepEqual(both.diagnostics, [], 'two distinct actions never collide')
 })
+
+test('/settings describes the user-shell sandbox policy as conditional on Host execution', async () => {
+  // The row keeps its persisted value and write path, but its discovery copy
+  // must not over-promise execution: a backend that provides no Host
+  // user-shell (Remote rc.2 fails closed) still shows the policy row.
+  const t = setup()
+  let captured: Parameters<TuiApp['openSettings']>[0] | undefined
+  t.app.openSettings = ((items: Parameters<TuiApp['openSettings']>[0]) => { captured = items }) as unknown as TuiApp['openSettings']
+  await t.runCommand('settings', '')
+  const row = captured?.find(candidate => candidate.id === 'local-shell-sandbox')
+  assert.ok(row !== undefined, 'the local-shell-sandbox row must exist')
+  assert.match(row.description ?? '', /when Host user-shell execution is available/i,
+    'the sandbox policy description must scope execution to an available Host user-shell')
+  t.app.stop()
+})
