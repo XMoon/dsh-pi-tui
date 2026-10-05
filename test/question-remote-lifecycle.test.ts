@@ -379,8 +379,15 @@ test('M3-6 PR2 (review F3): a proven settlement does not notify the REPLACEMENT 
   await Promise.resolve()
   assert.equal(h.asks.length, 1, 'the form is up')
 
-  // Answer submitted (the dispatch is in flight, held).
+  // Answer submitted; wait for the AUTHORITATIVE dispatch marker
+  // (`answered` is appended by the port when `answerContinued` is entered,
+  // BEFORE the held settlement), so the switch below happens strictly AFTER
+  // the dispatch — the window the finding is about. Pure microtask drain: no
+  // timer, and the held gate guarantees the settlement is still in flight.
   h.submit([{ id: 'q1', selected: ['A'] }] as never)
+  for (let i = 0; i < 50 && h.answered.length === 0; i += 1) await Promise.resolve()
+  assert.deepEqual(h.answered, [{ sessionId: 'session-a', callId: 'call-f3' }],
+    'the answer dispatch must have happened before the switch (authoritative marker)')
 
   // The surface switches to session B: reconcile drops A's entries.
   h.setSession('session-b')
@@ -398,4 +405,69 @@ test('M3-6 PR2 (review F3): a proven settlement does not notify the REPLACEMENT 
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(h.notices.some(text => text.includes('Answer queued')), false,
     'the replacement subject\'s surface never sees the old subject\'s settlement notice')
+})
+
+test('M3-6 PR2 (review F3b): a superseded settlement never retires a NEWER entry for the same call', async () => {
+  // The reachable sequence the entry-mutation fence exists for: session A's
+  // continued answer is dispatched and the Host accepts it (settlement held);
+  // the queued reply reaches the projection; the user then DISCARDS that
+  // queued reply (official inbox discard), so the call becomes answerable
+  // again; reconcile creates a NEW entry for the SAME (session, call) and the
+  // user reopens it. When the OLD settlement finally lands it must neither
+  // notify (identity fence) nor DELETE/ABORT the newer live form.
+  let releaseSettlement: (() => void) | undefined
+  const settlementGate = new Promise<void>(resolve => { releaseSettlement = resolve })
+  const h = harness({ answerContinued: async () => { await settlementGate; return 'queued' } })
+  const drain = async (): Promise<void> => { for (let i = 0; i < 50; i += 1) await Promise.resolve() }
+  const continuedCall = (): never => ({ sessionId: 'session-a', callId: 'call-f3b', state: 'continued', questions: QUESTIONS }) as never
+
+  // A's continued form is mounted and the answer dispatched (held).
+  h.setSnapshot({
+    sessionId: 'session-a',
+    active: [continuedCall()],
+    settled: [],
+    queuedReplyCallIds: new Set<string>(),
+  })
+  h.attach()
+  h.controller.reconcile()
+  assert.equal(h.controller.reopen('session-a', 'call-f3b'), true, 'the first form mounts')
+  await drain()
+  h.submit([{ id: 'q1', selected: ['A'] }] as never)
+  for (let i = 0; i < 50 && h.answered.length === 0; i += 1) await Promise.resolve()
+  assert.equal(h.answered.length, 1, 'the dispatch happened before the reply is discarded')
+
+  // The queued reply reaches the projection: reconcile retires the old entry.
+  h.setSnapshot({
+    sessionId: 'session-a',
+    active: [{ sessionId: 'session-a', callId: 'call-f3b', state: 'continued', questions: QUESTIONS as never }],
+    settled: [],
+    queuedReplyCallIds: new Set(['call-f3b']),
+  })
+  h.controller.reconcile()
+  assert.equal(h.controller.attentionRows().length, 0, 'the queued reply retires the old entry')
+
+  // The user discards the queued reply: the call is answerable again, so
+  // reconcile creates a NEW entry for the SAME call, which the user reopens.
+  h.setSnapshot({
+    sessionId: 'session-a',
+    active: [continuedCall()],
+    settled: [],
+    queuedReplyCallIds: new Set<string>(),
+  })
+  h.controller.reconcile()
+  assert.equal(h.controller.attentionRows().length, 1, 'the re-answerable call offers a new entry')
+  assert.equal(h.controller.reopen('session-a', 'call-f3b'), true, 'the newer form mounts')
+  await drain()
+  const newerSignal = h.asks.at(-1)?.signal
+  assert.equal(newerSignal?.aborted, false, 'the newer form is live')
+
+  // The OLD settlement lands: it must not touch the newer entry.
+  releaseSettlement!()
+  await drain()
+  assert.equal(newerSignal?.aborted, false,
+    'the superseded settlement must not abort the newer form')
+  assert.equal(h.controller.attentionRows().length, 1,
+    'the superseded settlement must not delete the newer entry')
+  assert.equal(h.notices.some(text => text.includes('Answer queued')), false,
+    'the superseded settlement is still not announced on the current surface')
 })
