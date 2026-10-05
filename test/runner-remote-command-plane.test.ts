@@ -634,11 +634,35 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // a mounted submission through the REAL Host handler exactly once.
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr4-catalog-stale-a'
-  const fixture = await mountRunner(life, { resumeSessionId: sessionA })
+  // A post-reconnect B-side Host command: proving it dispatches through the
+  // REAL Host handler exactly once is the PR2 source→decision→sink sink
+  // (AC1). Its name ALSO carries a CLIENT-CONTEXT extension contribution —
+  // the collision is the DISCRIMINATOR: whether the mounted line routes to
+  // the Host executor depends on the INSTALLED B-side Host-origin claim, so
+  // a no-op install (the counterfactual: the automatic refresh read B but
+  // never installed it) would send the line nowhere and this test red.
+  let bHostRuns = 0
+  let bClientCalls = 0
+  const fixture = await mountRunner(life, {
+    resumeSessionId: sessionA,
+    // The CLIENT-CONTEXT twin of the B Host command's name: registered BEFORE
+    // the runner mounts, so both sides exist for the whole scenario. While
+    // the B Host-origin claim is installed the Host route wins and this
+    // callback never runs; without the installed claim the line cannot reach
+    // the Host executor either (see the routing analysis above).
+    extensionCommands: [{
+      id: 'pr2-b-fresh-twin',
+      name: 'b-fresh-cmd',
+      sessionless: true,
+      handler: () => { bClientCalls += 1; return { kind: 'success', text: 'client twin ran' } },
+    }],
+  })
 
   // The Host command whose name only the STALE snapshot carries, plus a
   // SURVIVOR command that stays registered — the post-release positive
-  // control must see the survivor and never the retired name.
+  // control must see the survivor and never the retired name. The B-side
+  // Host command (the collision's Host side) registers here too, BEFORE any
+  // reconnect: only the generation-B catalog can ever claim its name.
   const commands = fixture.host.ctx.commands as {
     register(def: { name: string; description: string; handler: () => { kind: 'success' } }): () => void
   }
@@ -652,10 +676,6 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
     description: 'the surviving catalog entry',
     handler: () => ({ kind: 'success' }),
   })
-  // A post-reconnect B-side Host command: proving it reaches the mounted
-  // completions and dispatches through the REAL Host handler exactly once
-  // is the PR2 source→decision→sink sink (AC1).
-  let bHostRuns = 0
   commands.register({
     name: 'b-fresh-cmd',
     description: 'the B generation command',
@@ -776,7 +796,10 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // wire.connection.generation → RemoteCommandSource subscription →
   // CommandSurface reconnect decision → CatalogRefreshCoordinator → real
   // Host command catalog B → Host-origin classifier → mounted submission →
-  // official executor).
+  // official executor). The same-named CLIENT-CONTEXT twin never executes:
+  // the INSTALLED B claim owns the line (the §D3 collision, and the
+  // discriminator that makes a no-op install of the automatic B refresh
+  // fail this whole block instead of passing vacuously).
   const commandRunsBefore = fixture.hostCommandRuns(sessionA)
   submit(fixture, '/b-fresh-cmd')
   await waitFor('the B Host command entered its real handler', () => bHostRuns === 1, 15_000)
@@ -784,6 +807,8 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   assert.equal(bHostRuns, 1, 'exactly one B Host handler entry (no auto-retry, no double dispatch)')
   assert.equal(fixture.hostCommandRuns(sessionA) - commandRunsBefore, 1,
     'exactly ONE new official command/run row for the B Host command')
+  assert.equal(bClientCalls, 0,
+    'the same-named Client twin never executed — the installed B Host claim owns the line')
 
   // NEGATIVE control on the same claim layer: the retired A-only Host
   // command no longer routes anywhere — the B claims are the authority, so
