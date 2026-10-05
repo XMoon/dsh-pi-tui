@@ -1767,3 +1767,59 @@ test('L6 PR5: a TRUE indeterminate Remote /preset <id> is consumed by the outer 
   assert.equal(sessionEvents().filter(event => event.type === 'agent-preset/selected').length, commitsBefore,
     'an indeterminate switch commits no durable preset selection')
 })
+
+test('L6 PR5: a TRUE indeterminate Remote /title <name> is consumed by the outer settlement and surfaces the no-retry notice', async (t) => {
+  // External review F5: the `/title` indeterminate branch suppresses the draft
+  // disposition, but the Remote Client-owned command path renders no command
+  // card either — so without its own notice the user saw the command vanish
+  // with no explanation. As in the `/preset` E5 case, the fact under test is
+  // the APPLICATION disposition/presentation, so only the Remote operation
+  // result is controlled; the handler, the command settlement owner, the TUI
+  // surface and the editor gesture stay real.
+  const life = testLifecycle(t)
+  const mainId = 'm3-5-pr5-title-indeterminate'
+  const hostPreset = 'm3-4-pr2-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+  })
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    submitDraft(): void
+    getDraft(): string
+  }
+  const sessionEvents = (): Array<{ readonly type: string }> =>
+    (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ readonly type: string }>
+    }).snapshotEvents()
+
+  // The COMPOSED Remote session writer is the /title handler's business owner:
+  // replace only its operation result with a post-dispatch uncertainty.
+  const writer = fixture.aggregate.selected.backend.sessionWriter
+  let renames = 0
+  Object.assign(writer, {
+    rename: async () => {
+      renames += 1
+      return {
+        kind: 'indeterminate' as const,
+        error: { code: 'gateway/internal', message: 'the rename may have committed' },
+      }
+    },
+  })
+
+  editor.setDraft('/title indeterminate-title')
+  editor.submitDraft()
+  await waitFor('the indeterminate title notice is rendered', () =>
+    fixture.vt.getViewport().join('').includes('do not retry'), 30_000)
+  assert.equal(renames, 1, 'the rename dispatched exactly once — no automatic retry')
+  assert.equal(editor.getDraft(), '',
+    'an indeterminate title write must NOT restore the typed command as retry-ready intent')
+  assert.ok(fixture.vt.getViewport().join('').includes('session title result is indeterminate'),
+    'the user-visible notice names the indeterminate title settlement')
+  assert.ok(!sessionEvents().some(event => event.type === 'session/title'),
+    'the indeterminate rename committed no durable title row')
+})

@@ -4914,12 +4914,16 @@ architecture, adds no writer-held error taxonomy, and takes over no lease.
   existing no-auto-retry error, so the outer command settlement consumes the
   command instead of restoring it. A KNOWN rejection — including
   `session/writer-held` — keeps its draft restoration.
-- **`/title <name>` keeps its production write semantics and now surfaces its
-  own refusal** (`src/commands.ts`): the `rejected` branch emits the same inline
-  `app.notify(...)` the `/preset` and `/model` handlers already use. On Remote
-  the TUI built-in runs in the Client-owned command registry, which renders no
-  official command card (no Host `command/run` row), so a refusal was otherwise
-  silent. See the plan-assumption correction below.
+- **`/title <name>` keeps its production write semantics and now surfaces BOTH
+  of its non-committed settlements** (`src/commands.ts`): the `rejected` branch
+  (`session/writer-held` included) emits the same inline `app.notify(...)` the
+  `/preset` and `/model` handlers already use, and the true-`indeterminate`
+  branch emits its own no-retry notice beside the `suppressed` draft
+  disposition (external review F5 — suppressing the draft without a notice left
+  the user with a vanished command and no explanation). On Remote the TUI
+  built-in runs in the Client-owned command registry, which renders no official
+  command card (no Host `command/run` row), so both were otherwise silent. See
+  the plan-assumption correction below.
 - **Reachability stays truthful.** `/model` keeps its existing exact
   writer-held mapping (no duplication); the Remote `commands.execute`
   adapter classifies an explicit `session/writer-held` result correctly at L3,
@@ -4950,6 +4954,7 @@ Direct; that duplication already exists for `/preset` and `/model`.
 | Remote preset writer-held | existing preset port | `test/remote-preset-port.test.ts`: exact code + `details.sessionId` + guidance, empty details dropped, `session/post-commit-failed`/`gateway/internal` stay indeterminate | `Flow F` preset adapter rejected | real runner `/preset <alt>`: command restored, guidance visible, no durable `agent-preset/selected`, and the RENDERED welcome-card preset row never becomes the requested alternate |
 | `/preset` indeterminate draft suppression | `test/preset-command.test.ts`: the real outer command-settlement owner drives the real handler — the indeterminate case leaves the editor empty and the REAL `/preset status` handler (the production consumer of the runner's current-preset read) still reports the authoritative preset, while the known writer-held rejection restores the command (one semantic family, plus no run-local pending preset) | `test/remote-preset-port.test.ts` result source | not required | real runner with a controlled Remote operation result: the editor does not regain the command, exactly one dispatch, no durable preset commit, and BOTH the projection read and the RENDERED welcome-card preset row stay at the value of a REAL preceding committed switch |
 | `/title` writer-held | — | `test/remote-session-writer.test.ts`: rename rejected + code/details/guidance | `Flow F` rename rejected | real runner `/title`: command restored + guidance visible + no title mutation; the explicit retry after the holder exits commits the EXACT `session/title` row with `source.kind === 'user'` (never an activation-only `session/end-seed` marker) and the settled command is consumed |
+| `/title` true indeterminate (no retry intent + no-retry notice) | `test/session-state.test.ts` handler family | result source | not required | real runner with a controlled Remote rename result: the editor does NOT regain the command, exactly one dispatch, no durable `session/title`, and the `session title result is indeterminate — do not retry automatically` notice is RENDERED (external review F5) |
 | model writer-held | existing | existing exact mapping (`test/remote-model-port.test.ts`) | `Flow F` model adapter rejected | not duplicated (existing application evidence) |
 | Host command writer-held | existing | `test/remote-host-command.test.ts`: exact code/details/guidance, one dispatch | optional contract probe only | deliberately absent (not normally UI-reachable) |
 | real kernel write lease | — | — | `scripts/dsh-remote-session-lifecycle-parity-smoke.mjs` Flow F: an independent Node holder process owns the lease (`SessionAlreadyOwnedError`), cold read/open stays available, and after `SIGKILL` an explicit retry commits | same fixture shape in the real runner tests (`test/support/session-writer-holder.mjs`) |
@@ -4963,12 +4968,23 @@ public Remote selector, unrelated UI/plugins, reconnect/HMR).
 
 ### Known limitations / debt (not PR5's)
 
-- A successful Client-owned TUI command renders no result text on Remote
-  either (`/title` reports no "title set:" confirmation). That is the same
-  missing Client-command-result presentation sink, not a recovery defect; PR5
-  fixes only the refusal path its acceptance requires.
-- The `/title` `stale`/`transitioning` branches remain silent on Remote for the
-  same reason.
+The `/title` result branches are enumerated EXPLICITLY so PR6 cannot miss one:
+
+```text
+rejected (incl. session/writer-held) -> command restored + guidance notice      (PR5, delivered)
+true indeterminate                   -> command suppressed + no-retry notice     (PR5, delivered)
+committed                            -> NO success confirmation on Remote        (still silent)
+stale capture                        -> NO notice on Remote                      (still silent)
+transition in progress               -> NO notice on Remote                      (still silent)
+```
+
+- A COMMITTED Client-owned TUI command renders no result text on Remote (no
+  `title set: <name>` confirmation), and the `/title` `stale`/`transitioning`
+  branches stay silent there. All three are the SAME missing
+  Client-command-result presentation sink: the Client-owned command registry
+  returns a normalized `CommandResult` and neither it nor the outer command
+  settlement presents it. It is a presentation gap, not a recovery defect, and
+  PR5 fixes only the two branches its acceptance covers.
 - A last-good Host-command claim after reconnect/ownership change, and Remote
   reconnect/HMR/global-fatal recovery, stay M3-6.
 
