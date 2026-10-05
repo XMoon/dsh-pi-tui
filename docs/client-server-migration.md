@@ -5419,8 +5419,9 @@ repopulate the same surfaces, and Host write settlements stay real.
   child truth and a B-side new descendant converge, exactly one retain
   released on close); the open selected-Job viewer receives post-B output
   through the same observation with no duplicate observer, and a Stop
-  issued after B reaches official `IJobs.kill` exactly once while a
-  pre-reconnect settled Stop is never replayed; a real pending Question
+  issued after B reaches official `IJobs.kill` exactly once while the
+  cross-reconnect kill counters stay at their pre-reconnect baseline (a
+  settled Stop is never replayed); a real pending Question
   survives reconnect answerable in the same flow (exactly one answer, no
   duplicate overlay, no fabricated settlement); a durable image read under
   a still-owned presentation commits across a same-binding reconnect while
@@ -5439,8 +5440,10 @@ repopulate the same surfaces, and Host write settlements stay real.
     held generation-A read → official `connection.reconnect()` → the stale
     snapshot cannot install and generation B AUTOMATICALLY re-reads the
     Host catalog without `/reload`; the B Host command dispatches through
-    the real Host executor exactly once and the retired A command routes
-    nowhere.
+    the real Host executor exactly once — against a same-named Client
+    extension twin that never executes (the installed-B-claim discriminator:
+    a no-op install of the automatic refresh sends the line nowhere) — and
+    the retired A command routes nowhere.
   - `test/runner-remote-presentation.test.ts` (L6, requalified): reconnect
     rehydrates the authoritative baseline/projection with no foreign
     subject leak.
