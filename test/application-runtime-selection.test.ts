@@ -227,6 +227,25 @@ test('the seam reaches the Remote aggregate ONLY through the backend-loader boun
     'the entry module statically re-exports the aggregate constructor (the single-entry join)')
 })
 
+test('Remote-selected Task composition resolves no Host ctx.jobs / ctx.subagents (source-locked, PR6)', async () => {
+  const bootstrapSource = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  // The Task Center Host-service lookups are Direct-only: each must be gated on
+  // the ABSENCE of the Remote composition input. A restored unconditional
+  // `const subagents = ctx.get('subagents')` (or `jobs`) makes the Remote
+  // composition root resolve a Host service it must never touch, even though
+  // the Remote branch consumes neither value.
+  assert.match(
+    bootstrapSource,
+    /const jobs = remoteSources === undefined \? ctx\.get\('jobs'\) : undefined/,
+    'Remote-selected Task composition must not resolve Host ctx.jobs',
+  )
+  assert.match(
+    bootstrapSource,
+    /const subagents = remoteSources === undefined \? ctx\.get\('subagents'\) : undefined/,
+    'Remote-selected Task composition must not resolve Host ctx.subagents',
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Real chain — seam -> backend-loader -> REAL aggregate over a real Host
 // ---------------------------------------------------------------------------
