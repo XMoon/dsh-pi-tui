@@ -29,6 +29,7 @@ import type {
   PluginSpecInspectionFact,
 } from '../runtime/plugin-manager-port.ts'
 import { runDetached } from '../detached.ts'
+import { runSyncDisposalSteps } from '../disposal.ts'
 import type { Diag } from '../diag.ts'
 import { classifyPluginPackages, type PluginClassificationInput, type PluginPresentationRole } from './classify.ts'
 import type { TuiExtensionObservation } from './extension-inventory.ts'
@@ -225,12 +226,17 @@ export class PluginManagerController {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    // Drop the in-flight inspect before its late result could reach a disposed
-    // controller. Only the explicit user cancel action may call `cancelInstall`:
-    // disposing the surface never cancels a Host install.
-    this.install?.inspectAbort?.abort()
-    this.unsubscribe()
-    this.unsubscribeInvalidation()
+    // The disposed latch is committed BEFORE the callbacks, so both are
+    // attempts at most once even when the first throws; a throwing first
+    // unsubscribe can no longer strand the second (M3-6 PR3).
+    runSyncDisposalSteps('plugin manager disposal', [
+      // Drop the in-flight inspect before its late result could reach a disposed
+      // controller. Only the explicit user cancel action may call `cancelInstall`:
+      // disposing the surface never cancels a Host install.
+      () => this.install?.inspectAbort?.abort(),
+      () => this.unsubscribe(),
+      () => this.unsubscribeInvalidation(),
+    ])
   }
 
   /** Current rendered rows for the panel. */

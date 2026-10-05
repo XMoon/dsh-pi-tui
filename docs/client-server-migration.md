@@ -40,7 +40,12 @@ M3-6 PR1 DONE      (Client UI / Extension locality: the Remote application's UI 
 M3-6 PR2 DONE      (Full-surface reconnect recovery: the official Connection generation
                     drives the Remote command-catalog reread; every supported Remote
                     surface recovers in place — see the M3-6 PR2 section)
-M3-6 IN PROGRESS   (PR1/PR2 landed on this branch; PR3 shutdown/HMR/fatal teardown NEXT)
+M3-6 PR3 DONE      (Shutdown / HMR / mounted-fatal teardown hardening: one frozen
+                    surface → retirement → transport order, a non-truncating synchronous
+                    disposal primitive hardening every named owner, the mounted fatal routed
+                    through the SAME surface cleanup authority, and fail-closed process-slot
+                    ownership preserved — see the M3-6 PR3 section)
+M3-6 IN PROGRESS   (PR1/PR2/PR3 landed; PR4 M3 closure / docs / gates NEXT)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -5524,3 +5529,101 @@ repopulate the same surfaces, and Host write settlements stay real.
 
 M3-6 PR2 = DONE (full-surface reconnect recovery)
 M3-6 PR3 = NEXT (shutdown / HMR / global-fatal teardown hardening)
+
+### M3-6 PR3 — Shutdown / HMR / mounted-fatal teardown (DONE)
+
+Baseline: `next @ 8c265e4941137619dada9f202fa8886c8a0f9325` (M3-6 PR2
+merged). PR3 hardens the EXISTING runner/surface teardown owners — it creates
+no shutdown manager, no second lifecycle state machine, and leaves Session
+retirement / reconnect semantics and the Remote Client/Host disposal order
+untouched. The frozen top-level order is unchanged and now proven end to end:
+
+```text
+normal unload / HMR:
+  surface total cleanup attempt
+  → Session retirement settlement
+  → selected transport disposal
+
+mounted fatal:
+  same surface cleanup authority
+  → bounded Session retirement
+  → transport only if retirement settled
+  → exit(1)
+```
+
+- **One synchronous disposal primitive** (`src/disposal.ts`):
+  `runSyncDisposalSteps(label, steps)` invokes every step in caller order,
+  collects synchronous thrown values, rethrows the single exact value by
+  identity or `AggregateError(errors, label)` for multiple. No Remote import,
+  no async, no ownership state, no logging, no retry/fallback.
+- **Non-truncating owner scope**: the bootstrap `disposeSurface` (its 15-step
+  order preserved), `TuiApp.stop`/`TuiApp.dispose`,
+  `SurfaceRuntime.dispose`, `ViewerRuntime` child release,
+  `CommandSurface.disposeCatalog`, `SettingsRuntime.disposeFooterCommand`,
+  `PluginManagerController.dispose`, `QuestionSurfaceController.dispose` and
+  `OverlayBroker.disposeAll` each attempt every independent owned step and
+  surface the collected failure afterwards. One-shot release slots are
+  retired before their callbacks run, so a thrown cleanup stays idempotent
+  and a second disposal is inert.
+- **Shared mounted-fatal cleanup authority**: `handleStartupFailure` reaches
+  the SAME `disposeSurface` through a runner-scope `disposeSurfaceRef`
+  assigned before `surface.start`; a fatal before the surface owner exists
+  keeps its own minimal focus/abort safety (no fabricated surface cleanup).
+  The bounded fatal retirement (2000 ms) and the
+  retirement-settled-before-transport rule are unchanged; cleanup errors are
+  secondary diagnostics and never replace the original fatal reason or block
+  `exit(1)`.
+- **Fail-closed process slot preserved**: `TuiApp.dispose()` releases the
+  process live-TUI slot only after the WHOLE non-truncating batch settles; any
+  collected final-dispose error keeps the slot claimed (a later fiber
+  disposal cannot re-run the latched surface cleanup).
+- **L6 evidence (decisive, `test/runner-remote-shutdown.test.ts`, real
+  Remote runner over the official in-process wire)**:
+  - **L6-A** clean HMR unload + same-process remount: observed order
+    `surface terminal stop < retirement settled < transport dispose`,
+    transport disposed exactly once, process slot released, a fresh Remote
+    runner mounts and its submission commits durably on the Host.
+  - **L6-B** partial surface disposer failure: the REAL official generation
+    unsubscribe is wrapped to release, record and throw; the same run proves
+    the command coordinator disposal (its active reconnect-refresh signal is
+    aborted), later surface/TuiApp cleanup, the exactly-once transport
+    disposal, the released process slot, the logged `surface dispose failed`
+    diagnostic, and a same-process replacement runner mount.
+  - **L6-C** mounted startup fatal (`TuiApp.prototype.setWheelScrollLines`
+    throws inside `settings.applyBootDisplay` after the real mount): the same
+    surface cleanup authority ran before retirement/transport, the injected
+    error is the fatal reason, the transport disposed exactly once when
+    retirement settled, `exit(1)` fired exactly once, and the later fiber
+    disposal did not re-run surface cleanup.
+- **Owner/component evidence**: `test/disposal.test.ts`;
+  `test/viewer-lifecycle-release.test.ts` (throwing ingress still releases
+  the retained child binding); `test/command-catalog-reconnect.test.ts`
+  CCR-9 (throwing official unsubscribe still disposes the coordinator and
+  retires the refresh path); `test/settings-runtime-lifecycle.test.ts`
+  (throwing footer unsubscribe / runner disposal still release siblings);
+  `test/plugin-manager-port.test.ts` (throwing install unsubscribe still
+  releases invalidation); `test/question-remote-lifecycle.test.ts` (throwing
+  projection unsubscribe still aborts the mounted form and runs the active
+  cleanup); `test/overlay-broker.test.ts` (a throwing physical `hide()` still
+  attempts later hides and clears the logical graph);
+  `test/surface-lifecycle.test.ts` (TuiApp unstarted final-dispose fault
+  injection keeps the generation retirement; SurfaceRuntime aggregate
+  continuation); `test/process-tui-slot.test.ts` (terminal fail-closed case).
+- **Mutation / counterfactual evidence** (each applied locally, verified red,
+  then restored): M1 removing the fatal surface cleanup call → L6-C red; M2
+  restoring a truncating pre-batch `command.disposeCatalog()` → L6-B red; M3
+  force-releasing the process slot after a final-dispose failure →
+  `process-tui-slot` fail-closed red; M4 restoring the viewer early-throw →
+  the new viewer behavioural case red; M5 starting transport disposal before
+  the retirement settlement → L6-A ordering red.
+- **Direct**: unchanged — the Direct branch has no Remote selector, transport
+  disposal stays the inert no-op, and the shared helper does not import any
+  Remote code. PR2 reconnect/write semantics are untouched and their suites
+  stayed green.
+- **Deferrals**: the final M3 closure matrix, `M3 DONE` and broad
+  debt-ledger reconciliation → M3-6 PR4.
+
+Final HEAD: recorded at PR open.
+
+M3-6 PR3 = DONE (shutdown / HMR / mounted-fatal teardown)
+M3-6 PR4 = NEXT (M3 closure / docs / gates)

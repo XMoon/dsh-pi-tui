@@ -196,3 +196,34 @@ test('a constructed-but-not-started TuiApp never pollutes the shared global keyb
   assert.equal(getKeybindings().getUserBindings()['tui.editor.submit'], 'ctrl+l', 'the owner commits its keys on the first start')
   appB.dispose()
 })
+
+/**
+ * M3-6 PR3 terminal fail-closed case. This is the LAST test in the file: it
+ * deliberately leaves the process slot claimed, and node:test runs each test
+ * FILE in its own process with sequential top-level tests, so nothing in this
+ * process can be poisoned. No product reset API is introduced.
+ */
+test('M3-6 PR3: a failing final teardown keeps the process slot claimed (fail-closed)', (t) => {
+  const app = newApp()
+  app.start()
+  assert.equal(liveTuiCountForTest(), 1, 'the started app owns the process slot')
+
+  const failure = new Error('final teardown failed')
+  // A controlled failure in the middle of the final batch: the later cleanup
+  // (the generation retirement) must still run, and the disposal must report
+  // the failure instead of silently finishing.
+  t.mock.method(app, 'stop', () => { throw failure })
+  const before = app.getSurfaceGeneration()
+
+  assert.throws(() => app.dispose(), (error: unknown) => error === failure)
+  assert.equal(app.isDisposed(), true, 'the disposed latch is committed')
+  assert.ok(app.getSurfaceGeneration() > before,
+    'the remaining final cleanup (the generation retirement) still ran')
+  assert.equal(liveTuiCountForTest(), 1,
+    'the process slot stays CLAIMED after a failed final teardown (fail-closed)')
+
+  // A second TuiApp cannot become live while the failed surface still holds
+  // the process-global keybinding namespace.
+  const appB = newApp()
+  assert.throws(() => appB.start(), /one live TuiApp per process/)
+})

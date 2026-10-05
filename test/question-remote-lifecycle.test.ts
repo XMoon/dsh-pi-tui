@@ -48,6 +48,9 @@ function harness(options: {
   /** Gate the claim opening so a test can abort while the first frame is in flight. */
   claimGate?: Promise<void>
   answerContinued?: (sessionId: string, callId: string, answer: AskUserQuestionAnswer) => Promise<'queued' | 'not-continued'>
+  /** Make the projection unsubscribe throw AFTER doing its real release (the
+   *  M3-6 PR3 partial-disposer fault injection). */
+  unsubscribeFailure?: Error
 } = {}) {
   let provider: UserQuestionProvider | undefined
   const asks: AskRecord[] = []
@@ -72,6 +75,7 @@ function harness(options: {
       return () => {
         unsubscribed.push(sessionId)
         subscribers = subscribers.filter(entry => entry !== listener)
+        if (options.unsubscribeFailure !== undefined) throw options.unsubscribeFailure
       }
     },
     snapshot: () => snapshot,
@@ -470,4 +474,35 @@ test('M3-6 PR2 (review F3b): a superseded settlement never retires a NEWER entry
     'the superseded settlement must not delete the newer entry')
   assert.equal(h.notices.some(text => text.includes('Answer queued')), false,
     'the superseded settlement is still not announced on the current surface')
+})
+
+test('M3-6 PR3: a throwing projection unsubscribe cannot strand the mounted form abort or the active cleanup', async () => {
+  const failure = new Error('projection unsubscribe failed')
+  let released = 0
+  const claim: QuestionWaitClaim = { remainingMs: 60_000, ended: new Promise(() => {}), release: () => { released += 1 } }
+  const h = harness({ claim, unsubscribeFailure: failure })
+  h.setSnapshot(continuedSurface())
+  h.attach()
+  h.controller.reconcile()
+  assert.equal(h.controller.reopen('session-a', 'call-continued'), true, 'the continued form mounts')
+  for (let i = 0; i < 10; i += 1) await Promise.resolve()
+  const mountedSignal = h.asks.at(-1)?.signal
+  assert.equal(mountedSignal?.aborted, false, 'the continued form is live')
+
+  const live = h.live({ sessionId: 'session-a', callId: 'call-live', timed: true, questions: QUESTIONS })
+  // `handleLive` registers its teardown cleanup BEFORE the claim await.
+  for (let i = 0; i < 10; i += 1) await Promise.resolve()
+  assert.equal(h.claimSignals.length, 1, 'the live claim is held')
+
+  assert.throws(() => h.controller.dispose(), (error: unknown) => error === failure)
+  assert.equal(released, 1, 'the active cleanup still ran after the throwing unsubscribe')
+  assert.equal(mountedSignal?.aborted, true, 'the mounted continued form was still aborted')
+
+  h.controller.dispose()
+  assert.equal(released, 1, 'a second disposal is inert')
+
+  await assert.rejects(() => live, (error: unknown) => {
+    assert.equal((error as { code?: string }).code, ASK_ABORTED)
+    return true
+  })
 })

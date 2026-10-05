@@ -46,6 +46,7 @@
  */
 
 import type { OverlayHandle } from '@xmoon76/pi-tui'
+import { runSyncDisposalSteps } from './disposal.ts'
 
 /** The broker's view of the active question suspension (owned by TuiApp's
  * QuestionFlow). The broker reads/writes it through this seam. */
@@ -583,11 +584,20 @@ export class OverlayBroker {
   }
 
   /** Physically unmount every node (final surface teardown) without restoring
-   * anything, then forget the graph. Idempotent. */
+   * anything, then forget the graph. Idempotent. Every physical hide is
+   * attempted in iteration order; the logical graph and the screen-swap focus
+   * bookkeeping are cleared in the same batch, so a throwing hide can neither
+   * strand a later handle nor leave a half-forgotten graph (M3-6 PR3). */
   disposeAll(): void {
-    for (const node of this.nodes.values()) node.raw?.hide()
-    this.nodes.clear()
-    this.roots.clear()
+    const nodes = [...this.nodes.values()]
+    runSyncDisposalSteps('overlay broker disposal', [
+      ...nodes.map(node => () => node.raw?.hide()),
+      () => {
+        this.nodes.clear()
+        this.roots.clear()
+        this.swapFocusOwner = undefined
+      },
+    ])
   }
 
   /** Every stable managed handle (test / diagnostics). */

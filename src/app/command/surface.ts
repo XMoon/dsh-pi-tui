@@ -27,6 +27,7 @@
 import type { Diag } from '../../diag.ts'
 import type { BackendKind } from '../../runtime/backend.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
+import { runSyncDisposalSteps } from '../../disposal.ts'
 import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { normalizeSkillInvocation } from '../../command-policy.ts'
@@ -1081,16 +1082,24 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const disposeCatalog = (): void => {
     // M3-6 PR2 §13.3.6: release the Remote generation listener FIRST (a
     // late generation callback after disposal must not start a read), then
-    // clear the slot, then dispose the coordinator.
-    disposeRemoteConnectionGeneration?.()
+    // dispose the coordinator. M3-6 PR3: both one-shot slots and the refresh
+    // request are retired BEFORE either callback runs, so a throwing official
+    // unsubscribe can neither skip the coordinator disposal nor leave a live
+    // refresh path behind this surface; the collected failure is surfaced
+    // after both attempts.
+    const generationUnsubscribe = disposeRemoteConnectionGeneration
+    const coordinator = catalogCoordinator
     disposeRemoteConnectionGeneration = undefined
-    catalogCoordinator?.dispose()
     catalogCoordinator = undefined
     // The Direct `skills/change` capability offers no unsubscribe, so a late
     // event can still reach the coalescing gate after teardown. Clearing the
     // request slot makes both refresh paths no-ops (they guard on undefined)
     // instead of touching the disposed coordinator.
     catalogRefreshRequest = undefined
+    runSyncDisposalSteps('command catalog disposal', [
+      () => generationUnsubscribe?.(),
+      () => coordinator?.dispose(),
+    ])
   }
 
   return {

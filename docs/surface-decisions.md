@@ -1390,7 +1390,14 @@ fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
 - Exclusivity is FAIL-CLOSED: if the final teardown throws, the slot
   stays claimed (a half-torn-down surface must never be publicly
   replaceable by a new one). `stop()` never releases, so a throwing stop
-  teardown cannot fail open either.
+  teardown cannot fail open either. **Fail-closed slot ownership is not
+  fail-fast cleanup** (M3-6 PR3): `TuiApp.dispose()` attempts EVERY final
+  cleanup step (the non-truncating `runSyncDisposalSteps` batch), and only
+  a completely successful batch releases the slot. Any collected
+  final-dispose error therefore keeps the slot claimed while the remaining
+  independent resources were still released. A sibling surface-cleanup
+  error that leaves `TuiApp.dispose()` itself successful does NOT poison the
+  slot: the surface records the failure and retirement/transport continue.
 - The external-editor suspend/resume and ordinary stop/start cycles keep
   the claim (same generation, same ownership — no trip); fullscreen
   main/alt-screen swaps stop/start the SCREENS (not the app) and never

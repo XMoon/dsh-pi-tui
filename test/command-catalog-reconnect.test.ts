@@ -60,6 +60,9 @@ interface CatalogRead { readonly sessionId: string }
 function controlledRemoteSource(options: {
   /** Notify the listener SYNCHRONOUSLY at subscription time (the rc.2 shape). */
   readonly synchronousSubscriptionNotify?: boolean
+  /** Make the official generation unsubscribe throw AFTER doing its real
+   *  release (the M3-6 PR3 partial-disposer fault injection). */
+  readonly unsubscribeFailure?: Error
 }) {
   const generationA = { id: 1 } satisfies GenerationToken
   const generationB = { id: 2 } satisfies GenerationToken
@@ -144,6 +147,7 @@ function controlledRemoteSource(options: {
       return () => {
         unsubscribed += 1
         listeners = listeners.filter(entry => entry !== listener)
+        if (options.unsubscribeFailure !== undefined) throw options.unsubscribeFailure
       }
     },
   }
@@ -656,6 +660,58 @@ test('CCR-8 (Direct negative control): no generation subscription exists on the 
     assert.equal(harness.surface.catalogRefreshAvailable(), true,
       'the Direct catalog coordinator is registered and usable')
   } finally {
+    harness.dispose()
+  }
+})
+
+/* ── CCR-9 (M3-6 PR3) ─────────────────────────────────────────────────── */
+
+test('CCR-9: a throwing official generation unsubscribe still disposes the coordinator and retires the refresh path', async () => {
+  const unsubscribeFailure = new Error('generation unsubscribe failed')
+  const source = controlledRemoteSource({ unsubscribeFailure })
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+  })
+  try {
+    harness.register()
+    source.script([['host-a']])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-a' })?.claimed, true)
+
+    // Leave one refresh IN FLIGHT (a held read), then dispose the catalog with
+    // a throwing official unsubscribe. The coordinator disposal must still run
+    // and abort the active refresh, so the held read can never install.
+    source.script(['hold'])
+    const inFlight = harness.surface.refreshLiveCatalogById('session-a')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const readsBeforeDispose = source.reads.length
+
+    assert.throws(() => harness.surface.disposeCatalog(), (error: unknown) => error === unsubscribeFailure)
+    assert.equal(source.unsubscribedCount(), 1, 'the official unsubscribe ran exactly once before throwing')
+    assert.equal(harness.surface.catalogRefreshAvailable(), false,
+      'the refresh request is retired despite the unsubscribe failure')
+
+    // The coordinator WAS disposed: releasing the held read cannot install.
+    source.releaseRead(0, ['host-z'])
+    await inFlight
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-z' }), undefined,
+      'the aborted refresh could not install its late snapshot')
+
+    // No later generation callback can start a read through this surface.
+    source.script([['host-b']])
+    source.replace(undefined)
+    source.replace(source.tokens.b)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(source.reads.length, readsBeforeDispose,
+      'no read started after the catalog was disposed')
+
+    // A second disposal is inert: no rethrow, no second unsubscribe.
+    harness.surface.disposeCatalog()
+    assert.equal(source.unsubscribedCount(), 1)
+  } finally {
+    source.releaseRead(0, [])
     harness.dispose()
   }
 })
