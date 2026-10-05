@@ -1447,3 +1447,48 @@ test('a /skill picker selection refuses when the owner changed while the picker 
   for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
   assert.deepEqual(delivered, [], 'a stale picker must not deliver to the replacement owner')
 })
+
+test('capability-truthful discovery copy is registered for the conditional commands', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent: undefined }))
+  const descriptionOf = (name: string): string => {
+    const def = services.defs.find(candidate => candidate.name === name)
+    assert.ok(def?.description !== undefined, `/${name} must be registered with a description`)
+    return def.description
+  }
+  // Each description stays truthful about the conditional capability it
+  // advertises; the supported rename/switch/default subpaths stay discoverable
+  // and the unsupported ones no longer over-promise.
+  assert.equal(descriptionOf('model'),
+    'Switch the model (and reasoning effort) for this session; before a session exists, change the default when supported')
+  assert.equal(descriptionOf('title'),
+    'Set the session title; without an argument, regenerate it from the conversation when supported (overwrites the current title)')
+  assert.equal(descriptionOf('attach'),
+    'Attach an image or file to the draft; generic-file delivery requires backend support (tab completes the path)')
+  assert.equal(descriptionOf('transcript'),
+    'Export a readable Markdown transcript of this session when supported')
+  assert.equal(descriptionOf('login'),
+    'Configure provider credentials; provider-native sign-in is available when supported')
+  assert.equal(descriptionOf('logout'),
+    'Clear provider credentials; stored-record cleanup is available when supported')
+  // The ! / !! help row is presentation-only copy on the same discovery
+  // surface: the gesture/card stays visible, execution is Host-owned.
+  let captured: Parameters<TuiApp['openSettings']>[0] | undefined
+  app.openSettings = ((items: Parameters<TuiApp['openSettings']>[0]) => { captured = items }) as unknown as TuiApp['openSettings']
+  const help = services.defs.find(candidate => candidate.name === 'help')
+  assert.ok(help?.handler !== undefined, '/help must be registered')
+  ;(help.handler as () => unknown)()
+  const bang = captured?.find(candidate => candidate.id === 'k-bang')
+  assert.ok(bang !== undefined, 'the ! cmd help row must exist')
+  assert.match(bang.description ?? '', /^Host user-shell execution is available only when the backend provides it;/)
+  assert.match(bang.description ?? '', /! submits the completed command and its output to the Session/)
+  assert.match(bang.description ?? '', /!! keeps the result presentation-only/)
+  app.stop()
+})
