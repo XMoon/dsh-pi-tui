@@ -5437,13 +5437,19 @@ repopulate the same surfaces, and Host write settlements stay real.
     supersession (B in flight, C wins), callback-time session id, disposal
     unsubscribe, Direct negative control.
   - `test/runner-remote-command-plane.test.ts` §7.4-14 (L6, decisive):
-    held generation-A read → official `connection.reconnect()` → the stale
-    snapshot cannot install and generation B AUTOMATICALLY re-reads the
-    Host catalog without `/reload`; the B Host command dispatches through
-    the real Host executor exactly once — against a same-named Client
-    extension twin that never executes (the installed-B-claim discriminator:
-    a no-op install of the automatic refresh sends the line nowhere) — and
-    the retired A command routes nowhere.
+    held generation-A read → official `connection.reconnect()` → the held
+    A snapshot cannot commit (the admission/epoch fences) and generation B
+    AUTOMATICALLY re-reads the Host catalog without `/reload`. The routing
+    layer proves the INSTALLED B catalog: the B Host command (whose name
+    also carries a Client extension twin) dispatches through the real Host
+    executor exactly once with the twin never executing — a no-op install
+    of the automatic refresh cannot produce that Host dispatch — and the
+    retired A command's name falls to its own Client twin exactly once (no
+    Host claim may remain: a stale-retained A claim would keep the line on
+    the disposed Host route and the twin would never run). Both
+    counterfactuals were verified red by read-only in-process mutations
+    (install no-op; installing the exact saved generation-A catalog in
+    place of B's).
   - `test/runner-remote-presentation.test.ts` (L6, requalified): reconnect
     rehydrates the authoritative baseline/projection with no foreign
     subject leak.
