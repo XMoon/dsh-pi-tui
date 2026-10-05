@@ -812,3 +812,72 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
   assert.deepEqual(settledOutcomes, ['queued'],
     `the controller observed exactly one truthful adapter settlement (no reclassification): ${JSON.stringify(settledOutcomes)}`)
 })
+
+test('L6 M3-6 PR2 (review O1): a dispatched credential write stays real across reconnect — no reclassification, exactly one dispatch, no replay', async (t) => {
+  // The /login handler writes through exactly this port
+  // (`runner.config.credentials.setReference`). The shared fixture now mounts
+  // the SAME writable provider the production base composition mounts
+  // (`@deepseek-ai/dsh-credentials-local`), so this exercises the real chain:
+  // official Remote → CredentialsController → real provider.
+  const life = testLifecycle(t)
+  const mainId = 'm3-6-pr2-cred'
+  const presetId = 'm3-4-pr4-preset'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  // Hold the Host-side write (the real provider's `set` is what the
+  // CredentialsController calls) so the settlement is in flight while the
+  // connection is replaced.
+  const { symbols } = await import('@deepseek-ai/cordis')
+  const providerProxy = host.ctx.get('credentials') as unknown as Record<symbol, unknown> & {
+    set(ref: unknown, value: string): unknown
+  }
+  const providerImpl = (providerProxy[symbols.original] ?? providerProxy) as typeof providerProxy
+  const originalSet = providerImpl.set
+  let dispatches = 0
+  let releaseSettlement: (() => void) | undefined
+  const settlementGate = new Promise<void>(resolve => { releaseSettlement = resolve })
+  providerImpl.set = async (ref: unknown, value: string) => {
+    dispatches += 1
+    const result = await originalSet.call(providerImpl, ref, value)
+    await settlementGate
+    return result
+  }
+  life.defer(() => { releaseSettlement?.(); providerImpl.set = originalSet })
+
+  const credentials = aggregate.selected.backend.config.credentials
+  const write = credentials.setReference('M3_6_PR2_KEY', 'sk-test-value')
+  for (let i = 0; i < 400 && dispatches === 0; i += 1) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(dispatches, 1, 'the credential write reached the real provider exactly once')
+
+  // reconnect A -> B while the settlement is in flight.
+  const connection = aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== generationBefore
+  }, 20_000)
+
+  releaseSettlement?.()
+  await write
+  assert.equal(dispatches, 1,
+    'the settlement was reported as real and the write was never replayed across the reconnect')
+
+  // The replacement generation reports the durable result from Host authority.
+  assert.equal((await credentials.describeReference('M3_6_PR2_KEY')).configured, true,
+    'the replacement generation converges on the stored credential')
+})

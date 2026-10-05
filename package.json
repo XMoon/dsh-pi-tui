@@ -158,6 +158,7 @@
     "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.2.0-rc.2",
     "@deepseek-ai/dsh-config-editor": "0.2.0-rc.2",
     "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-credentials-local": "0.2.0-rc.2",
     "@deepseek-ai/dsh-file-reference": "0.2.0-rc.2",
     "@deepseek-ai/dsh-file-reference-local": "0.2.0-rc.2",
     "@deepseek-ai/dsh-fs-local": "0.2.0-rc.2",

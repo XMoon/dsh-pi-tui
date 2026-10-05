@@ -56,7 +56,7 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
-import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
@@ -268,9 +268,12 @@ export async function createRemoteApplicationHostFixture(
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
-    await ctx.plugin(pluginCtx => {
-      Reflect.construct(CredentialProvider, [pluginCtx])
-    })
+    // The REAL writable credential provider the production base composition
+    // mounts (`packages/bundle/base/cordis.patch.yml`, id `credentials`):
+    // the abstract `@deepseek-ai/dsh-credentials` seam has no set/unset, so
+    // mounting it here made every credential WRITE fail with "credentials.set
+    // is not a function" — a fixture prerequisite error, not a product gap.
+    await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(toolJobs)
     await ctx.plugin(JobController, {})

@@ -5436,18 +5436,23 @@ repopulate the same surfaces, and Host write settlements stay real.
   cancelled prompt; "connection unavailable; the API key was not sent —
   reconnect and retry" only for the PRE-dispatch refusal; the real Host error
   otherwise).
-- **Known gap recorded while qualifying the credential write** (independent
-  of the settlement semantics above, pre-existing): on the real in-process
-  wire the mounted path
-  `runner.config.credentials.setReference(...)` fails with
-  `credentials.set is not a function`, even though
-  `docs/m3-entry-contract.md` §10 states the API-key path works through
-  `credentials/set` (the descriptor exists in
-  `@deepseek-ai/dsh-api-settings-controller`'s Remote). The adapter
-  semantics above are therefore qualified at the adapter level (controlled
-  official Remote) rather than through a mounted write, and this namespace
-  activation/assembly gap needs its own investigation and an owner decision
-  (it is not a settlement-classification defect and is not fixed here).
+- **Fixture prerequisite corrected while qualifying the credential write**
+  (not a product gap): the shared Remote fixture used to mount the ABSTRACT
+  `@deepseek-ai/dsh-credentials` seam base (which only carries listener
+  plumbing — no `set`/`unset`/`describe`), so every mounted credential write
+  failed with `credentials.set is not a function` inside
+  `CredentialsController.provider()`. Production mounts the REAL writable
+  provider (`packages/bundle/base/cordis.patch.yml`, `id: credentials ->
+  @deepseek-ai/dsh-credentials-local`), so the fixture now mounts
+  `@deepseek-ai/dsh-credentials-local` (devDependency, same
+  `0.2.0-rc.2` line as the other `@deepseek-ai/*` test dependencies) with a
+  per-worktree `.credentials.yaml`. With that prerequisite in place the
+  mounted L6 exercises the real chain (official Remote namespace →
+  `CredentialsController` → real provider) and proves the credential write
+  settlement across a reconnect, its exactly-once dispatch and the
+  replacement generation's convergence. The earlier working note that called
+  this a "namespace activation/assembly gap" was WRONG — it was the fixture's
+  own substitution, and it is corrected here.
   Reconnect does not bump the TUI Session ownership generation, the viewer
   generation, or materialize another Client Session reference — the retained
   binding objects survive by identity (normal reconnect is adoption, not
