@@ -5653,7 +5653,8 @@ mounted fatal:
 - **Deferrals**: the final M3 closure matrix, `M3 DONE` and broad
   debt-ledger reconciliation → M3-6 PR4.
 
-Final HEAD (reviewed/accepted implementation snapshot): `1a3bd1cb`.
+Reviewed implementation snapshot: `b89a0706` (branch tip and PR body record the
+later docs-only metadata commits).
 
 M3-6 PR3 = DONE (shutdown / HMR / mounted-fatal teardown)
 M3-6 PR4 = NEXT (M3 closure / docs / gates)
