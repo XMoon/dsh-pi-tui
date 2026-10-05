@@ -1794,7 +1794,7 @@
       "capabilities": "pure / owner capability",
       "lifecycle": "n/a (category documents ownership)",
       "sweep": "verified@a5b6",
-      "sweepNote": "Host extension service resolved for surface.attachExtensionHost; process prerequisite.",
+      "sweepNote": "branch-selected TUI extension service: Direct resolves the ordinary profile-Context service; experimental Remote consumes the selected Client-local service from RemoteApplicationOverride (M3-6 PR1).",
       "callers": [
         "settings",
         "command",
