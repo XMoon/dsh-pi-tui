@@ -537,6 +537,96 @@ test('L6 §15 step 10 + 11(b): a SECOND real Job stops through the Task-Center r
     'every observer except the currently mounted one must have been released')
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// M3-6 PR2 §14.6: the OPEN selected-Job viewer recovers in place across a
+// normal Connection reconnect — the same Job stays mounted, the B-side
+// authoritative output reaches the SAME viewer, no duplicate observer/viewer is
+// created, and a Stop issued AFTER B reaches the official `IJobs.kill` exactly
+// once (the write-settlement negative: a Stop settled BEFORE the reconnect is
+// never replayed).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same detail, B output converges, one observer, post-B Stop kills exactly once, no replay', async (t) => {
+  const life = testLifecycle(t)
+  const fx = await mountJobViewerFixture(life)
+  const { app, view } = fx
+  const key = stopKey(app)
+
+  // One real running Job and one REAL write settled BEFORE the reconnect
+  // (the write-settlement negative control: an official `IJobs.kill` whose
+  // proven settlement must never be replayed by the reconnect).
+  const settledJob = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_ONE_LABEL, text: JOB_ONE_INITIAL })
+  const liveJob = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_TWO_LABEL, text: 'pr3-two retained line\n' })
+  await waitFor('both Jobs are officially running', () =>
+    fx.rosterStatus(settledJob.id) === 'running' && fx.rosterStatus(liveJob.id) === 'running', 20_000)
+  const settledKillsBefore = fx.killControl.calls
+  fx.killControl.mode = 'real'
+  // The pre-reconnect Stop: the official Client write the surface's Stop
+  // key would dispatch (the same `IJobs.kill` the mounted Stop uses).
+  const settledOutcome = await fx.clientJobs.kill(MAIN_ID, String(settledJob.id))
+  assert.equal(settledOutcome.ok, true, 'the pre-reconnect Stop settled with a proven outcome')
+  await waitFor('the pre-reconnect stop converged', () =>
+    fx.rosterStatus(settledJob.id) === 'killed', 20_000)
+  const preReconnectKills = fx.killControl.calls - settledKillsBefore
+  assert.equal(preReconnectKills, 1, 'the pre-reconnect Stop dispatched exactly once')
+
+  // ── Open the SECOND Job's detail (the surface that must recover).
+  submit(app, '/tasks')
+  await openJobRow(fx, JOB_TWO_LABEL)
+  await waitFor('the live Job detail opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the pre-reconnect retained output rendered', () =>
+    view().includes('pr3-two retained line'), 20_000)
+  const acquiresBeforeReconnect = fx.observeAcquires()
+
+  // ── The OFFICIAL reconnect, with the Job truth advancing while the old
+  // generation is gone (the appended output exists only for generation B).
+  const connection = fx.fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  liveJob.handle().append('pr3-two post-reconnect line\n')
+  liveJob.handle().updateProgress('7/10 linking')
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== generationBefore
+  }, 20_000)
+
+  // The SAME Job detail remains mounted and the B-side authoritative
+  // observation reaches the SAME viewer.
+  await waitFor('the post-reconnect output reached the same viewer', () =>
+    view().includes('pr3-two post-reconnect line'), 20_000)
+  await waitFor('the post-reconnect progress converged', () =>
+    view().includes('progress: 7/10 linking'), 20_000)
+  assert.equal(app.overlayGraphState().handles, 2,
+    'the reconnect neither closed nor duplicated the Job detail')
+  assert.equal(fx.observeAcquires(), acquiresBeforeReconnect,
+    'the reconnect created NO duplicate observer')
+
+  // The roster and detail converge after B (the settled Job stays terminal,
+  // the live Job stays running through the same Client model).
+  await waitFor('the roster re-converged after B', () =>
+    fx.rosterStatus(settledJob.id) === 'killed' && fx.rosterStatus(liveJob.id) === 'running', 20_000)
+
+  // ── A Stop issued AFTER B reaches the official `IJobs.kill` exactly once.
+  const killCallsBeforePostB = fx.killControl.calls
+  const hostKillsBeforePostB = fx.hostKillCalls()
+  fx.fixture.vt.sendInput(key)
+  await waitFor('the post-B Stop converged the live Job', () =>
+    fx.rosterStatus(liveJob.id) === 'killed', 20_000)
+  await waitFor('the viewer rendered the terminal status', () => view().includes('killed'), 20_000)
+  assert.equal(fx.killControl.calls - killCallsBeforePostB, 1,
+    'the post-B Stop dispatched the official kill EXACTLY once')
+  assert.equal(fx.hostKillCalls() - hostKillsBeforePostB, 1,
+    'exactly one Host kill admission served the post-B Stop')
+  // The write-settlement negative control: the reconnect NEVER replayed the
+  // pre-reconnect Stop — the total kill count grows by exactly the one
+  // post-B dispatch above.
+  assert.equal(fx.killControl.calls, killCallsBeforePostB + 1,
+    'no pre-reconnect settlement was replayed across the reconnect')
+})
+
 test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child id stays in the Job detail, never a guessed transcript', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)

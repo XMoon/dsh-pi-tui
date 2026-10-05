@@ -118,6 +118,14 @@ export interface RemoteCommandSourceFace {
   /** Whether the captured transport identity is still live (the COMBINED
    *  multi-provider settle re-checks this after every await). */
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** Current official Connection generation; undefined while disconnected
+   *  (M3-6 PR2). Direct delegation only — the SAME official snapshot
+   *  object by identity, never a cached/normalized copy. */
+  connectionGeneration(): unknown | undefined
+  /** Subscribe the official Connection generation observable (M3-6 PR2):
+   *  the invalidation hint the Client-local CommandSurface consumes. The
+   *  returned unsubscribe is the official one, unchanged. */
+  subscribeConnectionGeneration(listener: () => void): () => void
 }
 
 export interface RemoteApplicationSources {

@@ -37,7 +37,10 @@ M3-5 DONE          (secondary surfaces + writer-held recovery closed; PR1–PR6 
 M3-6 PR1 DONE      (Client UI / Extension locality: the Remote application's UI extension
                     authority moved from the ordinary Host runner Context to the existing
                     official Client Context — see the M3-6 PR1 section)
-M3-6 IN PROGRESS   (PR1 landed on this branch; PR2 full-surface reconnect recovery NEXT)
+M3-6 PR2 DONE      (Full-surface reconnect recovery: the official Connection generation
+                    drives the Remote command-catalog reread; every supported Remote
+                    surface recovers in place — see the M3-6 PR2 section)
+M3-6 IN PROGRESS   (PR1/PR2 landed on this branch; PR3 shutdown/HMR/fatal teardown NEXT)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -73,7 +76,8 @@ M3-5 = DONE                 (PR1–PR6 landed; PR6 stage closure/hardening close
                              the Remote Task locality gap and reconciled the
                              live closure record)
 M3-6 = IN PROGRESS          (PR1 Client UI / Extension locality complete;
-                             PR2 full-surface reconnect recovery NEXT)
+                             PR2 full-surface reconnect recovery complete;
+                             PR3 shutdown/HMR/fatal teardown NEXT)
 ```
 
 M3-4 closed the **experimental in-process official-wire MAIN-TUI application**
@@ -5367,3 +5371,96 @@ captures to the **Client Context** under wire mode):
 
 M3-6 PR1 = DONE (Client UI / Extension locality)
 M3-6 PR2 = NEXT (full-surface reconnect recovery)
+
+### M3-6 PR2 — Full-surface reconnect recovery (DONE)
+
+Baseline: `next @ 4cc991f6f0891e0b65472918fb42f062a89aca9a` (M3-6 PR1
+merged as PR #219). PR2 closes the M3-6 reconnect axis for the
+already-composed experimental Remote TUI: a connected generation A →
+disconnect/reconnect → generation B keeps the retained Session ownership,
+old-generation reads cannot commit, new-generation authoritative reads
+repopulate the same surfaces, and Host write settlements stay real.
+
+- **The narrow production delta**: `RemoteCommandSource` now also exposes
+  the SAME official Connection generation observable it already fences its
+  reads with — `connectionGeneration()` /
+  `subscribeConnectionGeneration()` are direct delegation only (no cache,
+  no normalization, the official snapshot object preserved by identity) —
+  and `CommandSurface` owns the reconnect subscription: capture-before-
+  subscribe (a synchronous subscription-time notification of the current
+  token is a no-op, so no duplicate startup refresh), an identical token
+  (`Object.is`) is a no-op, `undefined` (disconnected/connecting) issues NO
+  catalog RPC and clears nothing, and a new defined generation triggers ONE
+  `CatalogRefreshCoordinator` refresh (`'invalidation'` source) against the
+  session id read at callback execution time. `disposeCatalog()` releases
+  the generation listener before the coordinator. No reconnect manager,
+  watchdog, timer or second coalescer exists; bootstrap gained no reconnect
+  orchestration.
+- **Last-good Host claim rule**: a disconnect or a failed new-generation
+  provider read keeps the last-good Host-origin claims reserved
+  (`mergePartial`); a Client same-name contribution cannot take the name
+  while the new-generation Host catalog is unconfirmed; a successful
+  generation-B read replaces the Host command truth (retired commands lose
+  their claims, new ones gain them).
+- **Read supersession vs write settlement**: old-generation reads settle as
+  superseded/unavailable and never commit (the existing adapter fences,
+  requalified); a proven Host write settlement is never reclassified or
+  replayed because the transport generation changed. Reconnect does not
+  bump the TUI Session ownership generation, the viewer generation, or
+  materialize another Client Session reference — the retained binding
+  objects survive by identity (normal reconnect is adoption, not
+  re-materialization).
+- **All other Remote surfaces were requalified, not rewritten**: main
+  presentation/status rehydrate, Plugin Manager authoritative reread without
+  mutation replay, the Config mirror generation invalidation, and the
+  L5 client-runtime reconnect/reset/list case all stayed green unchanged.
+  New L6 qualifications: the open Task Center + child viewer recover in
+  place (same binding objects, no viewer bump, draft preserved, B-side
+  child truth and a B-side new descendant converge, exactly one retain
+  released on close); the open selected-Job viewer receives post-B output
+  through the same observation with no duplicate observer, and a Stop
+  issued after B reaches official `IJobs.kill` exactly once while a
+  pre-reconnect settled Stop is never replayed; a real pending Question
+  survives reconnect answerable in the same flow (exactly one answer, no
+  duplicate overlay, no fabricated settlement); a durable image read under
+  a still-owned presentation commits across a same-binding reconnect while
+  a different binding fails closed.
+- **L5/L6 evidence**:
+  - `test/remote-client-runtime.test.ts` case I (L5, requalified):
+    official A→undefined→B with the same retained binding.
+  - `test/remote-command-source.test.ts` RCS-G1/G2 (L3): exact generation
+    snapshot/subscription delegation.
+  - `test/command-catalog-reconnect.test.ts` CCR-1..CCR-8 (supporting
+    owner/unit level): subscription no-op on the current token, no read on
+    `undefined`, last-good claims, automatic B refresh, coordinator
+    supersession (B in flight, C wins), callback-time session id, disposal
+    unsubscribe, Direct negative control.
+  - `test/runner-remote-command-plane.test.ts` §7.4-14 (L6, decisive):
+    held generation-A read → official `connection.reconnect()` → the stale
+    snapshot cannot install and generation B AUTOMATICALLY re-reads the
+    Host catalog without `/reload`; the B Host command dispatches through
+    the real Host executor exactly once and the retired A command routes
+    nowhere.
+  - `test/runner-remote-presentation.test.ts` (L6, requalified): reconnect
+    rehydrates the authoritative baseline/projection with no foreign
+    subject leak.
+  - `test/runner-remote-task-center.test.ts` (L6, new §14.5 + §14.10):
+    in-place Task Center/child-viewer recovery; same-binding image read
+    adoption vs different-binding fail-closed.
+  - `test/runner-remote-job-viewer.test.ts` (L6, new): open viewer
+    recovery, post-B Stop exactly once, no settlement replay.
+  - `test/runner-remote-plugin-manager.test.ts` L6-E (L6, requalified):
+    authoritative reread, prior mutation never replayed.
+  - `test/remote-config-port.test.ts` (L3, requalified): generation-aware
+    mirror invalidation/reread.
+  - `test/runner-remote-permission.test.ts` §14.9 (L6, new): pending
+    Question survives reconnect, one answer, no duplicate overlay.
+- **Direct**: unchanged — the Direct branch installs no generation
+  subscription (`remoteCommandSource === undefined`) and the Direct suites
+  stayed green.
+- **Deferrals**: global fatal-path teardown hardening, HMR/unload
+  end-to-end teardown proof, and the final shutdown/dispose matrix →
+  M3-6 PR3; the final M3 closure matrix and `M3 DONE` → M3-6 PR4.
+
+M3-6 PR2 = DONE (full-surface reconnect recovery)
+M3-6 PR3 = NEXT (shutdown / HMR / global-fatal teardown hardening)

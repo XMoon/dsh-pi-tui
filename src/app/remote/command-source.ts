@@ -50,6 +50,16 @@ export interface RemoteCommandSource {
    *  session (a same-id binding rollover or Connection replacement reads
    *  stale — the COMBINED settle of a multi-provider read re-checks this). */
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** Current official Connection generation; undefined while disconnected
+   *  (M3-6 PR2 §13.2): DIRECT delegation to the SAME official generation
+   *  observable the read fences already consume — no cache, no
+   *  normalization, no mapping to a primitive (the official snapshot
+   *  object is preserved by identity). */
+  connectionGeneration(): unknown | undefined
+  /** Subscribe the official Connection generation observable (M3-6 PR2
+   *  §13.2): the narrow invalidation hint the Client-local CommandSurface
+   *  consumes. Returns the official unsubscribe, unchanged. */
+  subscribeConnectionGeneration(listener: () => void): () => void
 }
 
 /** The narrow one-source face this bundle consumes: the SAME shared sessions
@@ -88,5 +98,9 @@ export function createRemoteCommandSource(inputs: RemoteCommandSourceInputs): Re
       if (!Object.is(captured.generation, inputs.generation.getSnapshot())) return false
       return inputs.bindings.binding(sessionId) === captured.binding
     },
+    // M3-6 PR2 §13.2: direct delegation ONLY — the same official snapshot
+    // object and the same official unsubscribe, no state kept here.
+    connectionGeneration: () => inputs.generation.getSnapshot(),
+    subscribeConnectionGeneration: listener => inputs.generation.subscribe(listener),
   }
 }

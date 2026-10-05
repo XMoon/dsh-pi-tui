@@ -66,6 +66,19 @@ After mount, one `CatalogRefreshCoordinator` owns every refresh:
   notifications read the STANDING skill catalog of the effective preset
   (skills only, via `resolveColdSkillTarget` + `readHumanSkillCatalog`).
 
+On the Remote branch there is one more refresh boundary (M3-6 PR2): the
+official Connection generation itself. `RemoteCommandSource` exposes the same
+generation observable it fences its reads with, and the Client-local
+`CommandSurface` subscribes (capture-before-subscribe, so a synchronous
+subscription-time notification is a no-op). A new DEFINED generation after a
+reconnect triggers one same-Session/same-target refresh (`'invalidation'`
+source) against the session id read at callback time — no `/reload` needed.
+The refresh target does NOT change (reconnect is not a Session transition),
+and the same-target last-good policy applies: a failed reconnect reread keeps
+the old provider field (the last-good Host-origin claims stay reserved); a
+successful reread replaces it. While the generation is `undefined`
+(disconnected/connecting) NO catalog RPC is issued and nothing is cleared.
+
 Each refresh is an explicit request naming its target; a new request aborts
 the active one and only the latest epoch may commit, so a stale standing
 result can never replace a live-Agent result. `skills/change` bursts are

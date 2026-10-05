@@ -444,3 +444,126 @@ test('L6 PR5 §1D: /yolo on a Remote live session reaches the semantic permissio
   assert.equal(events.filter(event => event.type === 'command/run').length, 1,
     'exactly ONE official /permission command ran (never retried, never duplicated)')
 })
+
+test('L6 M3-6 PR2 §14.9: a real pending Remote Question survives reconnect — the same flow answers exactly once, no duplicate overlay, no answer replay', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-6-pr2-q'
+  const presetId = 'm3-4-pr4-preset'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  // The live Agent the official userQuestions service scopes its waterfall to
+  // (the same live-root identity the production ask path requires).
+  const agent = await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+  life.defer(restoreTerminal)
+
+  const runnerCtx = host.ctx
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  runnerCtx.provide('appExit', (code: number) => { void code })
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
+  }
+  const apps: unknown[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: unknown) {
+    apps.push(this)
+    return originalStart.call(this)
+  }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => { runnerFiber.dispose() })
+  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+
+  const app = await (async () => {
+    for (let i = 0; i < 600; i += 1) {
+      const candidate = apps.at(-1) as unknown as {
+        overlayGraphState(): { handles: number }
+      } | undefined
+      if (candidate !== undefined && candidate.overlayGraphState !== undefined) return candidate as never
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed the overlay graph')
+  })()
+  const view = (): string => vt.getViewport().join('\n')
+
+  // ── A REAL Host Question becomes pending: the official service's live
+  // waterfall (the exact path a tool call takes), forwarded over the wire to
+  // the mounted TUI's question surface.
+  const service = host.ctx.get('userQuestions') as unknown as {
+    ask(request: { questions: readonly unknown[]; agent: unknown }): Promise<{ answers: Array<{ id: string; selected: string[] }> }>
+  }
+  const questions = [{ id: 'q1', question: 'Proceed with the reconnect probe?', options: [{ label: 'yes' }, { label: 'no' }] }]
+  const askSettled = service.ask({ questions, agent })
+  let askOutcome: { kind: 'fulfilled'; value: unknown } | { kind: 'rejected'; reason: unknown } | undefined
+  const outcomeKind = (): string | undefined => askOutcome?.kind
+  askSettled.then(
+    value => { askOutcome = { kind: 'fulfilled', value } },
+    reason => { askOutcome = { kind: 'rejected', reason } },
+  )
+  await waitFor('the question surface is visible', () => view().includes('Proceed with the reconnect probe?'), 20_000)
+  const handlesBefore = (app as unknown as { overlayGraphState(): { handles: number } }).overlayGraphState().handles
+
+  // ── reconnect A -> B (the same official carrier the sibling suites use).
+  const connection = aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== generationBefore
+  }, 20_000)
+
+  // The SAME question flow remains mounted and answerable after B: exactly
+  // one overlay (no duplicate question surface), the Host ask still pending
+  // (no fabricated settlement, no error surfaced by the transport rollover).
+  await new Promise(resolve => setTimeout(resolve, 800))
+  assert.equal(view().includes('Proceed with the reconnect probe?'), true,
+    'the same question remains visible after the reconnect')
+  assert.equal((app as unknown as { overlayGraphState(): { handles: number } }).overlayGraphState().handles, handlesBefore,
+    'no duplicate question overlay was created by the reconnect')
+  assert.equal(askOutcome, undefined,
+    'the Host ask is still pending after the reconnect (no transport-driven settlement)')
+
+  // ── Answer through the MOUNTED question flow (the real single-select key
+  // + submit): exactly one answer reaches the Host.
+  vt.sendInput('1')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await waitFor('the review page rendered', () => view().includes('Submit'), 10_000)
+  vt.sendInput('\r')
+  const settled = await askSettled
+  assert.deepEqual(settled.answers, [{ id: 'q1', selected: ['yes'] }],
+    'the mounted answer reached the official Host ask exactly as submitted')
+  assert.equal(outcomeKind(), 'fulfilled',
+    'the ask settled exactly once (fulfilled, never rejected by the reconnect)')
+  await waitFor('the question overlay retired after the answer', () =>
+    view().includes('Proceed with the reconnect probe?') === false, 10_000)
+  // No answer replay: the settled ask produced exactly ONE fulfillment and
+  // the overlay never re-armed.
+  assert.equal((app as unknown as { overlayGraphState(): { handles: number } }).overlayGraphState().handles, 0,
+    'the question surface fully retired after the single answer')
+})

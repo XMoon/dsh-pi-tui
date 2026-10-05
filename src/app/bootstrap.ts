@@ -1531,6 +1531,11 @@ export function applyRunnerWithRuntime(
           readCommands: (sessionId, signal) => remoteSources.commandSource.readCommands(sessionId, signal),
           captureTransportToken: (sessionId) => remoteSources.commandSource.captureTransportToken(sessionId),
           isTransportTokenCurrent: (sessionId, token) => remoteSources.commandSource.isTransportTokenCurrent(sessionId, token),
+          // M3-6 PR2 §13.2: the SAME official generation observable, exposed
+          // to the CommandSurface as the reconnect invalidation hint.
+          connectionGeneration: () => remoteSources.commandSource.connectionGeneration(),
+          subscribeConnectionGeneration: (listener: () => void) =>
+            remoteSources.commandSource.subscribeConnectionGeneration(listener),
         },
         remoteFacts: {
           running: (sessionId) => remoteSources.sessionFacts.running(sessionId),
