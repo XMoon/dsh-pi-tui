@@ -33,7 +33,7 @@ import { normalizeSkillInvocation } from '../../command-policy.ts'
 import { readSurfaceCatalog, type SurfaceCatalogAgent, type SurfaceCatalogContext } from '../../surface-catalog.ts'
 import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
-import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from '../../skill-catalog-refresh.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from '../../skill-catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
@@ -462,6 +462,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   
   let skillsChangeSubscribed = false
 
+  // M3-6 PR2 §13.3.1: the Remote-only Connection-generation invalidation
+  // lifetime. `observedRemoteConnectionGeneration` is the last token the
+  // callback saw (the identity authority — never a `firstEvent` boolean);
+  // `disposeRemoteConnectionGeneration` is the official unsubscribe slot,
+  // released by `disposeCatalog()` BEFORE the coordinator goes away.
+  let observedRemoteConnectionGeneration: unknown | undefined
+  let disposeRemoteConnectionGeneration: (() => void) | undefined
+
   const skillsChangeGate = new CoalescingRefreshGate(() => {
     runOwned('skills/change refresh', async () => {
       const refresh = catalogRefreshRequest
@@ -621,12 +629,18 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   }
 
   /** PR4 §2.2: the Remote live refresh — the coordinator target wraps the
-   *  session id (the command source reads the Host metadata generation-fenced). */
-  const refreshLiveCatalogById = async (sessionId: string): Promise<void> => {
+   *  session id (the command source reads the Host metadata generation-fenced).
+   *  M3-6 PR2 §13.3.2: `source` names the refresh trigger for diagnostics
+   *  ('invalidation' for the reconnect callback); existing callers keep the
+   *  default 'live-session' behavior. */
+  const refreshLiveCatalogById = async (
+    sessionId: string,
+    source: CatalogRefreshSource = 'live-session',
+  ): Promise<void> => {
     const refresh = catalogRefreshRequest
     if (refresh === undefined) return
     await refresh({
-      source: 'live-session',
+      source,
       target: { kind: 'agent', key: deps.ownership.generation() },
       agent: remoteCatalogTargetOf(sessionId),
     })
@@ -705,6 +719,38 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       }, deps.signal, deps.diag)
       catalogRefreshRequest = (request) => catalogCoordinator!.refresh(request)
       subscribeSkillsChangeEvents()
+      // M3-6 PR2 §13.3.3: the Remote-only Connection-generation
+      // invalidation subscription, installed AFTER the coordinator and the
+      // refresh request slot exist. Capture-before-subscribe is mandatory
+      // (§13.3.4): the official observable may notify SYNCHRONOUSLY at
+      // subscription time, and the token identity (never a `firstEvent`
+      // boolean) makes that immediate callback a no-op — no duplicate
+      // startup refresh. The callback reads the CURRENT session id at
+      // execution time (§6 Must 4), never a startup-captured id.
+      if (deps.remoteCommandSource !== undefined) {
+        observedRemoteConnectionGeneration = deps.remoteCommandSource.connectionGeneration()
+        disposeRemoteConnectionGeneration =
+          deps.remoteCommandSource.subscribeConnectionGeneration(() => {
+            const source = deps.remoteCommandSource
+            if (source === undefined) return
+            const next = source.connectionGeneration()
+            if (Object.is(next, observedRemoteConnectionGeneration)) return
+            observedRemoteConnectionGeneration = next
+            // Disconnected / connecting (§6 Must 2): keep the last-good
+            // Host claims; NO catalog RPC, no Session retain, no UI clear.
+            if (next === undefined) return
+            const sessionId = deps.ownership.currentSessionId()
+            if (sessionId === undefined) return
+            runOwned(
+              'remote reconnect catalog refresh',
+              () => refreshLiveCatalogById(sessionId, 'invalidation'),
+              {
+                diag: deps.diag,
+                sessionId: () => deps.ownership.currentSessionId(),
+              },
+            )
+          })
+      }
     } catch (error) {
       // A failed registration must not lock the surface forever (a locked
       // flag would leave every later command resolving to a plain message
@@ -1033,6 +1079,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     return catalogRefreshRequest(request)
   }
   const disposeCatalog = (): void => {
+    // M3-6 PR2 §13.3.6: release the Remote generation listener FIRST (a
+    // late generation callback after disposal must not start a read), then
+    // clear the slot, then dispose the coordinator.
+    disposeRemoteConnectionGeneration?.()
+    disposeRemoteConnectionGeneration = undefined
     catalogCoordinator?.dispose()
     catalogCoordinator = undefined
     // The Direct `skills/change` capability offers no unsubscribe, so a late

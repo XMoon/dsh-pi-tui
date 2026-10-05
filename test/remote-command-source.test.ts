@@ -31,6 +31,23 @@ function generationSource(initial: RemoteConnectionGeneration | undefined) {
   }
 }
 
+/** A generation source double with a REAL observable (subscribe + notify). */
+function observableGenerationSource(initial: RemoteConnectionGeneration | undefined) {
+  let snapshot = initial
+  let listeners: Array<() => void> = []
+  return {
+    getSnapshot: (): RemoteConnectionGeneration | undefined => snapshot,
+    replace(next: RemoteConnectionGeneration | undefined) {
+      snapshot = next
+      for (const listener of [...listeners]) listener()
+    },
+    subscribe(listener: () => void): () => void {
+      listeners.push(listener)
+      return () => { listeners = listeners.filter(entry => entry !== listener) }
+    },
+  }
+}
+
 /** A mutable sessions-binding source double (the §16 exact-binding fence). */
 function bindingsSource(initial: unknown) {
   let current = initial
@@ -176,8 +193,37 @@ test('negative lock: the command source module never widens the authority reader
   })
   assert.equal(typeof source.read, 'function')
   assert.deepEqual(Object.keys(source).sort(),
-    ['captureTransportToken', 'isTransportTokenCurrent', 'read', 'readCommands'],
-    'the exposed bundle carries ONLY the metadata reads + the transport fence — no execute, no callbacks, no registry')
+    ['captureTransportToken', 'connectionGeneration', 'isTransportTokenCurrent', 'read', 'readCommands', 'subscribeConnectionGeneration'],
+    'the exposed bundle carries ONLY the metadata reads + the transport fence + the generation delegation — no execute, no callbacks, no registry')
+})
+
+/* ── M3-6 PR2 §14.1: the generation delegation (RCS-G1/G2) ─────────────── */
+
+test('RCS-G1: connectionGeneration() returns the EXACT official snapshot object by identity', () => {
+  const generation = { id: 7 } as RemoteConnectionGeneration
+  const source = createRemoteCommandSource({
+    authority: { commands: { list: async () => ({ ok: true, value: [] }) }, skills: { list: async () => ({ ok: true, value: { skills: [] } }) } },
+    generation: generationSource(generation),
+    bindings: bindingsSource({ session: {} }),
+  })
+  assert.equal(Object.is(source.connectionGeneration(), generation), true,
+    'the delegated snapshot IS the official token object (never a copied {id} DTO)')
+})
+
+test('RCS-G2: subscribeConnectionGeneration delegates exactly — one notify while subscribed, none after unsubscribe', () => {
+  const generation = observableGenerationSource({ id: 1 } as RemoteConnectionGeneration)
+  const source = createRemoteCommandSource({
+    authority: { commands: { list: async () => ({ ok: true, value: [] }) }, skills: { list: async () => ({ ok: true, value: { skills: [] } }) } },
+    generation,
+    bindings: bindingsSource({ session: {} }),
+  })
+  let notified = 0
+  const unsubscribe = source.subscribeConnectionGeneration(() => { notified += 1 })
+  generation.replace({ id: 2 } as RemoteConnectionGeneration)
+  assert.equal(notified, 1, 'the source generation emission reached the subscribed listener exactly once')
+  unsubscribe()
+  generation.replace({ id: 3 } as RemoteConnectionGeneration)
+  assert.equal(notified, 1, 'a later emission does not reach the unsubscribed listener')
 })
 
 

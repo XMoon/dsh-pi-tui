@@ -1344,6 +1344,108 @@ test('L6 F2: the runner teardown releases the MOUNTED child viewer child generat
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// M3-6 PR2 §14.5: the open Task Center + child viewer recover IN PLACE across
+// a normal Connection reconnect (same retained binding objects, no viewer
+// generation bump, no draft clear, no second retain, B-side truth converges).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('L6 M3-6 PR2 §14.5: the OPEN Task Center + child viewer survive a normal reconnect in place — same bindings, no viewer bump, draft kept, B truth converges, one retain release', async (t) => {
+  const life = testLifecycle(t)
+  const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
+  const clientSessions = fixture.aggregate.wire.client.sessions
+  const aAppend = appenderOf(host.ctx, CHILD_A_ID)
+
+  // ── Open the Task Center and a real continuable child viewer.
+  submit(app, '/tasks')
+  await waitFor('the Task Center rendered the child row', () => viewport().includes(LABEL_A), 20_000)
+  fixture.vt.sendInput('\r')
+  await waitFor('the child viewer mounted', () => viewport().includes('childa answer 30'), 20_000)
+  const viewerGenerationBefore = app.getViewerGeneration()
+
+  // Capture the exact identity/state the reconnect must preserve.
+  const mainBindingBefore = sessions.binding(SessionId(PARENT_ID))
+  const childBindingBefore = sessions.binding(SessionId(CHILD_A_ID))
+  assert.ok(mainBindingBefore !== undefined && childBindingBefore !== undefined,
+    'both the main and the child binding are retained before the reconnect')
+  app.setDraft('child draft kept across reconnect')
+  assert.equal(app.getDraft(), 'child draft kept across reconnect',
+    'the draft text is present before the reconnect')
+
+  // ── The OFFICIAL reconnect (the same carrier the presentation suite
+  // uses): A -> undefined -> B, with the child Host truth changing while
+  // the old generation is gone (only the NEW generation can deliver it).
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  seedTurns(aAppend, 40, 40, 'offline')
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== generationBefore
+  }, 20_000)
+
+  // 1-2. The EXACT retained binding objects survive (normal reconnect is
+  // NOT a Session release/re-materialization).
+  assert.equal(sessions.binding(SessionId(PARENT_ID)), mainBindingBefore,
+    'the main exact binding object is unchanged across the reconnect')
+  assert.equal(sessions.binding(SessionId(CHILD_A_ID)), childBindingBefore,
+    'the child exact binding object is unchanged across the reconnect')
+
+  // 3. The transport reconnect does NOT bump the app viewer generation.
+  assert.equal(app.getViewerGeneration(), viewerGenerationBefore,
+    'a normal reconnect is not a viewer replacement')
+
+  // 4-5. The viewer stays on the same child and the draft is preserved.
+  assert.equal(viewport().includes('childa answer 30'), true,
+    'the child viewer keeps showing its own subject')
+  assert.equal(app.getDraft(), 'child draft kept across reconnect',
+    'the user draft is not cleared by the transport reconnect')
+
+  // 6. The B generation rehydrates the offline child truth.
+  await waitFor('the B-side offline child turn rehydrated into the viewer', () =>
+    viewport().includes('offline answer 40'), 20_000)
+
+  // 7. No second child retain/reference was created.
+  assert.deepEqual(retainFacts(clientSessions, CHILD_A_ID).retainedBy, { tuiChildView: 1 },
+    'still exactly ONE viewer-owned child generation (no reconnect re-retain)')
+
+  // 8. Closing the viewer after the reconnect releases the one retained
+  // child reference exactly once.
+  fixture.vt.sendInput('\x1b')
+  await waitFor('the closed viewer released its child generation', () =>
+    retainFacts(clientSessions, CHILD_A_ID).referenceCount === 0, 10_000)
+  assert.deepEqual(retainFacts(clientSessions, CHILD_A_ID).retainedBy, {},
+    'the reconnect added no hidden child owner')
+  await waitFor('the main transcript restored', () => viewport().includes('parent answer 2'), 20_000)
+
+  // ── Return to the Task Center and prove a B-side Task/descendant change
+  // appears WITHOUT restarting the runner: a NEW grandchild under A.
+  const { snapshotSubagentDescriptor } = await import('@deepseek-ai/dsh-subagent')
+  const CHILD_D_ID = 'm3-6-pr2-child-d'
+  const childDwd = join(host.anchorDir, 'd-ws')
+  mkdirSync(childDwd, { recursive: true })
+  await host.harness.create(
+    SessionId(CHILD_D_ID),
+    { provider: 'smoke', model: 'smoke' } as never,
+    { cwd: childDwd, parentSession: SessionId(CHILD_A_ID), origin: 'subagent' } as never,
+  )
+  appenderOf(host.ctx, CHILD_D_ID)('subagent/descriptor',
+    snapshotSubagentDescriptor({ mode: 'one-shot', provider: 'fixture', label: `child D ${CHILD_D_ID}` }))
+  aAppend('subagent/catalog', { version: 1, childId: CHILD_D_ID, childCreatedAt: 5_000, mode: 'one-shot', label: `child D ${CHILD_D_ID}` })
+  const LABEL_D = `child D ${CHILD_D_ID}`
+  submit(app, '/tasks')
+  await waitFor('the Task Center rendered again over the B generation', () =>
+    viewport().includes(LABEL_A), 20_000)
+  // The nested B-side row is behind the parent row disclosure: expand A
+  // (the same real right-arrow gesture the first tree proof uses).
+  fixture.vt.sendInput('\x1b[C')
+  await waitFor('the B-side new descendant row appeared', () =>
+    viewport().includes(LABEL_D), 20_000)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // §14 step 14 (main-Session switch fencing) and the two cross-subject negative
 // controls: absent child facts and child A → child B residue.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1903,4 +2005,96 @@ test('L6 P1 reincarnation: a read stamped with the OLD child lifetime fails clos
   assert.equal(successorReads.filter(id => id === orphan.attachmentId).length, 1,
     'ARMING PROOF: this very spy observed the new scope\'s call, so the zero-call assertion in (d) is not vacuous')
   assert.equal(readerSpy.served.has(address), false, 'the refused ref is never served in either scope')
+})
+
+test('L6 M3-6 PR2 §14.10: a durable image read under the STILL-OWNED presentation survives a same-binding reconnect; a different binding fails closed', async (t) => {
+  // The frozen lifetime rule: a presentation captured under generation A +
+  // binding X keeps its authority across a NORMAL reconnect (generation B +
+  // the SAME binding X — the official adoption). A NEW image read started
+  // under that presentation must be allowed and commits when B + X remain
+  // current through the settle; only a DIFFERENT binding X2 retires it.
+  const life = testLifecycle(t)
+  const piTui = await import('@xmoon76/pi-tui') as unknown as {
+    resetCapabilitiesCache(): void
+    setCapabilities(caps: { images: 'kitty' | 'iterm2' | null; trueColor: boolean; hyperlinks: boolean }): void
+  }
+  piTui.resetCapabilitiesCache()
+  piTui.setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  life.defer(() => { piTui.resetCapabilitiesCache() })
+
+  const { host, fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
+  const readerSpy = spyDurableImageReads(fixture)
+  life.defer(readerSpy.restore)
+  const loader = (app as unknown as MountedImageLoader).imageLoader
+  const attachments = host.ctx.get('attachments') as unknown as FixtureAttachments
+
+  // ── Open the child viewer: its presentation owns the child:1 lifetime and
+  // the EXACT retained child binding.
+  submit(app, '/tasks')
+  await waitFor('the Task Center rendered the child row', () => viewport().includes(LABEL_A), 20_000)
+  fixture.vt.sendInput('\r')
+  await waitFor('the child viewer hydrated', () => viewport().includes('childa answer 30'), 20_000)
+  const scope = currentImageScope(app)
+  const bindingBefore = sessions.binding(SessionId(CHILD_A_ID))
+  assert.ok(bindingBefore !== undefined, 'the presentation owns its exact binding before the reconnect')
+
+  // ── A REAL durable image in the CHILD Session (referenced by a durable
+  // child message, so the Session read can genuinely serve it).
+  const png = await realPng('#0f0f0f', 3)
+  const image = (await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'pr2-reconnect.png' }]))[0]!
+  seedImageTurn(appenderOf(host.ctx, CHILD_A_ID), 50, 'reconnect image prompt', image)
+
+  // ── The OFFICIAL reconnect (A -> B) with the SAME retained binding.
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== generationBefore
+  }, 20_000)
+  assert.equal(sessions.binding(SessionId(CHILD_A_ID)), bindingBefore,
+    'the retained child binding object survived the reconnect (the adoption)')
+
+  // ── The post-reconnect read under the still-owned presentation: ALLOWED.
+  // The read captures generation B for its own async fence and the bytes
+  // commit because B + the same binding remain current through the settle.
+  // (No `routed` clearing: the reconnect-triggered rehydrate may fire the
+  // loader before this point; the attachmentId filter selects this image.)
+  await waitFor('the reconnect image turn hydrated', () =>
+    viewport().includes('reconnect image prompt'), 20_000)
+  const imageKey = `${CHILD_A_ID}\u0000${image.attachmentId}`
+  await waitFor('the still-owned presentation served the new image', () =>
+    readerSpy.served.has(imageKey), 20_000)
+  assert.deepEqual(readerSpy.served.get(imageKey), png,
+    'the bytes committed under generation B + the SAME binding')
+  const adoptedRead = readerSpy.routed.find(call => call.attachmentId === image.attachmentId)
+  assert.ok(adoptedRead !== undefined, 'the post-reconnect read was issued')
+  assert.equal(adoptedRead.sessionId, CHILD_A_ID, 'the read addressed the CHILD Session')
+  assert.equal((adoptedRead.expectedLifetime as RemoteTransportLifetime).binding, bindingBefore,
+    'the read carried the still-owned binding (never re-resolved)')
+
+  // ── Negative control: the SAME session id under a DIFFERENT binding (the
+  // real release/re-materialization) fails closed BEFORE the Session is
+  // touched — the reincarnation shape this regression guards.
+  const staleScope: ImageScopeToken = {
+    ...scope,
+    transportToken: {
+      generation: connection.generation.getSnapshot(),
+      binding: { other: true },
+    } as unknown as RemoteTransportLifetime,
+  }
+  readerSpy.routed.length = 0
+  loader.load({ ...image, attachmentId: `${image.attachmentId}-stale` }, staleScope)
+  await waitFor('the stale-binding read settled', () => {
+    const call = readerSpy.routed.find(entry => entry.attachmentId === `${image.attachmentId}-stale`)
+    return call?.outcome !== undefined
+  }, 20_000)
+  const staleCall = readerSpy.routed.find(entry => entry.attachmentId === `${image.attachmentId}-stale`)!
+  assert.equal(staleCall.outcome, 'failed',
+    'a different binding fails closed')
+  assert.match(String(staleCall.error), /retired/u,
+    'the refusal is the retired-binding fence (a same-id rollover is NOT adoption)')
 })

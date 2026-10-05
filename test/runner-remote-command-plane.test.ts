@@ -619,19 +619,19 @@ test('L6 truthful-unavailable (review round 4): Remote /transcript refuses EXPLI
     'the Remote /transcript refusal never reaches the Host command executor')
 })
 
-test('L6 §7.4-14 stale catalog: refresh A → Connection replacement → the old snapshot cannot commit', async (t) => {
-  // The F2a install fence over the MOUNTED composition. The stale payload is
-  // REAL by construction: the gated read completes FIRST (its snapshot
-  // verifiably contains `stale-cmd`), then holds; while held, the OFFICIAL
-  // Connection is REPLACED (`reconnect()`: the plan scenario's second form —
-  // the /reload submit's FIFO turn is taken by the held refresh, so a second
-  // submit cannot drive a switch; the frozen admission token's generation
-  // component dies with the old Connection) and `stale-cmd` is DISPOSED — so
-  // the held wrapper returns a snapshot whose content is wrong for every
-  // later state. Without the install fence that stale snapshot WOULD commit
-  // (the counterfactual force); with it, the completion rows must never
-  // offer the retired name, and a later legitimate refresh reads the live
-  // (absent) catalog.
+test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement → the old snapshot cannot commit and generation B AUTOMATICALLY re-reads the Host catalog without /reload', async (t) => {
+  // The F2a install fence over the MOUNTED composition, plus the M3-6 PR2
+  // automatic reconnect recovery. The stale payload is REAL by construction:
+  // the gated read completes FIRST (its snapshot verifiably contains
+  // `stale-cmd`), then holds; while held, the OFFICIAL Connection is
+  // REPLACED (`reconnect()`) and `stale-cmd` is DISPOSED — so the held
+  // wrapper returns a snapshot whose content is wrong for every later
+  // state. Without the install fence that stale snapshot WOULD commit (the
+  // counterfactual force); with it, the completion rows must never offer
+  // the retired name. M3-6 PR2 then proves the DECISIVE new path: the new
+  // defined generation B triggers the CommandSurface's own generation
+  // subscription — NO user /reload — and the B catalog installs and serves
+  // a mounted submission through the REAL Host handler exactly once.
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr4-catalog-stale-a'
   const fixture = await mountRunner(life, { resumeSessionId: sessionA })
@@ -651,6 +651,15 @@ test('L6 §7.4-14 stale catalog: refresh A → Connection replacement → the ol
     name: 'live-cmd',
     description: 'the surviving catalog entry',
     handler: () => ({ kind: 'success' }),
+  })
+  // A post-reconnect B-side Host command: proving it reaches the mounted
+  // completions and dispatches through the REAL Host handler exactly once
+  // is the PR2 source→decision→sink sink (AC1).
+  let bHostRuns = 0
+  commands.register({
+    name: 'b-fresh-cmd',
+    description: 'the B generation command',
+    handler: () => { bHostRuns += 1; return { kind: 'success', text: 'b ran' } },
   })
 
   // GATE the REAL commands provider read: the read COMPLETES first, then
@@ -708,14 +717,19 @@ test('L6 §7.4-14 stale catalog: refresh A → Connection replacement → the ol
   // replacement Connection is actually established (a mere `!== old` would
   // pass while the client is still connecting with no generation at all).
   connection.reconnect()
+  // While the old generation is gone (the client publishes `undefined`
+  // synchronously on 'connecting'), the HOST TRUTH ITSELF CHANGES: the
+  // stale-cmd registration is disposed before generation B ever appears, so
+  // generation B's authoritative catalog legitimately no longer carries it
+  // (the same offline-truth shape the presentation reconnect case uses).
+  disposeStale()
   await waitFor('a NEW DEFINED Connection generation is established', () => {
     const current = connection.generation.getSnapshot()?.id
     return current !== undefined && current !== generationBefore
   }, 20_000)
 
-  // The stale content becomes permanently wrong: the Host registration is
-  // disposed while the wrapper still holds its saved snapshot.
-  disposeStale()
+  // Release the held A read: its snapshot (captured under generation A,
+  // verifiably containing the retired name) settles after B exists.
   releaseRead?.()
 
   // The stale snapshot must NOT commit: the completion rows never offer the
@@ -728,23 +742,58 @@ test('L6 §7.4-14 stale catalog: refresh A → Connection replacement → the ol
   }).commandCompletionsForTest()
   assert.equal(rows.some(row => row.name === 'stale-cmd'), false,
     `the stale snapshot never commits (the retired Host command must not appear): ${JSON.stringify(rows.map(row => row.name))}`)
-  // The current subject's own refresh (a real /reload after the release)
-  // over the NEW Connection.
-  submit(fixture, '/reload')
-  await settle(600)
-  // POSITIVE CONTROL, direct on the provider's settled result: the
-  // post-release refresh actually READ the live catalog over the new
-  // Connection (a defined, non-empty result containing the survivor) —
-  // never a started-but-undefined read (the old `count >= 2` form could not
-  // distinguish that), and the retired name is absent from what it read.
-  const liveRead = postReleaseReads.find(read => read.sessionId === sessionA && read.names !== undefined)
-  assert.ok(liveRead !== undefined,
-    `a post-release refresh must settle a DEFINED read over the new Connection: ${JSON.stringify(postReleaseReads)}`)
-  const liveNames = liveRead.names as readonly string[]
+
+  // ── M3-6 PR2 DECISIVE PATH: the automatic reconnect refresh. NO /reload
+  // is submitted after the reconnect; the CommandSurface's own generation
+  // subscription must have read the B catalog against the CURRENT session
+  // id and installed it. The mounted-visible proof rides the CLAIM layer:
+  // on Remote the completion DISPLAY list is deliberately Client-only
+  // (PR4 §D3 — the Host catalog arrives as claims, never as display rows),
+  // so the user-visible surface of the installed B catalog is which lines
+  // the mounted submission still routes to the REAL Host executor.
+  let liveRead: { sessionId: string; names: readonly string[] | undefined } | undefined
+  try {
+    await waitFor('the AUTOMATIC reconnect refresh settled a DEFINED post-retirement B read', () => {
+      liveRead = postReleaseReads.find(read =>
+        read.sessionId === sessionA
+        && read.names !== undefined
+        && read.names.includes('b-fresh-cmd')
+        && !read.names.includes('stale-cmd'))
+      return liveRead !== undefined
+    }, 20_000)
+  } catch (error) {
+    console.error('[stale-dump] postReleaseReads=', JSON.stringify(postReleaseReads))
+    throw error
+  }
+  const liveNames = liveRead!.names as readonly string[]
   assert.ok(liveNames.includes('live-cmd'),
-    `the live catalog read carries the surviving command: ${JSON.stringify(liveNames)}`)
+    `the automatic B catalog read carries the surviving command: ${JSON.stringify(liveNames)}`)
   assert.equal(liveNames.includes('stale-cmd'), false,
-    'the live catalog read no longer carries the retired name')
+    'the automatic B catalog read no longer carries the retired name')
+
+  // The mounted submission routes the B Host command to the REAL Host
+  // handler EXACTLY ONCE (the sink of the PR2 source→decision→sink chain:
+  // wire.connection.generation → RemoteCommandSource subscription →
+  // CommandSurface reconnect decision → CatalogRefreshCoordinator → real
+  // Host command catalog B → Host-origin classifier → mounted submission →
+  // official executor).
+  const commandRunsBefore = fixture.hostCommandRuns(sessionA)
+  submit(fixture, '/b-fresh-cmd')
+  await waitFor('the B Host command entered its real handler', () => bHostRuns === 1, 15_000)
+  await settle()
+  assert.equal(bHostRuns, 1, 'exactly one B Host handler entry (no auto-retry, no double dispatch)')
+  assert.equal(fixture.hostCommandRuns(sessionA) - commandRunsBefore, 1,
+    'exactly ONE new official command/run row for the B Host command')
+
+  // NEGATIVE control on the same claim layer: the retired A-only Host
+  // command no longer routes anywhere — the B claims are the authority, so
+  // a /stale-cmd line must NOT reach the Host executor (and must not become
+  // a Client callback either).
+  const runsAfterB = fixture.hostCommandRuns(sessionA)
+  submit(fixture, '/stale-cmd')
+  await settle(600)
+  assert.equal(fixture.hostCommandRuns(sessionA), runsAfterB,
+    'the retired Host command is absent from the installed B claims (no command/run row)')
 })
 
 /* ── PR5 supplement: Client self-claim reachability under running + steer ── */
