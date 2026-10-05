@@ -15,6 +15,7 @@ import {
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const MIGRATION_DOC = new URL('../docs/client-server-migration.md', import.meta.url)
+const SURFACE_DECISIONS_DOC = new URL('../docs/surface-decisions.md', import.meta.url)
 const CI_WORKFLOW = new URL('../.github/workflows/ci.yml', import.meta.url)
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const GATE_SCRIPT = join(REPO_ROOT, 'scripts', 'check-no-session-events.mjs')
@@ -72,6 +73,45 @@ test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () =>
   // d2.4 smoke.
   assert.doesNotMatch(workflow, /smoke:remote-d2-write/,
     'the retired D2.2 write harness must not remain a gate')
+})
+
+test('M3-5 PR6 stage closure: merged-PR record, child-image tail and owned queue gap', () => {
+  const migration = readFileSync(MIGRATION_DOC, 'utf8')
+  const surface = readFileSync(SURFACE_DECISIONS_DOC, 'utf8')
+
+  // Stage closure. The canonical `### Migration stage pointer` block AND the
+  // top status header must both record M3-5 DONE / M3-6 NEXT; duplicate summary
+  // markers elsewhere in the document must not be able to satisfy this lock.
+  const pointerMatch = migration.match(/### Migration stage pointer\n+```text\n([\s\S]*?)```/u)
+  assert.ok(pointerMatch !== null, 'the canonical Migration stage pointer block must exist')
+  const pointer = pointerMatch[1]
+  assert.match(pointer, /^M3-5 = DONE\b/mu, 'the stage pointer must record M3-5 DONE')
+  assert.match(pointer, /^M3-6 = NEXT\b/mu, 'the stage pointer must record M3-6 NEXT')
+  assert.doesNotMatch(pointer, /^M3-5 = IN PROGRESS\b/mu, 'the stage pointer must not regress M3-5 to IN PROGRESS')
+  assert.doesNotMatch(pointer, /^M3-6 = (?:DONE|IN PROGRESS)\b/mu, 'the stage pointer must not mark M3-6 started or done')
+  assert.match(migration, /^M3-5 DONE\b/mu, 'the status header must record M3-5 DONE')
+  assert.match(migration, /^M3-6 NEXT\b/mu, 'the status header must record M3-6 NEXT')
+  assert.doesNotMatch(migration, /^M3-5 IN PROGRESS\b/mu, 'the status header must not regress M3-5')
+
+  // Merged-PR bookkeeping: the merged PR3/PR5 must never read as still open.
+  for (const line of migration.split('\n')) {
+    if (/\bPR3\b/u.test(line) || /\bPR5\b/u.test(line)) {
+      assert.doesNotMatch(line, /PR open/iu, `a merged M3-5 PR still reads as open: ${line.trim()}`)
+    }
+  }
+
+  // The stale PR5 tail must record the delivered/requalified child image.
+  assert.doesNotMatch(migration, /finish the child durable[- ]image/iu,
+    'the stale "finish the child durable image" PR5 tail must be corrected')
+  assert.match(migration, /already delivered by PR2/iu, 'child durable image: delivered-by-PR2 record')
+  assert.match(migration, /requalified by PR6/iu, 'child durable image: PR6 requalification record')
+
+  // Queue per-occurrence UI is a CURRENT PRODUCT GAP owned by Post-M3 Q1; the
+  // stale "expected, not a gap" framing is gone.
+  assert.match(surface, /CURRENT PRODUCT GAP/u, 'queue per-occurrence UI must be a current product gap')
+  assert.match(surface, /Post-M3 Q1/u, 'the queue gap must carry its Post-M3 Q1 owner')
+  assert.doesNotMatch(surface, /expected, not a gap/iu, 'the stale "expected, not a gap" wording must be removed')
+  assert.doesNotMatch(migration, /expected, not a gap/iu, 'the stale wording must be absent from the migration doc too')
 })
 
 // ── deprecated synchronous Session history reader freeze (WP2) ─────────────

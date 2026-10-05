@@ -1,6 +1,6 @@
 {
   "generatedFrom": "src/app/bootstrap.ts",
-  "sourceHash": "sha256:bb9960bc66b44c29",
+  "sourceHash": "sha256:d92e27c71bdedad9",
   "note": "One row per root-scope declaration of startRunner(). classification is the ownership decision; UNCLASSIFIED rows are the A5b-6 worklist (must reach zero).",
   "total": 99,
   "rows": [
@@ -558,10 +558,11 @@
       "kind": "const",
       "mutable": false,
       "lines": "586-586",
-      "refs": 91,
+      "refs": 92,
       "hostDependency": false,
       "head": "const remoteSources = override === undefined ? undefined : override.presentation",
       "tests": [
+        "application-runtime-selection.test.ts",
         "m3-4-pr4-guards.test.ts",
         "runner-remote-task-center.test.ts"
       ],
@@ -2216,7 +2217,7 @@
         "a2-ownership-cutover.test.ts",
         "a4-surface-ownership.test.ts",
         "a5b-bootstrap-closure.test.ts",
-        "disclosure-search-path.test.ts"
+        "application-runtime-selection.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
@@ -2237,12 +2238,12 @@
       "lines": "2747-2747",
       "refs": 5,
       "hostDependency": true,
-      "head": "const subagents = ctx.get('subagents')",
+      "head": "const subagents = remoteSources === undefined ? ctx.get('subagents') : undefined",
       "tests": [
         "action-tool-card.test.ts",
+        "application-runtime-selection.test.ts",
         "busy-enter.test.ts",
-        "preset.test.ts",
-        "remote-backend.test.ts"
+        "preset.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
