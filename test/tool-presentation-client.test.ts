@@ -1,5 +1,6 @@
 /**
- * L1 contract tests for the Client-derived tool presenter (M3-4 PR4 §5):
+ * Supporting presenter-unit tests (no L1–L6 level) for the Client-derived tool
+ * presenter (M3-4 PR4 §5):
  * diff cards from raw edit/write args, terminal cards from bash/pwsh args,
  * bounded patch cards, the undefined-for-everything-else contract (the
  * existing Client generic/read-envelope fallbacks stay authoritative), and

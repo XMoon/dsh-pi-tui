@@ -1,8 +1,12 @@
 /**
- * L3 contract tests for the Remote command source (M3-4 PR4 Step 2):
- * the branch-specific command authority read assembled from the ONE Remote
- * aggregate — generation fencing (a replaced Connection never commits a
- * stale snapshot), error propagation (never an empty success), and the
+ * Supporting app-side source/composition unit tests (no L1–L6 level) for the
+ * Remote command source (M3-4 PR4 Step 2). The real L3 Remote adapter proof is
+ * `test/remote-surface-authority-reader.test.ts` over
+ * `src/runtime/remote/surface-authority-remote.ts`.
+ *
+ * This file covers the branch-specific command authority read assembled from
+ * the ONE Remote aggregate — generation fencing (a replaced Connection never
+ * commits a stale snapshot), error propagation (never an empty success), and the
  * neutral application face satisfied by the real bundle with no cast.
  * @module @xmoon76/dsh-pi-tui/remote-command-source.test
  */

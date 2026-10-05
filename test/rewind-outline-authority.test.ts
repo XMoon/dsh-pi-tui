@@ -1,6 +1,8 @@
 /**
- * L2/L3 boundary tests for the whole-log rewind picker authority
- * (M3-4 PR4 Step 4 / plan §4/§18.4):
+ * L2 Direct adapter tests plus the Remote architecture/source guard for the
+ * whole-log rewind picker authority (M3-4 PR4 Step 4 / plan §4/§18.4). The
+ * Remote side is a source guard only (the structural source has no
+ * `snapshotEvents` / compatibility-fold path); it is not an L3 adapter contract.
  *
  * - Direct / projection present → the projection is THE outline (the
  *   full-snapshot compatibility fold must not run);

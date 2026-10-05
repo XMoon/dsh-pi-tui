@@ -1,7 +1,6 @@
 /**
- * L1 contract tests for the transport-neutral writer subject (M3-5 PR2 Step 8,
- * plan §5 Must 18, §14 L1 "transport-neutral queue-steer subject-currentness
- * helper semantics").
+ * Supporting writer-subject / steer orchestration unit tests (no L1–L6 level)
+ * for the transport-neutral writer subject (M3-5 PR2 Step 8, plan §5 Must 18).
  *
  * `SteerDeps.currentSubject()` names a subject whose ONLY contract is the
  * Session id its writes address: on Direct that is the live child Agent object,

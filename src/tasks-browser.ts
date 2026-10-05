@@ -1,8 +1,18 @@
 /**
- * Task-browser row model — the merged view over:
- *  A. the DSH JobRegistry projection (`ctx.jobs`), and
- *  B. the DSH subagent descendant catalog
- *     (`ctx.subagents.listDescendants`).
+ * Task-browser row model — the merged view over the SELECTED semantic Task
+ * sources (M3-5 PR2):
+ *  A. the root Job roster feed (the selected roster capability
+ *     `TaskSurfaceSource.jobs`, a `TaskSurfaceJobs`), and
+ *  B. the selected Task read's descendant subagent catalog
+ *     (`TaskSurfaceRead.readTask`, the full tree).
+ *
+ * The selection is transport-neutral. Direct maps the roster to the Host
+ * JobRegistry (`ctx.jobs`) and the tree to `ctx.subagents.listDescendants`,
+ * with live activity from `ctx.agents`; Remote maps the roster to the official
+ * Client Jobs service (`remoteSources.task.jobs()`, a retained `watchRows`),
+ * the tree to the official descendant projections, and live activity to the
+ * official Client Session-list running fact. The model never learns which
+ * backend produced the rows.
  *
  * Since DSH 0.1.7 the JobRegistry is NOT a background-only roster: the
  * foreground `bash`/`pwsh` wait path temporarily registers the work while
@@ -12,7 +22,7 @@
  * record stays listed until an owner removes/disposes it. The TUI only
  * consumes `JobView` — it has no handed-out/provisional bit and NEVER
  * guesses provenance (kind/tool args/transcript/timing); row membership
- * simply follows the registry on every commit. A job row is STATUS-ONLY:
+ * simply follows the selected roster source on every commit. A job row is STATUS-ONLY:
  *  - a shell job's output has a single read cursor owned by the model's
  *    `job_output`; consuming it from the UI would swallow the main
  *    session's result;
@@ -21,7 +31,7 @@
  *    id, so it can never be matched to its child transcript — label/
  *    order/time are never identity (see subagentJobTranscriptId).
  *
- * Source B — the subagent registry: the durable child tree. Every row —
+ * Source B — the selected descendant catalog: the durable child tree. Every row —
  * continuable AND one-shot, running AND inactive — is a viewable row: the
  * catalog `activity` is live-store PRESENCE, never an outcome, and a
  * finished one-shot child stays reachable through its persisted
@@ -30,8 +40,9 @@
  * running-first re-sort may ever break the lineage.
  *
  * Runtime activity is NOT a catalog fact: the UI projects each child's
- * `running` / `inactive` word from the Agent registry at COMMIT time
- * (`ctx.agents.get(id)?.status === 'running'` — see
+ * `running` / `inactive` word at COMMIT time from the selected `activityOf`
+ * read (Direct: the live Agent registry `ctx.agents.get(id)?.status`; Remote:
+ * the official Client Session-list running fact — see
  * {@link projectSubagentActivity}). The catalog's store-presence
  * `activity` must never reach a row or the badge as the execution state:
  * an idle continuable child stays live in the session store and would
@@ -74,18 +85,19 @@ export interface TaskBrowserJobInput {
  * SubagentDescendantListEntry). parentId/depth are the CATALOG'S OWN
  * facts (plan §6.3) — never guessed from labels or order. The `activity`
  * field may carry the catalog's store-presence value on INPUT, but the
- * caller MUST overwrite it with the live Agent-registry projection before
- * the entry becomes a row (see {@link projectSubagentActivity}) — a row's
- * `running`/`inactive` means "an Agent driver is executing right now". */
+ * caller MUST overwrite it with the selected live activity projection
+ * (`activityOf`) before the entry becomes a row (see
+ * {@link projectSubagentActivity}) — a row's `running`/`inactive` means
+ * "the selected source reports a live driver right now". */
 export interface TaskBrowserAgentInput {
   readonly kind: 'child' | 'diagnostic'
   readonly id: string
   /** Absent for a one-shot child; continuable children always carry one. */
   readonly label?: string
   readonly mode?: 'one-shot' | 'continuable'
-  /** UI-PROJECTED runtime activity of the child's Agent driver
-   * (`running` = the registry reports `status === 'running'` right now;
-   * `inactive` = no live driver — idle, cold, or disposed, never
+  /** UI-PROJECTED runtime activity of the child's driver
+   * (`running` = the selected activity source reports a live driver right
+   * now; `inactive` = no live driver — idle, cold, or disposed, never
    * completed/failed/terminal). Never interpret the catalog's
    * store-presence value as execution state. */
   readonly activity?: 'running' | 'inactive'
@@ -211,9 +223,10 @@ export function buildTaskRows(
 
 /**
  * Project the UI runtime activity of one descendant catalog onto its
- * entries: a child's `activity` is overwritten from the live Agent
- * registry (`agentStatusOf(id) === 'running'`), read AT COMMIT TIME —
- * never captured when the (async) listing started. A slow catalog
+ * entries: a child's `activity` is overwritten from the selected live
+ * activity read (`agentStatusOf(id)` — Direct: the live Agent registry;
+ * Remote: the official Client Session-list running fact), read AT COMMIT
+ * TIME — never captured when the (async) listing started. A slow catalog
  * response must not flip an already-idle child back to `running` with
  * the store-presence status it captured earlier (plan §7.3).
  *

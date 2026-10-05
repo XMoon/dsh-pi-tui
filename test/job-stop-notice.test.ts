@@ -1,7 +1,8 @@
 /**
- * The ONE user-facing Job Stop settlement (plan J2 / L1): every
- * {@link JobStopOutcome} maps to a distinct, truthful notice, and an
- * INDETERMINATE settlement is never reported as a proven negative.
+ * The ONE user-facing Job Stop settlement (plan J2; supporting presentation
+ * unit, no L1–L6 level): every {@link JobStopOutcome} maps to a distinct,
+ * truthful notice, and an INDETERMINATE settlement is never reported as a
+ * proven negative.
  *
  * @module @xmoon76/dsh-pi-tui/job-stop-notice.test
  */
