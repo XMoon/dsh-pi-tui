@@ -72,8 +72,10 @@ Experimental Remote:        the M3-4 main-TUI application is closed on the wire
                            (Session reads/writes, interaction, status, command runtime,
                            rewind, images, tool cards); the M3-5 secondary surfaces
                            (child/Task Center, Job viewer, Plugin Manager) and the
-                           writer-held caller recovery (PR5) are closed, and PR6
-                           stage closure is complete; normal startup never selects it
+                           writer-held caller recovery (PR5) are closed, PR6
+                           stage closure is complete, and the M3-6
+                           locality/reconnect/teardown closure (PR1–PR4) is
+                           complete; normal startup never selects it
 Remote writes:              available only through the experimental in-process wire
                            application path; no normal/default production Remote
                            selection
