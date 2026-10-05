@@ -5583,7 +5583,8 @@ mounted fatal:
     `surface terminal stop < retirement settled < transport dispose`,
     transport disposed exactly once, and each production sub-owner released
     exactly once (call-through observers on the Client UI subtree, the Remote
-    task watch, the official Client runtime and the Host additive runtime).
+    task watch, the semantic/config adapters, the official Client runtime and
+    the Host additive runtime).
     The process slot was released, a fresh Remote runner mounts in the same
     process, its submission commits durably on the Host, and the
     Host-produced model reply renders back through the Remote read on the
@@ -5604,9 +5605,12 @@ mounted fatal:
     disposal did not re-run surface cleanup.
   - **L6-D** a throwing TuiApp-owned aggregate cleanup: `TuiApp.prototype.
     setSettledQuestionAnswersLookup` throws inside the mounted
-    `SurfaceRuntime.dispose()` batch; the later extension-surface bridge
-    detach still ran exactly once, the transport still disposed exactly once,
-    and the mounted TuiApp still completed final disposal (process slot
+    `SurfaceRuntime.dispose()` batch; the two intermediate surface leases
+    (plugin-keybinding sync unsubscribe, theme-unload hook release) AND the
+    final extension-surface bridge detach each still ran exactly once
+    (call-through observers on the REAL returned releases), the transport
+    still disposed exactly once, a second runner disposal re-ran none of
+    them, and the mounted TuiApp still completed final disposal (process slot
     released).
 - **Owner/component evidence**: `test/disposal.test.ts`;
   `test/viewer-lifecycle-release.test.ts` (throwing ingress still releases
@@ -5633,7 +5637,10 @@ mounted fatal:
   the retirement settlement → L6-A ordering red; M6 removing
   `coordinator?.dispose()` → L6-B coordinator-observer red; M7 restoring the
   truncating `SurfaceRuntime.dispose` sequence → L6-D red; M8 restoring the
-  raw tracked-editor for-loop → the new tracked-editor regression red.
+  raw tracked-editor for-loop → the new tracked-editor regression red; M9
+  removing the theme-unload hook release → L6-D theme-lease red; M10 removing
+  the plugin-keybinding sync release → L6-D keybinding-lease red; M11 removing
+  the aggregate `backendRuntime.dispose()` → L6-A adapters count red.
 - **Direct**: unchanged — the Direct branch has no Remote selector, transport
   disposal stays the inert no-op, and the shared helper does not import any
   Remote code. PR2 reconnect/write semantics are untouched and their suites
