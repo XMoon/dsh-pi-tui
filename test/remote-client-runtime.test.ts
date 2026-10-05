@@ -1,6 +1,6 @@
 /**
  * M3-1 L5 composition acceptance: the real dependency-closed experimental
- * Remote runtime (`docs/m3-entry-contract.md` §11 M3-1, plan §20–§22) over the
+ * Remote runtime (M3-1 experimental composition, plan §20–§22) over the
  * pinned official DSH packages. One ordinary Host Context composes the
  * production `createExperimentalRemoteRuntime` (Host additive rows + Client
  * wire) with no `fileUploads`/`fileUpload` test doubles, and every case below

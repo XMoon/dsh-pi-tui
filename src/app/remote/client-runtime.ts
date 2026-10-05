@@ -3,7 +3,7 @@
  *
  * Owns the official Client bundle capture, the Client `Context`, the exact
  * plugin mount order, the explicit `/remote` contributions, initial
- * readiness, and reverse disposal (`docs/m3-entry-contract.md` §2.4.2/§2.4.3).
+ * readiness, and reverse disposal.
  * It does not assemble the TUI semantic `Backend`.
  *
  * rc.2 publishes the six required Client plugin entries as Web
@@ -455,7 +455,7 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
 }
 
 /**
- * Initial readiness (`docs/m3-entry-contract.md` §4.1): a defined Connection
+ * Initial readiness: a defined Connection
  * generation AND a `ready` Session list. Subscription-driven with no
  * production timeout; the lifecycle signal aborts the wait and every listener
  * is removed on settle or abort.

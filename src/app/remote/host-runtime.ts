@@ -3,7 +3,7 @@
  *
  * This module owns ONLY the additive official Host rows of the Remote
  * runtime: it receives the already-running ordinary pi-tui Host `Context`,
- * mounts the exact `docs/m3-entry-contract.md` §2.4.1 closure as tracked
+ * mounts the exact Remote Host composition closure as tracked
  * Cordis fibers, and exposes the narrow in-process carrier that
  * `client-runtime.ts` installs as the Client Connection transport.
  *
@@ -30,7 +30,7 @@ import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
 
 /**
  * Host services the ordinary Host Context must already expose before any M3
- * row mounts (`docs/m3-entry-contract.md` §2.4.1). The check fails fast with
+ * row mounts. The check fails fast with
  * the missing service named instead of parking the runtime.
  */
 const HOST_PREREQUISITE_SERVICES = [

@@ -69,8 +69,12 @@ The current production backend is Direct. The long-term migration is tracked in
   relocations only, with migration and coupling docs updated in the same PR.
 - Every Host-touching feature declares locality (Client-local, Host-owned, or
   split), its narrow semantic-port owner, and its wire story. Never assume
-  Client cwd/filesystem equals Host cwd/filesystem: remote shell, `@file`,
-  external-editor, and export must fail closed until a Host seam exists.
+  Client cwd/filesystem equals Host cwd/filesystem. Host workspace semantics —
+  `@file`, Host user-shell execution, and any future Host-owned filesystem
+  editing/open — require an authoritative Host seam and fail closed until one
+  exists. Client-local semantics — terminal/editor UI, the current draft
+  external editor, Client-local draft file/image intake, and Client-local
+  artifact output — stay Client-local by contract.
 - Keep Client-local and Host-owned state explicit; callbacks/renderers/editor
   objects never cross the process boundary. Do not replace Context with a
   universal god object; keep ports narrow and domain-owned.

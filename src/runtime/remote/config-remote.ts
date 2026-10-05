@@ -4,7 +4,7 @@
  * semantic contract as `src/runtime/direct/config-direct.ts`; no Remote-only
  * Config semantics and no Direct fallback exist.
  *
- * Published mapping (docs/m3-entry-contract.md §2.3):
+ * Published mapping (see docs/client-server-migration.md):
  *
  * ```text
  * TUI settings / footer trust / custom items / providers / permissions /
@@ -18,7 +18,7 @@
  * preset apply       -> remote.commands.execute(`/permission <preset>`)
  * ```
  *
- * Explicitly unsupported on the wire (docs/m3-entry-contract.md §10):
+ * Explicitly unsupported on the wire:
  * authorization flows (no `authorization` namespace anywhere in rc.2),
  * credential-record enumeration/deletion (no `credentials/list` or record
  * delete Remote), and the exact independent session approval-policy read
@@ -1112,7 +1112,7 @@ class RemoteCredentialConfig implements CredentialConfig {
   }
 
   /**
-   * Unsupported on the wire (docs/m3-entry-contract.md §2.3/§10): rc.2
+   * Unsupported on the wire: rc.2
    * publishes no credentials record read Remote and no record delete Remote
    * (`credentials/describe|set|unset` address REFERENCE names only, and the
    * two key grammars are disjoint). `recordsSupported()` (below) is the
@@ -1123,7 +1123,7 @@ class RemoteCredentialConfig implements CredentialConfig {
    */
   listRecords(): Promise<readonly { key: string; kind?: string }[]> {
     return Promise.reject(new Error(
-      'the Remote credentials backend cannot enumerate stored credential records: rc.2 publishes no credentials record read Remote (docs/m3-entry-contract.md §10)',
+      'the Remote credentials backend cannot enumerate stored credential records: rc.2 publishes no credentials record read Remote',
     ))
   }
 
@@ -1137,7 +1137,7 @@ class RemoteCredentialConfig implements CredentialConfig {
   /** @see listRecords — no record delete Remote exists on rc.2. */
   deleteRecord(key: string): Promise<void> {
     return Promise.reject(new Error(
-      `the Remote credentials backend cannot delete stored credential record "${key}": rc.2 publishes no credential record delete Remote (docs/m3-entry-contract.md §10)`,
+      `the Remote credentials backend cannot delete stored credential record "${key}": rc.2 publishes no credential record delete Remote`,
     ))
   }
 
@@ -1170,7 +1170,7 @@ class RemoteCredentialConfig implements CredentialConfig {
 
 class RemoteAuthorizationConfig implements AuthorizationConfig {
   available(): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3 (docs/m3-entry-contract.md §10): rc.2
+    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2
     // publishes no authorization namespace/Remote at all. Never a private RPC.
     return false
   }
@@ -1190,13 +1190,13 @@ class RemoteAuthorizationConfig implements AuthorizationConfig {
 
   respond(): Promise<void> {
     return Promise.reject(new Error(
-      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote (docs/m3-entry-contract.md §10)',
+      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote',
     ))
   }
 
   cancel(): Promise<void> {
     return Promise.reject(new Error(
-      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote (docs/m3-entry-contract.md §10)',
+      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote',
     ))
   }
 }
@@ -1242,7 +1242,7 @@ class RemotePermissionConfig implements PermissionConfig {
   }
 
   approvalOverrideOf(_sessionId: string): undefined {
-    // INTENTIONAL_UNSUPPORTED_IN_M3 (docs/m3-entry-contract.md §10): rc.2 has
+    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2 has
     // no public Client read of the independent session `approval/policy`
     // override. `undefined` means "unavailable", NEVER `ask` — the Remote
     // settings row must be hidden/disabled instead of guessing.

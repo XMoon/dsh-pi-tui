@@ -2,7 +2,7 @@
  * M3-2 Remote Session owner services: the exact-`SessionBinding` provider of
  * the consumer-owned `SessionOwnerAccess` / `SessionOwnerRetirement` seams.
  *
- * Identity authority (frozen in `docs/m3-entry-contract.md` §5.1): the exact
+ * Identity authority (frozen in `docs/concurrency.md`): the exact
  * `SessionReference.binding` OBJECT a retained `ClientSessionOwner` carries is
  * the generation token —
  *

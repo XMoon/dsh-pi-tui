@@ -58,7 +58,7 @@ test('§18.1 the TUI-owned registration path never requires the Host commands se
 })
 
 test('§D2 (review round 3 ruling): Direct keeps the Host compatibility MIRROR; Remote callback isolation stays complete', () => {
-  // The stage contract (m3-entry-contract §3.3, disambiguated by the M3-4
+  // The stage contract (disambiguated by the M3-4
   // owner ruling): ONE TUI definition; Direct may mirror-register it into
   // the in-process Host registry (the compatibility adapter — never a
   // second business authority), while Remote keeps ZERO Host ctx.commands

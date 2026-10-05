@@ -56,8 +56,9 @@ allowed consumer, wire source, reuse-vs-additive mount and evidence owner; the
 canonical M3-3B rows below already use that shape.
 
 `Evidence owner` is the test/smoke lane or the document that carries the proof.
-The frozen architecture statements live in `docs/m3-entry-contract.md` §2.4.4;
-qualification evidence lives in `docs/client-server-migration.md`.
+This inventory is the composition-ownership authority; the M3-0 architecture
+statements it was derived from were retired by M3-6 PR4 (Git history keeps the
+last version); qualification evidence lives in `docs/client-server-migration.md`.
 
 ### Composition-owner classes
 
@@ -66,9 +67,9 @@ BASE_HOST_PREREQUISITE   ordinary DSH/base/profile composition owns it;
                          migration code may require/read/adapt/verify identity
                          but MUST NOT mount a second copy merely to satisfy
                          Remote composition
-M3_ADDITIVE_HOST         a Host contribution genuinely added by the M3
-                         composition contract; it may mount only the rows frozen
-                         in m3-entry-contract.md
+MIGRATION_ADDITIVE_HOST  a Host contribution genuinely added by the migration
+                         composition contract; it may mount only the frozen
+                         additive rows (see `docs/client-server-migration.md`)
 GENERATED_CLIENT_REMOTE  official Client-side generated Remote/service
                          contribution; the TUI consumes it and does not
                          reconstruct its namespace object
@@ -88,12 +89,12 @@ SPLIT                    one capability split across the Client gesture/
 
 The classes above describe the current M3 core graph; they do not turn the
 current composition owners into universal registries. Generated Remote
-availability is not sufficient evidence for `M3_ADDITIVE_HOST` ownership, and it
+availability is not sufficient evidence for `MIGRATION_ADDITIVE_HOST` ownership, and it
 does not imply `RemoteHostRuntime` must own the Host plugin.
 
 ```text
 CORE GENERATED REMOTE
-  mounted/disposed by RemoteClientRuntime (the m3-entry-contract.md §2.4.2
+  mounted/disposed by RemoteClientRuntime (the
   current M3 core generated contribution closure)
 
 OPTIONAL FEATURE GENERATED REMOTE
@@ -120,7 +121,7 @@ lands.
 | `configEditor` | Host-owned | `BASE_HOST_PREREQUISITE` | profile/base composition (`profileContext` config plane) | `ConfigPort` settings mirror | Host settings/config plane | reuse; `RemoteHostRuntime` must not mount it | M3-3B same-Host smoke (fixture-mounted only per `docs/client-server-migration.md`) |
 | `settings` | Host-owned | `BASE_HOST_PREREQUISITE` | profile/base composition | Remote Config adapter | generated `settings` Remote | reuse; no second settings authority or namespace | `test/remote-config-port.test.ts` + same-Host smoke |
 | `jobController` | Host-owned | `BASE_HOST_PREREQUISITE` | the existing TUI row | `JobObservationPort` | `IJobs` + generated `job` Remote | reuse; no second job observation authority | `test/remote-job-observation.test.ts` + the Job roster in `test/remote-client-runtime.test.ts` |
-| M3 Host API/session helper rows | Host-owned | `M3_ADDITIVE_HOST` | `RemoteHostRuntime` (§2.4.1) | the M3 adapters | official Host plugins + generated Remotes | additive; mount only the frozen §2.4.1 closure | `test/remote-client-runtime.test.ts` |
+| M3 Host API/session helper rows | Host-owned | `MIGRATION_ADDITIVE_HOST` | `RemoteHostRuntime` | the M3 adapters | official Host plugins + generated Remotes | additive; mount only the frozen additive closure | `test/remote-client-runtime.test.ts` |
 | TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority; the Remote Task composition resolves no Host `ctx.jobs`/`ctx.subagents` (Direct-only gate, M3-5 PR6) | `test/runner-viewer-task-integration.test.ts` + `test/runner-remote-task-center.test.ts` + the Remote Task locality source lock in `test/application-runtime-selection.test.ts` |
 | Application runtime selection (`SelectedApplicationRuntime`) | Client-local composition | composition spine (M3-4 PR1) | `src/app/remote/application-runtime.ts` (Remote aggregate) + `selectApplicationRuntime` in `src/app/bootstrap.ts` (the seam) | `bindSessionRuntime` common inputs (`owners`/`retirement`/`lifecycle`) and the runner's `backend` | Remote aggregate reuses the M3-1 wire + M3-3B backend + M3-2 owner services; reached ONLY through `runtime/backend-loader.ts` (the ONE frozen dynamic edge into `app/remote/runtime.ts`, which statically re-exports the aggregate) | exactly ONE Remote Host/Client graph, ONE semantic assembly, ONE owner registry per selected runtime; no second construction site; no public/config/env selector — normal `apply()` stays Direct | `test/remote-application-runtime.test.ts` + `test/application-runtime-selection.test.ts` + the dynamic-boundary rules in `test/pre-m3-architecture-gate.test.mjs` |
 | PiTui Client UI subtree (`RemoteClientUiRuntime`) | CLIENT_LOCAL | `CLIENT_LOCAL` | `src/app/remote/client-ui-runtime.ts`, composed by the Remote application runtime (M3-6 PR1) on the EXISTING official Client Context (`wire.client.context` — `client-runtime.ts` stays the official transport/data core and creates that Context exactly once) | SurfaceRuntime / extension-facing TUI owners (through `RemoteApplicationOverride.extensionService` — the narrow service object; it does not expose the Client Context or plugin fibers, only the selected PiTuiExtensionService capability crosses the in-process composition seam) | none for extension callbacks (TUI-local `src/extensions.ts`/`src/builtins.ts` plugin fibers); plugins may separately consume public Client/Remote facts | one subtree per Remote application aggregate: exactly three fibers (Client-local tuiStartup facts provider → extension host → builtins), no second Client Context, no generic Loader/profile/bundle discovery | `test/remote-client-ui-runtime.test.ts` (component) + `test/remote-application-runtime.test.ts` (aggregate) + `test/runner-remote-command-plane.test.ts` (L6 locality) |
@@ -155,7 +156,7 @@ Before mounting any Host service/plugin row in M3+:
 1. determine whether base/profile already owns it
 2. determine whether mounting replaces a Cordis namespace owner
 3. determine whether projection units/event handlers would be registered twice
-4. freeze the owner in m3-entry-contract.md
+4. freeze the owner in this inventory
 5. record the coupling/owner row here
 ```
 
@@ -524,8 +525,8 @@ clipboard semantic port or Remote RPC exists for this.
 | `src/startup.ts` | (none by design) | Zero-dependency compatibility island; must never import experimental client/runtime code (plan §23). |
 | `src/builtins.ts`, `src/extensions.ts` | `ctx.get(TUI_STARTUP_SERVICE)` / `ctx.get(PI_TUI_EXTENSIONS_SERVICE)` | The TUI's own services, not Host services; excluded from the gate patterns. |
 | `src/index.ts` (`loader`, `appExit`) | `ctx.get('loader')`, `ctx.get('appExit')` | Cordis/dsh process services with no Host business state; excluded from the gate patterns. |
-| `src/app/remote/host-runtime.ts` | (none — `ctx.reflect.get(...)` is not a tracked pattern) | M3-1 experimental Remote Host composition owner (`docs/m3-entry-contract.md` §2.4.1). The earlier `import:dsh-session` baseline entry was removed when the gate matcher was narrowed to exact package matching; the module imports `dsh-session-stats` / `dsh-session-turn-outline` / `dsh-session-log-export` projection plugins, not the Host `dsh-session` type package. |
-| `src/app/remote/client-runtime.ts` | (none) | M3-1 experimental Client composition owner (`docs/m3-entry-contract.md` §2.4.2/§2.4.3). The earlier `import:dsh-agent` baseline entry was removed when the gate matcher was narrowed to exact package matching; the import is `dsh-agent-preset-registry/remote` — a Remote contribution, not the Host `dsh-agent` type package. |
+| `src/app/remote/host-runtime.ts` | (none — `ctx.reflect.get(...)` is not a tracked pattern) | M3-1 experimental Remote Host composition owner (the retired M3-0 entry contract §2.4.1). The earlier `import:dsh-session` baseline entry was removed when the gate matcher was narrowed to exact package matching; the module imports `dsh-session-stats` / `dsh-session-turn-outline` / `dsh-session-log-export` projection plugins, not the Host `dsh-session` type package. |
+| `src/app/remote/client-runtime.ts` | (none) | M3-1 experimental Client composition owner (the retired M3-0 entry contract §2.4.2/§2.4.3). The earlier `import:dsh-agent` baseline entry was removed when the gate matcher was narrowed to exact package matching; the import is `dsh-agent-preset-registry/remote` — a Remote contribution, not the Host `dsh-agent` type package. |
 
 The M3-1 composition owners also introduce the first scanned `src/app/remote/**`
 coupling of a new kind: they mount official Host plugin rows by plugin object
@@ -541,16 +542,22 @@ Per the AGENTS.md guardrails, every new feature declares its locality before
 implementation:
 
 - **Client-local**: terminal rendering, key handling, clipboard, draft state,
-  local UI history, search filter UI state, picker cursor, overlay state,
-  fullscreen, TUI theme.
+  the current draft external editor (`$VISUAL`/`$EDITOR`), Client-local draft
+  file/image intake, Client-local artifact output (the save of an exported
+  archive/transcript), local UI history, search filter UI state, picker cursor,
+  overlay state, fullscreen, TUI theme.
 - **Host-owned**: Agent, Session, subagent, jobs, tools, LLM/provider/model,
   skills, agent presets, persistence, session search, approval/question
   authority, workspace, Host filesystem references, Host-side shell/tool
   execution, credentials, settings.
 - **Explicitly split** (must define which machine owns each operation):
-  `!` / `!!` shell, `@file`, external editor, `/image`, `/export`, `/open`,
-  working directory. Remote mode fails closed rather than silently running on
-  the Client filesystem with Host semantics.
+  `!` / `!!` execution, `@file`, `/open`, `/image` (Client staging + Host durable
+  read), `/export` (Host archive read + Client-local save), working directory.
+  Remote mode fails closed rather than silently running on the Client
+  filesystem with Host semantics. The current draft external editor stays
+  Client-local — it edits the draft, not Host workspace files; a future
+  Host-filesystem editor/open is a SEPARATE capability that requires an
+  authoritative Host seam.
 
 Two UI ownership forms are legal (2026-10-03 clarification):
 
@@ -616,8 +623,8 @@ Host-only catalog source
 4. Composition ownership changes follow the row classes above:
    - a semantic coupling move updates the allowlist row and the boundary
      baseline intentionally;
-   - a composition-owner change updates this ownership inventory and amends
-     `docs/m3-entry-contract.md` when the frozen architecture changed;
+   - a composition-owner change updates this ownership inventory (the frozen
+     M3-0 architecture statements were retired by M3-6 PR4);
    - implementation progress alone never changes frozen ownership;
    - a fixture that adds a production prerequisite documents its topology and
      does not automatically grant product composition ownership.

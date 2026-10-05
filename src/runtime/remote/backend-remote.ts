@@ -10,8 +10,8 @@
  * the explicit experimental path), and M3-4 owns the main-application
  * selection.
  *
- * Capability advertisement is EXACT (docs/m3-entry-contract.md §10 +
- * docs/client-server-migration.md): the set is declared in
+ * Capability advertisement is EXACT (the current Remote composition's
+ * unsupported set + docs/client-server-migration.md): the set is declared in
  * `REMOTE_IMPLEMENTED_CAPABILITIES`, and a capability is advertised only when
  * its port genuinely serves the semantic contract — never to mask a
  * misleading empty/default value.
