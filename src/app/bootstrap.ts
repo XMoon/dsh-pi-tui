@@ -2744,7 +2744,7 @@ export function applyRunnerWithRuntime(
     // writer-admitted interrupt, the selected-Job observation port and the root
     // row-disposition helpers. No new Backend port and no second task model.
     const jobs = remoteSources === undefined ? ctx.get('jobs') : undefined
-    const subagents = ctx.get('subagents')
+    const subagents = remoteSources === undefined ? ctx.get('subagents') : undefined
     // The selected Task read source: Direct composes the Host catalog/registry
     // reads; Remote composes the official Client projection/Session-list reads
     // from the ONE Remote application graph. Neither branch is a second task
