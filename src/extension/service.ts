@@ -1,7 +1,9 @@
 /**
  * The PiTuiExtensionService: the Cordis service third-party plugins inject
- * to register contributions. Provided by the `pi-tui-extension-host` row
- * (src/extensions.ts); owned by that provider's fiber, so provider unload
+ * to register contributions. Direct: provided by the `pi-tui-extension-host`
+ * Loader row (src/extensions.ts); Remote: provided by the Client UI
+ * subtree's extension-host plugin fiber on the official Client Context
+ * (M3-6 PR1). Owned by that provider's fiber, so provider unload
  * disposes every registration made through it.
  *
  * Owner binding (M1, plan §16): every registration is created inside the

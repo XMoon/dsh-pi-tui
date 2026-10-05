@@ -663,7 +663,8 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
 - **The footer surface (composer/layout/items/configurator, `src/footer/`)
   is client-local presentation.** It consumes the snapshot; no Host
   service is read there. The extension footer items ride the public
-  extension service (Host-composed, Stable). User Custom Text definitions are
+  extension service (Stable; Direct profile-Context-composed, Remote
+  wire Client-Context-composed — M3-6 PR1). User Custom Text definitions are
   compiled into the same local item contract, but their raw definition
   collection is Host-owned settings data and is persisted separately from the
   client-local `FooterLayoutV1` placement references. The Direct config port
@@ -5317,7 +5318,9 @@ captures to the **Client Context** under wire mode):
   (first-party contributions through the same public extension API). The
   resolved `PiTuiExtensionService` crosses to `app/bootstrap.ts` only as the
   narrow `RemoteApplicationOverride.extensionService` object (never the
-  Client Context, never a Cordis face), and the bootstrap selects the
+  Client Context or plugin fibers — only the selected PiTuiExtensionService
+  capability crosses the in-process composition seam), and the bootstrap
+  selects the
   extension authority by the branch discriminator `override === undefined`:
   Direct reads the existing Host/profile service exactly as before; Remote
   consumes `override.extensionService` and never evaluates the Host lookup

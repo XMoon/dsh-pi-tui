@@ -236,7 +236,8 @@ export interface RemoteLiveIngressFactory {
  *  Host-context lookup). The selection seam re-uses the aggregate's selected
  *  core instead of constructing a second Remote graph; internal/test paths
  *  only. The override carries the narrow service object, NOT the Client
- *  Context and not any Cordis/transport face. */
+ *  Context or plugin fibers; only the selected PiTuiExtensionService
+ *  capability crosses the in-process composition seam. */
 export interface RemoteApplicationOverride {
   readonly selected: SelectedApplicationRuntime
   readonly presentation: RemoteApplicationSources

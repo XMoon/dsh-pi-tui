@@ -324,7 +324,7 @@ const SWEEP_NOTES = {
   cwd: 'process.cwd() client composition fact injected into owners as a value (execution-notes item 4).',
   cleanedUp: 'runner disposal flag owned by the composition root; lifetime prerequisite.',
   app: 'the mounted TuiApp assigned once by surface.start; process-lifetime reference.',
-  extensionService: 'Host extension service resolved for surface.attachExtensionHost; process prerequisite.',
+  extensionService: 'branch-selected TUI extension service: Direct resolves the ordinary profile-Context service; experimental Remote consumes the selected Client-local service from RemoteApplicationOverride (M3-6 PR1).',
   signal: 'lifecycleController.signal abort signal; process lifetime.',
   draftImages: 'per-TUI draft image store created once and injected; client input buffer, not a §7.6.2 named state category.',
   draftFiles: 'per-TUI draft file store created once and injected; client input buffer, not a §7.6.2 named state category.',
