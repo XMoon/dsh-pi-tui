@@ -5584,23 +5584,32 @@ export function registerTuiCommands(
       const providerSignInNote = runner.config.authorization.available() || option === undefined || option.namesCredential
         ? ''
         : ' — provider sign-in (OAuth/device) is unavailable on this backend'
+      // The prompt and the WRITE have separate failure scopes: a cancelled
+      // prompt is a user cancellation, while a dispatched credential write
+      // reports its real settlement (the adapter never reclassifies a proven
+      // Host result because the transport generation rolled over).
+      let key: string
       try {
         const answers = await app.askQuestions([
           { id: 'key', question: `Enter the API key for ${label}${providerSignInNote}:`, masked: true },
         ])
-        const key = answers[0]?.custom ?? ''
-        if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
-        await credentials.setReference(targetRef, key)
-        return { kind: 'success', text: `API key ${targetRef} set` }
-      } catch (error) {
-        // A superseded completion is NOT a user cancellation: the key cannot
-        // be confirmed as set on the current Host (the Remote credential
-        // write re-checks its Connection generation before reporting success).
-        if (error instanceof SupersededReadError) {
-          return { kind: 'error', text: 'the connection changed while setting the key; it was not confirmed — retry' }
-        }
+        key = answers[0]?.custom ?? ''
+      } catch {
         return { kind: 'error', text: 'login cancelled' }
       }
+      if (key === '') return { kind: 'error', text: 'empty key; nothing set' }
+      try {
+        await credentials.setReference(targetRef, key)
+      } catch (error) {
+        // A pre-dispatch refusal (no current Connection generation) means the
+        // key provably never left; anything else is this Host's own refusal.
+        // Either way the key is NEVER retried automatically.
+        if (error instanceof SupersededReadError) {
+          return { kind: 'error', text: 'connection unavailable; the API key was not sent — reconnect and retry' }
+        }
+        return { kind: 'error', text: `could not store the API key: ${safeErrorMessage(error)}` }
+      }
+      return { kind: 'success', text: `API key ${targetRef} set` }
     },
   })
 

@@ -5420,15 +5420,34 @@ repopulate the same surfaces, and Host write settlements stay real.
   (question-controller): a settlement whose entry/session no longer belongs
   to the current surface is not announced there (a session-switch negative
   is locked in `test/question-remote-lifecycle.test.ts`), while a normal
-  same-session reconnect still shows the truthful notice. KNOWN REMAINING
-  SIBLING (not fixed here, review-scoped out): `RemoteCredentialConfig`
-  `.setReference()/.unsetReference()` (config-remote.ts) still fence AFTER
-  the dispatched credential write and reclassify its proven result as
-  `SupersededReadError` — the same root cause, pre-existing, with
-  `test/remote-config-port.test.ts` locking the old semantics; fixing it
-  (adapter + tests + the /login caller's "not confirmed — retry" wording)
-  is tracked as its own change, and until then the "never reclassified"
-  claim holds for the paths qualified in this PR, not for credentials.
+  same-session reconnect still shows the truthful notice.
+- **Credential write sibling — FIXED in this PR** (same root cause, found by
+  the same review): `RemoteCredentialConfig.setReference()/.unsetReference()`
+  used to fence AFTER the dispatched credential write and reclassify its
+  proven result as `SupersededReadError`; `test/remote-config-port.test.ts`
+  locked that wrong behavior. The writes now take a PRE-dispatch gate only
+  (no current generation => provably not dispatched) and classify the Host
+  result alone, while `describeReference()` keeps its read fence (a value
+  from a replaced Host must never render as current). Tests were split
+  accordingly (write success/refusal preserved across a replacement; no
+  generation => zero dispatch; describe still superseded), and the `/login`
+  handler no longer tells the user to retry after an unconfirmed write: its
+  prompt and write now have separate failure scopes ("login cancelled" for a
+  cancelled prompt; "connection unavailable; the API key was not sent —
+  reconnect and retry" only for the PRE-dispatch refusal; the real Host error
+  otherwise).
+- **Known gap recorded while qualifying the credential write** (independent
+  of the settlement semantics above, pre-existing): on the real in-process
+  wire the mounted path
+  `runner.config.credentials.setReference(...)` fails with
+  `credentials.set is not a function`, even though
+  `docs/m3-entry-contract.md` §10 states the API-key path works through
+  `credentials/set` (the descriptor exists in
+  `@deepseek-ai/dsh-api-settings-controller`'s Remote). The adapter
+  semantics above are therefore qualified at the adapter level (controlled
+  official Remote) rather than through a mounted write, and this namespace
+  activation/assembly gap needs its own investigation and an owner decision
+  (it is not a settlement-classification defect and is not fixed here).
   Reconnect does not bump the TUI Session ownership generation, the viewer
   generation, or materialize another Client Session reference — the retained
   binding objects survive by identity (normal reconnect is adoption, not

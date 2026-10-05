@@ -1053,12 +1053,16 @@ class RemoteCredentialConfig implements CredentialConfig {
   }
 
   /**
-   * The generation fence every credential operation shares: a Remote async
-   * result must re-check the Connection generation before it can mutate
-   * visible state (AGENTS.md). A credential call that completed against a
-   * replaced Host is reported as superseded instead of as a success on the
-   * NEW Host — the write may have landed on the old one, and the UI must not
-   * claim otherwise.
+   * The generation fence for READ results: a Remote async read must re-check
+   * the Connection generation before it can mutate visible state, so a
+   * describe that completed against a replaced Host is never presented as
+   * the current configuration.
+   *
+   * It is NOT applied to the credential WRITES: once `set`/`unset` has been
+   * dispatched, its settlement is a real Host fact classified from the Host
+   * result alone (frozen §9.1 "Host settlements stay real"; M3-6 PR2 §16.3
+   * "DO NOT reinterpret solely from B"). A generation replacement after
+   * dispatch loses only the old surface's presentation ownership.
    */
   private fence(captured: RemoteConnectionGeneration | undefined): void {
     if (captured === undefined || !Object.is(captured, this.generation.getSnapshot())) {
@@ -1066,20 +1070,28 @@ class RemoteCredentialConfig implements CredentialConfig {
     }
   }
 
+  /**
+   * The PRE-dispatch gate for the credential writes: with no current
+   * Connection generation the write provably never left (§9.3 pre-dispatch
+   * unavailable). Nothing is checked after dispatch.
+   */
+  private requireDispatchableGeneration(): void {
+    if (this.generation.getSnapshot() === undefined) {
+      throw new SupersededReadError('the credential write was not dispatched: no current Connection generation')
+    }
+  }
+
   async setReference(ref: string, secret: string): Promise<void> {
-    const captured = this.generation.getSnapshot()
+    this.requireDispatchableGeneration()
     const result = await settledResult(this.credentials.set(ref, secret))
-    // The fence runs BEFORE the outcome is classified: a failure that belongs
-    // to a REPLACED connection (including a transport rejection folded by
-    // `settledResult`) is a superseded outcome, not this Host's error.
-    this.fence(captured)
+    // DISPATCHED: the Host result is the settlement authority — never
+    // reclassified because the transport generation rolled over.
     if (!result.ok) throw new Error(`credentials.set(${ref}) failed: ${remoteFailureMessage(result.error)}`)
   }
 
   async unsetReference(ref: string): Promise<void> {
-    const captured = this.generation.getSnapshot()
+    this.requireDispatchableGeneration()
     const result = await settledResult(this.credentials.unset(ref))
-    this.fence(captured)
     if (!result.ok) throw new Error(`credentials.unset(${ref}) failed: ${remoteFailureMessage(result.error)}`)
   }
 

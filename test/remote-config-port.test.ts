@@ -978,69 +978,67 @@ test('an empty replace diff is a no-op only once the mirror is current', async (
   assert.equal(state.mutateCalls.length, mutations, 'an unchanged document still dispatches no mutate')
 })
 
-test('credential operations re-check the Connection generation before reporting an outcome', async () => {
-  // AGENTS.md: a Remote async result must re-check generation/identity before
-  // it can mutate visible state. A credential call that completed against a
-  // REPLACED Host must not be reported as a success on the new one (the write
-  // may have landed on the old Host), and a replaced describe must not feed
-  // the /logout picker a stale row.
+test('credential WRITES keep a dispatched Host settlement real across a Connection generation replacement (M3-6 PR2 AC11)', async () => {
+  // A credential set/unset is a WRITE: once dispatched, the Host result is
+  // the settlement authority. A reconnect mid-settlement must NOT reclassify
+  // a proven success (or a proven Host refusal) as a transport supersession.
+  const writes = [
+    (port: ReturnType<typeof createBackend>['port']): Promise<void> => port.credentials.setReference('ACME_KEY', 'secret'),
+    (port: ReturnType<typeof createBackend>['port']): Promise<void> => port.credentials.unsetReference('ACME_KEY'),
+  ]
+  for (const call of writes) {
+    // Proven SUCCESS across the replacement: the write resolves.
+    const ok = createBackend()
+    ok.state.credentialGate = () => { ok.generation.set({ id: 'gen-2' }) }
+    await call(ok.port)
+    // Proven Host REFUSAL across the replacement keeps the Host's own error.
+    const refused = createBackend()
+    refused.state.credentialFailure = { code: 'gateway/forbidden', message: 'the host refused the key' }
+    refused.state.credentialGate = () => { refused.generation.set({ id: 'gen-2' }) }
+    await assert.rejects(() => call(refused.port), /failed: the host refused the key/u,
+      'a dispatched Host refusal is preserved, never masked as a supersession')
+  }
+})
+
+test('credential writes fail closed BEFORE dispatch when the Connection has no generation', async () => {
+  const writes = [
+    (port: ReturnType<typeof createBackend>['port']): Promise<void> => port.credentials.setReference('ACME_KEY', 'secret'),
+    (port: ReturnType<typeof createBackend>['port']): Promise<void> => port.credentials.unsetReference('ACME_KEY'),
+  ]
+  for (const call of writes) {
+    const { port, state, generation } = createBackend()
+    generation.set(undefined)
+    let dispatched = 0
+    state.credentialGate = () => { dispatched += 1 }
+    await assert.rejects(() => call(port), (error: unknown) => {
+      assert.equal((error as Error).name, 'SupersededReadError')
+      return true
+    })
+    assert.equal(dispatched, 0, 'no current generation means the write provably never dispatches')
+  }
+})
+
+test('credential READS still supersede a describe from a replaced Connection generation', async () => {
+  // A describe is a READ: a value from a replaced Host must never be shown as
+  // the current configuration (the /logout picker would render a stale row).
   const { port, state, generation } = createBackend()
   state.credentialGate = async () => { generation.set({ id: 'gen-2' }) }
-  await assert.rejects(
-    () => port.credentials.setReference('ACME_KEY', 'secret'),
-    (error: unknown) => {
-      assert.equal((error as Error).name, 'SupersededReadError')
-      return true
-    },
-  )
-  await assert.rejects(
-    () => port.credentials.unsetReference('ACME_KEY'),
-    (error: unknown) => {
-      assert.equal((error as Error).name, 'SupersededReadError')
-      return true
-    },
-  )
-  await assert.rejects(
-    () => port.credentials.describeReference('ACME_KEY'),
-    (error: unknown) => {
-      assert.equal((error as Error).name, 'SupersededReadError')
-      return true
-    },
-  )
+  await assert.rejects(() => port.credentials.describeReference('ACME_KEY'), (error: unknown) => {
+    assert.equal((error as Error).name, 'SupersededReadError')
+    return true
+  })
+  // A describe FAILURE from a replaced connection is superseded too.
+  const failing = createBackend()
+  failing.state.credentialFailure = { code: 'gateway/unavailable', message: 'the old host is gone' }
+  failing.state.credentialGate = () => { failing.generation.set({ id: 'gen-2' }) }
+  await assert.rejects(() => failing.port.credentials.describeReference('ACME_KEY'), (error: unknown) => {
+    assert.equal((error as Error).name, 'SupersededReadError')
+    return true
+  })
 
   // Same-generation operations still settle normally.
   const same = createBackend()
   assert.equal((await same.port.credentials.describeReference('ACME_KEY')).configured, false)
   await same.port.credentials.setReference('ACME_KEY', 'secret')
   assert.equal((await same.port.credentials.describeReference('ACME_KEY')).configured, true)
-})
-
-test('a credential failure from a REPLACED connection is superseded, not this Host error', async () => {
-  // The generation fence runs BEFORE the outcome is classified: a failure that
-  // belongs to the old connection (including a transport rejection folded by
-  // settledResult) must be reported as superseded-and-retry, never surfaced as
-  // the current Host's error — /login would otherwise call it "login
-  // cancelled" instead of "the connection changed".
-  for (const call of [
-    (port: ReturnType<typeof createBackend>['port']) => port.credentials.setReference('ACME_KEY', 'secret'),
-    (port: ReturnType<typeof createBackend>['port']) => port.credentials.unsetReference('ACME_KEY'),
-    (port: ReturnType<typeof createBackend>['port']) => port.credentials.describeReference('ACME_KEY'),
-  ]) {
-    const { port, state, generation } = createBackend()
-    state.credentialFailure = { code: 'gateway/unavailable', message: 'the old host is gone' }
-    state.credentialGate = () => { generation.set({ id: 'gen-2' }) }
-    await assert.rejects(() => call(port), (error: unknown) => {
-      assert.equal((error as Error).name, 'SupersededReadError',
-        'a replaced-connection failure is a superseded outcome')
-      return true
-    })
-  }
-
-  // The same failure on the SAME generation still surfaces as the real error.
-  const same = createBackend()
-  same.state.credentialFailure = { code: 'gateway/unavailable', message: 'the host refused' }
-  await assert.rejects(
-    () => same.port.credentials.setReference('ACME_KEY', 'secret'),
-    /credentials\.set\(ACME_KEY\) failed: the host refused/u,
-  )
 })
