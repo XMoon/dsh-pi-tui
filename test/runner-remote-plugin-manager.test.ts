@@ -139,7 +139,7 @@ async function mountPluginManagerRunner(
       service.register('chrome.header.badge', { id: badge.id }, { text: badge.text, tone: 'info' })
     })
     await fiber
-    life.defer(() => { void fiber.dispose() })
+    life.defer(() => fiber.dispose())
   }
 
   // The HOST-CONTEXT twin (the negative control): a separate extension
