@@ -5579,14 +5579,24 @@ mounted fatal:
   disposal cannot re-run the latched surface cleanup).
 - **Interaction settlement obligations**: the TuiApp-owned interaction
   settlements (`settleApproval`, `settleQuestions`, `settleSaveLocation`) run
-  their presentation cleanup as a non-truncating batch and settle the
-  caller's promise as an OBLIGATION afterwards, so a throwing overlay
+  their presentation cleanup AND the caller's promise settlement as steps of
+  ONE non-truncating `runSyncDisposalSteps` batch, so a throwing overlay
   hide/frame/seat/prompt cleanup can never strand the approval / question /
-  save-location promise (the cleanup error is surfaced after the settlement,
-  never swallowed). Their shared `ResponsiveOverlayFrame.dispose()` likewise
-  attempts the owned child dispose AND the one-shot close notification as
-  independent steps, so a throwing child dispose can no longer skip the
-  frame's removal from its owner's bookkeeping.
+  save-location promise, and every collected failure — a legitimately thrown
+  `undefined` rethrown by identity, several failures aggregated in execution
+  order, or a queued-next-prompt failure — is surfaced after the settlement
+  (never swallowed). `settleQuestions` decides its handover from the LIVE
+  queue AFTER the pre-handover callbacks, so a queued request synchronously
+  cancelled (or enqueued) by a draft callback is respected instead of being
+  mounted from a stale snapshot. The three `AbortSignal` listeners route a
+  terminal settlement failure to the owned diagnostic sink
+  (`events.runOwned`, `isCancellation` pinned false so an AbortError-shaped
+  cleanup failure is never misread as a user cancellation); a bare headless
+  TuiApp with no sink re-raises asynchronously rather than swallowing it.
+  Their shared `ResponsiveOverlayFrame.dispose()` likewise attempts the owned
+  child dispose AND the one-shot close notification as independent steps, so a
+  throwing child dispose can no longer skip the frame's removal from its
+  owner's bookkeeping.
 - **L6 evidence (decisive, `test/runner-remote-shutdown.test.ts`, real
   Remote runner over the official in-process wire)**:
   - **L6-A** clean HMR unload + same-process remount: observed order
@@ -5643,7 +5653,11 @@ mounted fatal:
   fail-closed case); `test/interaction-settlement-failure.test.ts` (a throwing
   approval / question / save-location presentation cleanup still settles the
   interaction promise, and a throwing overlay child dispose still fires the
-  one-shot close notification).
+  one-shot close notification); `test/interaction-settlement-hardening.test.ts`
+  (an abort-listener settlement failure reaches the owned sink; multiple
+  failures aggregate in execution order; a queued question synchronously
+  cancelled during handover is never mounted; a cleanup throwing `undefined`
+  is not swallowed).
 - **Mutation / counterfactual evidence** (each applied locally, verified red,
   then restored): M1 removing the fatal surface cleanup call → L6-C red; M2
   restoring a truncating pre-batch `command.disposeCatalog()` → L6-B red; M3
@@ -5663,7 +5677,12 @@ mounted fatal:
   close-notification regression red; N2/N3/N4 restoring the fail-fast
   settlement sequences (approval / question / save-location) → the
   corresponding interaction-promise regressions red (bounded probe reports a
-  stranded promise instead of hanging).
+  stranded promise instead of hanging); O4 making
+  `runSyncDisposalSteps` swallow a thrown `undefined` → the `throw undefined`
+  regression red; O5 shifting the question handover from a stale pre-callback
+  snapshot → the synchronously-cancelled-handover regression red; O6 restoring
+  the bare abort listener → the owned-sink routing regression red
+  (uncaughtException + no sink observation).
 - **Direct**: unchanged — the Direct branch has no Remote selector, transport
   disposal stays the inert no-op, and the shared helper does not import any
   Remote code. PR2 reconnect/write semantics are untouched and their suites
