@@ -690,6 +690,40 @@ test('dispose releases BOTH subscriptions exactly once and is idempotent', () =>
   assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'a disposed controller never re-subscribes or re-releases')
 })
 
+test('M3-6 PR3: a throwing install-event unsubscribe cannot strand the invalidation release', () => {
+  const failure = new Error('install unsubscribe failed')
+  const base = fakePort()
+  const { offCalls, invalidate, emit, installSubscriptions, invalidationSubscriptions, state } = base
+  const port: PluginManagerPort = {
+    ...base.port,
+    subscribeInstall: (listener) => {
+      const release = base.port.subscribeInstall(listener)
+      return () => {
+        release()
+        throw failure
+      }
+    },
+  }
+  const { controller, renders } = controllerOf(port)
+  assert.equal(installSubscriptions(), 1)
+  assert.equal(invalidationSubscriptions(), 1)
+
+  assert.throws(() => controller.dispose(), (error: unknown) => error === failure)
+  assert.deepEqual(offCalls, { install: 1, invalidation: 1 },
+    'the second unsubscribe still ran after the first threw')
+  assert.equal(installSubscriptions(), 0)
+  assert.equal(invalidationSubscriptions(), 0)
+
+  // The disposed latch stays committed: a second dispose is inert and no later
+  // invalidation/install event can read or repaint.
+  controller.dispose()
+  const rendersAtDispose = renders()
+  invalidate()
+  emit({ kind: 'phase', phase: { requestId: 'r1', phase: 'applying' } })
+  assert.equal(state.snapshotCalls, 0, 'a disposed controller performs no read')
+  assert.equal(renders(), rendersAtDispose, 'a disposed controller never repaints')
+})
+
 test('a held inventory read settled after dispose never commits nor repaints (success and failure)', async () => {
   for (const settlement of ['success', 'failure'] as const) {
     const readGate = deferred<PluginManagerSnapshot>()

@@ -81,6 +81,7 @@ import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extens
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from '../detached.ts'
+import { runSyncDisposalSteps } from '../disposal.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
 import { DraftImageStore } from '../image/draft-store.ts'
@@ -336,6 +337,15 @@ export function applyRunnerWithRuntime(
    * inert slot.
    */
   let disposeSelectedTransportRef: (() => Promise<void>) | undefined
+  /**
+   * The shared surface-cleanup authority for the terminal-total fatal catch
+   * (M3-6 PR3 plan D3): assigned immediately after `disposeSurface` is created
+   * and before any later startup operation can fail with surface ownership
+   * live. An undefined ref means the startup root never reached the surface
+   * owner, so the pre-surface fatal path keeps its own minimal focus/abort
+   * safety instead of fabricating a mounted-surface cleanup.
+   */
+  let disposeSurfaceRef: (() => void) | undefined
 
   const startRunner = async (): Promise<void> => {
     // The TUI required surface is committed to running: synchronous init
@@ -1947,62 +1957,71 @@ export function applyRunnerWithRuntime(
       // after teardown a late `agent/status` idle from the old live agent must
       // never emit a notification into a dead surface (the identity fence drops
       // every event once the live id is undefined).
-      surface.setCompletionOwner(undefined)
-      // Disable terminal focus reporting FIRST — before any throwable
-      // teardown step — so the mode can never leak into the shell even
-      // when a later teardown operation throws (idempotent: a startup
-      // failure that never enabled it writes a harmless no-op).
-      surface.disableFocusReporting()
-      // The DSH SessionWriteLease (kernel flock) is the only cross-process
-      // writer authority: a clean TUI exit needs no TUI-side lock
-      // bookkeeping — the lease is released by the DSH session teardown
-      // (the TUI's physical owner.lock / lease / cooling stack is removed
-      // legacy).
-      lifecycleController.abort()
-      // M3-5 PR2: tear the child viewer down FIRST among the presentation
-      // resources — a mounted viewer owns a client child generation + live
-      // ingress (Remote) and an in-flight open may own a retained generation.
-      // NO painting: the app is going away, and the adapter -> Client disposal
-      // follows this step. Late-bound (`viewerRef`): a startup failure can run
-      // this cleanup before the viewer owner exists (TDZ guard).
-      viewerRef?.dispose()
-      draftImages.clear()
-      draftFiles.clear()
-      // Abort any in-flight catalog refresh: its late result must never
-      // register commands or repaint after the app is gone.
-      command.disposeCatalog()
-      // Release the Plugin Manager install-event subscription at its original
-      // EARLY position (a late install event must never notify/repaint a dying
-      // surface). The subscription is surface-owned (A4-5).
-      surface.disposePluginManager()
-      // PR D2: cancel the deferred initial context measure — a stale
-      // callback must never measure/repaint into the disposed surface.
-      status.cancelDeferred()
-      // M5: release the footer command surface BEFORE the app dies — a
-      // late status-store notification must not refresh into a disposed
-      // surface. The lifecycle abort above already disposes an armed
-      // runner through its own abort listener; the explicit unsubscribe +
-      // dispose keeps the release symmetric with the arm path and also
-      // covers the teardown-before-arm window (both idempotent).
-      settings.disposeFooterCommand()
-      localShell.dispose()
-      // TuiApp.dispose() hides overlays without invoking their user cancel
-      // callbacks. The Task Center / Job viewer resources are surface-owned
-      // (A4-6) and released in their original order: the jobs-event
-      // subscription first (no Job listener may refresh a dying surface), then
-      // the selected-Job observation, then the browser handle/token.
-      surface.disposeJobEvents()
-      surface.disposeJobObservation()
-      surface.disposeTaskBrowser()
-      // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
-      // and the extension surface bridge are released by their surface owner
-      // (A4): the runner steps around this call release only what the runner
-      // still owns.
-      surface.dispose()
+      // M3-6 PR3: ONE ordered non-truncating batch. A throwing sibling cleanup
+      // must never skip a later surface owner, the Session retirement or the
+      // selected transport disposal (the plan's frozen top-level order).
+      runSyncDisposalSteps('surface disposal', [
+        () => surface.setCompletionOwner(undefined),
+        // Disable terminal focus reporting FIRST among the THROWABLE steps —
+        // before any teardown step — so the mode can never leak into the shell
+        // even when a later teardown operation throws (idempotent: a startup
+        // failure that never enabled it writes a harmless no-op).
+        () => surface.disableFocusReporting(),
+        // The DSH SessionWriteLease (kernel flock) is the only cross-process
+        // writer authority: a clean TUI exit needs no TUI-side lock
+        // bookkeeping — the lease is released by the DSH session teardown
+        // (the TUI's physical owner.lock / lease / cooling stack is removed
+        // legacy).
+        () => lifecycleController.abort(),
+        // M3-5 PR2: tear the child viewer down FIRST among the presentation
+        // resources — a mounted viewer owns a client child generation + live
+        // ingress (Remote) and an in-flight open may own a retained generation.
+        // NO painting: the app is going away, and the adapter -> Client disposal
+        // follows this step. Late-bound (`viewerRef`): a startup failure can run
+        // this cleanup before the viewer owner exists (TDZ guard).
+        () => viewerRef?.dispose(),
+        () => draftImages.clear(),
+        () => draftFiles.clear(),
+        // Abort any in-flight catalog refresh: its late result must never
+        // register commands or repaint after the app is gone.
+        () => command.disposeCatalog(),
+        // Release the Plugin Manager install-event subscription at its original
+        // EARLY position (a late install event must never notify/repaint a dying
+        // surface). The subscription is surface-owned (A4-5).
+        () => surface.disposePluginManager(),
+        // PR D2: cancel the deferred initial context measure — a stale
+        // callback must never measure/repaint into the disposed surface.
+        () => status.cancelDeferred(),
+        // M5: release the footer command surface BEFORE the app dies — a
+        // late status-store notification must not refresh into a disposed
+        // surface. The lifecycle abort above already disposes an armed
+        // runner through its own abort listener; the explicit unsubscribe +
+        // dispose keeps the release symmetric with the arm path and also
+        // covers the teardown-before-arm window (both idempotent).
+        () => settings.disposeFooterCommand(),
+        () => localShell.dispose(),
+        // TuiApp.dispose() hides overlays without invoking their user cancel
+        // callbacks. The Task Center / Job viewer resources are surface-owned
+        // (A4-6) and released in their original order: the jobs-event
+        // subscription first (no Job listener may refresh a dying surface), then
+        // the selected-Job observation, then the browser handle/token.
+        () => surface.disposeJobEvents(),
+        () => surface.disposeJobObservation(),
+        () => surface.disposeTaskBrowser(),
+        // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
+        // and the extension surface bridge are released by their surface owner
+        // (A4): the runner steps around this call release only what the runner
+        // still owns.
+        () => surface.dispose(),
+      ])
       // NOTE: diag.dispose() is NOT here — the Direct owned-session
       // retirement (retireOwnedSession) records its diagnostics first and
       // closes diag last (see below).
     }
+    // The terminal-total fatal catch reaches the SAME surface cleanup authority
+    // through this ref (M3-6 PR3 D3), assigned now — before `surface.start`
+    // and any later startup operation can fail with the surface owner live.
+    disposeSurfaceRef = disposeSurface
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): latch once → dispose/restore the Client surface →
     // synchronously pre-cancel the exact current Direct owner → resume-hint
@@ -3224,20 +3243,42 @@ export function applyRunnerWithRuntime(
     // down. (The runner-internal cleanup() never ran — the body threw.)
     // The pre-mount status line has already been cleared above; the lifecycle
     // abort listener's clear is idempotent.
-    // Terminal focus reporting (CSI ? 1004) may already be enabled when
-    // the body threw AFTER the TUI mount — disable it here so the mode
-    // never leaks into the shell on the startup-failure path either
-    // (idempotent when the mount never ran; the guarded writer swallows
-    // broken-stream errors, a synchronous throw is contained).
-    try {
-      notificationWriter.write(DISABLE_FOCUS_REPORTING)
-    } catch {
-      // The stream may already be gone during the fatal path.
-    }
-    try {
-      lifecycleController.abort()
-    } catch {
-      // The abort must not block dispose/exit.
+    // M3-6 PR3 D3: a startup failure AFTER the surface owner exists runs the
+    // SAME cleanup authority the fiber disposer uses (`disposeSurface`), which
+    // itself disables terminal focus reporting and aborts the lifecycle before
+    // its own throwable steps. Before the owner exists (`disposeSurfaceRef`
+    // undefined — a failure during the resume/settings/migration barrier) the
+    // minimal focus/abort safety is retained here: the fatal catch must never
+    // assume a mounted surface.
+    const surfaceCleanup = disposeSurfaceRef
+    if (surfaceCleanup !== undefined) {
+      try {
+        surfaceCleanup()
+      } catch (cleanupError) {
+        // Cleanup errors are secondary diagnostics; they must never replace
+        // the fatal root or block the retirement/exit below.
+        try {
+          diag.error('surface dispose failed', { error: safeErrorMessage(cleanupError) })
+        } catch {
+          // A throwing diagnostics channel must not block the teardown.
+        }
+      }
+    } else {
+      // Terminal focus reporting (CSI ? 1004) may already be enabled when
+      // the body threw BEFORE the surface owner existed — disable it here so
+      // the mode never leaks into the shell on the startup-failure path
+      // (idempotent when the mount never ran; the guarded writer swallows
+      // broken-stream errors, a synchronous throw is contained).
+      try {
+        notificationWriter.write(DISABLE_FOCUS_REPORTING)
+      } catch {
+        // The stream may already be gone during the fatal path.
+      }
+      try {
+        lifecycleController.abort()
+      } catch {
+        // The abort must not block dispose/exit.
+      }
     }
     // A startup failure AFTER the Direct owner was created (the resume
     // succeeded, then a later initialization threw) must still retire the

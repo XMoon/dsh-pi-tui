@@ -103,6 +103,7 @@ import type { PiTuiExtensionService } from '../../extensions.ts'
 import { color } from '../../theme.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { runOwned } from '../../detached.ts'
+import { runSyncDisposalSteps } from '../../disposal.ts'
 import {
   buildTaskRows,
   isActiveJobStatus,
@@ -3162,29 +3163,43 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     dispose() {
       if (disposed) return
       disposed = true
-      questionAttentionDisposal?.()
+      // M3-6 PR3: the aggregate teardown is ONE ordered non-truncating batch
+      // (the plan's frozen order). Every one-shot slot is retired before its
+      // callback runs, so a throwing TuiApp/app-owned cleanup can never strand
+      // the plugin keybinding sync, the theme-unload hook release or the
+      // extension surface detach. The process slot is NOT released here —
+      // TuiApp remains its sole owner.
+      const questionAttention = questionAttentionDisposal
+      const question = questionController
+      const pluginKeybindingSync = stopPluginKeybindingSync
+      const themeUnloadedHook = releaseThemeUnloadedHook
+      const service = extensionService
+      const surfaceId = extensionHost?.surfaceId
       questionAttentionDisposal = undefined
-      questionController?.dispose()
       questionController = undefined
-      app?.setSettledQuestionAnswersLookup(undefined)
-      // The mounted app is released first (its options captured the extension
-      // host), then the extension surface resources in the runner's original
-      // cleanup order.
-      app?.dispose()
-      // M2: unsubscribe the plugin keybinding sync (the registry outlives the
-      // surface — a stale listener must not resync into a dead app).
-      stopPluginKeybindingSync?.()
       stopPluginKeybindingSync = undefined
-      // Release THIS generation's theme-unload hook: without the generation
-      // lease, the old callback (capturing the disposed app) would stay
-      // installed until the next runner installed its own.
-      releaseThemeUnloadedHook?.()
       releaseThemeUnloadedHook = undefined
-      // Detach the extension service's surface bridge (its capability set and
-      // state listeners die with the surface). The surfaceId lease makes a
-      // stale detach a no-op (P1).
-      extensionService?.detachSurface(extensionHost?.surfaceId)
       extensionHost = undefined
+      runSyncDisposalSteps('surface runtime disposal', [
+        () => questionAttention?.(),
+        () => question?.dispose(),
+        () => app?.setSettledQuestionAnswersLookup(undefined),
+        // The mounted app is released first (its options captured the extension
+        // host), then the extension surface resources in the runner's original
+        // cleanup order.
+        () => app?.dispose(),
+        // M2: unsubscribe the plugin keybinding sync (the registry outlives the
+        // surface — a stale listener must not resync into a dead app).
+        () => pluginKeybindingSync?.(),
+        // Release THIS generation's theme-unload hook: without the generation
+        // lease, the old callback (capturing the disposed app) would stay
+        // installed until the next runner installed its own.
+        () => themeUnloadedHook?.(),
+        // Detach the extension service's surface bridge (its capability set and
+        // state listeners die with the surface). The surfaceId lease makes a
+        // stale detach a no-op (P1).
+        () => service?.detachSurface(surfaceId),
+      ])
     },
   }
 }

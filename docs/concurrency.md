@@ -561,6 +561,46 @@ serializes against an in-flight transition through the same gate + barrier
 (a FIFO no-op task waits for a running transition to settle — the lifecycle
 abort already cancelled its create/open), then retires the CURRENT owner.
 
+### Runner lifecycle contract: surface → retirement → transport
+
+Every runner teardown path shares ONE frozen top-level order (M3-6 PR3):
+
+```text
+normal unload / HMR:
+  surface total cleanup attempt
+  → Session retirement settlement
+  → selected transport disposal
+
+mounted fatal:
+  same surface cleanup authority
+  → bounded Session retirement
+  → transport only if retirement settled
+  → exit(1)
+```
+
+Surface cleanup is **non-truncating**: every independent surface-owned
+resource is attempted in its original order even when a sibling throws
+(`src/disposal.ts::runSyncDisposalSteps` runs every step, then rethrows the
+single failure by identity or an `AggregateError`). The same primitive
+hardens each owner's own `dispose()` chain (viewer, command catalog, footer
+settings, Plugin Manager, Question, OverlayBroker, `TuiApp.stop/dispose`,
+`SurfaceRuntime.dispose`, and the bootstrap `disposeSurface`). A cleanup
+error is recorded (or surfaced) but never reorders or replaces the Session
+retirement / selected-transport disposal: the surface failure is secondary,
+the retirement outcome stays the returned HMR result.
+
+`TuiApp.dispose()` remains **fail-closed** on the process live-TUI slot: the
+non-truncating batch runs to the end, but the process slot is released only
+when the WHOLE batch returned successfully — a final-dispose error keeps the
+slot claimed (a half-torn-down surface is never publicly replaceable).
+
+The mounted-fatal catch (`handleStartupFailure`) reaches the SAME
+`disposeSurface` authority through a runner-scope ref, so a fatal after the
+TUI mount runs the identical surface cleanup before the bounded retirement;
+only a fatal before the surface owner exists keeps its own minimal
+focus/abort safety. Cleanup errors never replace the original fatal message
+and never prevent `exit(1)`.
+
 ## The submit path is guard-free (the decision)
 
 A per-submit cross-process consistency check (stat + a full committed read

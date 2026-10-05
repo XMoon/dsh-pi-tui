@@ -22,6 +22,7 @@
  */
 
 import { runDetached } from '../../detached.ts'
+import { runSyncDisposalSteps } from '../../disposal.ts'
 import { serializeTuiSettingsMutation } from '../../runtime/config-port.ts'
 import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult } from '../../display-preset.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
@@ -597,16 +598,23 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * already disposes an armed runner through its own abort listener; the
    * explicit unsubscribe + dispose keeps the release symmetric with the arm
    * path and also covers the teardown-before-arm window (both idempotent).
+   * Every owner slot is retired before its callback runs, so a throwing
+   * unsubscribe/runner disposal cannot strand its siblings (M3-6 PR3).
    */
   const disposeFooterCommand = (): void => {
-    footerCommandUnsubscribe?.()
+    const unsubscribe = footerCommandUnsubscribe
+    const runner = footerCommandRunner
+    const dynamic = footerDynamicItemRuntime
     footerCommandUnsubscribe = undefined
-    footerCommandRunner?.dispose()
     footerCommandRunner = undefined
-    // PR D: release every per-item command runner (children, timers,
-    // abort listeners) before the app dies.
-    footerDynamicItemRuntime?.dispose()
     footerDynamicItemRuntime = undefined
+    runSyncDisposalSteps('footer command disposal', [
+      () => unsubscribe?.(),
+      () => runner?.dispose(),
+      // PR D: release every per-item command runner (children, timers,
+      // abort listeners) before the app dies.
+      () => dynamic?.dispose(),
+    ])
   }
 
   return {

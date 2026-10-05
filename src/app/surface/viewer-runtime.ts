@@ -29,6 +29,7 @@
  */
 
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
+import { runSyncDisposalSteps } from '../../disposal.ts'
 import { StatsFolder } from '../../stats.ts'
 import { childOwnEvents, TranscriptFolder } from '../../transcript.ts'
 import { TranscriptWindowController } from '../../transcript-window.ts'
@@ -571,20 +572,22 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     }
   }
 
-  /** Dispose the child live subscription (if any) BEFORE the child handle is
-   *  released, so a synchronous teardown effect cannot repaint a dead viewer. */
-  const disposeViewLive = (): void => {
-    const handle = viewLiveDispose
-    viewLiveDispose = undefined
-    handle?.dispose()
-  }
-
-  /** Release the acquired child handle (idempotent) after its ingress is down. */
+  /**
+   * Release the acquired child handle (idempotent) after its ingress is down.
+   * BOTH slots are retired before either callback runs (the plan's D2 reentrancy
+   * form), so a throwing ingress disposer can never skip the retained binding
+   * release nor re-run on a second disposal; the collected failure is surfaced
+   * after both attempts.
+   */
   const releaseViewHandle = (): void => {
     const handle = viewHandle
+    const live = viewLiveDispose
     viewHandle = undefined
-    disposeViewLive()
-    handle?.release()
+    viewLiveDispose = undefined
+    runSyncDisposalSteps('viewer child release', [
+      () => live?.dispose(),
+      () => handle?.release(),
+    ])
   }
 
   /** Re-fold the viewed child from the current authoritative window. The

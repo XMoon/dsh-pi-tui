@@ -62,6 +62,7 @@ import {
   type SearchablePickerTruncatePrimaryContext,
 } from './searchable-picker.ts'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
+import { runSyncDisposalSteps } from './disposal.ts'
 import { ImageThumbnail } from './components/media/image-thumbnail.ts'
 import { FileAttachmentComponent } from './components/media/file-attachment.ts'
 import {
@@ -5162,31 +5163,40 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * process-tui-slot.ts). */
   stop(): void {
-    this.clearNotify()
-    // Issue #8: the exit-confirmation timer dies with the surface — a stopped
-    // TUI must never fire a stale disarm into a dead footer.
-    this.clearExitConfirmation()
-    // A stop/start cycle is a fresh surface lifecycle: a PENDING leader
-    // sequence must be cancelled (its timeout must never fire into the
-    // stopped surface) and the interrupt double-action window must not
-    // survive the restart (a post-start interrupt must not read as the
-    // second press of a pre-stop one — convergence findings).
-    this.keybindings.cancelLeader()
-    this.lastEscapeAt = undefined
-    this.working.dispose()
-    // Every pending question flow settles rejected: a stopped TUI must
-    // not leave askQuestions promises hanging forever.
-    this.cancelQuestionFlows()
-    // The same for an active Save Location prompt: a stopped TUI must not
-    // leave askSaveLocation promises hanging forever.
-    this.cancelSaveLocationPrompt()
-    for (const dispose of this.schemeDisposers) dispose()
+    // M3-6 PR3: the stop is ONE ordered non-truncating batch — a throwing
+    // teardown step (a scheme disposer, a screen stop) must never skip the
+    // later independent resources. The ordinary stop() still does NOT release
+    // the process slot and does NOT bump the surface generation.
+    const schemeDisposers = this.schemeDisposers
     this.schemeDisposers = []
-    this.clearFocusLiveHeightState()
-    this.resetScrollProfileFrame()
-    this.tui.stop()
-    this.fullscreen?.stop()
-    this.fullscreen = undefined
+    runSyncDisposalSteps('tui stop', [
+      () => this.clearNotify(),
+      // Issue #8: the exit-confirmation timer dies with the surface — a stopped
+      // TUI must never fire a stale disarm into a dead footer.
+      () => this.clearExitConfirmation(),
+      // A stop/start cycle is a fresh surface lifecycle: a PENDING leader
+      // sequence must be cancelled (its timeout must never fire into the
+      // stopped surface) and the interrupt double-action window must not
+      // survive the restart (a post-start interrupt must not read as the
+      // second press of a pre-stop one — convergence findings).
+      () => this.keybindings.cancelLeader(),
+      () => { this.lastEscapeAt = undefined },
+      () => this.working.dispose(),
+      // Every pending question flow settles rejected: a stopped TUI must
+      // not leave askQuestions promises hanging forever.
+      () => this.cancelQuestionFlows(),
+      // The same for an active Save Location prompt: a stopped TUI must not
+      // leave askSaveLocation promises hanging forever.
+      () => this.cancelSaveLocationPrompt(),
+      // Each scheme disposer is an INDEPENDENT step: one plugin's teardown
+      // throw cannot strand its siblings.
+      ...schemeDisposers.map(dispose => () => dispose()),
+      () => this.clearFocusLiveHeightState(),
+      () => this.resetScrollProfileFrame(),
+      () => this.tui.stop(),
+      () => this.fullscreen?.stop(),
+      () => { this.fullscreen = undefined },
+    ])
   }
 
   /**
@@ -5201,130 +5211,148 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    // The diagnostic scroll-profiler instrumentation dies with the app: the
-    // write-wrap is unwrapped first and any latched frame window discarded.
-    this.resetScrollProfileFrame()
-    if (this.scrollProfileOriginalWrite !== undefined) {
-      (this.terminal as Terminal & { write: (data: string) => void }).write = this.scrollProfileOriginalWrite
-      this.scrollProfileOriginalWrite = undefined
-    }
-    // The process live-TUI slot stays CLAIMED through the whole final
-    // teardown (review-loop round 2): every step below still owns the
-    // process-global keybinding namespace (the host keybinding manager
-    // syncs into it until dispose()). The slot is released LAST, only
-    // after the completed teardown — see the tail of this method.
-    // The keybinding manager dies FIRST: every later teardown callback
-    // (approval settles, extension/editor disposal) could rebuild the
-    // keymap and schedule rendering — the disposed manager makes those
-    // rebuilds inert (PR review finding).
-    this.keybindings.dispose()
-    // Restore the fork's global submit bindings to the builtin defaults:
-    // the fork keybindings are PROCESS-GLOBAL, and a disposed surface
-    // must not leak its remap/disable into a LATER TuiApp instance (PR
-    // review finding — remap → stop → new app inherited ctrl+x/inert
-    // Enter). The manager's constructor re-syncs the builtin default for
-    // a fresh instance too; this covers the no-new-instance case. Both
-    // the editor binding (X037) and the plain-Input default are restored.
-    try {
-      const kb = getKeybindings()
-      kb.setUserBindings({ ...kb.getUserBindings(), 'tui.input.submit': 'enter', 'tui.editor.submit': 'enter' })
-    } catch {
-      // Best effort: the global keybindings may already be torn down.
-    }
-    // The store listener dies with the surface FIRST: the approval/flow
-    // settlements below project into the store, and the notify must not
-    // render a dead footer (a long-lived external store also stops
-    // retaining this instance here).
-    this.statusStoreUnsubscribe?.()
+    // M3-6 PR3: the final teardown is ONE ordered non-truncating batch. Every
+    // independent resource is attempted even when a sibling throws; the
+    // process live-TUI slot stays CLAIMED unless the WHOLE batch settles
+    // (review-loop round 2 fail-closed contract — see the tail).
+    // One-shot release slots are retired BEFORE their callback runs (D2), so a
+    // throwing teardown cannot leave a live callback behind a latched
+    // `disposed` surface.
+    const scrollProfileRestore = this.scrollProfileOriginalWrite
+    this.scrollProfileOriginalWrite = undefined
+    const statusStoreUnsubscribe = this.statusStoreUnsubscribe
     this.statusStoreUnsubscribe = undefined
-    // Settle every pending approval BEFORE stop(): settling hides overlay
-    // handles (hideCursor), and stop() ends with showCursor — the reverse
-    // order would leave the user's cursor hidden after exit. Iterate a COPY:
-    // settleApproval splices the item out of approvalQueue, so walking the
-    // live array would skip every other queued prompt and leave its promise
-    // hanging forever (the round-2 review catch — same defect class the
-    // cancelQuestionFlows sibling already avoided with its own copy).
-    for (const pending of [...this.approvalQueue]) this.settleApproval(pending, 'cancelled')
+    const pendingApprovals = [...this.approvalQueue]
     this.approvalQueue.length = 0
-    if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled')
-    this.disposeTrackedKeybindingEditors()
-    // Every physical overlay unmount happens BEFORE stop(): removing the
-    // last overlay writes hideCursor, and stop() ends with showCursor —
-    // the reverse order would leave the user's cursor hidden after exit
-    // (the same discipline the approval settles above already follow).
-    // This covers the plugin/advanced/unstable lease closes, the
-    // imperative broker settles and the broker's final disposeAll.
-    for (const lease of this.extensionOverlayLeases) lease.close()
-    this.extensionOverlayLeases.clear()
-    // Phase 2: close every still-owned ADVANCED interactive overlay lease
-    // (the wrappers die with the surface; the plugin's dispose() runs).
-    for (const lease of this.advancedOverlayLeases) lease.close()
-    this.advancedOverlayLeases.clear()
-    this.advancedOverlayWrappers.clear()
-    // Phase 3: close every still-owned UNSTABLE mount lease (the adapters
-    // die with the surface; the plugin's dispose() runs).
-    for (const lease of this.unstableMountLeases) lease.close()
-    this.unstableMountLeases.clear()
-    this.unstableMountAdapters.clear()
-    // Every lease close drops its own remount callback; drop any straggler
-    // (history / model picker) so no disposed surface keeps a callback.
-    this.overlayRemounts.clear()
-    // Phase 4: settle every still-open imperative broker promise (select/
-    // custom) — the picker/overlay dies with the surface; the promises
-    // must not hang.
-    for (const settle of [...this.pendingBrokerSettles]) settle()
-    this.pendingBrokerSettles.clear()
-    // Footer configurators are wrapped in a generic Frame, whose removal
-    // does not forward Component.dispose(); close their owned timers before
-    // the broker unmounts the physical overlay handles.
-    for (const close of [...this.footerConfiguratorClosers]) close()
-    this.footerConfiguratorClosers.clear()
-    // FINAL teardown: physically unmount every still-tracked overlay
-    // (disposeOnHide releases the panels — OutputViewer's refresh
-    // interval, TaskBrowser's tick — exactly once) instead of merely
-    // forgetting the handles. A caller that never invoked its closer must
-    // not leave a ref'd interval firing into the disposed surface.
-    this.overlayBroker.disposeAll()
-    this.stop()
-    this.generation += 1
-    this.clearNotify()
-    if (this.notifyTimer !== undefined) {
-      clearTimeout(this.notifyTimer)
-      this.notifyTimer = undefined
-    }
-    this.terminalSchemeListeners.clear()
-    this.expandedOverride.clear()
-    this.pendingUserExpanded.clear()
-    this.disposeMessageComponents()
-    this.localMessages.length = 0
-    this.pendingTailRows = []
-    // The transcript-search overlay dies with the surface: stale handles
-    // must never focus() or repaint a dead component.
-    this.searchOverlay = undefined
-    this.searchComponent = undefined
-    // The history-search panel dies with the surface: its in-flight search
-    // is aborted (a late result must never touch a dead component).
-    this.historyPanel?.dispose()
+    const extensionLeases = [...this.extensionOverlayLeases]
+    const advancedLeases = [...this.advancedOverlayLeases]
+    const unstableLeases = [...this.unstableMountLeases]
+    const brokerSettles = [...this.pendingBrokerSettles]
+    const footerClosers = [...this.footerConfiguratorClosers]
+    const historyPanel = this.historyPanel
     this.historyPanel = undefined
     this.historyOverlay = undefined
-    // The /model picker component dies with the surface too: a remountable
-    // overlay opts out of disposeOnHide, so final teardown owns it explicitly.
-    this.modelPickerComponent?.dispose?.()
+    const modelPickerComponent = this.modelPickerComponent
     this.modelPickerComponent = undefined
     this.modelPickerOverlay = undefined
     this.modelPickerFrame = undefined
-    this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
-    // Detach the extension surface host: its subscriptions and capability
-    // set die with the surface (M2 stale-generation contract).
-    this.extensionHost?.dispose()
-    // P1-12: the editor seat holder's FINAL disposal — every host
-    // capability a plugin editor captured (replaceText, dispatch,
-    // subscribe, invalidate) becomes inert; a late plugin callback can no
-    // longer mutate the seat or dispatch a real submission.
-    // The seat holder is non-owning for the permanent host editor, so final
-    // surface teardown closes host-only resources explicitly here.
-    this.editor.disposeHostResources()
-    this.editorSeatHolder.dispose()
+    runSyncDisposalSteps('tui dispose', [
+      // The diagnostic scroll-profiler instrumentation dies with the app: the
+      // write-wrap is unwrapped first and any latched frame window discarded.
+      () => this.resetScrollProfileFrame(),
+      () => {
+        if (scrollProfileRestore !== undefined) {
+          (this.terminal as Terminal & { write: (data: string) => void }).write = scrollProfileRestore
+        }
+      },
+      // The keybinding manager dies FIRST: every later teardown callback
+      // (approval settles, extension/editor disposal) could rebuild the
+      // keymap and schedule rendering — the disposed manager makes those
+      // rebuilds inert (PR review finding).
+      () => this.keybindings.dispose(),
+      // Restore the fork's global submit bindings to the builtin defaults:
+      // the fork keybindings are PROCESS-GLOBAL, and a disposed surface
+      // must not leak its remap/disable into a LATER TuiApp instance (PR
+      // review finding — remap → stop → new app inherited ctrl+x/inert
+      // Enter). The manager's constructor re-syncs the builtin default for
+      // a fresh instance too; this covers the no-new-instance case. Both
+      // the editor binding (X037) and the plain-Input default are restored.
+      () => {
+        try {
+          const kb = getKeybindings()
+          kb.setUserBindings({ ...kb.getUserBindings(), 'tui.input.submit': 'enter', 'tui.editor.submit': 'enter' })
+        } catch {
+          // Best effort: the global keybindings may already be torn down.
+        }
+      },
+      // The store listener dies with the surface FIRST: the approval/flow
+      // settlements below project into the store, and the notify must not
+      // render a dead footer (a long-lived external store also stops
+      // retaining this instance here).
+      () => statusStoreUnsubscribe?.(),
+      // Settle every pending approval BEFORE stop(): settling hides overlay
+      // handles (hideCursor), and stop() ends with showCursor — the reverse
+      // order would leave the user's cursor hidden after exit. Each entry is
+      // an INDEPENDENT step, so one rejected prompt cannot strand its
+      // siblings' promises.
+      ...pendingApprovals.map(pending => () => this.settleApproval(pending, 'cancelled')),
+      () => { if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled') },
+      () => this.disposeTrackedKeybindingEditors(),
+      // Every physical overlay unmount happens BEFORE stop(): removing the
+      // last overlay writes hideCursor, and stop() ends with showCursor —
+      // the reverse order would leave the user's cursor hidden after exit
+      // (the same discipline the approval settles above already follow).
+      // This covers the plugin/advanced/unstable lease closes, the
+      // imperative broker settles and the broker's final disposeAll.
+      ...extensionLeases.map(lease => () => lease.close()),
+      () => { this.extensionOverlayLeases.clear() },
+      // Phase 2: close every still-owned ADVANCED interactive overlay lease
+      // (the wrappers die with the surface; the plugin's dispose() runs).
+      ...advancedLeases.map(lease => () => lease.close()),
+      () => { this.advancedOverlayLeases.clear() },
+      () => { this.advancedOverlayWrappers.clear() },
+      // Phase 3: close every still-owned UNSTABLE mount lease (the adapters
+      // die with the surface; the plugin's dispose() runs).
+      ...unstableLeases.map(lease => () => lease.close()),
+      () => { this.unstableMountLeases.clear() },
+      () => { this.unstableMountAdapters.clear() },
+      // Every lease close drops its own remount callback; drop any straggler
+      // (history / model picker) so no disposed surface keeps a callback.
+      () => { this.overlayRemounts.clear() },
+      // Phase 4: settle every still-open imperative broker promise (select/
+      // custom) — the picker/overlay dies with the surface; the promises
+      // must not hang.
+      ...brokerSettles.map(settle => () => settle()),
+      () => { this.pendingBrokerSettles.clear() },
+      // Footer configurators are wrapped in a generic Frame, whose removal
+      // does not forward Component.dispose(); close their owned timers before
+      // the broker unmounts the physical overlay handles.
+      ...footerClosers.map(close => () => close()),
+      () => { this.footerConfiguratorClosers.clear() },
+      // FINAL teardown: physically unmount every still-tracked overlay
+      // (disposeOnHide releases the panels — OutputViewer's refresh
+      // interval, TaskBrowser's tick — exactly once) instead of merely
+      // forgetting the handles. A caller that never invoked its closer must
+      // not leave a ref'd interval firing into the disposed surface.
+      () => this.overlayBroker.disposeAll(),
+      () => this.stop(),
+      () => { this.generation += 1 },
+      () => this.clearNotify(),
+      () => {
+        if (this.notifyTimer !== undefined) {
+          clearTimeout(this.notifyTimer)
+          this.notifyTimer = undefined
+        }
+      },
+      () => this.terminalSchemeListeners.clear(),
+      () => this.expandedOverride.clear(),
+      () => this.pendingUserExpanded.clear(),
+      () => this.disposeMessageComponents(),
+      () => { this.localMessages.length = 0 },
+      () => { this.pendingTailRows = [] },
+      // The transcript-search overlay dies with the surface: stale handles
+      // must never focus() or repaint a dead component.
+      () => { this.searchOverlay = undefined },
+      () => { this.searchComponent = undefined },
+      // The history-search panel dies with the surface: its in-flight search
+      // is aborted (a late result must never touch a dead component).
+      () => historyPanel?.dispose(),
+      // The /model picker component dies with the surface too: a remountable
+      // overlay opts out of disposeOnHide, so final teardown owns it explicitly.
+      () => modelPickerComponent?.dispose?.(),
+      () => { this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' } },
+      // Detach the extension surface host: its subscriptions and capability
+      // set die with the surface (M2 stale-generation contract).
+      () => this.extensionHost?.dispose(),
+      // P1-12: the editor seat holder's FINAL disposal — every host
+      // capability a plugin editor captured (replaceText, dispatch,
+      // subscribe, invalidate) becomes inert; a late plugin callback can no
+      // longer mutate the seat or dispatch a real submission.
+      // The seat holder is non-owning for the permanent host editor, so final
+      // surface teardown closes host-only resources explicitly here.
+      () => this.editor.disposeHostResources(),
+      () => this.editorSeatHolder.dispose(),
+    ])
     // Re-vendor lifecycle follow-up P3 (review-loop round 2): release the
     // process slot ONLY after the completed final teardown — the
     // ownership covers the process-global keybinding namespace, which

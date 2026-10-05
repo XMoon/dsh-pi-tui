@@ -11,6 +11,8 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
+import { createSurfaceRuntime, type SurfaceExtensionService } from '../src/app/surface/runtime.ts'
+import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -232,4 +234,59 @@ test('fullscreen toggles and transcript search are benign no-ops after dispose',
   assert.equal(app.isFullscreen(), false, 'fullscreen must stay off after dispose')
   assert.equal(app.isSearching(), false, 'search must stay closed after dispose')
   await settle()
+})
+
+test('M3-6 PR3: one final-dispose cleanup failure cannot skip later cleanup or the generation retirement', (t) => {
+  // Deliberately NOT started: no process TUI slot is claimed, so this
+  // fault-injected final teardown can never poison the shared process slot for
+  // later tests (the plan's Step 3 isolation rule).
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const failure = new Error('stop failed')
+  t.mock.method(app, 'stop', () => { throw failure })
+  const before = app.getSurfaceGeneration()
+
+  assert.throws(() => app.dispose(), (error: unknown) => error === failure)
+  assert.equal(app.isDisposed(), true, 'the disposed latch is committed before the failing step')
+  assert.ok(app.getSurfaceGeneration() > before,
+    'the generation retirement still ran after the failing cleanup step')
+
+  app.dispose()
+  assert.ok(app.getSurfaceGeneration() > before, 'a second dispose is inert')
+})
+
+/**
+ * M3-6 PR3 SurfaceRuntime aggregate continuation. The real owner is exercised
+ * unmounted (its `app` slot only exists after a process-terminal mount, which a
+ * headless suite must not perform): a throwing extension cleanup must not
+ * prevent the LATER extension-surface bridge detach. The app-owned chain
+ * continuation is proven by the TuiApp final-dispose case above and by the
+ * mounted Remote runner L6 (`runner-remote-shutdown`).
+ */
+test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge detach', () => {
+  const surface = createSurfaceRuntime({
+    tuiVersion: '0.0.0-test',
+    notificationWriter: { write: () => {} },
+    notificationMode: undefined,
+    notificationMethod: undefined,
+  })
+  const failure = new Error('theme hook release failed')
+  let themeReleased = 0
+  let detachCalls = 0
+  const service = {
+    _ledger: () => new ExtensionLedger(),
+    setThemeUnloadedHook: () => () => {
+      themeReleased += 1
+      throw failure
+    },
+    detachSurface: () => { detachCalls += 1 },
+  } as unknown as SurfaceExtensionService
+
+  surface.attachExtensionHost(service)
+  assert.throws(() => surface.dispose(), (error: unknown) => error === failure)
+  assert.equal(themeReleased, 1, 'the theme-unload hook release ran once')
+  assert.equal(detachCalls, 1, 'the extension bridge detach still ran after the throwing release')
+
+  surface.dispose()
+  assert.equal(detachCalls, 1, 'a second dispose is inert')
 })

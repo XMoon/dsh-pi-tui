@@ -18,6 +18,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import {
+  createViewerRuntime,
+  type ViewerChildSource,
+  type ViewerChildView,
+  type ViewerRuntimeDeps,
+} from '../src/app/surface/viewer-runtime.ts'
+import type { SurfaceRuntime } from '../src/app/surface/runtime.ts'
+import type { SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
 
 const viewerSource = readFileSync(
   new URL('../src/app/surface/viewer-runtime.ts', import.meta.url),
@@ -37,7 +45,7 @@ function span(from: string, to: string, source = viewerSource): string {
 }
 
 test('F1: the pending open controller is owned and aborted on every supersession/end path', () => {
-  const enter = span('const enterView = async (', 'const disposeViewLive = ')
+  const enter = span('const enterView = async (', 'const releaseViewHandle = ')
   assert.ok(enter.includes('openingAbort?.abort()'),
     'a NEW open must abort the previous in-flight one (its retained generation)')
   assert.ok(enter.indexOf('openingAbort?.abort()') < enter.indexOf('openingAbort = openController'),
@@ -75,10 +83,14 @@ test('F2: the viewer dispose drops the ingress BEFORE the child reference, exact
   assert.ok(dispose.includes('viewerSessionAbort?.abort()'),
     'an in-flight follow-up of the dying viewer is cancelled')
   const release = span('const releaseViewHandle = (): void => {', 'const runDetachedViewerRehydrate')
-  assert.ok(release.indexOf('disposeViewLive()') < release.indexOf('handle?.release()'),
+  assert.ok(release.includes('runSyncDisposalSteps('),
+    'the ingress + binding release is ONE non-truncating batch')
+  assert.ok(release.indexOf('viewHandle = undefined') < release.indexOf('() => live?.dispose()'),
+    'the retained binding slot is retired BEFORE the ingress callback runs')
+  assert.ok(release.indexOf('viewLiveDispose = undefined') < release.indexOf('() => live?.dispose()'),
+    'the ingress slot is retired BEFORE its callback runs')
+  assert.ok(release.indexOf('() => live?.dispose()') < release.indexOf('() => handle?.release()'),
     'the live ingress goes down BEFORE the child generation is released')
-  const live = span('const disposeViewLive = (): void => {', 'const releaseViewHandle')
-  assert.ok(live.includes('handle?.dispose()'), 'the ingress handle is disposed (idempotent)')
 })
 
 test('F2: the runner surface disposal tears the viewer down before the surface/app teardown', () => {
@@ -191,4 +203,64 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
   )
   assert.ok(applicationRuntime.includes('expectedLifetime: RemoteTransportLifetime'),
     'the port contract REQUIRES the expected lifetime')
+})
+
+/**
+ * M3-6 PR3: the child live-ingress disposer is fault-injected through the REAL
+ * owner. The retained child binding must still be released exactly once, the
+ * ingress attempt must precede it, and the collected failure must surface
+ * after both attempts — a second dispose is inert (the plan's D2 form).
+ */
+test('M3-6 PR3: a throwing ingress disposer cannot strand the retained child binding', async () => {
+  const order: string[] = []
+  const ingressError = new Error('ingress dispose failed')
+  const view: ViewerChildView<SessionPresentationEvent> = {
+    childSessionId: 'child-1',
+    parentSessionId: 'parent-1',
+    snapshot: { durableEvents: [], liveInputs: [], activity: 'inactive', cwd: '', revision: undefined },
+    rehydrate: async () => undefined,
+    loadOlder: async () => {},
+    currentActivity: () => 'inactive',
+    subscribe: () => ({
+      dispose() {
+        order.push('ingress')
+        throw ingressError
+      },
+    }),
+    release: () => { order.push('release') },
+  }
+  const childView: ViewerChildSource<SessionPresentationEvent> = {
+    open: async () => view,
+    childWriterSubject: () => undefined,
+  }
+  const surface = {
+    routeSessionEvent: () => {},
+    repaint: () => {},
+    refreshPendingInput: () => {},
+    app: {
+      enterFocusViewerScope: () => {},
+      setViewerMode: () => {},
+    },
+  } as unknown as SurfaceRuntime<SessionPresentationEvent>
+  const viewer = createViewerRuntime<SessionPresentationEvent>({
+    surface,
+    isCleanedUp: () => false,
+    currentSessionId: () => 'parent-1',
+    liveParentSessionId: () => 'parent-1',
+    childView,
+    refreshStatus: () => {},
+    restoreMainTranscriptAnchor: () => {},
+    runDetached: () => {},
+  } satisfies ViewerRuntimeDeps<SessionPresentationEvent>)
+
+  await viewer.enterView('child-1', 'child', 'one-shot', 'parent-1', 'inactive')
+  assert.equal(viewer.isViewing(), true)
+
+  assert.throws(() => viewer.dispose(), (error: unknown) => error === ingressError)
+  assert.deepEqual(order, ['ingress', 'release'],
+    'the binding release runs exactly once after the throwing ingress, and the failure surfaces after both')
+
+  const releases = order.length
+  viewer.dispose()
+  assert.equal(order.length, releases, 'a second dispose does not re-run either release')
 })

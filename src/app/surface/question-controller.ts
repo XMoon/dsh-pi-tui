@@ -40,6 +40,7 @@ import { QuestionAnswerError, QUESTION_BAD_ANSWER, QUESTION_REPLY_QUEUED } from 
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { Diag } from '../../diag.ts'
 import { runDetached } from '../../detached.ts'
+import { runSyncDisposalSteps } from '../../disposal.ts'
 import type { TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
 import type { QuestionFlowDraft } from '../../question.ts'
 import type { QuestionAttentionRow } from '../../task-center-attention.ts'
@@ -205,18 +206,29 @@ export class QuestionSurfaceController {
 
   /** Release every controller-owned registration: the port subscription, the
    *  mounted late-answer panels (their owned abort controllers) and every held
-   *  claim / countdown. */
+   *  claim / countdown. Every owner slot/set is retired before any callback
+   *  runs, so one throwing cleanup cannot strand the remaining owned
+   *  cleanups (M3-6 PR3); the collected failure is surfaced after every
+   *  attempt. */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    this.disposal?.()
+    const disposal = this.disposal
     this.disposal = undefined
-    this.releaseSubscription()
-    for (const entry of this.entries.values()) entry.mounted?.abort()
+    const subscription = this.subscription
+    this.subscription = undefined
+    this.subscribedSessionId = undefined
+    const mounted = [...this.entries.values()].map(entry => entry.mounted)
     this.entries.clear()
     this.attentionListeners.clear()
-    for (const cleanup of [...this.activeCleanups]) cleanup()
+    const cleanups = [...this.activeCleanups]
     this.activeCleanups.clear()
+    runSyncDisposalSteps('question surface disposal', [
+      () => disposal?.(),
+      () => subscription?.(),
+      ...mounted.map(handle => () => handle?.abort()),
+      ...cleanups.map(cleanup => () => cleanup()),
+    ])
   }
 
   /**

@@ -312,6 +312,30 @@ test('OverlayBroker: disposeAll physically unmounts every node without restoring
   assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'])
 })
 
+test('M3-6 PR3: a throwing physical hide cannot strand later hides and still clears the logical graph', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  const c = fakeHandle('c')
+  mountOverlay(broker, a, { nonCapturing: true })
+  mountOverlay(broker, b, { nonCapturing: true })
+  mountOverlay(broker, c, { nonCapturing: true })
+  const failure = new Error('hide failed')
+  b.hide = () => { b.hiddenLog.push('hide'); throw failure }
+
+  assert.throws(() => broker.disposeAll(), (error: unknown) => error === failure,
+    'the collected physical-hide failure is observable')
+  assert.deepEqual(a.hiddenLog, ['hide'], 'the hide before the throwing one ran')
+  assert.deepEqual(b.hiddenLog, ['hide'], 'the throwing hide was attempted')
+  assert.deepEqual(c.hiddenLog, ['hide'], 'the hide AFTER the throwing one still ran')
+  assert.equal(broker.graphState().handles, 0,
+    'the logical graph is emptied in the same batch even though disposeAll throws')
+
+  broker.disposeAll()
+  assert.equal(broker.graphState().handles, 0)
+  assert.deepEqual(a.hiddenLog, ['hide'], 'a second disposeAll hides nothing (inert)')
+})
+
 test('OverlayBroker: detach + rebind preserves topology, visibility, focus intent and z-order', () => {
   const broker = new OverlayBroker()
   const a = fakeHandle('a')
