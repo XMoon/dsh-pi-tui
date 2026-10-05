@@ -651,6 +651,34 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
   }
   life.defer(() => releaseSettlement?.())
 
+  // ONE-TO-ONE recorder over the PRODUCTION port instance the mounted
+  // controller consumes: it observes the exact settlement VALUE the adapter
+  // hands the consumer (and any throw), continuing the original path
+  // unchanged. This is the witness that the adapter did not reclassify a
+  // proven Host settlement — a wrapper at the Host service (or the notice
+  // text) cannot see that, because both are independent of the adapter's own
+  // classification.
+  const productionQuestions = aggregate.backendRuntime.semantics.interaction.questions as unknown as {
+    answerContinued(sessionId: string, callId: string, answer: unknown): Promise<'queued' | 'not-continued'>
+  }
+  const originalAnswerContinued = productionQuestions.answerContinued
+  const settledOutcomes: Array<'queued' | 'not-continued' | { threw: string }> = []
+  productionQuestions.answerContinued = async (
+    sessionId: string, callId: string, answer: unknown,
+  ): Promise<'queued' | 'not-continued'> => {
+    try {
+      // Unbound original + explicit receiver (never `.bind`): the prototype
+      // method must run against the live instance.
+      const outcome = await originalAnswerContinued.call(productionQuestions, sessionId, callId, answer)
+      settledOutcomes.push(outcome)
+      return outcome
+    } catch (error) {
+      settledOutcomes.push({ threw: error instanceof Error ? `${error.name}: ${error.message}` : String(error) })
+      throw error
+    }
+  }
+  life.defer(() => { productionQuestions.answerContinued = originalAnswerContinued })
+
   const vt = new VirtualTerminal(110, 32)
   const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
   life.defer(restoreTerminal)
@@ -750,12 +778,10 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
     return current !== undefined && current !== generationBefore
   }, 20_000)
 
-  // ── Release the proven settlement. The witnesses below are ordered by
-  // authority: the HOST settlement first (the truth under test), then the
-  // authoritative projection convergence, and only then the presentation
-  // outcome (which is allowed to be shown because this surface still owns
-  // the interaction — the retained session across a normal reconnect). The
-  // notice text is deliberately NOT the settlement witness.
+  // ── Release the proven settlement. The witnesses are ordered by authority
+  // and NONE of them is the notice text: the notice is presentation, and the
+  // ownership fence legitimately suppresses it once the projection retires
+  // the entry.
   releaseSettlement?.()
 
   // WITNESS 1 — Host settlement authority: the reply was accepted exactly
@@ -774,13 +800,15 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
   await waitFor('the question form retired after the truthful settlement', () =>
     view().includes('yes') === false, 10_000)
 
-  // WITNESS 3 — presentation-positive (NOT the settlement witness): while
-  // the surface still owns the interaction, the outcome reaches the user
-  // truthfully — either the settlement notice or the authoritative
-  // projection's own queued-reply withdrawal. A surface that had been
-  // retired instead is covered by the different-subject negative in
-  // question-remote-lifecycle.test.ts.
-  await waitFor('the still-owning surface reports the outcome truthfully', () =>
-    noticeHistory.some(text =>
-      text.includes('Answer queued') || text.includes('reply for this question is already queued')), 10_000)
+  // WITNESS 3 — adapter→controller settlement passthrough (the E1 witness):
+  // the production port handed the consumer exactly ONE settlement and it was
+  // the truthful 'queued' — never a transport supersession. Restoring the
+  // post-dispatch generation re-check (the original E1 defect) makes this red,
+  // because the recorded value becomes the thrown SupersededReadError. The
+  // notice text is deliberately NOT asserted here: it is presentation, and
+  // the ownership fence legitimately suppresses it once the projection has
+  // retired the entry (that side is covered by the F3 negatives in
+  // question-remote-lifecycle.test.ts).
+  assert.deepEqual(settledOutcomes, ['queued'],
+    `the controller observed exactly one truthful adapter settlement (no reclassification): ${JSON.stringify(settledOutcomes)}`)
 })

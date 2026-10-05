@@ -684,8 +684,12 @@ export class QuestionSurfaceController {
           'info',
         )
       }
-      // Submitted: the interaction is spent (authority will confirm).
-      this.removeEntry(key, undefined)
+      // Submitted: the interaction is spent (authority will confirm). Delete
+      // only OUR entry: a superseded settlement must never retire a NEWER
+      // entry reconcile created for the same (session, call) after the
+      // queued reply was discarded and the call became answerable again —
+      // that would delete/abort a live form the user is editing.
+      if (this.entries.get(key) === entry) this.removeEntry(key, undefined)
     } catch (error) {
       // A WITHDRAWN/parked form is not an outcome: the owner already decided
       // (authority ended it, the surface is disposing, or the user parked it),
