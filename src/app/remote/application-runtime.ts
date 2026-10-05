@@ -16,11 +16,11 @@
  *
  * The transport disposer owns exactly `clientUi.dispose()` (the M3-6 PR1
  * Client UI subtree: builtins -> extension host -> startup facts) then
- * `backendRuntime.dispose()` then `wire.dispose()` (adapters before Client,
- * Client before Host additive fibers) and is idempotent + error-preserving.
- * It never retires the currently selected Session — that stays `app/session`
- * ownership, and the caller order is `session retirement ->
- * disposeTransport()`.
+ * `presentation.task.dispose()` then `backendRuntime.dispose()` then
+ * `wire.dispose()` (adapters before Client, Client before Host additive
+ * fibers) and is idempotent + error-preserving. It never retires the
+ * currently selected Session — that stays `app/session` ownership, and the
+ * caller order is `session retirement -> disposeTransport()`.
  *
  * The only sanctioned reachability is the internal application
  * runtime-selection seam through `runtime/backend-loader.ts`; tests about
@@ -61,7 +61,7 @@ export interface RemoteApplicationRuntimeOptions {
   readonly promptSerializer?: RemotePromptSerializer
   /**
    * The Client-local UI startup facts (M3-6 PR1): detached
-   * `sessionId`/`resetId`-free plain data the Client UI subtree (extension
+   * `sessionId`/`presetId` plain data the Client UI subtree (extension
    * host + first-party builtins on `wire.client.context`) mounts under.
    * REQUIRED — every Remote aggregate construction states the Client-local
    * startup facts explicitly (runtime-only fixtures pass `{}`).

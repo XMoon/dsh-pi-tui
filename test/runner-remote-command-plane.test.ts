@@ -244,9 +244,9 @@ async function mountRunner(
       }
     })
     await extensionFiber
-    // The test fiber unloads BEFORE the aggregate transport disposal (the
-    // lifecycle deferrals run in reverse registration order).
-    life.defer(() => { void extensionFiber?.dispose() })
+    // The test fiber unloads (AWAITED) BEFORE the aggregate transport
+    // disposal (the lifecycle deferrals run in reverse registration order).
+    life.defer(() => extensionFiber?.dispose())
   }
 
   const vt = new VirtualTerminal(110, 32)

@@ -173,7 +173,7 @@ test('B. a retained Remote Session handle maps to the exact owner and retirement
   await runtime.selected.disposeTransport()
 })
 
-test('C. disposeTransport disposes adapters before the Client and the Client before the Host, idempotently', async (t) => {
+test('C. disposeTransport disposes the Client UI subtree FIRST, then adapters, then the Client, then the Host additive fibers, idempotently', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
@@ -183,9 +183,14 @@ test('C. disposeTransport disposes adapters before the Client and the Client bef
     clientUiStartup: {},
   })
 
-  // The disposal-ORDER proof observes each step's ACTUAL lifetime event:
-  // - adapter disposal: a probe on the semantic bundle's own dispose step
-  //   (the backend adapter caches/subscriptions drop);
+  // The disposal-ORDER proof observes each step's ACTUAL lifetime event with
+  // TRANSPARENT probes on the REAL objects (M3-6 PR1 D8/Must-#9: the Client
+  // UI subtree must be disposed BY disposeTransport itself, strictly before
+  // the presentation task, the backend adapters and the official Client
+  // Context — never left to the Client root's late sweep):
+  // - Client UI subtree: a probe on the real `runtime.clientUi.dispose`;
+  // - presentation task: a probe on the real `runtime.presentation.task.dispose`;
+  // - backend adapters: a probe on the semantic bundle's own dispose step;
   // - Client disposal: an effect disposer registered ON the Client Context
   //   (Cordis runs it during `wire.client.dispose()`), which SAMPLES the M3
   //   Host row presence at that instant;
@@ -195,9 +200,16 @@ test('C. disposeTransport disposes adapters before the Client and the Client bef
   //   transport disposal (must be gone — the Host unwound last).
   const order: string[] = []
   let hostRowAtClientDispose: boolean | undefined
-  const semantics = runtime.backendRuntime.semantics as unknown as { dispose(): void }
-  const originalSemanticsDispose = semantics.dispose.bind(semantics)
-  semantics.dispose = () => { order.push('adapters'); originalSemanticsDispose() }
+  const patchDispose = (label: string, object: { dispose(): unknown }): void => {
+    const original = object.dispose.bind(object)
+    object.dispose = async (...args: unknown[]) => {
+      order.push(label)
+      return (original as (...a: unknown[]) => unknown)(...args)
+    }
+  }
+  patchDispose('client-ui', runtime.clientUi)
+  patchDispose('presentation-task', runtime.presentation.task as unknown as { dispose(): void })
+  patchDispose('backend', runtime.backendRuntime.semantics as unknown as { dispose(): void })
   runtime.wire.client.context.effect(() => () => {
     order.push('client')
     hostRowAtClientDispose = host.ctx.reflect.get('connection') !== undefined
@@ -206,9 +218,14 @@ test('C. disposeTransport disposes adapters before the Client and the Client bef
   await runtime.selected.disposeTransport()
   await runtime.selected.disposeTransport() // idempotent: a second call is a contained no-op
 
-  // The MEASURED order: adapters -> Client -> Host additive fibers.
-  assert.deepEqual(order, ['adapters', 'client'],
-    'the adapter disposal must fire before the Client Context disposal, exactly once each (idempotence)')
+  // The MEASURED order: Client UI -> presentation task -> backend adapters
+  // -> Client Context -> (Host additive fibers last). Every step exactly
+  // once (idempotence): reordering or deleting the clientUi step from
+  // disposeTransport fails this assertion.
+  assert.deepEqual(order, ['client-ui', 'presentation-task', 'backend', 'client'],
+    'the transport disposal must run clientUi -> presentation.task -> backend -> Client, exactly once each (idempotence)')
+  assert.equal(runtime.wire.client.context.get(PI_TUI_EXTENSIONS_SERVICE), undefined,
+    'the Client UI extension service is gone after the transport disposal (the subtree step really ran)')
   assert.equal(hostRowAtClientDispose, true,
     'at Client disposal the M3 Host rows must STILL be present — the Client disposes before the Host additive fibers')
   assert.equal(host.ctx.reflect.get('connection'), undefined,
