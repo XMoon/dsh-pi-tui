@@ -5581,12 +5581,19 @@ mounted fatal:
   Remote runner over the official in-process wire)**:
   - **L6-A** clean HMR unload + same-process remount: observed order
     `surface terminal stop < retirement settled < transport dispose`,
-    transport disposed exactly once, process slot released, a fresh Remote
-    runner mounts and its submission commits durably on the Host.
+    transport disposed exactly once, and each production sub-owner released
+    exactly once (call-through observers on the Client UI subtree, the Remote
+    task watch, the official Client runtime and the Host additive runtime).
+    The process slot was released, a fresh Remote runner mounts in the same
+    process, its submission commits durably on the Host, and the
+    Host-produced model reply renders back through the Remote read on the
+    remounted Client.
   - **L6-B** partial surface disposer failure: the REAL official generation
     unsubscribe is wrapped to release, record and throw; the same run proves
-    the command coordinator disposal (its active reconnect-refresh signal is
-    aborted), later surface/TuiApp cleanup, the exactly-once transport
+    the production `CatalogRefreshCoordinator.dispose` ran exactly once
+    (a call-through prototype observer — the lifecycle/controller signal
+    union alone is not discriminating because bootstrap aborts the lifecycle
+    first), later surface/TuiApp cleanup, the exactly-once transport
     disposal, the released process slot, the logged `surface dispose failed`
     diagnostic, and a same-process replacement runner mount.
   - **L6-C** mounted startup fatal (`TuiApp.prototype.setWheelScrollLines`
@@ -5595,6 +5602,12 @@ mounted fatal:
     error is the fatal reason, the transport disposed exactly once when
     retirement settled, `exit(1)` fired exactly once, and the later fiber
     disposal did not re-run surface cleanup.
+  - **L6-D** a throwing TuiApp-owned aggregate cleanup: `TuiApp.prototype.
+    setSettledQuestionAnswersLookup` throws inside the mounted
+    `SurfaceRuntime.dispose()` batch; the later extension-surface bridge
+    detach still ran exactly once, the transport still disposed exactly once,
+    and the mounted TuiApp still completed final disposal (process slot
+    released).
 - **Owner/component evidence**: `test/disposal.test.ts`;
   `test/viewer-lifecycle-release.test.ts` (throwing ingress still releases
   the retained child binding); `test/command-catalog-reconnect.test.ts`
@@ -5607,15 +5620,20 @@ mounted fatal:
   cleanup); `test/overlay-broker.test.ts` (a throwing physical `hide()` still
   attempts later hides and clears the logical graph);
   `test/surface-lifecycle.test.ts` (TuiApp unstarted final-dispose fault
-  injection keeps the generation retirement; SurfaceRuntime aggregate
-  continuation); `test/process-tui-slot.test.ts` (terminal fail-closed case).
+  injection keeps the generation retirement; a throwing tracked
+  keybinding-editor disposal still releases its siblings; SurfaceRuntime
+  aggregate batch continuation); `test/process-tui-slot.test.ts` (terminal
+  fail-closed case).
 - **Mutation / counterfactual evidence** (each applied locally, verified red,
   then restored): M1 removing the fatal surface cleanup call → L6-C red; M2
   restoring a truncating pre-batch `command.disposeCatalog()` → L6-B red; M3
   force-releasing the process slot after a final-dispose failure →
   `process-tui-slot` fail-closed red; M4 restoring the viewer early-throw →
   the new viewer behavioural case red; M5 starting transport disposal before
-  the retirement settlement → L6-A ordering red.
+  the retirement settlement → L6-A ordering red; M6 removing
+  `coordinator?.dispose()` → L6-B coordinator-observer red; M7 restoring the
+  truncating `SurfaceRuntime.dispose` sequence → L6-D red; M8 restoring the
+  raw tracked-editor for-loop → the new tracked-editor regression red.
 - **Direct**: unchanged — the Direct branch has no Remote selector, transport
   disposal stays the inert no-op, and the shared helper does not import any
   Remote code. PR2 reconnect/write semantics are untouched and their suites

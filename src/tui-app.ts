@@ -19166,9 +19166,11 @@ export class TuiApp {
     // overlay (trackKeybindingEditor also covers panels nested inside the
     // SettingsList submenu) — so the tracking set disposes here, and the
     // panel's own disposed guard makes the later frame-dispose a no-op.
+    // M3-6 PR3: each panel is an INDEPENDENT step — one panel's throwing
+    // dispose cannot strand its siblings.
     const panels = [...this.keybindingEditorPanels]
     this.keybindingEditorPanels.clear()
-    for (const panel of panels) panel.dispose?.()
+    runSyncDisposalSteps('keybinding editor disposal', panels.map(panel => () => panel.dispose?.()))
   }
 
   /** Open the action-first Keyboard Shortcuts Editor in the standard overlay

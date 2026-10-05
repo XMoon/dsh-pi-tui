@@ -256,12 +256,14 @@ test('M3-6 PR3: one final-dispose cleanup failure cannot skip later cleanup or t
 })
 
 /**
- * M3-6 PR3 SurfaceRuntime aggregate continuation. The real owner is exercised
- * unmounted (its `app` slot only exists after a process-terminal mount, which a
- * headless suite must not perform): a throwing extension cleanup must not
- * prevent the LATER extension-surface bridge detach. The app-owned chain
- * continuation is proven by the TuiApp final-dispose case above and by the
- * mounted Remote runner L6 (`runner-remote-shutdown`).
+ * M3-6 PR3 SurfaceRuntime aggregate continuation (SUPPORTING owner-level proof).
+ * The real owner is exercised unmounted: a throwing extension cleanup must not
+ * prevent the LATER extension-surface bridge detach, which pins the aggregate
+ * batch ordering itself. The plan's Step 4 requirement — a throwing
+ * TuiApp/app-owned cleanup must not strand the later plugin/theme/extension
+ * releases ON A MOUNTED surface — is proven decisively by the mounted Remote
+ * runner case `runner-remote-shutdown` L6-D; the sibling TuiApp final-dispose
+ * case above pins the TuiApp-owned batch continuation without a claim.
  */
 test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge detach', () => {
   const surface = createSurfaceRuntime({
@@ -289,4 +291,24 @@ test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge 
 
   surface.dispose()
   assert.equal(detachCalls, 1, 'a second dispose is inert')
+})
+
+test('M3-6 PR3: one throwing tracked keybinding-editor disposal cannot strand its siblings', () => {
+  // Not started: this exercises the final-dispose teardown without claiming the
+  // process slot, so the failing panel can never poison the shared slot (the
+  // same isolation rule as the final-dispose case above).
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const disposed: string[] = []
+  const first = { dispose: () => { disposed.push('first'); throw new Error('first panel dispose failed') } } as never
+  const second = { dispose: () => { disposed.push('second') } } as never
+  app.trackKeybindingEditor(first)
+  app.trackKeybindingEditor(second)
+
+  assert.throws(() => app.dispose(), /first panel dispose failed/)
+  assert.deepEqual(disposed, ['first', 'second'],
+    'the later tracked panel was still disposed after the first threw')
+
+  app.dispose()
+  assert.deepEqual(disposed, ['first', 'second'], 'a second dispose is inert')
 })

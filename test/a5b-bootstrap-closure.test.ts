@@ -729,18 +729,23 @@ test('A5b-3: the command runtime application binding is command-owned', () => {
   const owner = ownerFile('src/app/command/surface.ts')
   assert.match(owner, /bindCommandRuntime\(/u,
     'the command surface owner must own the runtime binding')
-  // A5b-3 review P2: disposal must clear BOTH the coordinator and the refresh
-  // request, so a late `skills/change` (the Direct capability cannot unsubscribe)
-  // cannot reach a disposed coordinator.
+  // A5b-3 review P2 + M3-6 PR3: disposal must retire BOTH the coordinator and
+  // the refresh request through the non-truncating primitive, so a throwing
+  // generation unsubscribe or a late `skills/change` (the Direct capability
+  // cannot unsubscribe) cannot reach a disposed coordinator.
   const disposeAt = owner.indexOf('const disposeCatalog = (): void => {')
   assert.ok(disposeAt > 0, 'the command owner must expose disposeCatalog')
   const disposeBody = owner.slice(disposeAt, owner.indexOf('\n  }', disposeAt))
-  assert.ok(disposeBody.includes('catalogCoordinator?.dispose()'),
-    'disposal must dispose the catalog coordinator')
+  assert.ok(disposeBody.includes('runSyncDisposalSteps('),
+    'disposal attempts every owned step through the non-truncating primitive')
+  assert.ok(disposeBody.includes('const coordinator = catalogCoordinator'),
+    'disposal snapshots the coordinator before retiring the slot')
+  assert.ok(disposeBody.includes('coordinator?.dispose()'),
+    'disposal disposes the catalog coordinator')
   assert.ok(disposeBody.includes('catalogCoordinator = undefined'),
-    'disposal must clear the coordinator reference')
+    'disposal clears the coordinator reference')
   assert.ok(disposeBody.includes('catalogRefreshRequest = undefined'),
-    'disposal must clear the refresh request so a late skills/change is a no-op')
+    'disposal clears the refresh request so a late skills/change is a no-op')
 })
 
 test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read late-bound', () => {

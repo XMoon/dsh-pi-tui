@@ -39,6 +39,7 @@ import { applyRunnerWithRuntime } from '../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride } from '../src/app/application-runtime.ts'
 import type { SessionOwnerRetirement } from '../src/app/session/owner-access.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
+import { CatalogRefreshCoordinator } from '../src/skill-catalog-refresh.ts'
 import { liveTuiCountForTest } from '../src/process-tui-slot.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -119,6 +120,37 @@ function instrumentAggregate(aggregate: RemoteAggregate, observed: string[]): { 
     await originalDispose()
   }
   return { transport }
+}
+
+/** Observed exactly-once releases of the Remote aggregate's sub-owners. */
+interface TeardownCounts {
+  clientUi: number
+  taskWatch: number
+  client: number
+  host: number
+}
+
+/**
+ * Wrap the aggregate's REAL sub-owner disposers (Client UI subtree, Remote
+ * task watch, official Client runtime, Host additive runtime) with
+ * call-through observers, so the L6 teardown proves each production owner was
+ * actually released — not merely that the transport entry was called.
+ */
+function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
+  const counts: TeardownCounts = { clientUi: 0, taskWatch: 0, client: 0, host: 0 }
+  const wrap = (owner: object, key: string, onDispose: () => void): void => {
+    const record = owner as unknown as Record<string, unknown>
+    const original = record[key] as (...args: unknown[]) => Promise<void> | void
+    record[key] = (...args: unknown[]): Promise<void> | void => {
+      onDispose()
+      return original.apply(owner, args)
+    }
+  }
+  wrap(aggregate.clientUi, 'dispose', () => { counts.clientUi += 1 })
+  wrap(aggregate.presentation.task, 'dispose', () => { counts.taskWatch += 1 })
+  wrap(aggregate.wire.client, 'dispose', () => { counts.client += 1 })
+  wrap(aggregate.wire.host, 'dispose', () => { counts.host += 1 })
+  return counts
 }
 
 interface ShutdownFixture {
@@ -227,17 +259,23 @@ test('L6-A: a mounted Remote runner unloads totally and a fresh runner mounts in
   const mainA = 'm3-6-pr3-shutdown-a'
   await hostA.harness.create(SessionId(mainA), { provider: 'smoke', model: 'smoke' }, { cwd: hostA.anchorDir })
   let transportA: { disposals: number } | undefined
+  let teardownA: TeardownCounts | undefined
   const fixtureA = await mountShutdownRunner(life, apps, {
     host: hostA,
     presetId,
     resumeSessionId: mainA,
-    beforeMount: (aggregate) => { transportA = instrumentAggregate(aggregate, observed).transport },
+    beforeMount: (aggregate) => {
+      transportA = instrumentAggregate(aggregate, observed).transport
+      teardownA = instrumentTeardownOwners(aggregate)
+    },
   })
   await waitFor('runner A paint', () => vt.getViewport().join('').length > 0, 20_000)
   assert.equal(liveTuiCountForTest(), 1, 'runner A mounted and owns the process TUI slot')
 
   await fixtureA.runnerFiberDispose()
   assert.equal(transportA?.disposals, 1, 'the selected Remote transport disposes exactly once')
+  assert.deepEqual(teardownA, { clientUi: 1, taskWatch: 1, client: 1, host: 1 },
+    'every Remote owner released exactly once: Client UI subtree, task watch, official Client, Host additive runtime')
   assert.ok(observed.includes('surface-stop'), 'the mounted surface terminal stop was observed')
   assert.ok(observed.includes('retirement-settled'), 'the Session retirement settled')
   assert.ok(observed.includes('transport-dispose'), 'the transport disposal was observed')
@@ -264,6 +302,10 @@ test('L6-A: a mounted Remote runner unloads totally and a fresh runner mounts in
   submitDraft(fixtureB, 'post-remount marker phi')
   await waitFor('runner B write commits on the Host', () => hostUserRows(fixtureB, mainB).some(row => row.includes('post-remount marker phi')), 20_000)
   await waitFor('runner B paints the submission', () => vt.getViewport().join('').includes('post-remount marker phi'), 20_000)
+  // A genuine REMOTE READ on the remounted surface: the Host-produced model
+  // reply reaches the Client transcript through the official wire.
+  await waitFor('runner B renders the Host reply through the Remote read',
+    () => vt.getViewport().join('').includes('remote reply'), 20_000)
 
   await fixtureB.runnerFiberDispose()
   assert.equal(transportB?.disposals, 1, 'runner B disposes its transport exactly once')
@@ -291,6 +333,16 @@ test('L6-B: a throwing real generation unsubscribe cannot truncate the root tear
   const failure = new Error('m3-6-pr3 generation unsubscribe exploded')
   let generationUnsubscribes = 0
   let transport: { disposals: number } | undefined
+  // Observe the PRODUCTION coordinator disposal directly (a call-through
+  // prototype observer — no product hook). The old held-read signal abort was
+  // NOT discriminating: bootstrap aborts the lifecycle BEFORE disposeCatalog,
+  // and the reader's signal is AbortSignal.any([lifecycleSignal, controller]).
+  const originalCoordinatorDispose = CatalogRefreshCoordinator.prototype.dispose
+  const coordinatorDisposals: CatalogRefreshCoordinator[] = []
+  t.mock.method(CatalogRefreshCoordinator.prototype, 'dispose', function (this: CatalogRefreshCoordinator) {
+    coordinatorDisposals.push(this)
+    return originalCoordinatorDispose.call(this)
+  })
   const fixture = await mountShutdownRunner(life, apps, {
     host,
     presetId,
@@ -314,49 +366,20 @@ test('L6-B: a throwing real generation unsubscribe cannot truncate the root tear
   })
   await waitFor('runner paint', () => vt.getViewport().join('').length > 0, 20_000)
 
-  // Arm a hold on the NEXT catalog read, then drive a real Connection
-  // generation change so the command surface's own reconnect refresh is IN
-  // FLIGHT during teardown: its coordinator disposal is then observable
-  // through the abort of the active refresh signal.
-  const commandSource = fixture.aggregate.presentation.commandSource
-  const originalReadCommands = commandSource.readCommands.bind(commandSource)
-  let holdArmed = false
-  let heldSignal: AbortSignal | undefined
-  let releaseHeld: (() => void) | undefined
-  commandSource.readCommands = (sessionId, signal) => {
-    if (!holdArmed) return originalReadCommands(sessionId, signal)
-    holdArmed = false
-    heldSignal = signal
-    return new Promise((resolve) => { releaseHeld = () => resolve([]) })
-  }
-  life.defer(() => releaseHeld?.())
-  const connection = fixture.aggregate.wire.client.connection as unknown as {
-    generation: { getSnapshot(): { readonly id: number } | undefined }
-    reconnect(): void
-  }
-  const generationBefore = connection.generation.getSnapshot()?.id
-  holdArmed = true
-  connection.reconnect()
-  await waitFor('held reconnect catalog read began', () => heldSignal !== undefined, 15_000)
-  assert.equal(heldSignal?.aborted, false, 'the held refresh is in flight before teardown')
-
   await fixture.runnerFiberDispose()
 
   assert.equal(generationUnsubscribes, 1, 'the real generation unsubscribe executed exactly once')
+  assert.equal(coordinatorDisposals.length, 1,
+    'the production catalog coordinator disposed exactly once despite the throwing unsubscribe')
   assert.equal(transport?.disposals, 1, 'the selected transport disposed exactly once')
   assert.ok(observed.includes('surface-stop'), 'later surface/TuiApp cleanup executed')
   assert.ok(observed.includes('retirement-settled'), 'the Session retirement executed/settled')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('retirement-settled'))
   assert.ok(observed.indexOf('retirement-settled') < observed.indexOf('transport-dispose'))
-  assert.equal(heldSignal?.aborted, true,
-    'the command coordinator disposal aborted the active refresh signal (the coordinator disposal executed)')
-  releaseHeld?.()
   assert.equal(liveTuiCountForTest(), 0,
     'TuiApp itself completed and released the process TUI slot despite the surface failure')
   assert.match(diagLogOf(host), /surface dispose failed/,
     'the surface disposal failure was observed/logged')
-  assert.equal(connection.generation.getSnapshot()?.id !== generationBefore, true,
-    'the reconnect really replaced the Connection generation')
 
   // A same-process replacement runner can still mount.
   const hostB = await mountHost(life, presetId)
@@ -425,4 +448,53 @@ test('L6-C: a mounted startup fatal uses the same surface cleanup authority befo
   await fixture.runnerFiberDispose()
   assert.equal(observed.filter(entry => entry === 'surface-stop').length, stopsAfterFatal,
     'a later fiber disposal does not re-run the surface cleanup')
+})
+
+/* ── L6-D ──────────────────────────────────────────────────────────────── */
+
+test('L6-D: a throwing TuiApp-owned aggregate cleanup does not strand the later plugin/theme/extension releases', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'm3-6-pr3-shutdown-preset'
+  const vt = virtualTerminal(life)
+  const { apps } = instrumentTuiApps(life)
+  const observed: string[] = []
+  const originalStop = TuiApp.prototype.stop
+  t.mock.method(TuiApp.prototype, 'stop', function (this: TuiApp) {
+    observed.push('surface-stop')
+    return originalStop.call(this)
+  })
+
+  const host = await mountHost(life, presetId)
+  const mainId = 'm3-6-pr3-shutdown-d-appowned'
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  let transport: { disposals: number } | undefined
+  const fixture = await mountShutdownRunner(life, apps, {
+    host,
+    presetId,
+    resumeSessionId: mainId,
+    beforeMount: (aggregate) => { transport = instrumentAggregate(aggregate, observed).transport },
+  })
+  await waitFor('runner paint', () => vt.getViewport().join('').length > 0, 20_000)
+
+  // Observer on the REAL extension service's bridge detach — the LAST step of
+  // the SurfaceRuntime aggregate batch.
+  const service = fixture.aggregate.clientUi.extensionService as unknown as { detachSurface(surfaceId?: string): void }
+  let detachCalls = 0
+  const originalDetach = service.detachSurface.bind(service)
+  service.detachSurface = (surfaceId?: string): void => { detachCalls += 1; originalDetach(surfaceId) }
+
+  // A REAL TuiApp-owned cleanup step in the aggregate batch. Patched AFTER the
+  // mount (the mount itself calls it through attachInteraction), so only the
+  // teardown call throws.
+  const failure = new Error('m3-6-pr3 app-owned cleanup failed')
+  t.mock.method(TuiApp.prototype, 'setSettledQuestionAnswersLookup', () => { throw failure })
+
+  await fixture.runnerFiberDispose()
+
+  assert.equal(detachCalls, 1, 'the extension bridge detach still ran after the app-owned cleanup threw')
+  assert.equal(transport?.disposals, 1, 'the selected transport still disposed exactly once')
+  assert.ok(observed.includes('surface-stop'), 'the mounted TuiApp still completed its final disposal')
+  assert.equal(liveTuiCountForTest(), 0,
+    'the process TUI slot was released because TuiApp.dispose itself completed')
 })
