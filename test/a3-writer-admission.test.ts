@@ -496,6 +496,8 @@ test('A3-4 static exit: index.ts has ZERO direct writer admission; commands.ts h
 
 test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachment-intake UX fence', () => {
   const commands = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
+  // TS1 moved the attachment-intake fence into the artifacts command owner.
+  const artifacts = readFileSync(new URL('../src/tui/commands/artifacts.ts', import.meta.url), 'utf8')
   // The /skill semantic write enters through withWriter: no gate.busy re-check.
   const skill = span(commands, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
   assert.equal(skill.includes('sessionTransitionPending()'), false,
@@ -503,23 +505,23 @@ test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachmen
   // The only remaining uses are the attachment-intake UX fence (a draft-stage
   // gate, NOT a semantic session write).
   const intake = span(
-    commands,
+    artifacts,
     'const stageAttachmentCommand = (',
-    "\n  registerTuiCommand({\n    name: 'attach'",
+    '\n  const registerCopy = (): void => {',
   )
   const fenced = intake.match(/sessionTransitionPending\(\)/g) ?? []
   assert.equal(fenced.length, 3, 'the attachment intake keeps its three UX checks')
   // The lock scans EVERY production source, not just commands.ts (A5b review
   // finding): deriving `all` from the same file as `fenced` made a second
   // caller in any other module invisible. Every occurrence across src/** must
-  // be in commands.ts, and the only non-fence occurrence there is the
-  // interface declaration.
+  // be the three fence checks in the artifacts owner plus the ONE interface
+  // declaration in src/commands.ts.
   const sites = productionSources().flatMap(({ rel, source }) =>
     Array.from(source.matchAll(/sessionTransitionPending\(\)/g), () => rel),
   )
   assert.deepEqual(
     sites,
-    Array.from({ length: fenced.length + 1 }, () => 'src/commands.ts'),
+    ['src/commands.ts', ...Array.from({ length: fenced.length }, () => 'src/tui/commands/artifacts.ts')],
     'the only sessionTransitionPending() outside the intake fence is the interface declaration in src/commands.ts (whole-tree)',
   )
 })
