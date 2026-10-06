@@ -6,25 +6,26 @@
  * and is never reordered or mutated here. Quick Tasks and the full Task Center
  * use the same component with different layout/default options.
  *
- * @module @xmoon76/dsh-pi-tui/task-panel
+ * @module @xmoon76/dsh-pi-tui/tui/panels/task-panel
  */
 
 import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { componentKeymap } from './keybindings/component-keymap.ts'
-import { color, taskStatusColor } from './theme.ts'
-import { SelectedMarquee } from './tui/components/marquee.ts'
-import { singlePhysicalLine } from './presentation-lines.ts'
+import { componentKeymap } from '../../keybindings/component-keymap.ts'
+import { color, taskStatusColor } from '../../theme.ts'
+import { SelectedMarquee } from '../components/marquee.ts'
+import { singlePhysicalLine } from '../../presentation-lines.ts'
 import {
   isTaskItemActive,
   isTaskItemFailure,
   projectTaskItems,
   type TaskPanelItem,
   type TaskScope,
-} from './task-presentation.ts'
+} from '../../task-presentation.ts'
+import type { TaskBrowserViewState } from '../../app/surface/task-runtime.ts'
 
-export type { TaskPanelItem, TaskScope } from './task-presentation.ts'
+export type { TaskPanelItem, TaskScope } from '../../task-presentation.ts'
 
 /** One physical row of the last painted panel frame (mouse hit-testing).
  * The map is built from the EXACT final rows render() returns (including
@@ -34,19 +35,6 @@ type TaskMouseHit =
   | { kind: 'search' }
   | { kind: 'item'; value: string; index: number; listWidth?: number }
   | { kind: 'inert' }
-
-/** The state carried when Quick Tasks opens the full Task Center. */
-export interface TaskBrowserViewState {
-  readonly mode: 'quick' | 'full'
-  readonly openedFrom: 'quick' | 'command'
-  readonly scope: TaskScope
-  readonly typeFilter: string | null
-  readonly searchMode: boolean
-  readonly searchQuery: string
-  readonly selectedId: string | null
-  readonly expandedIds: ReadonlySet<string>
-  readonly collapsedIds: ReadonlySet<string>
-}
 
 /** Options for {@link TaskBrowserPanel}. */
 export interface TaskPanelOptions {

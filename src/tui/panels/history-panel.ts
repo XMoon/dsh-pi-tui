@@ -31,7 +31,7 @@
  * bumps a generation counter, and only a result whose generation is STILL
  * current is committed — a stale response can never overwrite a fresher
  * query. The debounce is 75ms (local filesystem, plan §15).
- * @module @xmoon76/dsh-pi-tui/history-panel
+ * @module @xmoon76/dsh-pi-tui/tui/panels/history-panel
  */
 
 import { matchesKey } from '@xmoon76/pi-tui'
@@ -39,9 +39,9 @@ import { Input } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import type { HistorySearchResult, HistorySearchSource, HistoryScope } from './history-search.ts'
-import { HISTORY_SEARCH_RESULT_LIMIT } from './history-search.ts'
-import { HISTORY_SEARCH_DEBOUNCE_MS } from './history-search.ts'
+import type { HistorySearchResult, HistorySearchSource, HistoryScope } from '../../history-search.ts'
+import { HISTORY_SEARCH_RESULT_LIMIT } from '../../history-search.ts'
+import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../history-search.ts'
 
 /** Split threshold: at or above this panel width the list and details
  * render side by side (plan §20). */

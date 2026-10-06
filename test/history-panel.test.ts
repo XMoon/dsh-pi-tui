@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { HistoryPanel, HISTORY_PANEL_FOOTER, HISTORY_PANEL_SPLIT_WIDTH, historyOverlayGeometry } from '../src/history-panel.ts'
+import { HistoryPanel, HISTORY_PANEL_FOOTER, HISTORY_PANEL_SPLIT_WIDTH, historyOverlayGeometry } from '../src/tui/panels/history-panel.ts'
 import type { HistorySearchResult, HistorySearchSource } from '../src/history-search.ts'
 import type { HistoryScope } from '../src/history-search.ts'
 
@@ -67,7 +67,7 @@ function row(content: string, ts: number, cwd = '/a', id = content): HistorySear
   return { id, content, cwd, ts, sourceFile: '/a/h.jsonl', sourceByteOffset: 0 }
 }
 
-function makePanel(source: FakeSource, opts: Partial<import('../src/history-panel.ts').HistoryPanelOptions> = {}) {
+function makePanel(source: FakeSource, opts: Partial<import('../src/tui/panels/history-panel.ts').HistoryPanelOptions> = {}) {
   let accepted: string | undefined
   let closed = 0
   const panel = new HistoryPanel({
