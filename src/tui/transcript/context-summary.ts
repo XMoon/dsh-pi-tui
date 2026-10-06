@@ -13,7 +13,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/transcript/context-summary
  */
 
-import { contextFormOf } from '../../context-presentation.ts'
+import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import type { TranscriptMessage } from '../../transcript.ts'
 import type { ContextCluster } from './context-structure.ts'
 

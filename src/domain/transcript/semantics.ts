@@ -1,17 +1,23 @@
 /**
- * Stable semantic classification for the shared transcript projection.
+ * Canonical transcript semantic classification and row-provenance evidence (TS7).
  *
  * Classification is source/kind driven and deliberately ignores display text,
- * tool names, and error wording. Compact and later Work-span projections can
- * consume this vocabulary without rebuilding a second transcript.
- * @module @xmoon76/dsh-pi-tui/transcript-semantics
+ * tool names, and error wording. Compact and later Work-span projections consume
+ * this vocabulary without rebuilding a second transcript.
+ *
+ * The post-turn replay sidecar lives here too: "this row materialized after its
+ * owning turn's `turn/end`" is source-derived semantic provenance consumed by
+ * the ONE grouping eligibility authority AND by the presentation core, so it
+ * cannot live inside the folder without creating a folder <-> grouping value
+ * cycle.
+ * @module @xmoon76/dsh-pi-tui/domain/transcript/semantics
  */
 
 import type {
   TranscriptMessage,
   TranscriptSystemOrigin,
   TranscriptToolOrigin,
-} from './transcript.ts'
+} from './types.ts'
 
 /** The five semantic layers used by the shared transcript projection.
  * `control` is standalone control-plane evidence (slash commands) — never
@@ -117,4 +123,42 @@ export function isSurfacedInteractionToolName(name: string): boolean {
  */
 export function isSurfacedInteractionTool(message: TranscriptMessage): boolean {
   return message.kind === 'tool' && isSurfacedInteractionToolName(message.name) && message.status !== 'running'
+}
+
+/**
+ * Post-turn replay evidence: the rows that MATERIALIZED after their owning
+ * turn's authoritative `turn/end` (weakly held sidecar — the fact dies with
+ * its row). The fold is the ONLY authority that can know this: a row's
+ * `turn`/`kind` alone cannot distinguish a durable row of a settled turn from
+ * a replay artifact that arrived afterwards.
+ *
+ * The provenance is exactly "this row was NEWLY created after the turn
+ * completed" — NEVER "this row was touched by a post-`turn/end` event". A
+ * `tool/result` that finds its own pending/running card still settles that
+ * card normally and leaves it fully legal Action evidence; only a newly
+ * created row (an orphan result or a fresh synthetic call card) earns the
+ * mark.
+ *
+ * Consumers share this ONE predicate so no surface invents its own fence:
+ * - the transcript keeps the row (search / Full / expanded Focus);
+ * - it is never Process aggregation evidence: it is excluded from the Action
+ *   classifier, from Work-span membership, and from consecutive-read
+ *   grouping (a group card is a synthesized object that could otherwise
+ *   launder the provenance back into an aggregate).
+ */
+const postTurnReplayEvidence = new WeakSet<TranscriptMessage>()
+
+/** Whether one row materialized after its owning turn's `turn/end` (see
+ * {@link postTurnReplayEvidence}). Presentation/persistence consumers use
+ * this to keep the row as transcript evidence while excluding it from the
+ * settled turn's Process/Action aggregates. */
+export function isPostTurnReplayEvidence(message: TranscriptMessage): boolean {
+  return postTurnReplayEvidence.has(message)
+}
+
+/** Mark one newly materialized row as post-turn replay evidence
+ * (fold-internal authority — called ONLY where a row is created while its
+ * owning turn is already `completed`). */
+export function markPostTurnReplayEvidence(message: TranscriptMessage): void {
+  postTurnReplayEvidence.add(message)
 }

@@ -23,7 +23,7 @@
  */
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-structure.ts'
-import { classifyTranscriptMessage, isSurfacedInteractionTool } from '../../transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import { isPostTurnReplayEvidence, type TranscriptMessage } from '../../transcript.ts'
 
 /**
