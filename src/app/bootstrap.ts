@@ -20,16 +20,12 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-tool-todo'
-import { selectBlankSessionPreset, sessionPresetOf } from '../runtime/direct/session-preset-direct.ts'
-import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui-settings-direct.ts'
-import type { DefaultModelServiceLike } from '../runtime/direct/model-selection-direct.ts'
-import { rawSelectionFromRequestHeader } from '../model-selection.ts'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -39,16 +35,19 @@ import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-plan-mode'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-goal'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type {} from '@deepseek-ai/dsh-jobs'
-import type { JobId } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
-import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-shell'
 import type {} from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-token-meter'
+import { selectBlankSessionPreset, sessionPresetOf } from '../runtime/direct/session-preset-direct.ts'
+import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui-settings-direct.ts'
+import type { DefaultModelServiceLike } from '../runtime/direct/model-selection-direct.ts'
+import { rawSelectionFromRequestHeader } from '../model-selection.ts'
+import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
 import { createStatusRuntime } from './surface/status-runtime.ts'
@@ -69,9 +68,8 @@ import { createClientToolPresenter } from '../tool-presentation-client.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
 import { parseGitAttributionMode, type GitAttributionState } from '../git-attribution.ts'
 import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
-import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
-import { type SessionStatsFacts, sessionStatsFactsOf } from '../stats.ts'
+import { sessionStatsFactsOf } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
@@ -80,8 +78,7 @@ import type { TuiApp } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
-import { runDetached, runOwned, type OwnedTaskOptions } from '../detached.ts'
-import { runSyncDisposalSteps } from '../disposal.ts'
+import { runDetached, runOwned } from '../detached.ts'
 import { FileHistorySearchSource } from '../history-search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
 import { DraftImageStore } from '../image/draft-store.ts'
@@ -97,13 +94,13 @@ import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from '../steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
-import type {
-  RemoteApplicationOverride,
-  RemoteTransportLifetime,
-} from '../app/application-runtime.ts'
+import type { RemoteApplicationOverride, RemoteTransportLifetime } from '../app/application-runtime.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
+import { installApplicationEventWiring } from './bootstrap/event-wiring.ts'
+import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
+import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
@@ -113,25 +110,17 @@ import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
-import {
-  requireCreated,
-  requireOpened,
-  type CreateSessionRequest,
-  type SessionHandle,
-  type SessionLifecycle,
-} from '../runtime/session-lifecycle-port.ts'
+import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
 import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
-import type {} from '@deepseek-ai/dsh-token-meter'
 import { dangerCommand } from '../command-policy.ts'
 import { resolveInitialCatalog } from '../surface-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
 import { queueTextOf } from '../pending-presentation.ts'
 import { bundleVersion, packageVersion } from '../dsh-version.ts'
-import { workingFromLog } from '../compaction-presentation.ts'
 import { hostRunningProfile, resumeCommand } from '../dsh-profile.ts'
 
 import type { Config } from '../tui-config.ts'
@@ -268,6 +257,24 @@ export function applyRunnerWithRuntime(
    * safety instead of fabricating a mounted-surface cleanup.
    */
   let disposeSurfaceRef: (() => void) | undefined
+
+  /**
+   * The terminal-total fatal catch (TS2 §11): the orchestration is owned by
+   * `app/bootstrap/lifecycle.ts`; the three late-bound owner refs above stay
+   * owned by this composition root and are read through getters, so a failure
+   * before an owner exists keeps its minimal focus/abort safety.
+   */
+  const fatalLifecycle = createFatalLifecycle({
+    diag,
+    clearStartupStatus: () => startupStatus.clear(),
+    logFatal: (message) => { ctx.logger.error(`tui-runner: ${message}`) },
+    writeOutput: (text) => { notificationWriter.write(text) },
+    abortLifecycle: () => lifecycleController.abort(),
+    surfaceCleanup: () => disposeSurfaceRef,
+    retireOwnedSession: () => retireOwnedSessionRef,
+    disposeSelectedTransport: () => disposeSelectedTransportRef,
+    exit,
+  })
 
   const startRunner = async (): Promise<void> => {
     // The TUI required surface is committed to running: synchronous init
@@ -764,55 +771,35 @@ export function applyRunnerWithRuntime(
         'settings', 'skills', 'userQuestions', 'approval', 'permissionPresets',
       ].filter(name => ctx.get(name as never) !== undefined).join(','),
     })
-    /** Resolve the launch composition, falling back to the default on an unknown id. */
-    /**
-     * The branch-neutral launch intent (M3-4 PR2): the Remote branch has no
-     * Direct composition, so it reports the PRESET INTENT alone. The intent
-     * is ALWAYS forwarded to the official `session.create({agentPreset})` —
-     * the HOST stays the single authority (an unknown/broken preset is
-     * refused THERE); the roster preflight below only shapes an EARLY UX
-     * notice, never drops the requested value.
-     */
-    const launchIntentOf = (presetId: string | undefined): { agentPreset?: string } =>
-      presetId === undefined ? {} : { agentPreset: presetId }
-
-    const launchComposition = async (): Promise<{ composition: DirectAgentComposition; failure?: string }> => {
-      if (remoteSources !== undefined) {
-        const presetId = pendingPreset ?? launchPreset
-        const composition = launchIntentOf(presetId)
-        if (presetId !== undefined) {
-          // UX-only preflight (never the authority): a clearly-broken roster
-          // answer warns early; the requested preset still reaches the Host,
-          // whose refusal remains the single create-time authority.
-          const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<{ broken?: string }> } | undefined
-          let broken: string | undefined
-          try {
-            broken = presets === undefined ? undefined : (await presets.resolve(presetId)).broken
-          } catch (error) {
-            const message = safeErrorMessage(error)
-            ctx.logger.warn(`tui-runner: launch preset preflight failed: ${message}`)
-            diag.warn('preset preflight failed', { preset: presetId, error: message })
-          }
-          if (broken !== undefined) {
-            const failure = `preset "${presetId}" may be unavailable (${broken}); the Host will refuse or accept it at create time`
-            ctx.logger.warn(`tui-runner: launch preset preflight: ${failure}`)
-            return { composition: composition as DirectAgentComposition, failure }
-          }
-        }
-        return { composition: composition as DirectAgentComposition }
-      }
-      try {
-        return { composition: await compose(pendingPreset ?? launchPreset) }
-      } catch (error) {
-        const message = safeErrorMessage(error)
-        ctx.logger.warn(`tui-runner: launch preset unavailable: ${message}`)
-        diag.warn('preset unavailable', { preset: launchPreset ?? 'default', error: message })
-        return {
-          composition: await compose(),
-          failure: `preset "${launchPreset}" unavailable; started with the default`,
-        }
-      }
-    }
+    // Session startup/resume/create composition helpers (TS2 §13): the
+    // branch-neutral launch intent/composition, the preset reads, the blank
+    // read and the Remote working-fold memo are owned by
+    // `app/bootstrap/session-startup.ts`; this root injects only the narrow
+    // readbacks (every `ctx.get(...)` Host resolution stays here).
+    const {
+      launchComposition,
+      currentPreset,
+      sessionBlank,
+      currentWorkingFromLog,
+      seedWorkingFold,
+      invalidateWorkingFold,
+    } = createSessionStartupHelpers({
+      isRemote: remoteSources !== undefined,
+      pendingPresetId: () => pendingPreset,
+      launchPresetId: () => launchPreset,
+      resolvePresetRoster: () => ctx.get('agentPresets') as { resolve(id?: string): Promise<{ broken?: string }> } | undefined,
+      warn: (message) => { ctx.logger.warn(message) },
+      diag,
+      composeDirect: compose,
+      currentAgent: () => agentNow(),
+      composedPresetRoster: () => ctx.get('agentPresets') as { composedPreset?: (agentCtx: unknown) => unknown } | undefined,
+      recordedPresetOf: (session) => sessionPresetOf(ctx, session as Parameters<typeof sessionPresetOf>[1]),
+      currentSessionId: () => ownership.currentSessionId(),
+      sessionPresetProjectionOf: (id) => backend.sessionReader.sessionStatus(id)?.preset,
+      sessionBlankOf: (id) => backend.sessionReader.blank(id),
+      generation: () => ownership.generation(),
+      remoteSources,
+    })
 
     // A failed --session resume leaves the surface sessionless (the next
     // input creates a new session); the failure is surfaced as a notify
@@ -985,21 +972,11 @@ export function applyRunnerWithRuntime(
     // quiesce. The publication itself stays SYNCHRONOUS; a sessionless
     // (deferred) startup has nothing to quiesce and must not gain a microtask
     // yield here.
-    const resumeQuiesce = sessionRuntime.publishResumedOwner(handle, (owner) => {
-      // The resume transaction succeeded; the remaining pre-mount wait is
-      // the conversation preparation (whenIdle + the catalog ready
-      // barrier) — the second status stage replaces the first in place
-      // and STAYS until the barrier completes (the catalog prefetch can
-      // take seconds; a cleared line would read as a hang again).
-      startupStatus.show('Preparing conversation…')
-      // The pre-mount whenIdle does NOT observe the lifecycle signal, and
-      // the full surface disposer is not registered yet (the pre-mount
-      // abort path below has not been reached) — an early HMR/app disposal
-      // would otherwise leave this await hanging forever and the
-      // just-created owner would never be retired. Cancel the agent on
-      // abort so whenIdle settles, then the pre-mount abort path below
-      // retires the owner.
-      return selectedRuntime.retirement.whenIdleOrAbort(owner, lifecycleController.signal)
+    const resumeQuiesce = quiesceResumedOwner<SessionOwnerRef>(handle, {
+      publishResumedOwner: (handle, preMountQuiesce) => sessionRuntime.publishResumedOwner(handle, preMountQuiesce),
+      showPreparingStage: () => startupStatus.show('Preparing conversation…'),
+      whenIdleOrAbort: (owner, signal) => selectedRuntime.retirement.whenIdleOrAbort(owner, signal),
+      signal: lifecycleController.signal,
     })
     if (resumeQuiesce !== undefined) await resumeQuiesce
     // Surface catalog resolution BEFORE the TUI mounts (the ready barrier):
@@ -1052,48 +1029,6 @@ export function applyRunnerWithRuntime(
       initialSnapshot = resolution.snapshot
       initialSkills = resolution.skills
       surfaceNotice = resolution.notice
-    }
-    /** The preset the live session runs on, when the deployment composes one.
-     *  Branch-neutral (M3-4 PR5 §3.4): Direct prefers the live composed
-     *  preset (`composedPreset(agent.ctx)` — the actual composition
-     *  authority) with the recorded projection as fallback; Remote reads the
-     *  official `agentPreset` projection through the SAME semantic
-     *  `SessionReader.sessionStatus` port. Sessionless = undefined. */
-    const currentPreset = (): string | undefined => {
-      const agent = agentNow()
-      if (agent !== undefined) {
-        const presets = ctx.get('agentPresets') as {
-          composedPreset?: (agentCtx: unknown) => unknown
-        } | undefined
-        if (typeof presets?.composedPreset === 'function') {
-          try {
-            const composed = presets.composedPreset(agent.ctx)
-            if (typeof composed === 'string') return composed
-          } catch {
-            // During teardown, fall back to the DSH projection read below.
-          }
-        }
-        return sessionPresetOf(ctx, agent.session)
-      }
-      // Remote branch: the official Session projection is the authority (a
-      // sessionless surface answers undefined).
-      const sessionId = ownership.currentSessionId()
-      if (sessionId === undefined) return undefined
-      return backend.sessionReader.sessionStatus(sessionId)?.preset
-    }
-    /** The Host turn-boundary authority's blank state for the live Session —
-     *  the SAME projection the official `agentPresets.select` re-check reads.
-     *  Never derived from the TUI transcript. Branch-neutral (PR5 §3.4): the
-     *  current session id drives the semantic reader, never a Direct-Agent
-     *  prerequisite. */
-    const sessionBlank = (): boolean | undefined => {
-      const agent = agentNow()
-      const sessionId = agent === undefined ? ownership.currentSessionId() : agent.session.id
-      if (sessionId === undefined) return undefined
-      // The Host-authoritative blank read lives BEHIND the semantic Session
-      // reader port (v2 §0.6): the runner no longer knows the Direct
-      // projection name or the turn-boundary reducer.
-      return backend.sessionReader.blank(sessionId)
     }
     // A5b-1: the live-session presentation owner (main transcript/stats folds,
     // the main presentation target, the generation reset and the ONE cold
@@ -1192,7 +1127,6 @@ export function applyRunnerWithRuntime(
      *  currentWorkingFromLog, seeded by the cold hydrate). Every read
      *  validates owner generation+session AND the token: a switch/new/fork
      *  or a same-owner Connection/binding rollover voids the entry. */
-    let remoteWorkingFoldFor: { generation: number; sessionId: string; transportToken: unknown; fold: boolean; proven: boolean } | undefined
     /** The session id one Remote `loadOlder` extension is in flight for (the
      *  history boundary seam coalesces repeated gestures for the SAME subject
      *  into one official page; another subject pages independently). */
@@ -1233,13 +1167,13 @@ export function applyRunnerWithRuntime(
       // on the outcome) — NOT a fresh capture here: a transport rollover
       // between the hydrate's inner check and this seed must leave the entry
       // non-current, so every later read misses it.
-      remoteWorkingFoldFor = {
+      seedWorkingFold({
         generation: initGeneration,
         sessionId,
         transportToken: hydrate.transportToken,
         fold: hydrate.working,
         proven: hydrate.proven,
-      }
+      })
       remoteIngressHandle = remoteSources.liveIngress.subscribe(sessionId, {
         onDurableEvent: (id, event) => {
           surface.routeSessionEvent({ id }, event as SessionEvent)
@@ -1281,7 +1215,7 @@ export function applyRunnerWithRuntime(
           // The old window's working-fold proof is VOID: drop the cache now
           // (initRemoteLiveSurface re-seeds it from the NEW window's fold).
           if (ownership.currentSessionId() !== id || cleanedUp) return
-          remoteWorkingFoldFor = undefined
+          invalidateWorkingFold()
           runDetached('remote window re-hydration', () => initRemoteLiveSurface(id), {
             diag,
             sessionId: () => id,
@@ -1789,83 +1723,31 @@ export function applyRunnerWithRuntime(
       },
     })
 
-    // Idempotent CLIENT-SURFACE teardown: abort lifecycle loads, stop the
-    // TUI. Shared by /exit, the effect cleanup, and the startup-failure
-    // path. The Direct owned-session retirement is a SEPARATE step
-    // (retireOwnedSession below) that runs after the surface stops — diag
-    // stays open until the retirement diagnostics are recorded.
-    const disposeSurface = (): void => {
-      if (cleanedUp) return
-      cleanedUp = true
-      // Fence the completion-notification controller (surface-owned, A4-4):
-      // after teardown a late `agent/status` idle from the old live agent must
-      // never emit a notification into a dead surface (the identity fence drops
-      // every event once the live id is undefined).
-      // M3-6 PR3: ONE ordered non-truncating batch. A throwing sibling cleanup
-      // must never skip a later surface owner, the Session retirement or the
-      // selected transport disposal (the plan's frozen top-level order).
-      runSyncDisposalSteps('surface disposal', [
-        () => surface.setCompletionOwner(undefined),
-        // Disable terminal focus reporting FIRST among the THROWABLE steps —
-        // before any teardown step — so the mode can never leak into the shell
-        // even when a later teardown operation throws (idempotent: a startup
-        // failure that never enabled it writes a harmless no-op).
-        () => surface.disableFocusReporting(),
-        // The DSH SessionWriteLease (kernel flock) is the only cross-process
-        // writer authority: a clean TUI exit needs no TUI-side lock
-        // bookkeeping — the lease is released by the DSH session teardown
-        // (the TUI's physical owner.lock / lease / cooling stack is removed
-        // legacy).
-        () => lifecycleController.abort(),
-        // M3-5 PR2: tear the child viewer down FIRST among the presentation
-        // resources — a mounted viewer owns a client child generation + live
-        // ingress (Remote) and an in-flight open may own a retained generation.
-        // NO painting: the app is going away, and the adapter -> Client disposal
-        // follows this step. Late-bound (`viewerRef`): a startup failure can run
-        // this cleanup before the viewer owner exists (TDZ guard).
-        () => viewerRef?.dispose(),
-        () => draftImages.clear(),
-        () => draftFiles.clear(),
-        // Abort any in-flight catalog refresh: its late result must never
-        // register commands or repaint after the app is gone.
-        () => command.disposeCatalog(),
-        // Release the Plugin Manager install-event subscription at its original
-        // EARLY position (a late install event must never notify/repaint a dying
-        // surface). The subscription is surface-owned (A4-5).
-        () => surface.disposePluginManager(),
-        // PR D2: cancel the deferred initial context measure — a stale
-        // callback must never measure/repaint into the disposed surface.
-        () => status.cancelDeferred(),
-        // M5: release the footer command surface BEFORE the app dies — a
-        // late status-store notification must not refresh into a disposed
-        // surface. The lifecycle abort above already disposes an armed
-        // runner through its own abort listener; the explicit unsubscribe +
-        // dispose keeps the release symmetric with the arm path and also
-        // covers the teardown-before-arm window (both idempotent).
-        () => settings.disposeFooterCommand(),
-        () => localShell.dispose(),
-        // TuiApp.dispose() hides overlays without invoking their user cancel
-        // callbacks. The Task Center / Job viewer resources are surface-owned
-        // (A4-6) and released in their original order: the jobs-event
-        // subscription first (no Job listener may refresh a dying surface), then
-        // the selected-Job observation, then the browser handle/token.
-        () => surface.disposeJobEvents(),
-        () => surface.disposeJobObservation(),
-        () => surface.disposeTaskBrowser(),
-        // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
-        // and the extension surface bridge are released by their surface owner
-        // (A4): the runner steps around this call release only what the runner
-        // still owns.
-        () => surface.dispose(),
-      ])
-      // NOTE: diag.dispose() is NOT here — the Direct owned-session
-      // retirement (retireOwnedSession) records its diagnostics first and
-      // closes diag last (see below).
-    }
+    // The ONE idempotent client-surface teardown + fiber disposer (TS2
+    // §11/§12): the orchestration is owned by `app/bootstrap/lifecycle.ts`;
+    // every released resource is an already-owned callback. The frozen §12
+    // relative order is preserved inside that module.
+    const surfaceLifecycle = createSurfaceLifecycle({
+      diag,
+      isCleanedUp: () => cleanedUp,
+      markCleanedUp: () => { cleanedUp = true },
+      surface,
+      abortLifecycle: () => lifecycleController.abort(),
+      disposeViewer: () => viewerRef?.dispose(),
+      clearDraftImages: () => draftImages.clear(),
+      clearDraftFiles: () => draftFiles.clear(),
+      disposeCommandCatalog: () => command.disposeCatalog(),
+      cancelDeferredStatus: () => status.cancelDeferred(),
+      disposeFooterCommand: () => settings.disposeFooterCommand(),
+      disposeLocalShell: () => localShell.dispose(),
+      retireOwnedSession: sessionRuntime.retireOwnedSession,
+      disposeSelectedTransport,
+      registerDisposal: (dispose) => { ctx.effect(function* () { yield dispose }) },
+    })
     // The terminal-total fatal catch reaches the SAME surface cleanup authority
     // through this ref (M3-6 PR3 D3), assigned now — before `surface.start`
     // and any later startup operation can fail with the surface owner live.
-    disposeSurfaceRef = disposeSurface
+    disposeSurfaceRef = surfaceLifecycle.disposeSurface
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): latch once → dispose/restore the Client surface →
     // synchronously pre-cancel the exact current Direct owner → resume-hint
@@ -1877,7 +1759,7 @@ export function applyRunnerWithRuntime(
     // starts, under the DSH process-shutdown watchdog (see docs/concurrency.md).
     const { requestExit } = createExitController({
       diag,
-      cleanup: disposeSurface,
+      cleanup: surfaceLifecycle.disposeSurface,
       prepareRetirement: sessionRuntime.preCancelOwnedSession,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
@@ -1920,38 +1802,7 @@ export function applyRunnerWithRuntime(
     // teardown is protected, the error is recorded (diag is still open —
     // retireOwnedSession closes it last), and the retirement promise is
     // always returned.
-    const registerRunnerDisposal = (): void => {
-      ctx.effect(function* () {
-        yield () => {
-          try {
-            disposeSurface()
-          } catch (error) {
-            try {
-              diag.error('surface dispose failed', { error: safeErrorMessage(error) })
-            } catch {
-              // No lower sink.
-            }
-          }
-          // M3-4 PR1 teardown order: the session retirement SETTLES first,
-          // then the selected runtime's transport disposer runs and is
-          // AWAITED (a no-op on Direct today) — the fiber unload observes the
-          // full teardown, so a Remote transport graph can never outlive the
-          // unloading fiber or race it. The retirement's settlement is the
-          // returned outcome; a disposal failure is recorded, never swapped
-          // in front of a retirement failure.
-          return sessionRuntime.retireOwnedSession()
-            .then(
-              report => disposeSelectedTransport()
-                .catch(error => { diag.warn('selected transport disposal failed', { error: safeErrorMessage(error) }) })
-                .then(() => report),
-              error => disposeSelectedTransport()
-                .catch(disposeError => { diag.warn('selected transport disposal failed', { error: safeErrorMessage(disposeError) }) })
-                .then(() => { throw error }),
-            )
-        }
-      })
-    }
-    registerRunnerDisposal()
+    surfaceLifecycle.registerRunnerDisposal()
     // The Direct stream adapter keeps active prefixes for Agents that were not
     // being displayed yet; enterView replays this exact-agent baseline before
     // mounting the child surface.
@@ -2846,64 +2697,6 @@ export function applyRunnerWithRuntime(
     // attached EARLIER, before `surface.attachTasks` and the startup
     // `surface.refreshPendingInput()` calls, because the A4-4/A4-8 surface
     // methods read the source during startup.
-    /** The compaction settle's log-end working read: the runner owns the
-     *  live-session log read; the surface only decides WHEN the settle
-     *  re-measures. */
-    const currentWorkingFromLog = (): boolean => {
-      const agent = agentNow()
-      if (agent !== undefined) return workingFromLog(agent.session.snapshotEvents())
-      // Remote branch: the working fact folds from the CURRENT official
-      // window; a bounded window that cannot prove a boundary falls back to
-      // the exact binding's official `running` bit (never a guess).
-      if (remoteSources === undefined) return false
-      const sessionId = ownership.currentSessionId()
-      if (sessionId === undefined) return false
-      // The CURRENT official window is the working-fold authority; a window
-      // that cannot prove a boundary falls back to the exact binding's
-      // official `running` bit (never a guess, never the rendered rows).
-      // The refresh is detached (failure keeps the last-known fold; the
-      // synchronous `running` read below remains the immediate answer).
-      // The proof hierarchy matches the presentation owner's cold-hydrate
-      // contract (test/remote-working-fold-equivalence.test.ts): a COMPLETE
-      // window (hasMore=false, including the EMPTY window) ALWAYS prefers
-      // the fold - only a TRUNCATED window defers to the official running
-      // bit. The cache is keyed by ownership generation + session id, so a
-      // stale fold never crosses an owner change; the async refresh commits
-      // only while the same generation/session still owns the surface.
-      const generation = ownership.generation()
-      const transportToken = remoteSources.sessionFacts.captureTransportToken(sessionId)
-      const cached = remoteWorkingFoldFor
-      // EVERY cache read validates BOTH identities: the owner (generation +
-      // session) AND the transport token the entry was captured under (a
-      // same-owner Connection/binding rollover voids the old window's proof).
-      const cacheValid = cached !== undefined
-        && cached.generation === generation
-        && cached.sessionId === sessionId
-        && remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, cached.transportToken)
-      const provenForThisOwner = cacheValid && cached!.proven
-      runDetached('remote working fold', async () => {
-        const snapshot = await remoteSources.presentationReader.read(sessionId)
-        if (snapshot === undefined) return
-        // Fence the cache commit: a settled read for a replaced owner must
-        // not mutate the shared slot. The fence covers BOTH identities: the
-        // ownership generation AND the Remote transport token (a
-        // Connection/binding rollover without a TUI owner commit invalidates
-        // the pending answer too).
-        if (ownership.generation() !== generation || ownership.currentSessionId() !== sessionId) return
-        if (!remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, transportToken)) return
-        remoteWorkingFoldFor = {
-          generation,
-          sessionId,
-          transportToken,
-          fold: !snapshot.hasMore
-            ? workingFromLog(snapshot.durableEvents)
-            : (remoteSources.sessionFacts.running(sessionId) ?? false),
-          proven: !snapshot.hasMore,
-        }
-      }, { diag, sessionId: () => sessionId })
-      if (provenForThisOwner) return cached!.fold
-      return remoteSources.sessionFacts.running(sessionId) ?? (cacheValid && cached!.proven ? cached!.fold : false)
-    }
     /** Persist one completed turn. Direct keeps its durability hint; the
      *  Remote branch is a DELIBERATE no-op (plan §7.9: no public Client
      *  flush verb exists — the Host owns durability; never a hidden Host
@@ -2923,11 +2716,12 @@ export function applyRunnerWithRuntime(
         recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
       })
     }
-    // Direct branch: the Host firehose registration (Remote durable events
-    // arrive through the eventSource ingress instead — never both).
-    if (remoteSources === undefined) {
-      ctx.on('session/event', (session, event) => surface.routeSessionEvent(session, event))
-    }
+    // The six application-level Host subscriptions (TS2 §10): installation is
+    // owned by `app/bootstrap/event-wiring.ts`; each handler stays a thin
+    // delegation into the surface-owned routing methods. The Direct-only
+    // durable/runtime channels and the capability-optional refresh
+    // subscriptions keep their existing branch split.
+    installApplicationEventWiring({ ctx, direct: remoteSources === undefined, surface })
     // Session v2 live assistant streams: the TRANSIENT plane
     // (`agent/assistant-stream` frames mapped through the neutral port).
     // Live model output never rides the durable log; the runner routes the
@@ -2954,45 +2748,6 @@ export function applyRunnerWithRuntime(
       assistantStreamBaselineFor = assistantStreamHandle.baselineFor
       lifecycleController.signal.addEventListener('abort', assistantStreamHandle, { once: true })
     }
-    // Subagent lifecycle events drive the continuable-children half of the
-    // dock badge (they never register jobs). The events are scoped by the
-    // delegating parent, but an UNTAGGED listener (this runner) receives
-    // every agent-scoped event — including nested descendants' — so no
-    // reachability caveat applies; the tool/call fallback stays as a
-    // redundant safety net. These are CATALOG events: membership/tree may
-    // have changed, so they re-list (A4-7 surface routing).
-    //
-    // M3-5 PR2: these are DIRECT Host runtime channels. The Remote Task Center's
-    // invalidation is observable-driven through the official Client model
-    // (`sessions.list` + `jobs.state`, wired at `attachTasks`), so a Host event
-    // must never double as the Remote authority.
-    if (remoteSources === undefined) {
-      ctx.on('subagent/start', () => surface.routeSubagentLifecycle())
-      ctx.on('subagent/end', () => surface.routeSubagentLifecycle())
-      // `agent/status` is the LIVE runtime channel: a child's driver transition
-      // (running ↔ idle) repaints the task browser and the badge WITHOUT a
-      // re-listing — membership changes come only from the lifecycle events, and
-      // `listDescendants().activity` is store-presence, never execution state).
-      // The MAIN agent's transitions feed the completion-notification controller
-      // (the authoritative settled boundary — running → idle on the SAME live
-      // agent; children never notify). A4-7: the membership gate, the
-      // completion-controller feed and the pending-input microtasks are
-      // surface-owned (`surface.routeAgentStatus`); the completion-identity
-      // provider stays here.
-      ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))
-    }
-    // Provider-topology and credential events refresh the footer model row
-    // and the welcome card: a /login /logout /add-provider (or an external
-    // settings.yaml / .credentials.yaml edit) changes the live provider /
-    // model surface, and the status line must not keep showing a stale
-    // selection. All three events are capability-optional: an absent llm /
-    // settings / credentials service never mounts them, and a throwing
-    // listener is contained by the event bus (the refresh is best-effort).
-    // A4-7: the refresh routing (the cleanup fence, the namespace filter and
-    // the refresh coordination) is surface-owned; the registrations and the
-    // credential subscription disposal stay runner-owned.
-    ctx.on('llm/adapters-updated', () => surface.routeProviderRefresh())
-    ctx.on('settings/document-updated', (ns) => surface.routeSettingsRefresh(ns))
     // The credential event wiring is the config port's (migration M1.9):
     // reference- and record-updated both change the same surface. The
     // subscription is DISPOSED on teardown — a remount/HMR must never
@@ -3015,153 +2770,5 @@ export function applyRunnerWithRuntime(
     })
   }
 
-  /**
-   * Terminal-total final catch of the startup lifecycle root: error
-   * observation, logging, abort, dispose and exit are each individually
-   * protected, so a hostile rejection or a throwing dependency can never skip
-   * the teardown or leak a rejection from this discarded chain.
-   */
-  const handleStartupFailure = async (error: unknown): Promise<void> => {
-    const message = safeErrorMessage(error)
-    // Release the shared terminal row BEFORE the first log line. The pre-mount
-    // status owns the current row, and a TTY shares one cursor between stdout
-    // and stderr: logging first would append the failure to `Starting DSH…`
-    // (or `Resuming session…`/`Preparing conversation…`), and the abort
-    // listener's later clear would then erase part of that error line. This is
-    // the same "clear the status, then write the log" rule the resume-failure
-    // path already follows; here it also covers a body failure that threw
-    // before its own stage cleanup ran.
-    // Contained like every other step of this terminal root: the status writer
-    // is an injected output seam with NO never-throws contract (and the Loader
-    // barrier's own `finally` clear can land here too), so a throwing clear must
-    // not reject this discarded `.catch` chain — that would skip the logs, the
-    // abort, the owner retirement and `exit(1)`.
-    try {
-      startupStatus.clear()
-    } catch {
-      // A broken status stream must not block the teardown.
-    }
-    try {
-      ctx.logger.error(`tui-runner: ${message}`)
-    } catch {
-      // The cordis logger must not block the teardown.
-    }
-    try {
-      diag.error('fatal', { error: message })
-    } catch {
-      // A throwing diagnostics channel must not block the teardown.
-    }
-    // Startup failure: cancel every in-flight lifecycle load, then tear
-    // down. (The runner-internal cleanup() never ran — the body threw.)
-    // The pre-mount status line has already been cleared above; the lifecycle
-    // abort listener's clear is idempotent.
-    // M3-6 PR3 D3: a startup failure AFTER the surface owner exists runs the
-    // SAME cleanup authority the fiber disposer uses (`disposeSurface`), which
-    // itself disables terminal focus reporting and aborts the lifecycle before
-    // its own throwable steps. Before the owner exists (`disposeSurfaceRef`
-    // undefined — a failure during the resume/settings/migration barrier) the
-    // minimal focus/abort safety is retained here: the fatal catch must never
-    // assume a mounted surface.
-    const surfaceCleanup = disposeSurfaceRef
-    if (surfaceCleanup !== undefined) {
-      try {
-        surfaceCleanup()
-      } catch (cleanupError) {
-        // Cleanup errors are secondary diagnostics; they must never replace
-        // the fatal root or block the retirement/exit below.
-        try {
-          diag.error('surface dispose failed', { error: safeErrorMessage(cleanupError) })
-        } catch {
-          // A throwing diagnostics channel must not block the teardown.
-        }
-      }
-    } else {
-      // Terminal focus reporting (CSI ? 1004) may already be enabled when
-      // the body threw BEFORE the surface owner existed — disable it here so
-      // the mode never leaks into the shell on the startup-failure path
-      // (idempotent when the mount never ran; the guarded writer swallows
-      // broken-stream errors, a synchronous throw is contained).
-      try {
-        notificationWriter.write(DISABLE_FOCUS_REPORTING)
-      } catch {
-        // The stream may already be gone during the fatal path.
-      }
-      try {
-        lifecycleController.abort()
-      } catch {
-        // The abort must not block dispose/exit.
-      }
-    }
-    // A startup failure AFTER the Direct owner was created (the resume
-    // succeeded, then a later initialization threw) must still retire the
-    // owned session — the SAME memoized teardown the fiber disposer uses.
-    // The wait is BOUNDED: a busy LLM could hang the retirement's whenIdle,
-    // and the fatal exit must never wait unboundedly in front of appExit
-    // (the same constraint as the interactive exit). When the fiber
-    // disposer is registered, the appExit disposal below joins the same
-    // memoized promise under the DSH process-shutdown watchdog; when it is
-    // NOT registered (a pre-mount failure), this bounded wait is the only
-    // window the retirement gets before the process exits — the bound is
-    // generous because the retirement is cancel-first and a healthy
-    // teardown settles in milliseconds. diag is closed by the
-    // retirement's own finalizer (or by the no-owner branch below).
-    try {
-      let retirementSettled = false
-      // The retirement coordinator covers MORE than the current Direct owner:
-      // it also drains parked owners and pending forks (the same facts the
-      // pre-mount abort path checks). Running it whenever it exists — never
-      // gating it on a Direct-handle owner-presence check — keeps those
-      // states from being falsely declared settled (a parked-owner drain is
-      // still a retirement the transport disposal must not race).
-      const retirement = retireOwnedSessionRef?.()
-      if (retirement !== undefined) {
-        let timer: NodeJS.Timeout | undefined
-        try {
-          await Promise.race([
-            retirement.finally(() => { retirementSettled = true }),
-            new Promise<void>(resolve => { timer = setTimeout(resolve, 2000) }),
-          ])
-        } finally {
-          if (timer !== undefined) clearTimeout(timer)
-        }
-      } else {
-        // The coordinator is defined BEFORE any owner can exist (see the
-        // hoisted declaration); an undefined coordinator means the startup
-        // root never reached the session runtime — nothing to retire.
-        diag.dispose()
-        retirementSettled = true
-      }
-      // M3-4 PR1 ordering guard: the selected transport disposes ONLY after
-      // the session retirement SETTLED. A timed-out fatal retirement leaves
-      // the transport undisposed (the process-exit watchdog owns the rest)
-      // rather than racing Client/Host disposal against the still-running
-      // retirement — plan §4: retirement -> transport disposal, never the
-      // reverse. Direct is a no-op either way.
-      if (retirementSettled) {
-        try {
-          await disposeSelectedTransportRef?.()
-        } catch {
-          // The last disposal attempt; never block the fatal exit.
-        }
-      }
-    } catch {
-      // TDZ (startup failed before the live-owner declarations ran — no
-      // owner existed then either) or a synchronous retirement failure:
-      // never block the fatal exit. The transport disposal is skipped for
-      // the same ordering reason — an unknown retirement state must not be
-      // raced by transport disposal.
-      try {
-        diag.dispose()
-      } catch {
-        // The dispose must not block the process exit.
-      }
-    }
-    try {
-      exit(1)
-    } catch {
-      // The last step; there is no lower sink.
-    }
-  }
-
-  void startRunner().catch(handleStartupFailure) // allowlist: startup lifecycle root — see AGENTS.md
+  void startRunner().catch(fatalLifecycle.handleStartupFailure) // allowlist: startup lifecycle root — see AGENTS.md
 }

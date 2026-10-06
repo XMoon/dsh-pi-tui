@@ -371,20 +371,31 @@ test('TUPLE SETTLE: settling an attempt retires its tuple, so a later chunk may 
 
 test('the compaction cache SEED uses the hydrate outcome token, never a fresh capture (source lock)', async () => {
   // The presentation-level regression proves the outcome carries the fenced
-  // token; this locks the CONSUMER side: the bootstrap seed must stamp the
-  // entry with `hydrate.transportToken`. A fresh `captureTransportToken`
-  // there would let a post-fence rollover stamp the OLD fold as CURRENT.
+  // token; this locks the CONSUMER side: the composition root's seed stamp must
+  // carry `hydrate.transportToken`. A fresh `captureTransportToken` there would
+  // let a post-fence rollover stamp the OLD fold as CURRENT. TS2 §13 moved the
+  // fold's STORAGE into `app/bootstrap/session-startup.ts`
+  // (`seedWorkingFold`), but the seed site — the fact this lock is about — is
+  // still the composition root.
   const { readFileSync } = await import('node:fs')
   const bootstrap = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
-  const seedStart = bootstrap.indexOf('remoteWorkingFoldFor = {')
+  const seedStart = bootstrap.indexOf('seedWorkingFold({')
   assert.ok(seedStart >= 0, 'the seed site exists')
-  const seed = bootstrap.slice(seedStart, bootstrap.indexOf('}', seedStart) + 1)
+  const seedEnd = bootstrap.indexOf('})', seedStart)
+  assert.ok(seedEnd > seedStart, 'the seed entry literal is closed')
+  const seed = bootstrap.slice(seedStart, seedEnd + 2)
   assert.ok(seed.includes('transportToken: hydrate.transportToken'),
     'the seed stamps the token the HYDRATE was fenced under')
   assert.ok(!seed.includes('captureTransportToken'),
     'the seed must NOT re-capture the transport identity at seed time')
   assert.ok(seed.includes('generation: initGeneration') && seed.includes('sessionId,'),
     'the owner fence travels with the seed')
+  // The storage itself must be the ONE helper-owned slot, fed only by that seed.
+  const startup = readFileSync(new URL('../src/app/bootstrap/session-startup.ts', import.meta.url), 'utf8')
+  assert.equal(startup.split('let remoteWorkingFoldFor').length - 1, 1,
+    'the working-fold cache has exactly one owning slot')
+  assert.equal(startup.split('remoteWorkingFoldFor = undefined').length - 1, 1,
+    'the slot is cleared by exactly one invalidator')
 })
 
 test('a projection change reaches the sink through the per-key faces, coalesced, and a stale generation detaches', async () => {

@@ -23,6 +23,9 @@ export function productionScriptKind(rel: string): ts.ScriptKind {
   return rel.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
 }
 
+/** This repository root. */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
 /**
  * The A5b owner surface: the composition surface (plan A5 §22) PLUS the
  * application modules the A5b slices extract bootstrap responsibilities into
@@ -62,10 +65,33 @@ export interface OwnerModule {
   readonly role: OwnerRole
 }
 
+/** The bootstrap composition-helper directory (the TS2 zone). */
+const BOOTSTRAP_ZONE = 'src/app/bootstrap'
+
+/**
+ * Every `src/app/bootstrap/**` composition helper, sorted deterministically. The
+ * zone is directory-defined (plan §7), so a new helper joins the aggregate owner
+ * surface automatically instead of escaping its bag/single-owner locks.
+ */
+function bootstrapHelperModules(): OwnerModule[] {
+  return readdirSync(join(ROOT, BOOTSTRAP_ZONE), { withFileTypes: true })
+    .filter(entry => entry.isFile() && PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension)))
+    .map(entry => entry.name)
+    .sort()
+    .map(name => ({ rel: `${BOOTSTRAP_ZONE}/${name}`, role: 'composition' as const }))
+}
+
 /** The explicit A5b owner-module set, in composition order. */
 export const OWNER_MODULES: readonly OwnerModule[] = [
   { rel: 'src/index.ts', role: 'composition' },
   { rel: 'src/app/bootstrap.ts', role: 'composition' },
+  // TS2: the composition zone is `src/app/bootstrap.ts` + every
+  // `src/app/bootstrap/**` wiring helper. The helper list is read from disk (the
+  // zone is defined by DIRECTORY, plan §7), so a newly extracted helper is
+  // covered by the aggregate `ownerSource()`/`ownerOccurrences()` locks — the
+  // "no universal dependency bag in the composition zone" invariant (plan §20)
+  // fails for a bag declared in ANY bootstrap module.
+  ...bootstrapHelperModules(),
   // A4-6 / A5b-6: the mounted-surface owner; the A5b-6 closure moved the
   // Task-Center jobs-read retention policy into it (plan §7.6.2), so its
   // ownership location is now locked from the A5b owner surface.
@@ -89,8 +115,6 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   { rel: 'src/app/surface/application-events.ts', role: 'owner' },
   { rel: 'src/app/surface/client-actions.ts', role: 'owner' },
 ] as const
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 function read(rel: string): string {
   const path = join(ROOT, rel)

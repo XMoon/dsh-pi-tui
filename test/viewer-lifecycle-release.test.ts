@@ -26,6 +26,7 @@ import {
 } from '../src/app/surface/viewer-runtime.ts'
 import type { SurfaceRuntime } from '../src/app/surface/runtime.ts'
 import type { SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
+import { compositionSource } from './support/composition-surface.ts'
 
 const viewerSource = readFileSync(
   new URL('../src/app/surface/viewer-runtime.ts', import.meta.url),
@@ -94,14 +95,23 @@ test('F2: the viewer dispose drops the ingress BEFORE the child reference, exact
 })
 
 test('F2: the runner surface disposal tears the viewer down before the surface/app teardown', () => {
-  const disposal = span('const disposeSurface = (): void => {', 'const registerRunnerDisposal', bootstrapSource)
-  const viewerDisposeAt = disposal.indexOf('viewerRef?.dispose()')
+  // TS2 §11 moved the idempotent client-surface teardown into the bootstrap
+  // composition zone (`app/bootstrap/lifecycle.ts`), which now receives an
+  // explicit `disposeViewer` seam. The ordering invariant is unchanged, and the
+  // late-binding half is asserted on the seam's provider: a startup failure can
+  // run this teardown before the viewer owner exists, so it must never capture a
+  // `viewer` value (TDZ) — it reads `viewerRef` at call time.
+  const zone = compositionSource()
+  const disposal = span('const disposeSurface = (): void => {', 'const registerRunnerDisposal', zone)
+  const viewerDisposeAt = disposal.indexOf('() => disposeViewer(),')
   const surfaceDisposeAt = disposal.indexOf('surface.dispose()')
   assert.ok(viewerDisposeAt >= 0, 'the runner must release the mounted/pending viewer on surface disposal')
   assert.ok(surfaceDisposeAt > viewerDisposeAt,
     'the viewer (client child generation + ingress) must go down before the surface/app and the Client Context')
   assert.ok(!disposal.includes('viewer.dispose()'),
-    'the closure must use the late-bound `viewerRef` (a startup failure can run this before the owner exists)')
+    'the teardown must go through the late-bound seam, never a captured viewer')
+  assert.equal(zone.split('disposeViewer: () => viewerRef?.dispose(),').length - 1, 1,
+    'the viewer seam must read the late-bound `viewerRef` exactly once')
 })
 
 test('F7: the Remote image read fails closed without a captured display subject, never late-selecting one', () => {

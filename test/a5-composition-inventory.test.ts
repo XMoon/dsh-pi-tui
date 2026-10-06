@@ -386,12 +386,12 @@ test('A5: the composition-root construction calls occur only in the composition 
 
 /** The composition root's Host subscriptions: event name -> its ONE owner. */
 const HOST_SUBSCRIPTIONS: Readonly<Record<string, string>> = {
-  'session/event': 'src/app/bootstrap.ts',
-  'subagent/start': 'src/app/bootstrap.ts',
-  'subagent/end': 'src/app/bootstrap.ts',
-  'agent/status': 'src/app/bootstrap.ts',
-  'llm/adapters-updated': 'src/app/bootstrap.ts',
-  'settings/document-updated': 'src/app/bootstrap.ts',
+  'session/event': 'src/app/bootstrap/event-wiring.ts',
+  'subagent/start': 'src/app/bootstrap/event-wiring.ts',
+  'subagent/end': 'src/app/bootstrap/event-wiring.ts',
+  'agent/status': 'src/app/bootstrap/event-wiring.ts',
+  'llm/adapters-updated': 'src/app/bootstrap/event-wiring.ts',
+  'settings/document-updated': 'src/app/bootstrap/event-wiring.ts',
 }
 
 /**
