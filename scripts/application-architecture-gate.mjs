@@ -282,6 +282,21 @@ export const ARCHITECTURE_RULES = [
     forbids: (resolved) => isBootstrapCompositionFile(resolved),
   },
   {
+    // TS4: the TUI implementation layer (`src/tui/**`) may be selected only by
+    // the composition zone. Application owners consume semantic contracts and
+    // injected narrow factories (`app/surface/plugin-manager-runtime` takes a
+    // panel FACTORY, never the panel module), so a concrete TUI import from an
+    // app owner is an inverted dependency. `src/app/bootstrap.ts` and
+    // `src/app/bootstrap/**` are exempt because wiring the concrete Client/TUI
+    // implementation is exactly what the composition zone does.
+    id: 'app-imports-tui',
+    message:
+      'src/app/** outside the bootstrap composition zone must not import src/tui/** (app owners consume '
+      + 'semantic contracts / injected factories; the composition zone selects concrete TUI implementations)',
+    applies: (srcRel) => srcRel.startsWith('app/') && !isBootstrapCompositionFile(srcRel),
+    forbids: (resolved) => resolved.startsWith('tui/'),
+  },
+  {
     // TS1 broadens the v1 command-layer rule to the whole long-lived TUI layer
     // (`src/tui/**`). `src/commands.ts` stays in scope as the TUI command
     // layer's transitional facade/coordinator: it owns the dynamic skill

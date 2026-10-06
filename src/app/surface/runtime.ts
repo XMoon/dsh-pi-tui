@@ -137,7 +137,7 @@ import {
   type SurfaceExtensionService,
   type SurfaceSeamDeps,
 } from './extension-runtime.ts'
-import { createPluginManagerRuntime, type PluginManagerAttachDeps, type SurfacePluginManager } from './plugin-manager-runtime.ts'
+import { createPluginManagerRuntime, type PluginManagerAttachDeps, type PluginManagerPanelFactory, type SurfacePluginManager } from './plugin-manager-runtime.ts'
 import { createInteractionRuntime, type SurfaceInteractionDeps } from './interaction-runtime.ts'
 import {
   createTaskRuntime,
@@ -228,6 +228,12 @@ export interface SurfaceRuntimeOptions {
   /** The persisted notification settings at startup (parsed by the owner). */
   readonly notificationMode: string | undefined
   readonly notificationMethod: string | undefined
+  /**
+   * The concrete Plugin Manager terminal panel factory (TS4 §8/§10): the
+   * composition zone selects the TUI implementation and injects it here, so no
+   * application owner imports a `tui/**` path.
+   */
+  readonly createPluginManagerPanel: PluginManagerPanelFactory
 }
 
 /** The surface owner the runner/bootstrap consumes. */
@@ -439,6 +445,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const pluginManager = createPluginManagerRuntime({
     mounted: () => mounted(),
     service: () => extension.service(),
+    createPanel: options.createPluginManagerPanel,
   })
   // A4-7 presentation event routing (plan §16): the injected routing source the
   // router and this aggregate's own pending-input/search coordination read. The

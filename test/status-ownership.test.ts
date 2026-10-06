@@ -25,6 +25,7 @@ import test from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { createSurfaceRuntime } from '../src/app/surface/runtime.ts'
+import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import type { AccessStatus } from '../src/domain/status/types.ts'
 
@@ -51,6 +52,7 @@ function surfaceOwner() {
     notificationWriter: { write: () => {} },
     notificationMode: undefined,
     notificationMethod: undefined,
+    createPluginManagerPanel,
   })
 }
 

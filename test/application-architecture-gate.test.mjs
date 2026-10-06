@@ -962,6 +962,40 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
   }
 })
 
+test('app owners must not import the TUI implementation layer (TS4 §11/§12)', () => {
+  // The composition zone is the ONLY place that selects concrete TUI
+  // implementations; every other application owner consumes semantic contracts
+  // and injected narrow factories. Type-only imports count.
+  const cases = [
+    ['app/surface/plugin-manager-runtime.ts', '../../tui/plugin-manager/panel.ts', 'tui/plugin-manager/panel.ts'],
+    ['app/surface/task-runtime.ts', '../../tui/panels/task-panel.ts', 'tui/panels/task-panel.ts'],
+    ['app/session/runtime.ts', '../../tui/pickers/model-picker.ts', 'tui/pickers/model-picker.ts'],
+  ]
+  for (const [file, specifier, target] of cases) {
+    const valueImport = findViolations([entry(file, `import { x } from '${specifier}'\n`), entry(target, 'export const x = 1\n')])
+    assert.equal(valueImport.length, 1, `${file} -> ${specifier} must be rejected`)
+    assert.equal(valueImport[0].rule, 'app-imports-tui')
+    const typeImport = findViolations([entry(file, `import type { X } from '${specifier}'\n`), entry(target, 'export type X = 1\n')])
+    assert.equal(typeImport.length, 1, `${file} -> ${specifier} (type-only) must be rejected too`)
+    assert.equal(typeImport[0].rule, 'app-imports-tui')
+  }
+  // The composition zone MAY wire concrete TUI implementations.
+  const allowed = [
+    ['app/bootstrap.ts', '../tui/plugin-manager/panel.ts', 'tui/plugin-manager/panel.ts'],
+    ['app/bootstrap/lifecycle.ts', '../../tui/plugin-manager/panel.ts', 'tui/plugin-manager/panel.ts'],
+    // The reverse direction stays open: a TUI module may consume application
+    // contracts (it is the presentation layer's input).
+    ['tui/pickers/model-picker.ts', '../../app/command/model-selection.ts', 'app/command/model-selection.ts'],
+  ]
+  for (const [file, specifier, target] of allowed) {
+    assert.deepEqual(
+      findViolations([entry(file, `import { x } from '${specifier}'\n`), entry(target, 'export const x = 1\n')]),
+      [],
+      `${file} -> ${specifier} must stay allowed`,
+    )
+  }
+})
+
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
   const specs = parseValueDynamicImports(
     [

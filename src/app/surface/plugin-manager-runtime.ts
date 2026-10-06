@@ -1,12 +1,13 @@
 /**
- * The surface ↔ Plugin Manager lifecycle glue (TS3 §33).
+ * The surface ↔ Plugin Manager lifecycle glue (TS3 §33, TS4 §7-§10).
  *
  * This owner holds the ONE `PluginManagerController` per surface, its
  * token-owned `PluginManagerHostRegistry` and both presentation entries
  * (`/plugins` = direct command, `/settings → Plugins` = submenu). It is exactly
  * the wiring the aggregate used to inline: the controller itself lives in
- * `app/plugin-manager/**` and is NOT reimplemented here, and the concrete panel
- * stays at `src/plugin-manager/panel.ts` until TS4.
+ * `app/plugin-manager/**` and is NOT reimplemented here, and the concrete
+ * terminal panel is selected by the COMPOSITION zone and injected as a narrow
+ * factory — this application owner imports no `tui/**` path at all.
  *
  * Preserved rules:
  *
@@ -29,9 +30,19 @@ import type { TuiApp } from '../../tui-app.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import { PluginManagerController } from '../plugin-manager/controller.ts'
 import { PluginManagerHostRegistry, type PluginManagerHostClaim } from '../plugin-manager/host-registry.ts'
-import { PluginManagerPanel } from '../../plugin-manager/panel.ts'
 import { observeTuiExtensions } from '../plugin-manager/extension-inventory.ts'
 import type { SurfaceExtensionService } from './extension-runtime.ts'
+
+/**
+ * The narrow concrete-panel factory the composition zone provides (TS4 §8). The
+ * application owner knows only this structural shape — never the panel class or
+ * its module path.
+ */
+export type PluginManagerPanelFactory = (
+  controller: PluginManagerController,
+  requestRender: () => void,
+  options: { readonly onDispose?: () => void },
+) => Component
 
 /** The Plugin Manager owner: the controller/panel wiring for both entries. */
 export interface SurfacePluginManager {
@@ -53,6 +64,8 @@ export interface PluginManagerRuntimeOptions {
   readonly mounted: () => TuiApp
   /** The attached extension service, read LATE-BOUND (the observation source). */
   readonly service: () => SurfaceExtensionService | undefined
+  /** The concrete terminal panel factory, selected by the composition zone. */
+  readonly createPanel: PluginManagerPanelFactory
 }
 
 /** The surface Plugin Manager owner `createSurfaceRuntime()` consumes. */
@@ -97,7 +110,7 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
         if (hosts.isOpen()) return
         let close: () => void = () => {}
         const claim = hosts.claim(() => close())
-        const panel = new PluginManagerPanel(controller, () => options.mounted().requestRender(), {
+        const panel = options.createPanel(controller, () => options.mounted().requestRender(), {
           // Any hide path that disposes the panel releases this owner exactly
           // once (a normal close and an external teardown are the same here).
           onDispose: () => claim.releaseExternally(),
@@ -107,7 +120,7 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
       }
       const submenu = (done: (selected?: string) => void): Component => {
         let claim: PluginManagerHostClaim | undefined
-        const panel = new PluginManagerPanel(controller, () => options.mounted().requestRender(), {
+        const panel = options.createPanel(controller, () => options.mounted().requestRender(), {
           // The Settings parent may dispose this submenu WITHOUT calling
           // `done` (the fork's lifecycle contract): release only the OWNER.
           onDispose: () => claim?.releaseExternally(),

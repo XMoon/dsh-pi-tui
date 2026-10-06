@@ -107,6 +107,7 @@ import { createSessionScopeAuthority, type LiveSessionScope } from '../app/sessi
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
+import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
@@ -443,6 +444,10 @@ export function applyRunnerWithRuntime(
       notificationWriter,
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
+      // TS4 §10: the composition zone selects the CONCRETE Plugin Manager panel
+      // implementation; the application surface owner consumes only the injected
+      // factory and never imports `tui/**` itself.
+      createPluginManagerPanel,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
