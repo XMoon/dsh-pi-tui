@@ -485,6 +485,11 @@ test('TypeScript import() type queries are static dependencies and are zone-chec
   assert.equal(violations.length, 1)
   assert.equal(violations[0].rule, 'direct-import-outside-composition')
   assert.deepEqual(parseImportSpecifiers("type U = typeof import('./y.ts')\n"), [{ specifier: './y.ts', line: 1, typeOnly: true }])
+  // Sibling of the value-dynamic literal completion: the no-substitution template
+  // spelling is the SAME module reference in a type position, and a `${…}`
+  // substitution stays out of a static gate's scope.
+  assert.deepEqual(parseImportSpecifiers('type V = import(`./v.ts`).V\n'), [{ specifier: './v.ts', line: 1, typeOnly: true }])
+  assert.deepEqual(parseImportSpecifiers('type W = typeof import(`./w/${name}.ts`)\n'), [])
 })
 
 test('the AST scanners are file-kind aware: a legal .tsx JSX tree is not a bypass (TS1)', () => {
@@ -601,11 +606,12 @@ test('parseImportSpecifiers covers the static ESM forms, type-only flags, and ig
       "import type { f } from './f.ts'",
       "export type { g } from './g.ts'",
       "import { type h } from './h.ts'",
+      "type i = import(`./i.ts`).I",
     ].join('\n'),
   )
-  assert.deepEqual(specs.map(s => s.specifier), ['./a.ts', './b.ts', './d.ts', './e.ts', './f.ts', './g.ts', './h.ts'])
-  assert.deepEqual(specs.map(s => s.line), [3, 4, 6, 7, 8, 9, 10])
-  assert.deepEqual(specs.map(s => s.typeOnly), [false, false, false, false, true, true, true])
+  assert.deepEqual(specs.map(s => s.specifier), ['./a.ts', './b.ts', './d.ts', './e.ts', './f.ts', './g.ts', './h.ts', './i.ts'])
+  assert.deepEqual(specs.map(s => s.line), [3, 4, 6, 7, 8, 9, 10, 11])
+  assert.deepEqual(specs.map(s => s.typeOnly), [false, false, false, false, true, true, true, true])
 })
 
 test('parseImportSpecifiers detects a from-clause split across lines', () => {

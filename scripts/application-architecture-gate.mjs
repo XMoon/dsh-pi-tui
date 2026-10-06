@@ -374,7 +374,13 @@ export function parseImportSpecifiers(source, rel = 'module.ts') {
   const lineOf = (node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1
   const importTypeArgument = (node) => {
     const arg = node.argument
-    if (arg === undefined || !ts.isLiteralTypeNode(arg) || !ts.isStringLiteral(arg.literal)) return undefined
+    if (arg === undefined || !ts.isLiteralTypeNode(arg)) return undefined
+    // Sibling of the `parseValueDynamicImports` literal classification: a
+    // no-substitution template literal in a type position
+    // (`type T = import(`./x.ts`).T`) parses as a LiteralTypeNode wrapping a
+    // NoSubstitutionTemplateLiteral, so `ts.isStringLiteral()` alone would miss
+    // the statically equivalent spelling there too.
+    if (!ts.isStringLiteral(arg.literal) && !ts.isNoSubstitutionTemplateLiteral(arg.literal)) return undefined
     return arg.literal.text
   }
   /** True when an import declaration binds/types only (no default value binding). */
