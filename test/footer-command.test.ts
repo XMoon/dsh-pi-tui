@@ -16,10 +16,11 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
-import type { FooterCustomItemSettings } from '../src/footer/custom-items.ts'
-import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from '../src/footer/dynamic-item-runtime.ts'
+import type { FooterCustomItemSettings } from '../src/domain/footer/custom-items.ts'
+import { FooterDynamicItemRuntime } from '../src/footer/dynamic-item-runtime.ts'
+import { activeFooterItemIds, executableCommandItemIds } from '../src/domain/footer/custom-items.ts'
 import { serializeTuiSettingsMutation } from '../src/runtime/config-port.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
@@ -76,7 +77,7 @@ function syncRuntimeApply(
   savedCustomItems: readonly FooterCustomItemSettings[] | undefined,
   savedLayout: FooterLayoutV1 | undefined,
 ): void {
-  const trusted = (savedCustomItems ?? []).filter((item): item is import('../src/footer/custom-items.ts').FooterCustomCommandItemSettings => item.kind === 'command')
+  const trusted = (savedCustomItems ?? []).filter((item): item is import('../src/domain/footer/custom-items.ts').FooterCustomCommandItemSettings => item.kind === 'command')
   const authorized = savedLayout === undefined ? new Set<string>() : activeFooterItemIds(savedLayout)
   const executable = executableCommandItemIds(trusted, authorized, app.getEffectiveFooterLayout())
   runtime.sync(trusted, executable)

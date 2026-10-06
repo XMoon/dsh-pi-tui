@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildCommandInput } from '../src/footer/command-protocol.ts'
+import { buildCommandInput } from '../src/domain/footer/command-protocol.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */

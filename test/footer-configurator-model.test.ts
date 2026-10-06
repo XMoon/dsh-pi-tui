@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { FooterConfiguratorModel, flatPositionOf } from '../src/footer/configurator-model.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 
 const registry = createBuiltinFooterRegistry()
 

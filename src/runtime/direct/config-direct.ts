@@ -41,8 +41,8 @@ import {
   resolveUserCommandItemActivationIds,
   resolveUserCommandItemFallbackActivationIds,
   resolveUserLayerFooterMode,
-} from '../../footer/command-trust.ts'
-import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../footer/custom-items.ts'
+} from '../../domain/footer/command-trust.ts'
+import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,

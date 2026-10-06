@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseFooterCommandConfig, resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../src/footer/command-trust.ts'
+import { parseFooterCommandConfig, resolveTrustedFooterCommand, resolveUserLayerFooterMode } from '../src/domain/footer/command-trust.ts'
 
 const NS = 'dsh-pi-tui'
 

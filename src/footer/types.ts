@@ -1,17 +1,17 @@
 /**
- * Footer composition types (plan M1): the builtin item registry, the
- * versioned layout shape, and the render contracts. The composer consumes
+ * Footer presentation types (TS5 §13.2): the render contracts the terminal
+ * composer consumes. The persisted/neutral layout shape lives in
+ * `domain/footer/layout.ts` and stays re-exported here for the existing
+ * consumers. The composer consumes
  * ONLY the StatusSnapshot plus a small host-owned surface context (editor
  * emptiness, extension chrome text) — never business state.
  * @module @xmoon76/dsh-pi-tui/footer
  */
 
 import type { StatusSnapshot } from '../domain/status/types.ts'
+import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../domain/footer/layout.ts'
 
-/** The semantic tones a footer span may carry (the theme token set). */
-export type FooterTone =
-  | 'primary' | 'accent' | 'text' | 'textStrong' | 'textDim' | 'textMuted'
-  | 'border' | 'success' | 'warning' | 'error' | 'roleUser' | 'shellMode'
+export type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from '../domain/footer/layout.ts'
 
 /** One styled run of footer text. */
 export interface FooterSpan {
@@ -30,38 +30,6 @@ export interface FooterSegment {
 /** The density an item renders at (plan §9.2: preferred vs compact). */
 export type FooterDensity = 'preferred' | 'compact'
 
-/** One item reference in a layout (plan §8). */
-export interface FooterItemRef {
-  readonly id: string
-  /** The item's finite formatter; absent = the definition default. */
-  readonly format?: string
-  /** Semantic tone override; 'auto' (default) uses the item's own tone. */
-  readonly tone?: FooterTone | 'auto'
-  readonly prefix?: string
-  readonly suffix?: string
-  /** User importance override; absent = the definition default. */
-  readonly importance?: number
-}
-
-/** The separator between surviving items of one zone. */
-export interface FooterSeparator {
-  readonly text: string
-  readonly tone?: FooterTone
-}
-
-/** One footer row: left zone, right zone, optional separator. */
-export interface FooterRowLayout {
-  readonly left: readonly FooterItemRef[]
-  readonly right: readonly FooterItemRef[]
-  readonly separator?: FooterSeparator
-}
-
-/** The versioned persisted layout (plan §8). V1 limits: 1..2 rows, no
- * template DSL, no conditions, no shell, no JS callbacks. */
-export interface FooterLayoutV1 {
-  readonly schemaVersion: 1
-  readonly rows: readonly FooterRowLayout[]
-}
 
 /** The host-owned surface context the composer receives (NOT business
  * state — the plan's §2.2 prohibition targets permission/plan/focus/stats/

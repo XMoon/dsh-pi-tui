@@ -23,9 +23,9 @@
  * @module @xmoon76/dsh-pi-tui/footer/dynamic-item-runtime
  */
 
-import { FooterCommandRunner, type FooterCommandConfig } from './command-runner.ts'
-import { customCommandConfigOf, type FooterCustomCommandItemSettings } from './custom-items.ts'
-import type { FooterLayoutV1 } from './types.ts'
+import { FooterCommandRunner } from './command-runner.ts'
+import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
+import { customCommandConfigOf, type FooterCustomCommandItemSettings } from '../domain/footer/custom-items.ts'
 import type { StatusSnapshot } from '../domain/status/types.ts'
 
 /** The runtime's options. */
@@ -49,50 +49,11 @@ interface ActiveCommandItem {
   readonly runner: FooterCommandRunner
 }
 
-/** Every item id the layout references (the runtime's active set). An
- * absent layout (no USER-trusted activation) activates nothing. */
-export function activeFooterItemIds(layout: FooterLayoutV1 | undefined): Set<string> {
-  const ids = new Set<string>()
-  if (layout === undefined) return ids
-  for (const row of layout.rows) {
-    for (const ref of row.left) ids.add(ref.id)
-    for (const ref of row.right) ids.add(ref.id)
-  }
-  return ids
-}
-
 function sameConfig(a: FooterCommandConfig, b: FooterCommandConfig): boolean {
   return a.command === b.command
     && a.timeoutMs === b.timeoutMs
     && a.refreshIntervalMs === b.refreshIntervalMs
     && a.maxRows === b.maxRows
-}
-
-/** The EXECUTABLE command item ids (PR D activation trust, final
- * formula):
- *
- *   executable = USER trusted definitions ∩ USER-authorized ids ∩
- *                currently rendered layout ids
- *
- * The trusted definitions come from the USER-layer semantic read; the
- * authorized ids come from the ConfigPort's mode-gated projection (a
- * stale leftover USER layout under footer: default/compact authorizes
- * nothing); the rendered layout is what the composer actually shows — a
- * command hidden by the merged layout must not keep running in the
- * background. A /footer save is the special case where the just-committed
- * validated layout is both authorized and rendered. */
-export function executableCommandItemIds(
-  trustedCommands: readonly FooterCustomCommandItemSettings[],
-  authorizedIds: ReadonlySet<string>,
-  renderedLayout: FooterLayoutV1 | undefined,
-): Set<string> {
-  const trustedIds = new Set(trustedCommands.map(item => item.id))
-  const renderedIds = activeFooterItemIds(renderedLayout)
-  const executable = new Set<string>()
-  for (const id of renderedIds) {
-    if (trustedIds.has(id) && authorizedIds.has(id)) executable.add(id)
-  }
-  return executable
 }
 
 /** The custom command item runtime. */

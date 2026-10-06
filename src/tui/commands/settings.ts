@@ -28,15 +28,15 @@ import type { AppKeybindingId } from '../keybindings/types.ts'
 import { KeybindingEditorController } from '../keybindings/ui/controller.ts'
 import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../keybindings/ui/list.ts'
 import type { KeybindingEditorModel } from '../keybindings/ui/model.ts'
-import { parseFooterLayout, isFooterLayout } from '../../footer/layout.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../../footer/presets.ts'
+import { parseFooterLayout, isFooterLayout } from '../../domain/footer/layout.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../../domain/footer/presets.ts'
 import { FooterComposer } from '../../footer/composer.ts'
+import { FooterCustomItemCatalog } from '../../footer/custom-items.ts'
 import {
-  FooterCustomItemCatalog,
   parseFooterCustomItem,
   parseFooterCustomItems,
   type FooterCustomItemSettings,
-} from '../../footer/custom-items.ts'
+} from '../../domain/footer/custom-items.ts'
 import { FooterItemRegistry } from '../../footer/item-registry.ts'
 import { FooterConfiguratorModel, sameFooterCustomItem } from '../../footer/configurator-model.ts'
 import { runOwned } from '../../detached.ts'

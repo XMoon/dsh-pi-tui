@@ -7,8 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../src/footer/layout.ts'
-import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../src/domain/footer/layout.ts'
+import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 
 test('the builtin default layout parses as valid', () => {
   const parsed = parseFooterLayout(DEFAULT_FOOTER_LAYOUT)

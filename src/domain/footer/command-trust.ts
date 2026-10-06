@@ -5,7 +5,7 @@
  * document's user section) — never from the merged/resolved value, which
  * a project layer could influence. When the user layer cannot prove the
  * command, command mode is disabled and the native layout applies.
- * @module @xmoon76/dsh-pi-tui/footer/command-trust
+ * @module @xmoon76/dsh-pi-tui/domain/footer/command-trust
  */
 
 import {
@@ -13,9 +13,8 @@ import {
   MAX_COMMAND_TIMEOUT_MS,
   MIN_COMMAND_REFRESH_MS,
   type FooterCommandConfig,
-} from './command-runner.ts'
-import { isFooterLayout, parseFooterLayout } from './layout.ts'
-import type { FooterLayoutV1 } from './types.ts'
+} from './command-config.ts'
+import { isFooterLayout, parseFooterLayout, type FooterLayoutV1 } from './layout.ts'
 
 /** The settings descriptor's shape the gate reads (structural). */
 export interface SettingsDescriptorLike {

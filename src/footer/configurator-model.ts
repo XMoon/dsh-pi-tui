@@ -21,19 +21,19 @@
  * @module @xmoon76/dsh-pi-tui/footer/configurator-model
  */
 
+import { FooterCustomItemCatalog } from './custom-items.ts'
 import {
   DEFAULT_CUSTOM_COMMAND_REFRESH_MS,
-  FooterCustomItemCatalog,
   type FooterCustomItemSettings,
   customItemId,
   customItemName,
   effectiveCustomCommandRefreshMs,
   effectiveCustomCommandTimeoutMs,
-} from './custom-items.ts'
-import { DEFAULT_COMMAND_TIMEOUT_MS } from './command-runner.ts'
+} from '../domain/footer/custom-items.ts'
+import { DEFAULT_COMMAND_TIMEOUT_MS } from '../domain/footer/command-config.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
-import { MAX_ITEMS_PER_ROW, stripControlChars } from './layout.ts'
-import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from './presets.ts'
+import { MAX_ITEMS_PER_ROW, stripControlChars } from '../domain/footer/layout.ts'
+import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../domain/footer/presets.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from './types.ts'
 
 /** The configurator's pages. */

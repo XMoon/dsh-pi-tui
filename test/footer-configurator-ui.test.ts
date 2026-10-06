@@ -15,7 +15,7 @@ import { FooterComposer } from '../src/footer/composer.ts'
 import { FooterConfiguratorModel, sameFooterCustomItem } from '../src/footer/configurator-model.ts'
 import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
 import { FooterItemRegistry } from '../src/footer/item-registry.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 import type { StatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -1455,7 +1455,7 @@ test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize'
  * otherwise. */
 function openWithCommand(
   app: TuiApp,
-  committed: readonly import('../src/footer/custom-items.ts').FooterCustomItemSettings[],
+  committed: readonly import('../src/domain/footer/custom-items.ts').FooterCustomItemSettings[],
   draft?: import('../src/footer/custom-items.ts').FooterCustomItemCatalog,
 ): void {
   const registry = new FooterItemRegistry(app.getFooterItemRegistry())
