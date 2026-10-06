@@ -1,63 +1,25 @@
 /**
- * Ambient Context cluster presentation: the collapsed cluster header and its
- * structured summary line.
+ * PiTui ambient Context cluster presentation: the collapsed cluster header
+ * chrome and the structured summary line.
  *
  * A cluster is a raw-adjacent same-turn run of ambient Context rows (see
- * `context-presentation.ts`). The collapsed header names the member count and
- * summarizes the members from STRUCTURED provenance only — each row's
- * producer label or its declared form, never arbitrary payload text.
- * Duplicate labels compress to `label ×N` for display only: the underlying
- * transcript rows are never deduplicated, reordered or removed.
+ * `tui/transcript/context-structure.ts`). The collapsed header names the member
+ * count and renders the cluster's summary parts, which are derived from
+ * STRUCTURED provenance only by the renderer-neutral
+ * `tui/transcript/context-summary.ts` — never from arbitrary payload text.
  *
  * The cluster block itself renders only the header (and the collapsed
  * summary); expanding it emits every member as an ordinary Context row that
  * the existing message renderer owns, so the cluster is never a second
  * context renderer.
- * @module @xmoon76/dsh-pi-tui/context-cluster
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/context-cluster
  */
 
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
-import type { ContextCluster } from './context-presentation.ts'
-import { contextFormOf } from './context-presentation.ts'
-import { iconLead, sectionDisclosureSemantic, type IconStyle } from './icons.ts'
-import { color } from './theme.ts'
-import type { TranscriptMessage } from './transcript.ts'
-
-/** The structured display name of one ambient Context member: its producer
- * label, else its declared form, else the generic role name. Never payload
- * text. */
-function memberDisplayName(member: TranscriptMessage): string {
-  if (member.kind !== 'system') return 'Context'
-  if (member.label !== undefined && member.label !== '') return member.label
-  const form = contextFormOf(member)
-  return form === undefined ? 'Context' : form
-}
-
-/**
- * The compressed summary parts of one cluster, in first-seen member order:
- * consecutive runs of the same display name become `name ×N`. Display-only —
- * the caller must not treat the parts as the member list.
- */
-export function contextClusterSummaryParts(cluster: ContextCluster): string[] {
-  const parts: string[] = []
-  const counts = new Map<string, number>()
-  const order: string[] = []
-  for (const member of cluster.members) {
-    const name = memberDisplayName(member)
-    const seen = counts.get(name)
-    if (seen === undefined) {
-      counts.set(name, 1)
-      order.push(name)
-    } else {
-      counts.set(name, seen + 1)
-    }
-  }
-  for (const name of order) {
-    const count = counts.get(name) ?? 1
-    parts.push(count > 1 ? `${name} ×${count}` : name)
-  }
-  return parts
-}
+import type { ContextCluster } from '../../transcript/context-structure.ts'
+import { contextClusterSummaryParts } from '../../transcript/context-summary.ts'
+import { iconLead, sectionDisclosureSemantic, type IconStyle } from '../../../icons.ts'
+import { color } from '../../../theme.ts'
 
 /** The cluster header: `▸ 📎 Context · 6 injections`.
  *

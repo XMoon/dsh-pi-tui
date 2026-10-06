@@ -12,17 +12,16 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { contextPresentation, contextProvenance, contextSummary } from '../src/context.ts'
+import { contextFormOf, isAmbientContext } from '../src/context-presentation.ts'
 import {
   clusterAdjacentAmbientContext,
-  contextFormOf,
   contextPresentationKind,
-  isAmbientContext,
   isNoticeContext,
   isRecallContext,
   isRelayContext,
-} from '../src/context-presentation.ts'
-import { contextClusterSummaryParts } from '../src/context-cluster.ts'
-import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/context-row.ts'
+} from '../src/tui/transcript/context-structure.ts'
+import { contextClusterSummaryParts } from '../src/tui/transcript/context-summary.ts'
+import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/tui/components/transcript/context-row.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 
 type SystemRow = Extract<TranscriptMessage, { kind: 'system' }>

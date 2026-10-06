@@ -50,7 +50,7 @@ import {
 } from './compact-process-preview.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
-import { isNoticeContext } from './context-presentation.ts'
+import { isNoticeContext } from './tui/transcript/context-structure.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import type { TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { displayFailureText } from './failure-presentation.ts'

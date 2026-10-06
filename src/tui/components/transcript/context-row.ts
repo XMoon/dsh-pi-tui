@@ -20,15 +20,15 @@
  * Every row stays semantic Context: only presentation primitives are reused.
  * All three wrap/truncate at RENDER time (a resize re-wraps), so no width is
  * baked into the cached component.
- * @module @xmoon76/dsh-pi-tui/context-row
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/context-row
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
-import { iconPrefix, type IconStyle } from './icons.ts'
-import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from './long-message-disclosure.ts'
-import { systemContextBody } from './present.ts'
-import { color } from './theme.ts'
-import type { TranscriptMessage } from './transcript.ts'
+import { iconPrefix, type IconStyle } from '../../../icons.ts'
+import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from '../../../long-message-disclosure.ts'
+import { systemContextBody } from '../../../present.ts'
+import { color } from '../../../theme.ts'
+import type { TranscriptMessage } from '../../../transcript.ts'
 
 /** One surfaced `system` Context row narrowed for presentation. */
 type ContextSystemRow = Extract<TranscriptMessage, { kind: 'system' }>

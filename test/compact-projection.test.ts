@@ -10,20 +10,20 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { contextFormOf, isAmbientContext } from '../src/context-presentation.ts'
 import {
-  contextFormOf,
-  contextPresentationKind,
   clusterAdjacentAmbientContext,
-  isAmbientContext,
+  contextPresentationKind,
   isNoticeContext,
   isRecallContext,
   isRelayContext,
-} from '../src/context-presentation.ts'
+} from '../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../src/context.ts'
 import { projectCompact } from '../src/compact-projection.ts'
 import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/compact-work.ts'
 import { compactActionPresentation } from '../src/compact-process-preview.ts'
-import { contextClusterSummaryParts, formatContextClusterHeader, ContextClusterComponent } from '../src/context-cluster.ts'
+import { contextClusterSummaryParts } from '../src/tui/transcript/context-summary.ts'
+import { formatContextClusterHeader, ContextClusterComponent } from '../src/tui/components/transcript/context-cluster.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
