@@ -17,6 +17,7 @@
  */
 
 import type { NotificationMethod } from '../../domain/notification/settings.ts'
+import { isTernTerminal } from '../terminal/tern.ts'
 
 /** The writer seam: tests inject a recorder, the runner passes
  * `process.stdout`. */
@@ -92,7 +93,8 @@ export function sanitizeOscPayload(text: string): string {
  * verified OSC 9 implementations): iTerm2 / WezTerm / Ghostty / Warp
  * / Kitty are recognized — by `TERM_PROGRAM`, by their `TERM` aliases
  * (`xterm-ghostty`, `xterm-kitty`), or by the Kitty window-id env
- * marker. Tern is recognized by `TERM_PROGRAM=tern`: its OSC 9 toast
+ * marker. Tern is recognized by its ONE shared identity helper
+ * (`isTernTerminal`, `src/tui/terminal/tern.ts`): its OSC 9 toast
  * is LOCALLY VERIFIED (a real Tern 0.5.0 Remote pane rendered both the
  * OSC 9 completion toast and the OSC 9;4 progress indicator), so it is
  * part of the verified whitelist rather than a guessed entry.
@@ -110,7 +112,7 @@ export function resolveAutoMethod(env: NodeJS.ProcessEnv = process.env): Notific
     || program === 'wezterm'
     || program === 'ghostty'
     || program === 'warpterminal'
-    || program === 'tern'
+    || isTernTerminal(env)
     || term === 'xterm-ghostty'
     || term === 'xterm-kitty'
     || env.KITTY_WINDOW_ID !== undefined

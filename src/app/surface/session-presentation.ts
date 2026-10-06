@@ -140,6 +140,9 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly setGoalText: (text: string | undefined) => void
     readonly refresh: () => void
     readonly refreshTerminalTitle: () => void
+    /** The terminal-local cwd projection (OSC 7): the same identity lifecycle
+     *  as the title, but a title-only rename must call the title alone. */
+    readonly refreshTerminalCwd: () => void
     readonly updateWelcomeCard: () => void
     readonly scheduleInitialMeasurement: (sessionId: string) => void
   }
@@ -594,7 +597,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // so the session-filtered projection is reversed at the seed.
     const sessionRecall = recallHistoryForSession(historyRecords, input.sessionId)
     deps.surface.app.resetInputHistory([...sessionRecall].reverse())
+    // Session identity commit (create/resume/switch): the title AND the
+    // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()
+    deps.status.refreshTerminalCwd()
     deps.status.updateWelcomeCard()
     deps.commands.register()
   }
