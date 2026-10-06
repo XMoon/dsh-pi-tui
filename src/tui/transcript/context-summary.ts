@@ -14,7 +14,7 @@
  */
 
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
-import type { TranscriptMessage } from '../../transcript.ts'
+import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 import type { ContextCluster } from './context-structure.ts'
 
 /** The structured display name of one ambient Context member: its producer
