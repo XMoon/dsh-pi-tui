@@ -3,7 +3,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources } from './support/composition-surface.ts'
-import { aliasAwareConstructionSites, ownerFile, ownerSource, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { aliasAwareConstructionSites, ownerFile, ownerSource, productionScriptKind, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -222,7 +222,11 @@ interface TypedObjectLiteral {
  * declared variable name).
  */
 function typedObjectLiterals(rel: string, source: string, typeName: string): TypedObjectLiteral[] {
-  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  // The parser kind follows the FILE (`.tsx` => TSX): every caller feeds this
+  // from `productionSources()`, which scans all four production extensions, and
+  // a legal JSX attribute/child holding a typed implementation literal is
+  // invisible to a TS parse (TS2 §19).
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel))
   // Local type aliases (`type Events = TuiAppEvents`, incl. chains, resolved to
   // convergence in source order) are followed; a CONTEXTUALLY typed literal (an
   // argument whose parameter is declared elsewhere as this type) has no syntactic
@@ -352,6 +356,30 @@ test('A5b: tuiAppEventsLiterals detects every TuiAppEvents literal form', () => 
       `${source.trim()} is not a TuiAppEvents literal`,
     )
   }
+})
+
+test('A5b/TS2: a typed implementation literal in a JSX attribute is caught (hard case, not a parser-kind copy)', () => {
+  // Every caller of `typedObjectLiterals` feeds it from `productionSources()`,
+  // which scans `.tsx` too. A legal JSX ATTRIBUTE position is invisible to a TS
+  // parse, so a rogue `TuiAppEvents`/`TuiCommandRunner` literal could hide in a
+  // `.tsx` production module and still satisfy "exactly one implementation".
+  // Both halves are asserted, so the extension — not incidental recovery — is
+  // what makes this pass.
+  const eventsInAttribute = 'export const view = <Box value={{ onSubmit: () => {} } satisfies TuiAppEvents} />\n'
+  assert.deepEqual(
+    tuiAppEventsLiterals('probe.tsx', eventsInAttribute).map(literal => literal.name),
+    ['<expression>'],
+  )
+  assert.deepEqual(tuiAppEventsLiterals('probe.ts', eventsInAttribute), [],
+    'the same bytes parsed as TS must yield NO literal')
+
+  const runnerInChild = 'export const view = <Box>{{ onSubmit: () => {} } satisfies TuiCommandRunner}</Box>\n'
+  assert.equal(tuiCommandRunnerLiterals('probe.tsx', runnerInChild).length, 1)
+  assert.deepEqual(tuiCommandRunnerLiterals('probe.ts', runnerInChild), [],
+    'the same bytes parsed as TS must yield NO literal')
+
+  // The `.ts` grammar is unchanged: angle-bracket assertions still work.
+  assert.equal(tuiCommandRunnerLiterals('synthetic.ts', 'const rogue = <TuiCommandRunner>{ onSubmit: () => {} }\n').length, 1)
 })
 
 test('A5b: tuiCommandRunnerLiterals detects every TuiCommandRunner literal form', () => {

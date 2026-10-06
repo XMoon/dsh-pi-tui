@@ -2,7 +2,7 @@
  * The application composition root's Host event-subscription installation
  * (TS2 §10).
  *
- * This module owns ONLY the INSTALLATION of the six application-level Host
+ * This module owns the INSTALLATION of the six application-level Host
  * subscriptions and their thin delegation into the already-owned surface
  * routing methods:
  *
@@ -14,6 +14,14 @@
  * llm/adapters-updated
  * settings/document-updated
  * ```
+ *
+ * The installation is deliberately TWO phases, in this module, because the
+ * frozen startup order interleaves them with the Direct live-assistant-stream
+ * install: phase 1 (`session/event`) runs BEFORE the stream acquire + its abort
+ * binding, phase 2 (the other five) runs AFTER them. Splitting the phases
+ * anywhere else — or collapsing them into one call — reorders the startup
+ * wiring, which is behavior (plan §0/§12/§85/§91 Pass 3): a throwing stream
+ * install must leave exactly the listeners the baseline had installed.
  *
  * It does not implement event semantics, does not own mutable state, does not
  * read Cordis application services, and does not import the composition facade
@@ -51,7 +59,7 @@ export interface ApplicationEventSurface {
   routeSettingsRefresh(namespace: string): void
 }
 
-/** The narrow inputs of the application event-wiring install; one lifetime. */
+/** The narrow inputs of one event-wiring phase; one lifetime. */
 export interface ApplicationEventWiringDeps {
   /** The Cordis context, used ONLY as the literal-event subscription surface. */
   readonly ctx: Context
@@ -62,17 +70,26 @@ export interface ApplicationEventWiringDeps {
 }
 
 /**
- * Install the six application-level Host subscriptions exactly once, delegating
- * each event into the surface-owned routing method. No event semantics live
- * here: the handlers forward and return.
+ * Phase 1 of the frozen startup order: the Direct durable firehose ONLY. It runs
+ * BEFORE the Direct live-assistant-stream acquire and its abort binding, exactly
+ * as the inline registration did.
  */
-export function installApplicationEventWiring(deps: ApplicationEventWiringDeps): void {
+export function installSessionEventWiring(deps: ApplicationEventWiringDeps): void {
   const { ctx, direct, surface } = deps
   // Direct branch: the Host firehose registration (Remote durable events
   // arrive through the eventSource ingress instead — never both).
   if (direct) {
     ctx.on('session/event', (session, event) => surface.routeSessionEvent(session, event))
   }
+}
+
+/**
+ * Phase 2 of the frozen startup order: the remaining five subscriptions, AFTER
+ * the Direct live-assistant-stream acquire and its abort binding. Each handler
+ * forwards and returns — no event semantics live here.
+ */
+export function installRuntimeEventWiring(deps: ApplicationEventWiringDeps): void {
+  const { ctx, direct, surface } = deps
   // Subagent lifecycle events drive the continuable-children half of the dock
   // badge (they never register jobs). The events are scoped by the delegating
   // parent, but an UNTAGGED listener (this runner) receives every agent-scoped

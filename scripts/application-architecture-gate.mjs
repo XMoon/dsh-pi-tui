@@ -467,8 +467,21 @@ export function findDirectAdapterConstructions(source, rel = 'module.ts') {
   return out
 }
 
-/** Read every TypeScript source under `dir` as a `{ rel, source }` entry. */
-export function collectSourceEntries(dir = SRC) {
+/**
+ * Every source file under `dir` whose extension is in `extensions`, enumerated
+ * RECURSIVELY, as `dir`-relative POSIX paths, deterministically sorted.
+ * `node_modules`/`dist` are skipped.
+ *
+ * This is the ONE recursive enumeration the zone scanners share. A scanner that
+ * read only one directory level would let a NESTED `src/app/bootstrap/**` module
+ * escape the composition-zone string/handler/bag/keybinding locks while the
+ * architecture gate (which treats the directory as the zone) still accepts it
+ * (TS2 §7/§18/§20/§21: the zone is the whole subtree).
+ * @param {string} dir directory to walk
+ * @param {string[]} [extensions] extensions to include (default: the production set)
+ * @returns {string[]}
+ */
+export function listSourceFilesUnder(dir, extensions = SOURCE_EXTENSIONS) {
   const out = []
   const walk = (d) => {
     for (const entry of readdirSync(d, { withFileTypes: true })) {
@@ -476,16 +489,18 @@ export function collectSourceEntries(dir = SRC) {
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === 'dist') continue
         walk(p)
-      } else if (SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
-        out.push({
-          rel: relative(dir, p).split('\\').join('/'),
-          source: readFileSync(p, 'utf8'),
-        })
+      } else if (extensions.some(extension => entry.name.endsWith(extension))) {
+        out.push(relative(dir, p).split('\\').join('/'))
       }
     }
   }
   walk(dir)
-  return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+/** Read every TypeScript source under `dir` as a `{ rel, source }` entry (recursive). */
+export function collectSourceEntries(dir = SRC) {
+  return listSourceFilesUnder(dir).map(rel => ({ rel, source: readFileSync(join(dir, rel), 'utf8') }))
 }
 
 /**
