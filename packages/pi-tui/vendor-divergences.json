@@ -69,7 +69,7 @@
     "X002",
     "X041"
    ],
-   "reason": "The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline."
+   "reason": "The DSH searchable picker behavior moved to the Host-owned src/tui/pickers/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline."
   },
   {
    "decision": "NOT_MOVABLE",
@@ -270,11 +270,11 @@
      "items": [
       "src/tui-app.ts openPicker and categorized picker rebuild (now Host SearchablePicker)",
       "src/tui/commands/sessions.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)",
-      "src/model-picker.ts /model ModelPicker (provider-grouped inline-effort model list via the Host SearchablePicker)",
-      "src/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)",
+      "src/tui/pickers/model-picker.ts /model ModelPicker (provider-grouped inline-effort model list via the Host SearchablePicker)",
+      "src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)",
       "advanced ui.select picker adapter"
      ],
-     "notes": "The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/model-picker.ts (which constructs SearchablePicker directly for the /model provider-grouped model list (with an inline per-model effort)); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics."
+     "notes": "The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/tui/pickers/model-picker.ts (which constructs SearchablePicker directly for the /model provider-grouped model list (with an inline per-model effort)); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics."
     },
     "publicExtension": {
      "audited": true,
@@ -322,7 +322,7 @@
      "Run host picker, extension surface, narrow-budget, and zero-result interaction tests after the migration."
     ],
     "replacementMapping": [
-     "SelectList search/group/page/row-budget behavior -> Host owner src/searchable-picker.ts SearchablePicker -> guarded by test/searchable-picker.test.ts",
+     "SelectList search/group/page/row-budget behavior -> Host owner src/tui/pickers/searchable-picker.ts SearchablePicker -> guarded by test/searchable-picker.test.ts",
      "TuiApp openPicker/categorized picker -> Host SearchablePicker API -> existing PickerHandle remains the Host-facing adapter",
      "advanced ui.select -> TuiApp.openPicker -> SearchablePicker -> advanced broker/lifecycle tests"
     ],
@@ -343,7 +343,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Relocated to the Host-owned SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned upstream baseline; the fork no longer carries this divergence."
+    "notes": "Relocated to the Host-owned SearchablePicker (src/tui/pickers/searchable-picker.ts) with the vendored SelectList restored to the pinned upstream baseline; the fork no longer carries this divergence."
    }
   },
   "X002": {
@@ -933,8 +933,8 @@
       "src/tui-app.ts OverlayBroker.disposeAll and overlay leases",
       "editor seat, panels, timers, and fullscreen surface teardown",
       "test/pi-component-compat.test.ts public component compatibility",
-      "src/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)",
-      "src/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)"
+      "src/tui/pickers/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)",
+      "src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)"
      ],
      "notes": "Host final teardown relies on exactly-once release. Post-v0.85.1 audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts)."
     },
@@ -4067,8 +4067,8 @@
      "audited": true,
      "items": [
       "SearchablePicker initialQuery/setFilter",
-      "src/history-panel.ts history query",
-      "src/task-panel.ts task query",
+      "src/tui/panels/history-panel.ts history query",
+      "src/tui/panels/task-panel.ts task query",
       "src/question.ts question draft/prefill paths"
      ],
      "notes": "These callers append or continue typing after prefill; the cited host paths are concrete setValue consumers rather than a generic editor-adjacent bucket."
@@ -4166,7 +4166,7 @@
      "items": [
       "src/tui-app.ts categorized picker query handoff and category cycle",
       "src/tui/commands/sessions.ts session prefill and row enrichment",
-      "src/tui-app.ts PickerHandle getFilter/setFilter closures and MarqueeFilterAdapter getFilter read"
+      "src/tui-app.ts PickerHandle getFilter/setFilter closures and src/tui/pickers/picker-adapters.ts MarqueeFilterAdapter getFilter read"
      ],
      "notes": "Host calls both programmatic and typed filter paths through distinct adapters; the categorized lifecycle consumes initialQuery once and category navigation preserves the live query (an empty query stays empty)."
     },
@@ -4274,9 +4274,9 @@
      "audited": true,
      "items": [
       "src/tui-app.ts FocusForwardingFrame and settings overlays",
-      "src/theme-menu.ts SettingsList submenu wrapper",
-      "src/subagent-model-menu.ts SubagentModelAllowlistPicker forwards focus to its SearchablePicker",
-      "src/model-picker.ts ModelPicker forwards focus to its active SearchablePicker",
+      "src/tui/pickers/theme-menu.ts SettingsList submenu wrapper",
+      "src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker forwards focus to its SearchablePicker",
+      "src/tui/pickers/model-picker.ts ModelPicker forwards focus to its active SearchablePicker",
       "test/theme-picker.test.ts and test/model-picker.test.ts CURSOR_MARKER regressions"
      ],
      "notes": "Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: ThemeSubmenu forwards Focusable state to its inner SettingsList, and the /settings SubagentModelAllowlistPicker and the /model ModelPicker forward the active view's focused flag through to their SearchablePicker search Input so the IME cursor marker survives submenu/view transitions."
@@ -4329,7 +4329,7 @@
      "Provide equivalent upstream Focusable propagation and nested row-budget semantics, then run IME, cursor marker, submenu, and extension focus lifecycle tests."
     ],
     "replacementMapping": [
-     "SelectList-side Input focus ownership -> moved to Host SearchablePicker (src/searchable-picker.ts) -> test/searchable-picker.test.ts focus tests",
+     "SelectList-side Input focus ownership -> moved to Host SearchablePicker (src/tui/pickers/searchable-picker.ts) -> test/searchable-picker.test.ts focus tests",
      "remaining vendor-owned seam -> SettingsList focus/row-budget propagation -> packages/pi-tui/test/settings-list.test.ts"
     ],
     "evidence": [

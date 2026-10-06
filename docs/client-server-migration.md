@@ -2734,7 +2734,7 @@ the final complete Remote Backend assembly.
   `todos`, and the session's own cwd) through the shared
   `src/runtime/session-status-projection.ts` mapping — one session's values
   only, absent fields stay absent, no parent fallback, no StatsFolder.
-- `src/subagent-model-menu.ts` — the allowlist picker consumes the official
+- `src/tui/pickers/subagent-model-menu.ts` — the allowlist picker consumes the official
   grouped model directory (`ModelCatalog.loadDirectory()`, the
   `session.modelCatalog()` semantic) in ONE async read; saved routes stay
   representable/removable as trailing rows, and ABSENCE is a claim only a
@@ -4709,7 +4709,7 @@ end of this file).
   write itself stays `PendingInputReader(childId)` +
   `SessionWriter.updateQueue(childId, occurrence, {kind:'steer'})`.
 - **Durable images read through the OWNING presentation's retained Session**
-  (`src/image/loader.ts` + `src/components/media/image-thumbnail.ts` +
+  (`src/image/loader.ts` + `src/tui/components/media/image-thumbnail.ts` +
   `src/tui-app.ts` + `src/app/bootstrap.ts`): the read AUTHORITY belongs to the
   attachment ref's owning presentation, not to whichever Session is on screen when
   the read runs. `TuiApp` stamps each thumbnail with the presentation scope sampled

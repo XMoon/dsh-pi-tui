@@ -103,7 +103,7 @@ can never claim it). It is "find and EDIT", never "find and run":
   from `All directories` (Rule 3 — never a guessed directory).
 - **Search source**: `src/history-search.ts` (replaceable; a SQLite/FTS
   backend can swap in without touching the panel) and
-  `src/history-panel.ts` (the overlay).
+  `src/tui/panels/history-panel.ts` (the overlay).
 
 ### The session-scope persist gate (deferred start)
 
@@ -235,7 +235,7 @@ unwritten entries.
   (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-
   bound continuation cursors, abort). Pinned by
   `test/history-reverse-reader.test.ts`.
-- `src/history-panel.ts` — the Ctrl+R modal panel (query input, scope
+- `src/tui/panels/history-panel.ts` — the Ctrl+R modal panel (query input, scope
   tabs, list, details, responsive layout). Pinned by
   `test/history-panel.test.ts` and the `test/ctrl-r.test.ts` integration
   suite.
