@@ -12,7 +12,7 @@ import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { FooterComposer, renderSpans } from '../src/footer/composer.ts'
 import { isFooterLayout, parseFooterLayout } from '../src/footer/layout.ts'
 import type { FooterItemRef } from '../src/footer/types.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 const registry = createBuiltinFooterRegistry()
 const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '' }
@@ -482,7 +482,7 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
   // the LLM wall back into every footer.
   const { formatStatsLine } = await import('../src/footer/formatters.ts')
   const { formatStats } = await import('../src/stats.ts')
-  const { usageFromStats } = await import('../src/status/derive-usage.ts')
+  const { usageFromStats } = await import('../src/domain/status/derive-usage.ts')
   const stats = {
     turns: 12,
     steps: 38,
@@ -508,7 +508,7 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
 
 test('an unavailable token projection renders the performance segment alone (no orphan separator)', async () => {
   const { formatStatsLine, formatStatsLineCompact } = await import('../src/footer/formatters.ts')
-  const { usageFromStats } = await import('../src/status/derive-usage.ts')
+  const { usageFromStats } = await import('../src/domain/status/derive-usage.ts')
   const stats = {
     turns: 12,
     steps: 38,

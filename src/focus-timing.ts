@@ -30,7 +30,7 @@
  * @module @xmoon76/dsh-pi-tui/focus-timing
  */
 
-import type { RunPhase } from './status/types.ts'
+import type { RunPhase } from './domain/status/types.ts'
 import type { TurnActivity } from './transcript.ts'
 
 /** The user-blocked phases whose wait time is excluded from the live timer.

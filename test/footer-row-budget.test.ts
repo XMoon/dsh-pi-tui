@@ -15,7 +15,7 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { FooterComposer } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 import type { FooterInstructionLike } from '../src/footer/composer.ts'
 import type { FooterLayoutV1, FooterPhysicalLineBudget } from '../src/footer/types.ts'
 

@@ -16,7 +16,7 @@ import { FooterConfiguratorModel, sameFooterCustomItem } from '../src/footer/con
 import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
 import { FooterItemRegistry } from '../src/footer/item-registry.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import type { StatusSnapshot } from '../src/status/types.ts'
+import type { StatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 

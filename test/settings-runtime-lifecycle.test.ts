@@ -19,7 +19,7 @@ import { createDiag } from '../src/diag.ts'
 import { createSettingsRuntime, type SettingsRuntimeDeps } from '../src/app/surface/settings-runtime.ts'
 import { FooterCommandRunner, type FooterCommandConfig } from '../src/footer/command-runner.ts'
 import { FooterDynamicItemRuntime } from '../src/footer/dynamic-item-runtime.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 
 const silentDiag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 

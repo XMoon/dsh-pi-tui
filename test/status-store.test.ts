@@ -7,8 +7,8 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { StatusStore } from '../src/status/store.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { StatusStore } from '../src/domain/status/store.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -202,7 +202,7 @@ test('a same-value setStatus does not bump the store revision', async () => {
 })
 
 test('deriveRunnerPermission degrades when the permission service throws', async () => {
-  const { deriveRunnerPermission } = await import('../src/status/derive-permission.ts')
+  const { deriveRunnerPermission } = await import('../src/domain/status/derive-permission.ts')
   const agent = { session: { events: [] } }
   const exploding = { current: () => { throw new Error('boom') } }
   assert.equal(deriveRunnerPermission(exploding, agent as never), undefined,

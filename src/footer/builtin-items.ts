@@ -17,7 +17,7 @@
  * @module @xmoon76/dsh-pi-tui/footer/builtin-items
  */
 
-import type { StatusSnapshot } from '../status/types.ts'
+import type { StatusSnapshot } from '../domain/status/types.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   formatCacheHit,

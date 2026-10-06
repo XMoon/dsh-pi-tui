@@ -44,7 +44,7 @@ function actionStatsOf(total: number, types: Record<string, number> = {}): Compa
 import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/present.ts'
 import { formatTokens, totalTokens } from '../src/token-usage.ts'
 import { FocusTimingStore } from '../src/focus-timing.ts'
-import type { RunPhase } from '../src/status/types.ts'
+import type { RunPhase } from '../src/domain/status/types.ts'
 
 /** Build an event with an EXPLICIT time (Focus timing tests need control). */
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {

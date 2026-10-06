@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { resolveDisplaySubject } from '../src/status/resolve-subject.ts'
+import { resolveDisplaySubject } from '../src/domain/status/resolve-subject.ts'
 
 test('subject: main when no viewer is open', () => {
   assert.deepEqual(resolveDisplaySubject(undefined), { subject: { kind: 'main' } })

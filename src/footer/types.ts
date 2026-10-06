@@ -6,7 +6,7 @@
  * @module @xmoon76/dsh-pi-tui/footer
  */
 
-import type { StatusSnapshot } from '../status/types.ts'
+import type { StatusSnapshot } from '../domain/status/types.ts'
 
 /** The semantic tones a footer span may carry (the theme token set). */
 export type FooterTone =

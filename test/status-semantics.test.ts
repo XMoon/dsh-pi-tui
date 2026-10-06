@@ -8,10 +8,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveAccessStatus, sandboxModeName, type ApprovalServiceLike, type PermissionPresetsLike, type SandboxPolicyLike } from '../src/status/derive-access.ts'
-import { deriveActivityPhase, deriveActivityStatus } from '../src/status/derive-activity.ts'
-import { derivePlanStatus } from '../src/status/derive-plan.ts'
-import { usageFromStats } from '../src/status/derive-usage.ts'
+import { deriveAccessStatus, sandboxModeName, type ApprovalServiceLike, type PermissionPresetsLike, type SandboxPolicyLike } from '../src/domain/status/derive-access.ts'
+import { deriveActivityPhase, deriveActivityStatus } from '../src/domain/status/derive-activity.ts'
+import { derivePlanStatus } from '../src/domain/status/derive-plan.ts'
+import { usageFromStats } from '../src/domain/status/derive-usage.ts'
 import type { SessionStats } from '../src/stats.ts'
 
 // ── Access ────────────────────────────────────────────────────────────────

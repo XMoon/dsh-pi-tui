@@ -6,8 +6,8 @@
  * @module @xmoon76/dsh-pi-tui/status/derive-usage
  */
 
-import type { SessionStats } from '../stats.ts'
-import type { SessionStatusUsageProjection } from '../runtime/session-reader-port.ts'
+import type { SessionStats } from '../../stats.ts'
+import type { SessionStatusUsageProjection } from '../../runtime/session-reader-port.ts'
 import type { UsageStatus } from './types.ts'
 
 /** The official cumulative facts that outrank a BOUNDED window's fold. Each

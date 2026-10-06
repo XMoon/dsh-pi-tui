@@ -207,6 +207,32 @@ export const ARCHITECTURE_RULES = [
     forbids: (resolved) => resolved.startsWith('tui/'),
   },
   {
+    // TS3 creates the first canonical `src/domain/**` subtree (the
+    // transport/UI-neutral status model). The layer is neutral by contract:
+    // application ownership, terminal presentation and experimental Remote
+    // composition are all off limits. The existing Direct-import rule already
+    // covers `app/direct/**` / `runtime/direct/**` for these files, so no
+    // duplicate Direct rule is added here.
+    id: 'domain-imports-app',
+    message: 'src/domain/** must not import src/app/** (the neutral domain layer never depends on application ownership)',
+    applies: (srcRel) => srcRel.startsWith('domain/'),
+    // `app/remote/**` is reported by the more specific Remote rule below, so
+    // each violation has exactly one owning rule id.
+    forbids: (resolved) => resolved.startsWith('app/') && !resolved.startsWith('app/remote/'),
+  },
+  {
+    id: 'domain-imports-tui',
+    message: 'src/domain/** must not import src/tui/** (the neutral domain layer never depends on terminal presentation)',
+    applies: (srcRel) => srcRel.startsWith('domain/'),
+    forbids: (resolved) => resolved.startsWith('tui/'),
+  },
+  {
+    id: 'domain-imports-remote-composition',
+    message: 'src/domain/** must not import experimental Remote composition (domain primitives stay transport-neutral)',
+    applies: (srcRel) => srcRel.startsWith('domain/'),
+    forbids: (resolved, specifier) => isRemoteComposition(resolved, specifier),
+  },
+  {
     id: 'direct-import-outside-composition',
     message:
       'only src/index.ts, src/app/bootstrap.ts, src/app/direct/** and src/runtime/** may import '

@@ -37,7 +37,7 @@ import { wheelScrollLinesOf } from '../../wheel-scroll.ts'
 import type { Diag } from '../../diag.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { Backend } from '../../runtime/backend.ts'
-import type { StatusSnapshot } from '../../status/types.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
 
 /** The Direct settings document read (the adapter stays in the composition
  *  root); the type is DERIVED from the real persistence helper so this owner

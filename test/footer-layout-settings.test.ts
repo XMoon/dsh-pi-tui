@@ -9,11 +9,11 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import { StatusStore } from '../src/status/store.ts'
-import { initialStatusSnapshot } from '../src/status/snapshot.ts'
+import { StatusStore } from '../src/domain/status/store.ts'
+import { initialStatusSnapshot } from '../src/domain/status/snapshot.ts'
 import { FooterComposer } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }

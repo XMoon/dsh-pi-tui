@@ -24,7 +24,7 @@ import {
 } from '../src/footer/builtin-items.ts'
 import { FooterComposer, renderSpans } from '../src/footer/composer.ts'
 import type { FooterDensity, FooterItemRef } from '../src/footer/types.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 const registry = createBuiltinFooterRegistry()
 const composer = new FooterComposer(registry)

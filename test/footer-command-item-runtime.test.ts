@@ -17,7 +17,7 @@ import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds
 import { customCommandConfigOf, DEFAULT_CUSTOM_COMMAND_REFRESH_MS, effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs, type FooterCustomCommandItemSettings } from '../src/footer/custom-items.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import type { FooterLayoutV1 } from '../src/footer/types.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 /** A command item whose command runs one node script. */

@@ -26,7 +26,7 @@
 import { FooterCommandRunner, type FooterCommandConfig } from './command-runner.ts'
 import { customCommandConfigOf, type FooterCustomCommandItemSettings } from './custom-items.ts'
 import type { FooterLayoutV1 } from './types.ts'
-import type { StatusSnapshot } from '../status/types.ts'
+import type { StatusSnapshot } from '../domain/status/types.ts'
 
 /** The runtime's options. */
 export interface FooterDynamicItemRuntimeOptions {

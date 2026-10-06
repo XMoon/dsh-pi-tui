@@ -129,7 +129,7 @@ import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '..
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { SubmitLatencyPhase } from '../../submit-latency.ts'
-import type { ContextMeasureReason } from '../../status/context-measurement.ts'
+import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import {
   busyAfterTurnBoundary,
   contextRefreshKind,
@@ -140,9 +140,9 @@ import type { SessionSubject } from '../session/subject.ts'
 import { ImageLoader } from '../../image/loader.ts'
 import type { ImageAttachmentRefLike } from '../../image/admission.ts'
 import type { KeybindingRegistry } from '../../keybinding-registry.ts'
-import { StatusStore } from '../../status/store.ts'
-import type { StatusPatch } from '../../status/types.ts'
-import { initialStatusSnapshot } from '../../status/snapshot.ts'
+import { StatusStore } from '../../domain/status/store.ts'
+import type { StatusPatch } from '../../domain/status/types.ts'
+import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
 import type { TranscriptFolder, TranscriptMessage, TranscriptSearchMatch } from '../../transcript.ts'
 import type { TranscriptWindowController } from '../../transcript-window.ts'
 import { streamingToolPreviewSnapshot } from '../../streaming-tool-preparing.ts'
