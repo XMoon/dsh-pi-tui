@@ -164,7 +164,7 @@ stable
   deliberate root entries/facades expected to remain during this train
 
 legacy
-  grandfathered historical root modules awaiting TS4–TS8 owner migration
+  grandfathered historical root modules awaiting TS5–TS8 owner migration
 ```
 
 The architecture gate fails when a current `src/*.ts|.tsx|.mts|.cts` module is
@@ -172,7 +172,7 @@ in neither list (a new unclassified root module), when a `legacy` entry no longe
 exists (stale entry — remove it in the same PR that moved/deleted the file), when
 a `stable` entry no longer exists, when an entry is duplicated, or when the schema
 is unknown. The gate never auto-writes or auto-accepts a baseline entry. During
-TS4–TS8 a move deletes the corresponding `legacy` entry in the same PR; an
+TS5–TS8 a move deletes the corresponding `legacy` entry in the same PR; an
 ordinary new root module is never allowed.
 
 ## Existing directory convergence
@@ -233,15 +233,16 @@ app/surface/event-routing.ts             application-level presentation event ro
 
 Each is constructed exactly once from `createSurfaceRuntime()`; no bootstrap code
 constructs them directly. Search/transcript VIEW ownership stays in the aggregate until
-TS6, and leaf TUI components/panels/pickers stay in place until TS4.
+TS6; the leaf TUI components/panels/pickers now live in their canonical
+`src/tui/**` owners (TS4 DONE).
 
 ## TUI
 
 `TuiApp` is an implementation detail, not a semantic authority and not a public
 extension API.
 
-It still owns too many presentation/interaction responsibilities; TS4–TS6 will
-converge those owners. This debt is structural, not a reason to move business
+It still owns too many presentation/interaction responsibilities; TS5–TS6 will
+converge the remaining owners. This debt is structural, not a reason to move business
 semantics into the TUI.
 
 Plugins consume host-owned extension APIs, registries and brokers, not raw
