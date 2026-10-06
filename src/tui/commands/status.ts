@@ -7,9 +7,9 @@
  * @module @xmoon76/dsh-pi-tui/commands/status
  */
 
-import type { TuiCommandRunner, RegisterOne } from '../commands.ts'
-import { color } from '../theme.ts'
-import { formatStatsFacts } from '../stats.ts'
+import type { TuiCommandRunner, RegisterOne } from '../../commands.ts'
+import { color } from '../../theme.ts'
+import { formatStatsFacts } from '../../stats.ts'
 import { displaySessionId } from './sessions.ts'
 
 /**

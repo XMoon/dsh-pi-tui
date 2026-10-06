@@ -19,16 +19,16 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { compositionSource } from './support/composition-surface.ts'
 
 const commandsSource = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
-// TS1 decomposes the built-in command definitions into `src/commands/*.ts`;
+// TS1 decomposes the built-in command definitions into `src/tui/commands/*.ts`;
 // the WHOLE command layer is the facade plus every domain module (deterministic
 // sorted directory scan). Assertions that pin a property of the command layer
 // as a whole — never the moved implementation's location — use this handle.
 const commandLayerSource = [
   commandsSource,
-  ...readdirSync(new URL('../src/commands/', import.meta.url))
+  ...readdirSync(new URL('../src/tui/commands/', import.meta.url))
     .filter(name => name.endsWith('.ts'))
     .sort()
-    .map(name => readFileSync(new URL(`../src/commands/${name}`, import.meta.url), 'utf8')),
+    .map(name => readFileSync(new URL(`../src/tui/commands/${name}`, import.meta.url), 'utf8')),
 ].join('\n')
 const indexSource = compositionSource()
 // A3-5 relocated the semantic, scope-bound command facades (and their ONE

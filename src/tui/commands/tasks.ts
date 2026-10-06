@@ -9,7 +9,7 @@
  * @module @xmoon76/dsh-pi-tui/commands/tasks
  */
 
-import type { RegisterTuiCommand, TuiCommandRunner } from '../commands.ts'
+import type { RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 
 /** The runner operations the task entry commands consume. */
 type TasksCommandRunner = Pick<
