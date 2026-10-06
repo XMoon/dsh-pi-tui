@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
 import { testLifecycle } from './support/temp-lifecycle.ts'
@@ -267,11 +267,39 @@ test('a .mjs specifier resolving to a .d.mts declaration file is part of the sta
   assert.equal(violations[0].rule, STARTUP_REMOTE_COMPOSITION_RULE.id)
 })
 
+test('a .tsx module reached through a legal .js/.jsx spelling stays in the startup static graph (TS1)', () => {
+  // TypeScript NodeNext resolves `./client/bridge.js` AND `./client/bridge.jsx`
+  // to `client/bridge.tsx`; the gate must resolve the same edge, or the startup
+  // compatibility island could re-enter Remote composition through a TSX file.
+  for (const spelling of ['./client/bridge.js', './client/bridge.jsx']) {
+    const entries = [
+      entry('startup.ts', `export { bridge } from '${spelling}'\n`),
+      entry('client/bridge.tsx', "export { remote } from '../app/remote/runtime.ts'\n"),
+      entry('app/remote/runtime.ts', 'export const remote = 1\n'),
+    ]
+    assert.deepEqual([...buildStaticEdges(entries).get('startup.ts')], ['client/bridge.tsx'], spelling)
+    const violations = findViolations(entries)
+    assert.equal(violations.length, 1, spelling)
+    assert.equal(violations[0].file, 'client/bridge.tsx')
+    assert.equal(violations[0].rule, STARTUP_REMOTE_COMPOSITION_RULE.id)
+  }
+  // Positive control: the explicit `.tsx` spelling reports the same violation.
+  const control = findViolations([
+    entry('startup.ts', "export { bridge } from './client/bridge.tsx'\n"),
+    entry('client/bridge.tsx', "export { remote } from '../app/remote/runtime.ts'\n"),
+    entry('app/remote/runtime.ts', 'export const remote = 1\n'),
+  ])
+  assert.equal(control.length, 1)
+  assert.equal(control[0].rule, STARTUP_REMOTE_COMPOSITION_RULE.id)
+})
+
 test('staticImportCandidates covers NodeNext emitted extensions', () => {
-  assert.deepEqual(staticImportCandidates('runtime/x.js'), ['runtime/x.ts', 'runtime/x.d.ts', 'runtime/x.js'])
+  assert.deepEqual(staticImportCandidates('runtime/x.js'), ['runtime/x.ts', 'runtime/x.tsx', 'runtime/x.d.ts', 'runtime/x.js'])
+  assert.deepEqual(staticImportCandidates('runtime/x.jsx'), ['runtime/x.tsx', 'runtime/x.ts', 'runtime/x.d.ts', 'runtime/x.jsx'])
   assert.deepEqual(staticImportCandidates('runtime/x.mjs'), ['runtime/x.mts', 'runtime/x.d.mts', 'runtime/x.mjs'])
   assert.deepEqual(staticImportCandidates('runtime/x.cjs'), ['runtime/x.cts', 'runtime/x.d.cts', 'runtime/x.cjs'])
   assert.deepEqual(staticImportCandidates('runtime/x.ts'), ['runtime/x.ts'])
+  assert.deepEqual(staticImportCandidates('runtime/x.tsx'), ['runtime/x.tsx'])
   assert.deepEqual(staticImportCandidates('runtime/x.d.mts'), ['runtime/x.d.mts'])
   assert.deepEqual(staticImportCandidates('runtime/x'), [
     'runtime/x.ts',
@@ -293,21 +321,42 @@ test('staticImportCandidates agrees with TypeScript NodeNext resolution for ever
   writeFileSync(join(dir, 'a.ts'), 'export const a = 1\n')
   writeFileSync(join(dir, 'b.d.mts'), 'export const b = 1\n')
   writeFileSync(join(dir, 'c.cts'), 'export const c = 1\n')
+  // A `.tsx` module is a legal NodeNext target of BOTH `.js` and `.jsx`
+  // spellings — and of `./x.js` when a `.ts` sibling does not exist.
+  writeFileSync(join(dir, 'view.tsx'), 'export const view = 1\n')
+  writeFileSync(join(dir, 'both.ts'), 'export const both = 1\n')
+  writeFileSync(join(dir, 'both.tsx'), 'export const bothX = 1\n')
+  writeFileSync(join(dir, 'fallback.ts'), 'export const fallback = 1\n')
   writeFileSync(join(dir, 'entry.ts'), '')
   const options = {
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
     allowImportingTsExtensions: true,
+    jsx: ts.JsxEmit.Preserve,
   }
-  for (const [specifier, expected] of [['./a.js', 'a.ts'], ['./b.mjs', 'b.d.mts'], ['./c.cjs', 'c.cts']]) {
+  for (const [specifier, expected] of [
+    ['./a.js', 'a.ts'],
+    ['./b.mjs', 'b.d.mts'],
+    ['./c.cjs', 'c.cts'],
+    ['./view.js', 'view.tsx'],
+    ['./view.jsx', 'view.tsx'],
+    ['./both.js', 'both.ts'],
+    ['./both.jsx', 'both.tsx'],
+    ['./fallback.jsx', 'fallback.ts'],
+  ]) {
     const resolved = ts.resolveModuleName(specifier, join(dir, 'entry.ts'), options, ts.sys).resolvedModule?.resolvedFileName
     assert.ok(resolved !== undefined, `${specifier} must resolve under NodeNext`)
     const rel = relative(dir, resolved).split('\\').join('/')
     assert.equal(rel, expected)
+    const candidates = staticImportCandidates(specifier.slice(2))
     assert.ok(
-      staticImportCandidates(specifier.slice(2)).includes(rel),
+      candidates.includes(rel),
       `staticImportCandidates(${specifier.slice(2)}) must include the TypeScript-resolved ${rel}`,
     )
+    // The FIRST on-disk candidate must be the file TypeScript actually picks:
+    // a wrong order would canonicalize the edge to a different module.
+    const onDisk = candidates.filter(candidate => existsSync(join(dir, candidate)))
+    assert.equal(onDisk[0], rel, `staticImportCandidates(${specifier.slice(2)}) must resolve to ${rel} first (got ${onDisk[0]})`)
   }
 })
 
@@ -318,6 +367,43 @@ test('TypeScript import() type queries are static dependencies and are zone-chec
   assert.equal(violations.length, 1)
   assert.equal(violations[0].rule, 'direct-import-outside-composition')
   assert.deepEqual(parseImportSpecifiers("type U = typeof import('./y.ts')\n"), [{ specifier: './y.ts', line: 1, typeOnly: true }])
+})
+
+test('the AST scanners are file-kind aware: a legal .tsx JSX tree is not a bypass (TS1)', () => {
+  // A real TSX parse (ScriptKind.TSX) finds the import-type query inside JSX;
+  // the same source under ScriptKind.TS would yield no import at all.
+  const jsx = [
+    'export const view = (',
+    "  <Box value={null as import('../../app/remote/runtime.ts').Remote} />",
+    ')',
+    '',
+  ].join('\n')
+  assert.deepEqual(parseImportSpecifiers(jsx, 'tui/panels/example.tsx'), [
+    { specifier: '../../app/remote/runtime.ts', line: 2, typeOnly: true },
+  ])
+  // The gate consumer rejects it through the TUI-layer rule.
+  const violations = findViolations([entry('tui/panels/example.tsx', jsx)])
+  assert.equal(violations.length, 1)
+  assert.equal(violations[0].rule, 'tui-imports-remote-composition')
+  // Type-only JSX children and a value dynamic import inside JSX are seen too.
+  const dynamic = "export const lazy = () => <Box onClick={() => import('../../app/remote/client-runtime.ts')} />\n"
+  assert.deepEqual(parseValueDynamicImports(dynamic, 'tui/panels/example.tsx'), [
+    { specifier: '../../app/remote/client-runtime.ts', line: 1 },
+  ])
+  assert.equal(findRemoteDynamicImportViolations([entry('tui/panels/example.tsx', dynamic)]).length, 1)
+  // The legacy TS grammar (generics / angle-bracket assertions) still parses as
+  // TS — `.ts` files must never be forced into TSX mode.
+  const legacyTs = [
+    'import { x } from "./dep.ts"',
+    'const w = new (<Constructor>DirectSessionWriter)(deps)',
+    '',
+  ].join('\n')
+  assert.deepEqual(parseImportSpecifiers(legacyTs, 'app/surface/runtime.ts'), [
+    { specifier: './dep.ts', line: 1, typeOnly: false },
+  ])
+  assert.deepEqual(findDirectAdapterConstructions(legacyTs, 'app/surface/runtime.ts'), [
+    { name: 'DirectSessionWriter', line: 2 },
+  ])
 })
 
 test('app/surface constructing a Direct semantic adapter is rejected (canonical and parenthesized)', () => {
