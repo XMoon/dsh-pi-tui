@@ -31,6 +31,9 @@ const commandLayerSource = [
     .map(name => readFileSync(new URL(`../src/tui/commands/${name}`, import.meta.url), 'utf8')),
 ].join('\n')
 const indexSource = compositionSource()
+// TS1 moved the static /skill and /yolo definitions out of the facade; their
+// source locks now point at the real owning module.
+const modelsSource = readFileSync(new URL('../src/tui/commands/models.ts', import.meta.url), 'utf8')
 // A3-5 relocated the semantic, scope-bound command facades (and their ONE
 // stale-throwing admission) out of the runner into the bound command runtime.
 const commandRuntimeSource = readFileSync(new URL('../src/app/command/runtime.ts', import.meta.url), 'utf8')
@@ -69,11 +72,12 @@ test('the /skill paths resolve ONE atomic live scope and never pair two identity
     'no path may destructure a paired agent+scope identity')
   assert.equal(count(commandLayerSource, 'runner.liveAgent'), 0,
     'the command layer never reads a Direct Agent')
-  // Four /skill call sites (two wrappers, the handler, the picker): every one
-  // threads the SAME atomically captured scope.
-  assert.equal(count(commandsSource, 'loadSkill(scope,'), 4,
+  // Four /skill call sites across the whole command layer (two wrappers in the
+  // coordinator, the static /skill handler and its picker): every one threads
+  // the SAME atomically captured scope.
+  assert.equal(count(commandLayerSource, 'loadSkill(scope,'), 4,
     'every loadSkill call must receive the captured scope')
-  assert.ok(!commandsSource.includes('loadSkill(agent,'),
+  assert.ok(!commandLayerSource.includes('loadSkill(agent,'),
     'loadSkill must receive the captured scope, never a separately resolved agent')
 })
 
@@ -261,10 +265,10 @@ test('a superseded skill/permission interaction is refused gracefully, never thr
   // read to the user-visible stale notice instead of propagating it.
   assert.ok(commandsSource.includes("text: 'the session changed while loading the skill — try again'"),
     'the skill definition read reports the stale refusal')
-  assert.ok(commandsSource.includes("text: 'the session changed while loading skills — try again'"),
+  assert.ok(commandLayerSource.includes("text: 'the session changed while loading skills — try again'"),
     'the skill catalog read reports the stale refusal')
   // The picker SELECTION must not let the error escape the overlay callback.
-  assert.ok(commandsSource.includes("app.notify('the session changed while loading skills — try again', 'error')"),
+  assert.ok(commandLayerSource.includes("app.notify('the session changed while loading skills — try again', 'error')"),
     'the picker selection notifies instead of throwing')
   // The stale /settings panel CLOSES and tells the user instead of dispatching
   // the retained scope to the replacement owner.
@@ -272,7 +276,7 @@ test('a superseded skill/permission interaction is refused gracefully, never thr
     'the settings panel reports the refused write')
   assert.ok(commandLayerSource.includes('closeSettings()'), 'the stale panel closes itself')
   // /yolo maps the refused write to a command error.
-  assert.ok(commandsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
+  assert.ok(modelsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
     'the permission preset refusal is user-visible')
 })
 
@@ -291,7 +295,7 @@ test('a dispatched permission write keeps its settlement; the refusal text never
   // `/yolo`: the pre-dispatch refusal may invite a retry, the post-dispatch one
   // must NOT (this preset disables approvals; a retry would target the new owner).
   const yolo = span(
-    commandsSource,
+    modelsSource,
     'const outcome = await runner.applyPermissionPreset(',
     "return { kind: 'success', text: 'danger-full-access",
   )
