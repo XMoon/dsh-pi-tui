@@ -29,6 +29,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
+import { Frame } from '../components/frame.ts'
 import { componentKeymap } from '../../keybindings/component-keymap.ts'
 import { color } from '../../theme.ts'
 import type { DirectoryCompletionItem } from '../../file-completion/directory-completion.ts'
@@ -419,5 +420,27 @@ export class SaveLocationPrompt implements Component, Focusable {
     this.settled = true
     this.completionAbort.abort()
     this.suggestions = []
+  }
+}
+
+/**
+ * Frame for the Save Location prompt in the EDITOR SEAT: forwards focus to
+ * the prompt so its directory Input keeps the hardware cursor (a plain Frame
+ * would swallow the focus flag — the same contract as QuestionFrame).
+ */
+export class SaveLocationFrame extends Frame implements Focusable {
+  private readonly prompt: SaveLocationPrompt
+
+  constructor(prompt: SaveLocationPrompt) {
+    super(prompt, true)
+    this.prompt = prompt
+  }
+
+  get focused(): boolean {
+    return this.prompt.focused
+  }
+
+  set focused(value: boolean) {
+    this.prompt.focused = value
   }
 }
