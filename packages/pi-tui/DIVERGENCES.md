@@ -178,7 +178,7 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 
 **Host**
 - src/tui-app.ts openPicker and categorized picker rebuild (now Host SearchablePicker)
-- src/commands.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)
+- src/tui/commands/sessions.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)
 - src/model-picker.ts /model ModelPicker (provider-grouped inline-effort model list via the Host SearchablePicker)
 - src/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)
 - advanced ui.select picker adapter
@@ -269,7 +269,7 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 
 **Host**
 - src/tui-app.ts session and categorized SearchablePicker refreshes
-- src/commands.ts asynchronous session-title enrichment
+- src/tui/commands/sessions.ts asynchronous session-title enrichment
 - Audit note: Host updates session/category rows while overlays remain mounted; the model picker is SettingsList-owned and is not counted as an X002 SelectList consumer.
 
 **Public / extension**
@@ -3416,7 +3416,7 @@ filterQuery is the single source of truth for the rendered search box, getFilter
 
 **Host**
 - src/tui-app.ts categorized picker query handoff and category cycle
-- src/commands.ts session prefill and row enrichment
+- src/tui/commands/sessions.ts session prefill and row enrichment
 - src/tui-app.ts PickerHandle getFilter/setFilter closures and MarqueeFilterAdapter getFilter read
 - Audit note: Host calls both programmatic and typed filter paths through distinct adapters; the categorized lifecycle consumes initialQuery once and category navigation preserves the live query (an empty query stays empty).
 

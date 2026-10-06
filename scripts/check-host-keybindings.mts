@@ -23,18 +23,32 @@
  * @module @xmoon76/dsh-pi-tui/check-host-keybindings
  */
 
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /** The scanned host business files. */
 const SCANNED_FILES = ['src/tui-app.ts']
+
+/**
+ * The command-layer user-facing string files: the stable facade plus EVERY
+ * `src/tui/commands/**` domain module. The directory scan is deterministic
+ * (sorted) so a future command module is covered automatically instead of
+ * silently escaping the chord-label gate (TS1 §22).
+ */
+const COMMAND_STRING_FILES = [
+  'src/commands.ts',
+  ...readdirSync(join(process.cwd(), 'src/tui/commands'))
+    .filter(name => name.endsWith('.ts'))
+    .sort()
+    .map(name => `src/tui/commands/${name}`),
+]
 
 /** The user-facing string files (hard-coded chord labels must not
  * resurface in anything the user sees). */
 const SCANNED_STRING_FILES = [
   'src/index.ts',
   'src/app/bootstrap.ts',
-  'src/commands.ts',
+  ...COMMAND_STRING_FILES,
   'src/tui-app.ts',
   'src/local-shell-card.ts',
   'src/footer/instruction.ts',

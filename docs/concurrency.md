@@ -214,7 +214,7 @@ admit through the bound runtime and, once admitted, carry only the
 surface-lifetime fence — an admitted writer is never truncated by a waiting
 transition. Reading `transitionGate.busy` is therefore NOT a writer-admission
 mechanism at all: it has exactly ONE production reader, the attachment-intake
-UX fence (`sessionTransitionPending()`, `src/commands.ts`). Every semantic
+UX fence (`sessionTransitionPending()`, `src/tui/commands/artifacts.ts`). Every semantic
 writer — including the `HostCommandPort` submission — admits only through the
 bound runtime, and a `TransitionInProgressError` raised there is settled as a
 PROVEN pre-dispatch refusal (draft restored + the transition notice), never as

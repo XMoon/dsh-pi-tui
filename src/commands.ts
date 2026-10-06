@@ -1,28 +1,38 @@
 /**
- * The TUI-owned slash commands (/exit /settings /sessions /skill /model
- * /new /tasks /preset /search /title /copy /export /transcript
- * /fork /status /login /logout /help), extracted from the runner's
- * monolithic apply() so the registration surface is testable and the runner
- * closure shrinks. Every command reads the live runner state through the
- * {@link TuiCommandRunner} interface, whose accessors re-read the current
- * agent/settings on every access (sessions can swap the live agent).
+ * The TUI command layer's stable facade and SINGLE registration/catalog
+ * coordinator. The built-in slash command definitions live in
+ * `src/tui/commands/**` (settings, sessions, models, skills, tasks, artifacts,
+ * status, auth, utility); this module owns what must stay singular:
  *
- * /sessions, /resume and /search share ONE Session Browser lifecycle
- * (`openSessionPicker`): the picker is input-first, the listing is shared,
- * and a non-empty query enters a GLOBAL search projection — local metadata
- * matches UNION Host content hits, never scoped by the Current/All browse
- * tabs (the Host page is a bounded global ranking; scoping it afterwards
- * would hide real matches). Host content search is a debounced async
- * augmentation; clearing the query restores the browse state (plan:
- * temp/20260907/dsh-pi-tui-search-sessions-direct-boundary-plan.md).
+ * - the shared command-layer types (`TuiCommandRunner`, `TuiCommandSpec`,
+ *   `RegisterOne`/`RegisterTuiCommand`, `SubmitDelivery`, …) and their stable
+ *   re-exports (moved definitions are re-exported here so callers and tests keep
+ *   importing `src/commands.ts`);
+ * - the Client-first registration seam + Direct compatibility-mirror
+ *   provenance, the catalog/claims/collision state machine, completion
+ *   synthesis and the single `commands/change` listener;
+ * - the dynamic human-skill wrappers (`replaceSkillCommands`, `loadSkill`, the
+ *   skill disposers, snapshot install and transition revalidation) — the
+ *   static `/skill` and `/reload` definitions live in
+ *   `src/tui/commands/skills.ts`;
+ * - the draft-disposition side channel and the submit-resolved delivery
+ *   binding shared by the skill paths.
+ *
+ * `registerTuiCommands()` calls every domain registrar at its frozen position
+ * in the built-in registration sequence (changing that interleaving changes the
+ * synchronous `commands/change` behavior); the domain modules never register
+ * themselves at module load.
+ *
+ * Every command reads the live runner state through the {@link TuiCommandRunner}
+ * interface, whose accessors re-read the current agent/settings on every access
+ * (sessions can swap the live agent).
  * @module @xmoon76/dsh-pi-tui/commands
  */
 
 import { randomUUID } from 'node:crypto'
-import { scheduler } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
@@ -30,112 +40,35 @@ import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import type { DefaultIntentRecord } from './default-intent.ts'
-import { SettingsList, type Component, type SettingItem } from '@xmoon76/pi-tui'
+import type { Component } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft } from './steer.ts'
-import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
-import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from './display-preset.ts'
-import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
-import { parseGitAttributionMode, type GitAttributionState } from './git-attribution.ts'
-import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
-import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
-import { iconStyleOf } from './icons.ts'
-import { parseUserKeybindings } from './keybindings/config.ts'
-import { formatKeyId } from './keybindings/hints.ts'
-import type { AppKeybindingId } from './keybindings/types.ts'
-import { KeybindingEditorController } from './keybinding-ui/controller.ts'
-import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from './keybinding-ui/list.ts'
-import type { KeybindingEditorModel } from './keybinding-ui/model.ts'
-import { parseFooterLayout, isFooterLayout } from './footer/layout.ts'
-import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
-import { FooterComposer } from './footer/composer.ts'
-import {
-  FooterCustomItemCatalog,
-  parseFooterCustomItem,
-  parseFooterCustomItems,
-  type FooterCustomItemSettings,
-} from './footer/custom-items.ts'
-import { FooterItemRegistry } from './footer/item-registry.ts'
-import { FooterConfiguratorModel, sameFooterCustomItem } from './footer/configurator-model.ts'
+import type { DisplayPreset, DisplayPresetApplyResult } from './display-preset.ts'
+import type { ProgressUpdatesState, ResponseStyleState } from './communication-policy.ts'
+import type { GitAttributionState } from './git-attribution.ts'
+import type { FooterCustomItemSettings } from './footer/custom-items.ts'
 import type { TuiApp } from './tui-app.ts'
-import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
-import { cancellationError, isCancellation, runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
+import { cancellationError, runDetached } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
-import {
-  consumeDraftAttachments,
-  pinDraftAttachments,
-  pruneUnreferencedDraftAttachments,
-} from './image/submit.ts'
-import { readImageFile } from './image/intake.ts'
-import { FileInputError, probeAttachment } from './attachment/intake.ts'
-import { parseShellWords } from './shell-words.ts'
-import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
-import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
-import { SubagentModelAllowlistPicker, allowlistSummary } from './subagent-model-menu.ts'
-import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
+import { consumeDraftAttachments, pinDraftAttachments } from './image/submit.ts'
 import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
-import { ModelPicker, type ModelApplyOutcome } from './model-picker.ts'
-import type { OperationOwnership, OperationResult } from './runtime/write-outcome.ts'
-import { LifecycleError } from './runtime/session-lifecycle-port.ts'
+import type { OperationOwnership } from './runtime/write-outcome.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
-import { formatStats, formatStatsFacts, type SessionStats, type SessionStatsFacts } from './stats.ts'
-import { textOf } from './transcript.ts'
-import {
-  CONTENT_SEARCH_DEBOUNCE_MS,
-  PROJECTION_BATCH_SIZE,
-  PROJECTION_FIRST_BATCH,
-  buildSessionTree,
-  findSessionMatch,
-  sameWorkspace,
-  sanitizeSessionSearchInput,
-  sanitizeTerminalText,
-  sessionLabelParts,
-  sessionRowMatchesQuery,
-  sessionSearchItem,
-  sessionPickerItem,
-  type SessionContentHit,
-  type SessionPickerItem,
-  type SessionPickerRow,
-} from './sessions.ts'
-import type { SessionReader, SessionSummary } from './runtime/session-reader-port.ts'
+import type { SessionStatsFacts } from './stats.ts'
+import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
 import type { CreateSessionRequest, OpenSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
 import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
-import type { ConfigPort, CredentialProviderOption } from './runtime/config-port.ts'
+import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
-import {
-  credentialOptionsFor,
-  deriveKeyRef,
-  providerOptionsFor,
-  resolveCredentialArg,
-  ROUTE_PATTERN,
-  PROTOCOL_CHOICES,
-} from './provider-catalog.ts'
-import {
-  authorizationFailureText,
-  createAuthorizationFlow,
-  flowForRoute,
-  mergeLoginTargets,
-  type AuthorizationTarget,
-  type LoginTarget,
-} from './authorization.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './skill-catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
-import {
-  commandSummaryOf,
-  listGlobalCommands,
-  type SurfaceCatalogSnapshot,
-  type SurfaceCommandSummary,
-} from './surface-catalog.ts'
-import {
-  isUserInvocableSkill,
-  type HumanSkillCatalog,
-  type HumanSkillSummary,
-} from './skill-catalog.ts'
+import { commandSummaryOf, listGlobalCommands, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './surface-catalog.ts'
+import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './skill-catalog.ts'
 import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
@@ -145,7 +78,6 @@ import { createAuthCommands } from './tui/commands/auth.ts'
 import { createSettingsCommands } from './tui/commands/settings.ts'
 import { createSessionCommands } from './tui/commands/sessions.ts'
 import { registerStatusCommand } from './tui/commands/status.ts'
-import { displaySessionId } from './tui/commands/sessions.ts'
 
 
 /**
@@ -185,7 +117,7 @@ import { displaySessionId } from './tui/commands/sessions.ts'
  * an unknown-key pass-through in the config port's document schema — see
  * index.ts) ride along. */
 export type { TuiSettingsLike, TuiSettingsDoc } from './runtime/config-port.ts'
-import { serializeTuiSettingsMutation, type TuiSettingsDoc, type TuiSettingsLike } from './runtime/config-port.ts'
+import type { TuiSettingsLike } from './runtime/config-port.ts'
 
 
 /** The minimal commands-registry surface the TUI command surface needs

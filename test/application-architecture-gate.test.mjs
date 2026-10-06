@@ -695,3 +695,59 @@ test('findViolations includes the Remote dynamic-import owner rule in the produc
   assert.deepEqual(dynamicOnly, [], 'the real production tree must satisfy the dynamic-import owner rule')
   assert.deepEqual(findViolations(tree), [], 'the full production scan stays clean with the M3-1 rules')
 })
+
+test('the built-in command layer must not import experimental Remote composition (TS1)', () => {
+  // TS1 created the first long-lived `src/tui/commands/**` zone: the command
+  // definitions consume semantic/application-facing contracts only.
+  const commandFiles = [
+    'commands.ts',
+    'tui/commands/settings.ts',
+    'tui/commands/sessions.ts',
+    'tui/commands/models.ts',
+    'tui/commands/skills.ts',
+    'tui/commands/tasks.ts',
+    'tui/commands/artifacts.ts',
+    'tui/commands/status.ts',
+    'tui/commands/auth.ts',
+    'tui/commands/utility.ts',
+  ]
+  const relativeTo = (file, target) => (file.includes('/') ? '../'.repeat(file.split('/').length - 1) : './') + target
+  for (const file of commandFiles) {
+    for (const target of ['runtime/remote/session-reader-remote.ts', 'app/remote/runtime.ts', 'app/remote/application-runtime.ts']) {
+      const violations = findViolations([entry(file, `import { x } from '${relativeTo(file, target)}'\n`)])
+      assert.equal(violations.length, 1, `${file} -> ${target} must be rejected`)
+      assert.equal(violations[0].rule, 'commands-imports-remote-composition')
+    }
+    for (const specifier of [
+      '@deepseek-ai/dsh-commands/remote',
+      '@deepseek-ai/dsh-client-connection',
+      '@deepseek-ai/dsh-typert-registry/client',
+    ]) {
+      const violations = findViolations([entry(file, `import { x } from '${specifier}'\n`)])
+      assert.equal(violations.length, 1, `${file} -> ${specifier} must be rejected`)
+      assert.equal(violations[0].rule, 'commands-imports-remote-composition')
+    }
+  }
+  // Normal semantic ports, application owners and protocol/capability surfaces
+  // stay allowed — the rule forbids the Remote IMPLEMENTATION, not the layer.
+  for (const [file, target] of [
+    ['commands.ts', 'runtime/catalog-port.ts'],
+    ['tui/commands/settings.ts', 'runtime/config-port.ts'],
+    ['tui/commands/sessions.ts', 'app/session/scope.ts'],
+    ['tui/commands/models.ts', 'app/command/client-command-registry.ts'],
+    ['tui/commands/auth.ts', 'app/command/client-command-registry.ts'],
+  ]) {
+    assert.deepEqual(
+      findViolations([entry(file, `import type { T } from '${relativeTo(file, target)}'\n`)]),
+      [],
+      `${file} -> ${target} stays allowed`,
+    )
+  }
+  // A TYPE-ONLY Remote import is still Remote composition.
+  assert.equal(
+    findViolations([entry('tui/commands/models.ts', "import type { Remote } from '../../app/remote/runtime.ts'\n")]).length,
+    1,
+    'a type-only Remote import must be rejected too',
+  )
+})
+
